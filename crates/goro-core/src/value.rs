@@ -133,6 +133,23 @@ impl Value {
 
     pub fn add(&self, other: &Value) -> Value {
         match (self, other) {
+            // Array + Array = array union
+            (Value::Array(a), Value::Array(b)) => {
+                let a = a.borrow();
+                let b = b.borrow();
+                let mut result = crate::array::PhpArray::new();
+                // Copy all entries from a
+                for (key, val) in a.iter() {
+                    result.set(key.clone(), val.clone());
+                }
+                // Add entries from b that don't exist in a
+                for (key, val) in b.iter() {
+                    if !result.contains_key(key) {
+                        result.set(key.clone(), val.clone());
+                    }
+                }
+                Value::Array(std::rc::Rc::new(std::cell::RefCell::new(result)))
+            }
             (Value::Long(a), Value::Long(b)) => {
                 match a.checked_add(*b) {
                     Some(result) => Value::Long(result),
