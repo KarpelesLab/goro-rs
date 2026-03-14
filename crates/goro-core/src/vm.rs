@@ -90,6 +90,7 @@ impl Vm {
         let mut ip: usize = 0;
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
+        let mut foreach_positions: HashMap<u32, usize> = HashMap::new();
 
         loop {
             if ip >= op_array.ops.len() {
@@ -602,6 +603,62 @@ impl Vm {
                         Value::Null
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps);
+                }
+
+                OpCode::ForeachInit => {
+                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // Store array in the iterator tmp slot
+                    self.write_operand(&op.result, arr_val, &mut cvs, &mut tmps);
+                    // Reset iteration position
+                    let iter_idx = match op.result { OperandType::Tmp(idx) => idx, _ => 0 };
+                    foreach_positions.insert(iter_idx, 0usize);
+                }
+
+                OpCode::ForeachNext => {
+                    let iter_idx = match op.op1 { OperandType::Tmp(idx) => idx, _ => 0 };
+                    let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
+                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+
+                    if let Value::Array(arr) = &arr_val {
+                        let arr_borrow = arr.borrow();
+                        let entries: Vec<_> = arr_borrow.iter().collect();
+                        if pos >= entries.len() {
+                            // Done - jump to end
+                            if let OperandType::JmpTarget(target) = op.op2 {
+                                ip = target as usize;
+                            }
+                        } else {
+                            let (_, value) = entries[pos];
+                            self.write_operand(&op.result, value.clone(), &mut cvs, &mut tmps);
+                            foreach_positions.insert(iter_idx, pos + 1);
+                        }
+                    } else {
+                        // Not an array - jump to end
+                        if let OperandType::JmpTarget(target) = op.op2 {
+                            ip = target as usize;
+                        }
+                    }
+                }
+
+                OpCode::ForeachKey => {
+                    let iter_idx = match op.op1 { OperandType::Tmp(idx) => idx, _ => 0 };
+                    let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(1);
+                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+
+                    if let Value::Array(arr) = &arr_val {
+                        let arr_borrow = arr.borrow();
+                        let entries: Vec<_> = arr_borrow.iter().collect();
+                        // pos was already incremented by ForeachNext, so use pos - 1
+                        let actual_pos = pos.saturating_sub(1);
+                        if actual_pos < entries.len() {
+                            let (key, _) = entries[actual_pos];
+                            let key_val = match key {
+                                ArrayKey::Int(n) => Value::Long(*n),
+                                ArrayKey::String(s) => Value::String(s.clone()),
+                            };
+                            self.write_operand(&op.result, key_val, &mut cvs, &mut tmps);
+                        }
+                    }
                 }
 
                 OpCode::DeclareFunction => {

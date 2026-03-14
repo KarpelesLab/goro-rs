@@ -377,15 +377,14 @@ impl<'a> Lexer<'a> {
                     .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
                 =>
                 {
-                    // Variable interpolation - for now, simple $var
-                    // We'll emit what we have so far as a string part, then scan the variable
-                    if !result.is_empty() {
-                        self.pending.push(Token::new(
-                            TokenKind::InterpolatedStringPart(result.clone()),
-                            Span::new(self.pos as u32, self.pos as u32, self.line),
-                        ));
-                        result.clear();
-                    }
+                    // Variable interpolation
+                    // Always emit the current result as an InterpolatedStringPart
+                    // (even if empty, for the first variable in the string)
+                    self.pending.push(Token::new(
+                        TokenKind::InterpolatedStringPart(result.clone()),
+                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                    ));
+                    result.clear();
                     self.advance(); // consume $
                     let var_name = self.scan_identifier();
                     self.pending.push(Token::new(

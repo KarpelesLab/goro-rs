@@ -131,6 +131,14 @@ pub enum OpCode {
     /// Read array element: result = op1[op2]
     ArrayGet,
 
+    // ---- Foreach ----
+    /// Initialize foreach: op1 = array, result = iterator state (tmp)
+    ForeachInit,
+    /// Fetch next value: op1 = iterator (tmp), result = value (tmp), op2 = jump target if done
+    ForeachNext,
+    /// Fetch key for current iteration: op1 = iterator (tmp), result = key (tmp)
+    ForeachKey,
+
     // ---- Type checking ----
     TypeCheck,
 
@@ -213,8 +221,10 @@ impl OpArray {
         let op = &mut self.ops[op_index as usize];
         match op.opcode {
             OpCode::Jmp => op.op1 = OperandType::JmpTarget(target),
-            OpCode::JmpZ | OpCode::JmpNz => op.op2 = OperandType::JmpTarget(target),
-            _ => panic!("cannot patch non-jump instruction"),
+            OpCode::JmpZ | OpCode::JmpNz | OpCode::ForeachNext => {
+                op.op2 = OperandType::JmpTarget(target);
+            }
+            _ => panic!("cannot patch non-jump instruction: {:?}", op.opcode),
         }
     }
 }

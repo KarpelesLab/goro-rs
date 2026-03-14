@@ -21,15 +21,28 @@ impl std::error::Error for CompileError {}
 
 pub type CompileResult<T> = Result<T, CompileError>;
 
+/// Loop context for break/continue support
+struct LoopContext {
+    /// Jump targets to patch with the loop's end address (for break)
+    break_jumps: Vec<u32>,
+    /// Jump targets to patch with the loop's continue address
+    continue_jumps: Vec<u32>,
+    /// The offset to jump to for continue (set when known)
+    continue_target: Option<u32>,
+}
+
 /// Compiles an AST into bytecode
 pub struct Compiler {
     op_array: OpArray,
+    /// Stack of loop contexts for break/continue
+    loop_stack: Vec<LoopContext>,
 }
 
 impl Compiler {
     pub fn new() -> Self {
         Self {
             op_array: OpArray::new(),
+            loop_stack: Vec::new(),
         }
     }
 
@@ -185,6 +198,12 @@ impl Compiler {
             }
 
             StmtKind::While { condition, body } => {
+                self.loop_stack.push(LoopContext {
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                    continue_target: None,
+                });
+
                 let loop_start = self.op_array.current_offset();
                 let cond = self.compile_expr(condition)?;
                 let jmp_false = self.op_array.emit(Op {
@@ -194,6 +213,12 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
+
+                // Set continue target to loop_start (re-evaluate condition)
+                if let Some(ctx) = self.loop_stack.last_mut() {
+                    ctx.continue_target = Some(loop_start);
+                }
+
                 for s in body {
                     self.compile_stmt(s)?;
                 }
@@ -206,14 +231,30 @@ impl Compiler {
                 });
                 let after_loop = self.op_array.current_offset();
                 self.op_array.patch_jump(jmp_false, after_loop);
+
+                // Patch break/continue jumps
+                let ctx = self.loop_stack.pop().unwrap();
+                for jmp in ctx.break_jumps {
+                    self.op_array.patch_jump(jmp, after_loop);
+                }
+                for jmp in ctx.continue_jumps {
+                    self.op_array.patch_jump(jmp, loop_start);
+                }
                 Ok(())
             }
 
             StmtKind::DoWhile { body, condition } => {
+                self.loop_stack.push(LoopContext {
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                    continue_target: None,
+                });
+
                 let loop_start = self.op_array.current_offset();
                 for s in body {
                     self.compile_stmt(s)?;
                 }
+                let continue_target = self.op_array.current_offset();
                 let cond = self.compile_expr(condition)?;
                 self.op_array.emit(Op {
                     opcode: OpCode::JmpNz,
@@ -222,6 +263,15 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
+                let after_loop = self.op_array.current_offset();
+
+                let ctx = self.loop_stack.pop().unwrap();
+                for jmp in ctx.break_jumps {
+                    self.op_array.patch_jump(jmp, after_loop);
+                }
+                for jmp in ctx.continue_jumps {
+                    self.op_array.patch_jump(jmp, continue_target);
+                }
                 Ok(())
             }
 
@@ -235,6 +285,12 @@ impl Compiler {
                 for expr in init {
                     self.compile_expr(expr)?;
                 }
+
+                self.loop_stack.push(LoopContext {
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                    continue_target: None,
+                });
 
                 let loop_start = self.op_array.current_offset();
 
@@ -257,6 +313,9 @@ impl Compiler {
                     self.compile_stmt(s)?;
                 }
 
+                // Continue target is right before the update expressions
+                let continue_target = self.op_array.current_offset();
+
                 // Update
                 for expr in update {
                     self.compile_expr(expr)?;
@@ -271,11 +330,223 @@ impl Compiler {
                     line: stmt.span.line,
                 });
 
+                let after_loop = self.op_array.current_offset();
                 if let Some(jmp) = jmp_false {
-                    let after_loop = self.op_array.current_offset();
                     self.op_array.patch_jump(jmp, after_loop);
                 }
 
+                let ctx = self.loop_stack.pop().unwrap();
+                for jmp in ctx.break_jumps {
+                    self.op_array.patch_jump(jmp, after_loop);
+                }
+                for jmp in ctx.continue_jumps {
+                    self.op_array.patch_jump(jmp, continue_target);
+                }
+
+                Ok(())
+            }
+
+            StmtKind::Foreach {
+                expr,
+                key,
+                value,
+                body,
+                ..
+            } => {
+                let arr = self.compile_expr(expr)?;
+
+                // Create iterator temp
+                let iter_tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::ForeachInit,
+                    op1: arr,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(iter_tmp),
+                    line: stmt.span.line,
+                });
+
+                self.loop_stack.push(LoopContext {
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                    continue_target: None,
+                });
+
+                let loop_start = self.op_array.current_offset();
+
+                // Fetch next value (or jump to end if done)
+                let val_tmp = self.op_array.alloc_temp();
+                let jmp_done = self.op_array.emit(Op {
+                    opcode: OpCode::ForeachNext,
+                    op1: OperandType::Tmp(iter_tmp),
+                    op2: OperandType::JmpTarget(0), // patched later
+                    result: OperandType::Tmp(val_tmp),
+                    line: stmt.span.line,
+                });
+
+                // Assign value to the value variable
+                match &value.kind {
+                    ExprKind::Variable(name) => {
+                        let cv = self.op_array.get_or_create_cv(name);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Tmp(val_tmp),
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    }
+                    _ => {}
+                }
+
+                // Assign key if present
+                if let Some(key_expr) = key {
+                    let key_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ForeachKey,
+                        op1: OperandType::Tmp(iter_tmp),
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(key_tmp),
+                        line: stmt.span.line,
+                    });
+                    match &key_expr.kind {
+                        ExprKind::Variable(name) => {
+                            let cv = self.op_array.get_or_create_cv(name);
+                            self.op_array.emit(Op {
+                                opcode: OpCode::Assign,
+                                op1: OperandType::Cv(cv),
+                                op2: OperandType::Tmp(key_tmp),
+                                result: OperandType::Unused,
+                                line: stmt.span.line,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Compile body
+                for s in body {
+                    self.compile_stmt(s)?;
+                }
+
+                // Jump back to next iteration
+                self.op_array.emit(Op {
+                    opcode: OpCode::Jmp,
+                    op1: OperandType::JmpTarget(loop_start),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+
+                let after_loop = self.op_array.current_offset();
+                self.op_array.patch_jump(jmp_done, after_loop);
+
+                let ctx = self.loop_stack.pop().unwrap();
+                for jmp in ctx.break_jumps {
+                    self.op_array.patch_jump(jmp, after_loop);
+                }
+                for jmp in ctx.continue_jumps {
+                    self.op_array.patch_jump(jmp, loop_start);
+                }
+
+                Ok(())
+            }
+
+            StmtKind::Switch { expr, cases } => {
+                let subject = self.compile_expr(expr)?;
+                let subject_tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::Assign,
+                    op1: OperandType::Tmp(subject_tmp),
+                    op2: subject,
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+
+                self.loop_stack.push(LoopContext {
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                    continue_target: None,
+                });
+
+                // For each case, emit: compare, jmp if not equal, body
+                let mut next_case_jumps = Vec::new();
+                let mut fall_through = false;
+
+                for case in cases {
+                    // Patch the previous "next case" jump to here
+                    if !next_case_jumps.is_empty() && !fall_through {
+                        let here = self.op_array.current_offset();
+                        for jmp in next_case_jumps.drain(..) {
+                            self.op_array.patch_jump(jmp, here);
+                        }
+                    }
+
+                    if let Some(case_val) = &case.value {
+                        let case_op = self.compile_expr(case_val)?;
+                        let cmp_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Equal,
+                            op1: OperandType::Tmp(subject_tmp),
+                            op2: case_op,
+                            result: OperandType::Tmp(cmp_tmp),
+                            line: stmt.span.line,
+                        });
+                        let jmp = self.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: OperandType::Tmp(cmp_tmp),
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                        next_case_jumps.push(jmp);
+                    }
+                    // default case: no comparison needed
+
+                    for s in &case.body {
+                        self.compile_stmt(s)?;
+                    }
+                    fall_through = true;
+                }
+
+                // Patch remaining next_case jumps
+                let after_switch = self.op_array.current_offset();
+                for jmp in next_case_jumps {
+                    self.op_array.patch_jump(jmp, after_switch);
+                }
+
+                let ctx = self.loop_stack.pop().unwrap();
+                for jmp in ctx.break_jumps {
+                    self.op_array.patch_jump(jmp, after_switch);
+                }
+
+                Ok(())
+            }
+
+            StmtKind::Break(_) => {
+                let jmp = self.op_array.emit(Op {
+                    opcode: OpCode::Jmp,
+                    op1: OperandType::JmpTarget(0),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+                if let Some(ctx) = self.loop_stack.last_mut() {
+                    ctx.break_jumps.push(jmp);
+                }
+                Ok(())
+            }
+
+            StmtKind::Continue(_) => {
+                let jmp = self.op_array.emit(Op {
+                    opcode: OpCode::Jmp,
+                    op1: OperandType::JmpTarget(0),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+                if let Some(ctx) = self.loop_stack.last_mut() {
+                    ctx.continue_jumps.push(jmp);
+                }
                 Ok(())
             }
 
@@ -464,6 +735,96 @@ impl Compiler {
             }
 
             ExprKind::BinaryOp { op, left, right } => {
+                // Short-circuit boolean operators
+                match op {
+                    BinaryOp::BooleanAnd | BinaryOp::LogicalAnd => {
+                        let result_tmp = self.op_array.alloc_temp();
+                        let l = self.compile_expr(left)?;
+                        // If left is false, short-circuit: result = false
+                        let jmp_false = self.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: l,
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        // Left was truthy, evaluate right
+                        let r = self.compile_expr(right)?;
+                        // Result is truthiness of right
+                        self.op_array.emit(Op {
+                            opcode: OpCode::CastBool,
+                            op1: r,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(result_tmp),
+                            line: expr.span.line,
+                        });
+                        let jmp_end = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        // Short-circuit: result = false
+                        let false_target = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_false, false_target);
+                        let false_idx = self.op_array.add_literal(Value::False);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Tmp(result_tmp),
+                            op2: OperandType::Const(false_idx),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        let end = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_end, end);
+                        return Ok(OperandType::Tmp(result_tmp));
+                    }
+                    BinaryOp::BooleanOr | BinaryOp::LogicalOr => {
+                        let result_tmp = self.op_array.alloc_temp();
+                        let l = self.compile_expr(left)?;
+                        // If left is true, short-circuit: result = true
+                        let jmp_true = self.op_array.emit(Op {
+                            opcode: OpCode::JmpNz,
+                            op1: l,
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        // Left was falsy, evaluate right
+                        let r = self.compile_expr(right)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::CastBool,
+                            op1: r,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(result_tmp),
+                            line: expr.span.line,
+                        });
+                        let jmp_end = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        // Short-circuit: result = true
+                        let true_target = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_true, true_target);
+                        let true_idx = self.op_array.add_literal(Value::True);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Tmp(result_tmp),
+                            op2: OperandType::Const(true_idx),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        let end = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_end, end);
+                        return Ok(OperandType::Tmp(result_tmp));
+                    }
+                    _ => {}
+                }
+
                 let l = self.compile_expr(left)?;
                 let r = self.compile_expr(right)?;
                 let tmp = self.op_array.alloc_temp();
@@ -480,8 +841,6 @@ impl Compiler {
                     BinaryOp::BitwiseXor => OpCode::BitwiseXor,
                     BinaryOp::ShiftLeft => OpCode::ShiftLeft,
                     BinaryOp::ShiftRight => OpCode::ShiftRight,
-                    BinaryOp::BooleanAnd => OpCode::BitwiseAnd, // TODO: short-circuit
-                    BinaryOp::BooleanOr => OpCode::BitwiseOr,   // TODO: short-circuit
                     BinaryOp::Equal => OpCode::Equal,
                     BinaryOp::Identical => OpCode::Identical,
                     BinaryOp::NotEqual => OpCode::NotEqual,
@@ -491,9 +850,9 @@ impl Compiler {
                     BinaryOp::LessEqual => OpCode::LessEqual,
                     BinaryOp::GreaterEqual => OpCode::GreaterEqual,
                     BinaryOp::Spaceship => OpCode::Spaceship,
-                    BinaryOp::LogicalAnd => OpCode::BitwiseAnd, // TODO: proper logical
-                    BinaryOp::LogicalOr => OpCode::BitwiseOr,
                     BinaryOp::LogicalXor => OpCode::BitwiseXor,
+                    BinaryOp::BooleanAnd | BinaryOp::BooleanOr
+                    | BinaryOp::LogicalAnd | BinaryOp::LogicalOr => unreachable!(),
                 };
                 self.op_array.emit(Op {
                     opcode,
