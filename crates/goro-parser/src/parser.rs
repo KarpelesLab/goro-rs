@@ -1,0 +1,2628 @@
+use crate::ast::*;
+use crate::token::{Span, Token, TokenKind};
+
+/// Parse error
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    pub message: String,
+    pub span: Span,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Parse error on line {}: {}", self.span.line, self.message)
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+pub type ParseResult<T> = Result<T, ParseError>;
+
+pub struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
+impl Parser {
+    pub fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn current(&self) -> &Token {
+        self.tokens
+            .get(self.pos)
+            .unwrap_or(self.tokens.last().unwrap())
+    }
+
+    fn peek(&self) -> &TokenKind {
+        &self.current().kind
+    }
+
+    fn span(&self) -> Span {
+        self.current().span
+    }
+
+    fn advance(&mut self) -> &Token {
+        let tok = &self.tokens[self.pos.min(self.tokens.len() - 1)];
+        if self.pos < self.tokens.len() {
+            self.pos += 1;
+        }
+        tok
+    }
+
+    fn expect(&mut self, expected: &TokenKind) -> ParseResult<Span> {
+        if std::mem::discriminant(self.peek()) == std::mem::discriminant(expected) {
+            let span = self.span();
+            self.advance();
+            Ok(span)
+        } else {
+            Err(ParseError {
+                message: format!("expected {:?}, found {:?}", expected, self.peek()),
+                span: self.span(),
+            })
+        }
+    }
+
+    fn expect_semicolon(&mut self) -> ParseResult<()> {
+        // PHP allows ?> to act as a semicolon
+        match self.peek() {
+            TokenKind::Semicolon => {
+                self.advance();
+                Ok(())
+            }
+            TokenKind::CloseTag => {
+                // Don't consume the close tag - it will be handled by the statement loop
+                Ok(())
+            }
+            _ => Err(ParseError {
+                message: format!("expected ';', found {:?}", self.peek()),
+                span: self.span(),
+            }),
+        }
+    }
+
+    fn eat(&mut self, kind: &TokenKind) -> bool {
+        if std::mem::discriminant(self.peek()) == std::mem::discriminant(kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_at_end(&self) -> bool {
+        matches!(self.peek(), TokenKind::Eof)
+    }
+
+    /// Parse a complete PHP program
+    pub fn parse(&mut self) -> ParseResult<Program> {
+        let mut statements = Vec::new();
+        while !self.is_at_end() {
+            statements.push(self.parse_statement()?);
+        }
+        Ok(Program { statements })
+    }
+
+    fn parse_statement(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        match self.peek().clone() {
+            TokenKind::InlineHtml(html) => {
+                self.advance();
+                Ok(Statement {
+                    kind: StmtKind::InlineHtml(html),
+                    span,
+                })
+            }
+            TokenKind::OpenTag | TokenKind::OpenTagShort => {
+                let is_short = matches!(self.peek(), TokenKind::OpenTagShort);
+                self.advance();
+                if is_short {
+                    // <?= is equivalent to <?php echo
+                    let expr = self.parse_expression()?;
+                    self.expect_semicolon()?;
+                    Ok(Statement {
+                        kind: StmtKind::Echo(vec![expr]),
+                        span,
+                    })
+                } else {
+                    // <?php - just continue parsing
+                    self.parse_statement()
+                }
+            }
+            TokenKind::CloseTag => {
+                self.advance();
+                // ?> goes back to HTML mode. The next token might be InlineHtml or another OpenTag.
+                Ok(Statement {
+                    kind: StmtKind::Nop,
+                    span,
+                })
+            }
+            TokenKind::Echo => {
+                self.advance();
+                let mut exprs = vec![self.parse_expression()?];
+                while self.eat(&TokenKind::Comma) {
+                    exprs.push(self.parse_expression()?);
+                }
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::Echo(exprs),
+                    span,
+                })
+            }
+            TokenKind::Return => {
+                self.advance();
+                let value = if matches!(self.peek(), TokenKind::Semicolon | TokenKind::CloseTag) {
+                    None
+                } else {
+                    Some(self.parse_expression()?)
+                };
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::Return(value),
+                    span,
+                })
+            }
+            TokenKind::If => self.parse_if(),
+            TokenKind::While => self.parse_while(),
+            TokenKind::Do => self.parse_do_while(),
+            TokenKind::For => self.parse_for(),
+            TokenKind::Foreach => self.parse_foreach(),
+            TokenKind::Switch => self.parse_switch(),
+            TokenKind::Break => {
+                self.advance();
+                let depth = if matches!(self.peek(), TokenKind::Semicolon | TokenKind::CloseTag) {
+                    None
+                } else {
+                    Some(self.parse_expression()?)
+                };
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::Break(depth),
+                    span,
+                })
+            }
+            TokenKind::Continue => {
+                self.advance();
+                let depth = if matches!(self.peek(), TokenKind::Semicolon | TokenKind::CloseTag) {
+                    None
+                } else {
+                    Some(self.parse_expression()?)
+                };
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::Continue(depth),
+                    span,
+                })
+            }
+            TokenKind::Function => self.parse_function_decl(),
+            TokenKind::Class
+            | TokenKind::Abstract
+            | TokenKind::Final
+            | TokenKind::Readonly => self.parse_class_decl(),
+            TokenKind::Try => self.parse_try_catch(),
+            TokenKind::Throw => {
+                self.advance();
+                let expr = self.parse_expression()?;
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::Throw(expr),
+                    span,
+                })
+            }
+            TokenKind::Global => {
+                self.advance();
+                let mut vars = Vec::new();
+                loop {
+                    if let TokenKind::Variable(name) = self.peek().clone() {
+                        self.advance();
+                        vars.push(name);
+                    } else {
+                        return Err(ParseError {
+                            message: "expected variable name after 'global'".into(),
+                            span: self.span(),
+                        });
+                    }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::Global(vars),
+                    span,
+                })
+            }
+            TokenKind::Unset => {
+                self.advance();
+                self.expect(&TokenKind::OpenParen)?;
+                let mut exprs = vec![self.parse_expression()?];
+                while self.eat(&TokenKind::Comma) {
+                    exprs.push(self.parse_expression()?);
+                }
+                self.expect(&TokenKind::CloseParen)?;
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::Unset(exprs),
+                    span,
+                })
+            }
+            TokenKind::Declare => self.parse_declare(),
+            TokenKind::Semicolon => {
+                self.advance();
+                Ok(Statement {
+                    kind: StmtKind::Nop,
+                    span,
+                })
+            }
+            TokenKind::OpenBrace => {
+                // Block statement - parse as multiple statements, wrap in a synthetic block
+                self.advance();
+                let mut stmts = Vec::new();
+                while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+                    stmts.push(self.parse_statement()?);
+                }
+                self.expect(&TokenKind::CloseBrace)?;
+                // Return statements inline (PHP blocks are not scopes)
+                if stmts.len() == 1 {
+                    Ok(stmts.into_iter().next().unwrap())
+                } else {
+                    // Wrap in an if(true) as a hack, or we could add a Block variant
+                    // For now, just return the first or a nop
+                    Ok(Statement {
+                        kind: StmtKind::If {
+                            condition: Expr {
+                                kind: ExprKind::True,
+                                span,
+                            },
+                            body: stmts,
+                            elseif_clauses: vec![],
+                            else_body: None,
+                        },
+                        span,
+                    })
+                }
+            }
+            _ => {
+                // Expression statement
+                let expr = self.parse_expression()?;
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::Expression(expr),
+                    span,
+                })
+            }
+        }
+    }
+
+    fn parse_block(&mut self) -> ParseResult<Vec<Statement>> {
+        self.expect(&TokenKind::OpenBrace)?;
+        let mut stmts = Vec::new();
+        while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+            stmts.push(self.parse_statement()?);
+        }
+        self.expect(&TokenKind::CloseBrace)?;
+        Ok(stmts)
+    }
+
+    fn parse_if(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance(); // consume 'if'
+        self.expect(&TokenKind::OpenParen)?;
+        let condition = self.parse_expression()?;
+        self.expect(&TokenKind::CloseParen)?;
+
+        // Check for alternative syntax: if (...):
+        if self.eat(&TokenKind::Colon) {
+            let mut body = Vec::new();
+            while !matches!(
+                self.peek(),
+                TokenKind::ElseIf | TokenKind::Else | TokenKind::EndIf | TokenKind::Eof
+            ) {
+                body.push(self.parse_statement()?);
+            }
+
+            let mut elseif_clauses = Vec::new();
+            while self.eat(&TokenKind::ElseIf) {
+                self.expect(&TokenKind::OpenParen)?;
+                let cond = self.parse_expression()?;
+                self.expect(&TokenKind::CloseParen)?;
+                self.expect(&TokenKind::Colon)?;
+                let mut elsif_body = Vec::new();
+                while !matches!(
+                    self.peek(),
+                    TokenKind::ElseIf | TokenKind::Else | TokenKind::EndIf | TokenKind::Eof
+                ) {
+                    elsif_body.push(self.parse_statement()?);
+                }
+                elseif_clauses.push((cond, elsif_body));
+            }
+
+            let else_body = if self.eat(&TokenKind::Else) {
+                self.expect(&TokenKind::Colon)?;
+                let mut else_stmts = Vec::new();
+                while !matches!(self.peek(), TokenKind::EndIf | TokenKind::Eof) {
+                    else_stmts.push(self.parse_statement()?);
+                }
+                Some(else_stmts)
+            } else {
+                None
+            };
+
+            self.expect(&TokenKind::EndIf)?;
+            self.expect_semicolon()?;
+
+            return Ok(Statement {
+                kind: StmtKind::If {
+                    condition,
+                    body,
+                    elseif_clauses,
+                    else_body,
+                },
+                span,
+            });
+        }
+
+        let body = if matches!(self.peek(), TokenKind::OpenBrace) {
+            self.parse_block()?
+        } else {
+            vec![self.parse_statement()?]
+        };
+
+        let mut elseif_clauses = Vec::new();
+        while self.eat(&TokenKind::ElseIf) {
+            self.expect(&TokenKind::OpenParen)?;
+            let cond = self.parse_expression()?;
+            self.expect(&TokenKind::CloseParen)?;
+            let elsif_body = if matches!(self.peek(), TokenKind::OpenBrace) {
+                self.parse_block()?
+            } else {
+                vec![self.parse_statement()?]
+            };
+            elseif_clauses.push((cond, elsif_body));
+        }
+
+        let else_body = if self.eat(&TokenKind::Else) {
+            if matches!(self.peek(), TokenKind::OpenBrace) {
+                Some(self.parse_block()?)
+            } else {
+                Some(vec![self.parse_statement()?])
+            }
+        } else {
+            None
+        };
+
+        Ok(Statement {
+            kind: StmtKind::If {
+                condition,
+                body,
+                elseif_clauses,
+                else_body,
+            },
+            span,
+        })
+    }
+
+    fn parse_while(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance();
+        self.expect(&TokenKind::OpenParen)?;
+        let condition = self.parse_expression()?;
+        self.expect(&TokenKind::CloseParen)?;
+
+        let body = if matches!(self.peek(), TokenKind::OpenBrace) {
+            self.parse_block()?
+        } else {
+            vec![self.parse_statement()?]
+        };
+
+        Ok(Statement {
+            kind: StmtKind::While { condition, body },
+            span,
+        })
+    }
+
+    fn parse_do_while(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance(); // do
+        let body = self.parse_block()?;
+        self.expect(&TokenKind::While)?;
+        self.expect(&TokenKind::OpenParen)?;
+        let condition = self.parse_expression()?;
+        self.expect(&TokenKind::CloseParen)?;
+        self.expect_semicolon()?;
+        Ok(Statement {
+            kind: StmtKind::DoWhile { body, condition },
+            span,
+        })
+    }
+
+    fn parse_for(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance(); // for
+        self.expect(&TokenKind::OpenParen)?;
+
+        let init = self.parse_expression_list(&TokenKind::Semicolon)?;
+        self.expect(&TokenKind::Semicolon)?;
+        let condition = self.parse_expression_list(&TokenKind::Semicolon)?;
+        self.expect(&TokenKind::Semicolon)?;
+        let update = self.parse_expression_list(&TokenKind::CloseParen)?;
+        self.expect(&TokenKind::CloseParen)?;
+
+        let body = if matches!(self.peek(), TokenKind::OpenBrace) {
+            self.parse_block()?
+        } else {
+            vec![self.parse_statement()?]
+        };
+
+        Ok(Statement {
+            kind: StmtKind::For {
+                init,
+                condition,
+                update,
+                body,
+            },
+            span,
+        })
+    }
+
+    fn parse_expression_list(&mut self, terminator: &TokenKind) -> ParseResult<Vec<Expr>> {
+        let mut exprs = Vec::new();
+        if std::mem::discriminant(self.peek()) == std::mem::discriminant(terminator) {
+            return Ok(exprs);
+        }
+        exprs.push(self.parse_expression()?);
+        while self.eat(&TokenKind::Comma) {
+            exprs.push(self.parse_expression()?);
+        }
+        Ok(exprs)
+    }
+
+    fn parse_foreach(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance(); // foreach
+        self.expect(&TokenKind::OpenParen)?;
+        let expr = self.parse_expression()?;
+        self.expect(&TokenKind::As)?;
+
+        let by_ref = self.eat(&TokenKind::Ampersand);
+        let first = self.parse_expression()?;
+
+        let (key, value, by_ref) = if self.eat(&TokenKind::DoubleArrow) {
+            let by_ref_val = self.eat(&TokenKind::Ampersand);
+            let value = self.parse_expression()?;
+            (Some(first), value, by_ref_val)
+        } else {
+            (None, first, by_ref)
+        };
+
+        self.expect(&TokenKind::CloseParen)?;
+        let body = if matches!(self.peek(), TokenKind::OpenBrace) {
+            self.parse_block()?
+        } else {
+            vec![self.parse_statement()?]
+        };
+
+        Ok(Statement {
+            kind: StmtKind::Foreach {
+                expr,
+                key,
+                value,
+                by_ref,
+                body,
+            },
+            span,
+        })
+    }
+
+    fn parse_switch(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance(); // switch
+        self.expect(&TokenKind::OpenParen)?;
+        let expr = self.parse_expression()?;
+        self.expect(&TokenKind::CloseParen)?;
+        self.expect(&TokenKind::OpenBrace)?;
+
+        let mut cases = Vec::new();
+        while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+            let value = if self.eat(&TokenKind::Case) {
+                let v = self.parse_expression()?;
+                self.expect(&TokenKind::Colon)?;
+                Some(v)
+            } else if self.eat(&TokenKind::Default) {
+                self.expect(&TokenKind::Colon)?;
+                None
+            } else {
+                return Err(ParseError {
+                    message: "expected 'case' or 'default'".into(),
+                    span: self.span(),
+                });
+            };
+
+            let mut body = Vec::new();
+            while !matches!(
+                self.peek(),
+                TokenKind::Case | TokenKind::Default | TokenKind::CloseBrace | TokenKind::Eof
+            ) {
+                body.push(self.parse_statement()?);
+            }
+            cases.push(SwitchCase { value, body });
+        }
+
+        self.expect(&TokenKind::CloseBrace)?;
+        Ok(Statement {
+            kind: StmtKind::Switch { expr, cases },
+            span,
+        })
+    }
+
+    fn parse_function_decl(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance(); // function
+        let name = match self.peek().clone() {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                name
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "expected function name".into(),
+                    span: self.span(),
+                });
+            }
+        };
+
+        self.expect(&TokenKind::OpenParen)?;
+        let params = self.parse_params()?;
+        self.expect(&TokenKind::CloseParen)?;
+
+        let return_type = if self.eat(&TokenKind::Colon) {
+            Some(self.parse_type_hint()?)
+        } else {
+            None
+        };
+
+        let body = self.parse_block()?;
+
+        Ok(Statement {
+            kind: StmtKind::FunctionDecl {
+                name,
+                params,
+                return_type,
+                body,
+                is_static: false,
+            },
+            span,
+        })
+    }
+
+    fn parse_params(&mut self) -> ParseResult<Vec<Param>> {
+        let mut params = Vec::new();
+        if matches!(self.peek(), TokenKind::CloseParen) {
+            return Ok(params);
+        }
+
+        loop {
+            let mut visibility = None;
+            let mut readonly = false;
+
+            // Constructor promotion visibility
+            match self.peek() {
+                TokenKind::Public => {
+                    visibility = Some(Visibility::Public);
+                    self.advance();
+                }
+                TokenKind::Protected => {
+                    visibility = Some(Visibility::Protected);
+                    self.advance();
+                }
+                TokenKind::Private => {
+                    visibility = Some(Visibility::Private);
+                    self.advance();
+                }
+                _ => {}
+            }
+
+            if matches!(self.peek(), TokenKind::Readonly) {
+                readonly = true;
+                self.advance();
+            }
+
+            let type_hint = if !matches!(
+                self.peek(),
+                TokenKind::Variable(_) | TokenKind::Ampersand | TokenKind::Ellipsis
+            ) {
+                Some(self.parse_type_hint()?)
+            } else {
+                None
+            };
+
+            let by_ref = self.eat(&TokenKind::Ampersand);
+            let variadic = self.eat(&TokenKind::Ellipsis);
+
+            let name = match self.peek().clone() {
+                TokenKind::Variable(name) => {
+                    self.advance();
+                    name
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "expected parameter name".into(),
+                        span: self.span(),
+                    });
+                }
+            };
+
+            let default = if self.eat(&TokenKind::Assign) {
+                Some(self.parse_expression()?)
+            } else {
+                None
+            };
+
+            params.push(Param {
+                name,
+                type_hint,
+                default,
+                by_ref,
+                variadic,
+                visibility,
+                readonly,
+            });
+
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            // Allow trailing comma
+            if matches!(self.peek(), TokenKind::CloseParen) {
+                break;
+            }
+        }
+
+        Ok(params)
+    }
+
+    fn parse_type_hint(&mut self) -> ParseResult<TypeHint> {
+        if self.eat(&TokenKind::QuestionMark) {
+            let inner = self.parse_simple_type()?;
+            return Ok(TypeHint::Nullable(Box::new(inner)));
+        }
+
+        let first = self.parse_simple_type()?;
+
+        // Check for union or intersection
+        if matches!(self.peek(), TokenKind::Pipe) {
+            let mut types = vec![first];
+            while self.eat(&TokenKind::Pipe) {
+                types.push(self.parse_simple_type()?);
+            }
+            return Ok(TypeHint::Union(types));
+        }
+
+        if matches!(self.peek(), TokenKind::Ampersand) {
+            let mut types = vec![first];
+            while self.eat(&TokenKind::Ampersand) {
+                types.push(self.parse_simple_type()?);
+            }
+            return Ok(TypeHint::Intersection(types));
+        }
+
+        Ok(first)
+    }
+
+    fn parse_simple_type(&mut self) -> ParseResult<TypeHint> {
+        match self.peek().clone() {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                Ok(TypeHint::Simple(name))
+            }
+            TokenKind::Array => {
+                self.advance();
+                Ok(TypeHint::Simple(b"array".to_vec()))
+            }
+            TokenKind::Callable => {
+                self.advance();
+                Ok(TypeHint::Simple(b"callable".to_vec()))
+            }
+            TokenKind::Null => {
+                self.advance();
+                Ok(TypeHint::Simple(b"null".to_vec()))
+            }
+            TokenKind::True => {
+                self.advance();
+                Ok(TypeHint::Simple(b"true".to_vec()))
+            }
+            TokenKind::False => {
+                self.advance();
+                Ok(TypeHint::Simple(b"false".to_vec()))
+            }
+            TokenKind::Static => {
+                self.advance();
+                Ok(TypeHint::Simple(b"static".to_vec()))
+            }
+            _ => Err(ParseError {
+                message: format!("expected type name, found {:?}", self.peek()),
+                span: self.span(),
+            }),
+        }
+    }
+
+    fn parse_class_decl(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        let mut modifiers = ClassModifiers::default();
+
+        loop {
+            match self.peek() {
+                TokenKind::Abstract => {
+                    modifiers.is_abstract = true;
+                    self.advance();
+                }
+                TokenKind::Final => {
+                    modifiers.is_final = true;
+                    self.advance();
+                }
+                TokenKind::Readonly => {
+                    modifiers.is_readonly = true;
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+
+        self.expect(&TokenKind::Class)?;
+        let name = match self.peek().clone() {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                name
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "expected class name".into(),
+                    span: self.span(),
+                });
+            }
+        };
+
+        let extends = if self.eat(&TokenKind::Extends) {
+            match self.peek().clone() {
+                TokenKind::Identifier(name) => {
+                    self.advance();
+                    Some(name)
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "expected parent class name".into(),
+                        span: self.span(),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut implements = Vec::new();
+        if self.eat(&TokenKind::Implements) {
+            loop {
+                match self.peek().clone() {
+                    TokenKind::Identifier(name) => {
+                        self.advance();
+                        implements.push(name);
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "expected interface name".into(),
+                            span: self.span(),
+                        });
+                    }
+                }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.expect(&TokenKind::OpenBrace)?;
+        let mut body = Vec::new();
+        while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+            body.push(self.parse_class_member()?);
+        }
+        self.expect(&TokenKind::CloseBrace)?;
+
+        Ok(Statement {
+            kind: StmtKind::ClassDecl {
+                name,
+                modifiers,
+                extends,
+                implements,
+                body,
+            },
+            span,
+        })
+    }
+
+    fn parse_class_member(&mut self) -> ParseResult<ClassMember> {
+        let mut visibility = Visibility::Public;
+        let mut is_static = false;
+        let mut is_abstract = false;
+        let mut is_final = false;
+        let mut is_readonly = false;
+
+        // Parse modifiers
+        loop {
+            match self.peek() {
+                TokenKind::Public => {
+                    visibility = Visibility::Public;
+                    self.advance();
+                }
+                TokenKind::Protected => {
+                    visibility = Visibility::Protected;
+                    self.advance();
+                }
+                TokenKind::Private => {
+                    visibility = Visibility::Private;
+                    self.advance();
+                }
+                TokenKind::Static => {
+                    is_static = true;
+                    self.advance();
+                }
+                TokenKind::Abstract => {
+                    is_abstract = true;
+                    self.advance();
+                }
+                TokenKind::Final => {
+                    is_final = true;
+                    self.advance();
+                }
+                TokenKind::Readonly => {
+                    is_readonly = true;
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+
+        match self.peek() {
+            TokenKind::Function => {
+                self.advance();
+                let name = match self.peek().clone() {
+                    TokenKind::Identifier(name) => {
+                        self.advance();
+                        name
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "expected method name".into(),
+                            span: self.span(),
+                        });
+                    }
+                };
+
+                self.expect(&TokenKind::OpenParen)?;
+                let params = self.parse_params()?;
+                self.expect(&TokenKind::CloseParen)?;
+
+                let return_type = if self.eat(&TokenKind::Colon) {
+                    Some(self.parse_type_hint()?)
+                } else {
+                    None
+                };
+
+                let body = if is_abstract || matches!(self.peek(), TokenKind::Semicolon) {
+                    self.expect_semicolon()?;
+                    None
+                } else {
+                    Some(self.parse_block()?)
+                };
+
+                Ok(ClassMember::Method {
+                    name,
+                    params,
+                    return_type,
+                    body,
+                    visibility,
+                    is_static,
+                    is_abstract,
+                    is_final,
+                })
+            }
+            TokenKind::Const => {
+                self.advance();
+                let name = match self.peek().clone() {
+                    TokenKind::Identifier(name) => {
+                        self.advance();
+                        name
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "expected constant name".into(),
+                            span: self.span(),
+                        });
+                    }
+                };
+                self.expect(&TokenKind::Assign)?;
+                let value = self.parse_expression()?;
+                self.expect_semicolon()?;
+                Ok(ClassMember::ClassConstant {
+                    name,
+                    value,
+                    visibility,
+                })
+            }
+            TokenKind::Variable(_) => {
+                // Property (possibly with type hint already consumed as a modifier)
+                let name = match self.peek().clone() {
+                    TokenKind::Variable(name) => {
+                        self.advance();
+                        name
+                    }
+                    _ => unreachable!(),
+                };
+                let default = if self.eat(&TokenKind::Assign) {
+                    Some(self.parse_expression()?)
+                } else {
+                    None
+                };
+                self.expect_semicolon()?;
+                Ok(ClassMember::Property {
+                    name,
+                    type_hint: None,
+                    default,
+                    visibility,
+                    is_static,
+                    is_readonly,
+                })
+            }
+            _ => {
+                // Might be a typed property: type $name
+                let type_hint = self.parse_type_hint()?;
+                let name = match self.peek().clone() {
+                    TokenKind::Variable(name) => {
+                        self.advance();
+                        name
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "expected property name".into(),
+                            span: self.span(),
+                        });
+                    }
+                };
+                let default = if self.eat(&TokenKind::Assign) {
+                    Some(self.parse_expression()?)
+                } else {
+                    None
+                };
+                self.expect_semicolon()?;
+                Ok(ClassMember::Property {
+                    name,
+                    type_hint: Some(type_hint),
+                    default,
+                    visibility,
+                    is_static,
+                    is_readonly,
+                })
+            }
+        }
+    }
+
+    fn parse_try_catch(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance(); // try
+        let try_body = self.parse_block()?;
+
+        let mut catches = Vec::new();
+        while self.eat(&TokenKind::Catch) {
+            self.expect(&TokenKind::OpenParen)?;
+
+            let mut types = Vec::new();
+            loop {
+                let type_name = match self.peek().clone() {
+                    TokenKind::Identifier(name) => {
+                        self.advance();
+                        vec![name]
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "expected exception class name".into(),
+                            span: self.span(),
+                        });
+                    }
+                };
+                types.push(type_name);
+                if !self.eat(&TokenKind::Pipe) {
+                    break;
+                }
+            }
+
+            let variable = if let TokenKind::Variable(name) = self.peek().clone() {
+                self.advance();
+                Some(name)
+            } else {
+                None
+            };
+
+            self.expect(&TokenKind::CloseParen)?;
+            let body = self.parse_block()?;
+
+            catches.push(CatchClause {
+                types,
+                variable,
+                body,
+            });
+        }
+
+        let finally_body = if self.eat(&TokenKind::Finally) {
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+
+        Ok(Statement {
+            kind: StmtKind::TryCatch {
+                try_body,
+                catches,
+                finally_body,
+            },
+            span,
+        })
+    }
+
+    fn parse_declare(&mut self) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance(); // declare
+        self.expect(&TokenKind::OpenParen)?;
+
+        let mut directives = Vec::new();
+        loop {
+            let name = match self.peek().clone() {
+                TokenKind::Identifier(name) => {
+                    self.advance();
+                    name
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "expected directive name".into(),
+                        span: self.span(),
+                    });
+                }
+            };
+            self.expect(&TokenKind::Assign)?;
+            let value = self.parse_expression()?;
+            directives.push((name, value));
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::CloseParen)?;
+
+        let body = if matches!(self.peek(), TokenKind::OpenBrace) {
+            Some(self.parse_block()?)
+        } else {
+            self.expect_semicolon()?;
+            None
+        };
+
+        Ok(Statement {
+            kind: StmtKind::Declare { directives, body },
+            span,
+        })
+    }
+
+    // ---- Expression parsing (Pratt parser) ----
+
+    pub fn parse_expression(&mut self) -> ParseResult<Expr> {
+        self.parse_assignment()
+    }
+
+    fn parse_assignment(&mut self) -> ParseResult<Expr> {
+        let left = self.parse_null_coalesce()?;
+
+        match self.peek().clone() {
+            TokenKind::Assign => {
+                self.advance();
+                if self.eat(&TokenKind::Ampersand) {
+                    let right = self.parse_assignment()?;
+                    Ok(Expr {
+                        span: left.span.merge(right.span),
+                        kind: ExprKind::AssignRef {
+                            target: Box::new(left),
+                            value: Box::new(right),
+                        },
+                    })
+                } else {
+                    let right = self.parse_assignment()?;
+                    Ok(Expr {
+                        span: left.span.merge(right.span),
+                        kind: ExprKind::Assign {
+                            target: Box::new(left),
+                            value: Box::new(right),
+                        },
+                    })
+                }
+            }
+            TokenKind::PlusAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::Add,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::MinusAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::Sub,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::StarAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::Mul,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::SlashAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::Div,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::PercentAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::Mod,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::PowAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::Pow,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::DotAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::Concat,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::AmpersandAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::BitwiseAnd,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::PipeAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::BitwiseOr,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::CaretAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::BitwiseXor,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::ShiftLeftAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::ShiftLeft,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::ShiftRightAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::ShiftRight,
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            TokenKind::NullCoalesceAssign => {
+                self.advance();
+                let right = self.parse_assignment()?;
+                Ok(Expr {
+                    span: left.span.merge(right.span),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::Spaceship, // placeholder, needs proper NullCoalesce assign
+                        target: Box::new(left),
+                        value: Box::new(right),
+                    },
+                })
+            }
+            _ => Ok(left),
+        }
+    }
+
+    fn parse_null_coalesce(&mut self) -> ParseResult<Expr> {
+        let left = self.parse_ternary()?;
+        if self.eat(&TokenKind::NullCoalesce) {
+            let right = self.parse_null_coalesce()?; // right-associative
+            Ok(Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::NullCoalesce {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            })
+        } else {
+            Ok(left)
+        }
+    }
+
+    fn parse_ternary(&mut self) -> ParseResult<Expr> {
+        let cond = self.parse_logical_or()?;
+        if self.eat(&TokenKind::QuestionMark) {
+            let if_true = if matches!(self.peek(), TokenKind::Colon) {
+                None // short ternary: $a ?: $b
+            } else {
+                Some(Box::new(self.parse_expression()?))
+            };
+            self.expect(&TokenKind::Colon)?;
+            let if_false = self.parse_ternary()?;
+            Ok(Expr {
+                span: cond.span.merge(if_false.span),
+                kind: ExprKind::Ternary {
+                    condition: Box::new(cond),
+                    if_true,
+                    if_false: Box::new(if_false),
+                },
+            })
+        } else {
+            Ok(cond)
+        }
+    }
+
+    fn parse_logical_or(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_logical_and()?;
+        while matches!(self.peek(), TokenKind::BooleanOr) {
+            self.advance();
+            let right = self.parse_logical_and()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::BooleanOr,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_logical_and(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_bitwise_or()?;
+        while matches!(self.peek(), TokenKind::BooleanAnd) {
+            self.advance();
+            let right = self.parse_bitwise_or()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::BooleanAnd,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bitwise_or(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_bitwise_xor()?;
+        while matches!(self.peek(), TokenKind::Pipe) {
+            self.advance();
+            let right = self.parse_bitwise_xor()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::BitwiseOr,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bitwise_xor(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_bitwise_and()?;
+        while matches!(self.peek(), TokenKind::Caret) {
+            self.advance();
+            let right = self.parse_bitwise_and()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::BitwiseXor,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bitwise_and(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_equality()?;
+        while matches!(self.peek(), TokenKind::Ampersand) {
+            self.advance();
+            let right = self.parse_equality()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::BitwiseAnd,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_equality(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_comparison()?;
+        loop {
+            let op = match self.peek() {
+                TokenKind::Equal => BinaryOp::Equal,
+                TokenKind::Identical => BinaryOp::Identical,
+                TokenKind::NotEqual => BinaryOp::NotEqual,
+                TokenKind::NotIdentical => BinaryOp::NotIdentical,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_comparison()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_comparison(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_shift()?;
+        loop {
+            let op = match self.peek() {
+                TokenKind::Less => BinaryOp::Less,
+                TokenKind::Greater => BinaryOp::Greater,
+                TokenKind::LessEqual => BinaryOp::LessEqual,
+                TokenKind::GreaterEqual => BinaryOp::GreaterEqual,
+                TokenKind::Spaceship => BinaryOp::Spaceship,
+                TokenKind::Instanceof => {
+                    self.advance();
+                    let right = self.parse_shift()?;
+                    left = Expr {
+                        span: left.span.merge(right.span),
+                        kind: ExprKind::Instanceof {
+                            expr: Box::new(left),
+                            class: Box::new(right),
+                        },
+                    };
+                    continue;
+                }
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_shift()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_shift(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_additive()?;
+        loop {
+            let op = match self.peek() {
+                TokenKind::ShiftLeft => BinaryOp::ShiftLeft,
+                TokenKind::ShiftRight => BinaryOp::ShiftRight,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_additive()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_additive(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_multiplicative()?;
+        loop {
+            let op = match self.peek() {
+                TokenKind::Plus => BinaryOp::Add,
+                TokenKind::Minus => BinaryOp::Sub,
+                TokenKind::Dot => BinaryOp::Concat,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_multiplicative()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_multiplicative(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_pow()?;
+        loop {
+            let op = match self.peek() {
+                TokenKind::Star => BinaryOp::Mul,
+                TokenKind::Slash => BinaryOp::Div,
+                TokenKind::Percent => BinaryOp::Mod,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_pow()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_pow(&mut self) -> ParseResult<Expr> {
+        let base = self.parse_unary()?;
+        if self.eat(&TokenKind::Pow) {
+            let exp = self.parse_pow()?; // right-associative
+            Ok(Expr {
+                span: base.span.merge(exp.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::Pow,
+                    left: Box::new(base),
+                    right: Box::new(exp),
+                },
+            })
+        } else {
+            Ok(base)
+        }
+    }
+
+    fn parse_unary(&mut self) -> ParseResult<Expr> {
+        let span = self.span();
+        match self.peek().clone() {
+            TokenKind::Minus => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::UnaryOp {
+                        op: UnaryOp::Negate,
+                        operand: Box::new(operand),
+                        prefix: true,
+                    },
+                })
+            }
+            TokenKind::Plus => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::UnaryOp {
+                        op: UnaryOp::Plus,
+                        operand: Box::new(operand),
+                        prefix: true,
+                    },
+                })
+            }
+            TokenKind::BooleanNot => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::UnaryOp {
+                        op: UnaryOp::BooleanNot,
+                        operand: Box::new(operand),
+                        prefix: true,
+                    },
+                })
+            }
+            TokenKind::Tilde => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::UnaryOp {
+                        op: UnaryOp::BitwiseNot,
+                        operand: Box::new(operand),
+                        prefix: true,
+                    },
+                })
+            }
+            TokenKind::Increment => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::UnaryOp {
+                        op: UnaryOp::PreIncrement,
+                        operand: Box::new(operand),
+                        prefix: true,
+                    },
+                })
+            }
+            TokenKind::Decrement => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::UnaryOp {
+                        op: UnaryOp::PreDecrement,
+                        operand: Box::new(operand),
+                        prefix: true,
+                    },
+                })
+            }
+            TokenKind::IntCast => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Cast(CastType::Int, Box::new(operand)),
+                })
+            }
+            TokenKind::FloatCast => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Cast(CastType::Float, Box::new(operand)),
+                })
+            }
+            TokenKind::StringCast => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Cast(CastType::String, Box::new(operand)),
+                })
+            }
+            TokenKind::BoolCast => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Cast(CastType::Bool, Box::new(operand)),
+                })
+            }
+            TokenKind::ArrayCast => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Cast(CastType::Array, Box::new(operand)),
+                })
+            }
+            TokenKind::ObjectCast => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Cast(CastType::Object, Box::new(operand)),
+                })
+            }
+            TokenKind::At => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Suppress(Box::new(operand)),
+                })
+            }
+            TokenKind::Clone => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Clone(Box::new(operand)),
+                })
+            }
+            TokenKind::Print => {
+                self.advance();
+                let operand = self.parse_expression()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Print(Box::new(operand)),
+                })
+            }
+            _ => self.parse_postfix(),
+        }
+    }
+
+    fn parse_postfix(&mut self) -> ParseResult<Expr> {
+        let mut expr = self.parse_primary()?;
+
+        loop {
+            match self.peek().clone() {
+                TokenKind::Increment => {
+                    let span = self.span();
+                    self.advance();
+                    expr = Expr {
+                        span: expr.span.merge(span),
+                        kind: ExprKind::UnaryOp {
+                            op: UnaryOp::PostIncrement,
+                            operand: Box::new(expr),
+                            prefix: false,
+                        },
+                    };
+                }
+                TokenKind::Decrement => {
+                    let span = self.span();
+                    self.advance();
+                    expr = Expr {
+                        span: expr.span.merge(span),
+                        kind: ExprKind::UnaryOp {
+                            op: UnaryOp::PostDecrement,
+                            operand: Box::new(expr),
+                            prefix: false,
+                        },
+                    };
+                }
+                TokenKind::OpenBracket => {
+                    self.advance();
+                    let index = if matches!(self.peek(), TokenKind::CloseBracket) {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expression()?))
+                    };
+                    let end_span = self.span();
+                    self.expect(&TokenKind::CloseBracket)?;
+                    expr = Expr {
+                        span: expr.span.merge(end_span),
+                        kind: ExprKind::ArrayAccess {
+                            array: Box::new(expr),
+                            index,
+                        },
+                    };
+                }
+                TokenKind::Arrow => {
+                    self.advance();
+                    if matches!(self.peek(), TokenKind::OpenBrace) {
+                        // $obj->{expr}
+                        self.advance();
+                        let prop = self.parse_expression()?;
+                        self.expect(&TokenKind::CloseBrace)?;
+                        if matches!(self.peek(), TokenKind::OpenParen) {
+                            self.advance();
+                            let args = self.parse_arguments()?;
+                            let end_span = self.span();
+                            self.expect(&TokenKind::CloseParen)?;
+                            expr = Expr {
+                                span: expr.span.merge(end_span),
+                                kind: ExprKind::MethodCall {
+                                    object: Box::new(expr),
+                                    method: Box::new(prop),
+                                    args,
+                                    nullsafe: false,
+                                },
+                            };
+                        } else {
+                            expr = Expr {
+                                span: expr.span.merge(prop.span),
+                                kind: ExprKind::PropertyAccess {
+                                    object: Box::new(expr),
+                                    property: Box::new(prop),
+                                    nullsafe: false,
+                                },
+                            };
+                        }
+                    } else {
+                        let prop_span = self.span();
+                        let name = match self.peek().clone() {
+                            TokenKind::Identifier(name) => {
+                                self.advance();
+                                name
+                            }
+                            _ => {
+                                return Err(ParseError {
+                                    message: "expected property/method name".into(),
+                                    span: self.span(),
+                                });
+                            }
+                        };
+                        if matches!(self.peek(), TokenKind::OpenParen) {
+                            self.advance();
+                            let args = self.parse_arguments()?;
+                            let end_span = self.span();
+                            self.expect(&TokenKind::CloseParen)?;
+                            expr = Expr {
+                                span: expr.span.merge(end_span),
+                                kind: ExprKind::MethodCall {
+                                    object: Box::new(expr),
+                                    method: Box::new(Expr {
+                                        kind: ExprKind::Identifier(name),
+                                        span: prop_span,
+                                    }),
+                                    args,
+                                    nullsafe: false,
+                                },
+                            };
+                        } else {
+                            expr = Expr {
+                                span: expr.span.merge(prop_span),
+                                kind: ExprKind::PropertyAccess {
+                                    object: Box::new(expr),
+                                    property: Box::new(Expr {
+                                        kind: ExprKind::Identifier(name),
+                                        span: prop_span,
+                                    }),
+                                    nullsafe: false,
+                                },
+                            };
+                        }
+                    }
+                }
+                TokenKind::NullsafeArrow => {
+                    self.advance();
+                    let prop_span = self.span();
+                    let name = match self.peek().clone() {
+                        TokenKind::Identifier(name) => {
+                            self.advance();
+                            name
+                        }
+                        _ => {
+                            return Err(ParseError {
+                                message: "expected property/method name".into(),
+                                span: self.span(),
+                            });
+                        }
+                    };
+                    if matches!(self.peek(), TokenKind::OpenParen) {
+                        self.advance();
+                        let args = self.parse_arguments()?;
+                        let end_span = self.span();
+                        self.expect(&TokenKind::CloseParen)?;
+                        expr = Expr {
+                            span: expr.span.merge(end_span),
+                            kind: ExprKind::MethodCall {
+                                object: Box::new(expr),
+                                method: Box::new(Expr {
+                                    kind: ExprKind::Identifier(name),
+                                    span: prop_span,
+                                }),
+                                args,
+                                nullsafe: true,
+                            },
+                        };
+                    } else {
+                        expr = Expr {
+                            span: expr.span.merge(prop_span),
+                            kind: ExprKind::PropertyAccess {
+                                object: Box::new(expr),
+                                property: Box::new(Expr {
+                                    kind: ExprKind::Identifier(name),
+                                    span: prop_span,
+                                }),
+                                nullsafe: true,
+                            },
+                        };
+                    }
+                }
+                TokenKind::DoubleColon => {
+                    self.advance();
+                    let member_span = self.span();
+                    match self.peek().clone() {
+                        TokenKind::Identifier(name) if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::OpenParen)) => {
+                            self.advance(); // name
+                            self.advance(); // (
+                            let args = self.parse_arguments()?;
+                            let end_span = self.span();
+                            self.expect(&TokenKind::CloseParen)?;
+                            expr = Expr {
+                                span: expr.span.merge(end_span),
+                                kind: ExprKind::StaticMethodCall {
+                                    class: Box::new(expr),
+                                    method: name,
+                                    args,
+                                },
+                            };
+                        }
+                        TokenKind::Identifier(name) => {
+                            self.advance();
+                            expr = Expr {
+                                span: expr.span.merge(member_span),
+                                kind: ExprKind::ClassConstAccess {
+                                    class: Box::new(expr),
+                                    constant: name,
+                                },
+                            };
+                        }
+                        TokenKind::Class => {
+                            self.advance();
+                            expr = Expr {
+                                span: expr.span.merge(member_span),
+                                kind: ExprKind::ClassConstAccess {
+                                    class: Box::new(expr),
+                                    constant: b"class".to_vec(),
+                                },
+                            };
+                        }
+                        TokenKind::Variable(name) => {
+                            self.advance();
+                            expr = Expr {
+                                span: expr.span.merge(member_span),
+                                kind: ExprKind::StaticPropertyAccess {
+                                    class: Box::new(expr),
+                                    property: name,
+                                },
+                            };
+                        }
+                        _ => {
+                            return Err(ParseError {
+                                message: "expected member name after ::".into(),
+                                span: self.span(),
+                            });
+                        }
+                    }
+                }
+                TokenKind::OpenParen => {
+                    // Function call (for variable functions: $func())
+                    self.advance();
+                    let args = self.parse_arguments()?;
+                    let end_span = self.span();
+                    self.expect(&TokenKind::CloseParen)?;
+                    expr = Expr {
+                        span: expr.span.merge(end_span),
+                        kind: ExprKind::FunctionCall {
+                            name: Box::new(expr),
+                            args,
+                        },
+                    };
+                }
+                _ => break,
+            }
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_primary(&mut self) -> ParseResult<Expr> {
+        let span = self.span();
+        match self.peek().clone() {
+            TokenKind::LongNumber(n) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Int(n),
+                    span,
+                })
+            }
+            TokenKind::DoubleNumber(n) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Float(n),
+                    span,
+                })
+            }
+            TokenKind::ConstantString(s) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::String(s),
+                    span,
+                })
+            }
+            TokenKind::InterpolatedStringPart(s) => {
+                self.advance();
+                let mut parts = vec![StringPart::Literal(s)];
+                // Collect remaining parts
+                loop {
+                    match self.peek().clone() {
+                        TokenKind::Variable(name) => {
+                            self.advance();
+                            parts.push(StringPart::Expr(Expr {
+                                kind: ExprKind::Variable(name),
+                                span: self.span(),
+                            }));
+                        }
+                        TokenKind::InterpolatedStringPart(s) => {
+                            self.advance();
+                            parts.push(StringPart::Literal(s));
+                        }
+                        TokenKind::InterpolatedStringEnd(s) => {
+                            self.advance();
+                            if !s.is_empty() {
+                                parts.push(StringPart::Literal(s));
+                            }
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                Ok(Expr {
+                    kind: ExprKind::InterpolatedString(parts),
+                    span,
+                })
+            }
+            TokenKind::True => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::True,
+                    span,
+                })
+            }
+            TokenKind::False => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::False,
+                    span,
+                })
+            }
+            TokenKind::Null => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Null,
+                    span,
+                })
+            }
+            TokenKind::Variable(name) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Variable(name),
+                    span,
+                })
+            }
+            TokenKind::Identifier(name) => {
+                self.advance();
+                // Check if this is a function call
+                if matches!(self.peek(), TokenKind::OpenParen) {
+                    self.advance();
+                    let args = self.parse_arguments()?;
+                    let end_span = self.span();
+                    self.expect(&TokenKind::CloseParen)?;
+                    Ok(Expr {
+                        span: span.merge(end_span),
+                        kind: ExprKind::FunctionCall {
+                            name: Box::new(Expr {
+                                kind: ExprKind::Identifier(name),
+                                span,
+                            }),
+                            args,
+                        },
+                    })
+                } else {
+                    Ok(Expr {
+                        kind: ExprKind::Identifier(name),
+                        span,
+                    })
+                }
+            }
+            TokenKind::OpenParen => {
+                self.advance();
+                let expr = self.parse_expression()?;
+                self.expect(&TokenKind::CloseParen)?;
+                Ok(expr)
+            }
+            TokenKind::OpenBracket => {
+                self.advance();
+                let mut elements = Vec::new();
+                while !matches!(self.peek(), TokenKind::CloseBracket | TokenKind::Eof) {
+                    if self.eat(&TokenKind::Ellipsis) {
+                        let value = self.parse_expression()?;
+                        elements.push(ArrayElement {
+                            key: None,
+                            value,
+                            unpack: true,
+                        });
+                    } else {
+                        let first = self.parse_expression()?;
+                        if self.eat(&TokenKind::DoubleArrow) {
+                            let value = self.parse_expression()?;
+                            elements.push(ArrayElement {
+                                key: Some(first),
+                                value,
+                                unpack: false,
+                            });
+                        } else {
+                            elements.push(ArrayElement {
+                                key: None,
+                                value: first,
+                                unpack: false,
+                            });
+                        }
+                    }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let end_span = self.span();
+                self.expect(&TokenKind::CloseBracket)?;
+                Ok(Expr {
+                    span: span.merge(end_span),
+                    kind: ExprKind::Array(elements),
+                })
+            }
+            TokenKind::Array => {
+                self.advance();
+                self.expect(&TokenKind::OpenParen)?;
+                let mut elements = Vec::new();
+                while !matches!(self.peek(), TokenKind::CloseParen | TokenKind::Eof) {
+                    let first = self.parse_expression()?;
+                    if self.eat(&TokenKind::DoubleArrow) {
+                        let value = self.parse_expression()?;
+                        elements.push(ArrayElement {
+                            key: Some(first),
+                            value,
+                            unpack: false,
+                        });
+                    } else {
+                        elements.push(ArrayElement {
+                            key: None,
+                            value: first,
+                            unpack: false,
+                        });
+                    }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let end_span = self.span();
+                self.expect(&TokenKind::CloseParen)?;
+                Ok(Expr {
+                    span: span.merge(end_span),
+                    kind: ExprKind::Array(elements),
+                })
+            }
+            TokenKind::New => {
+                self.advance();
+                let class = self.parse_primary()?;
+                let args = if matches!(self.peek(), TokenKind::OpenParen) {
+                    self.advance();
+                    let args = self.parse_arguments()?;
+                    self.expect(&TokenKind::CloseParen)?;
+                    args
+                } else {
+                    Vec::new()
+                };
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::New {
+                        class: Box::new(class),
+                        args,
+                    },
+                })
+            }
+            TokenKind::Isset => {
+                self.advance();
+                self.expect(&TokenKind::OpenParen)?;
+                let mut exprs = vec![self.parse_expression()?];
+                while self.eat(&TokenKind::Comma) {
+                    exprs.push(self.parse_expression()?);
+                }
+                self.expect(&TokenKind::CloseParen)?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Isset(exprs),
+                })
+            }
+            TokenKind::Empty => {
+                self.advance();
+                self.expect(&TokenKind::OpenParen)?;
+                let expr = self.parse_expression()?;
+                self.expect(&TokenKind::CloseParen)?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Empty(Box::new(expr)),
+                })
+            }
+            TokenKind::Exit => {
+                self.advance();
+                let value = if matches!(self.peek(), TokenKind::OpenParen) {
+                    self.advance();
+                    let v = if matches!(self.peek(), TokenKind::CloseParen) {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expression()?))
+                    };
+                    self.expect(&TokenKind::CloseParen)?;
+                    v
+                } else {
+                    None
+                };
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Exit(value),
+                })
+            }
+            TokenKind::Eval => {
+                self.advance();
+                self.expect(&TokenKind::OpenParen)?;
+                let expr = self.parse_expression()?;
+                self.expect(&TokenKind::CloseParen)?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Eval(Box::new(expr)),
+                })
+            }
+            TokenKind::Function => {
+                // Anonymous function
+                self.advance();
+                self.expect(&TokenKind::OpenParen)?;
+                let params = self.parse_params()?;
+                self.expect(&TokenKind::CloseParen)?;
+
+                let use_vars = if matches!(self.peek(), TokenKind::Use) {
+                    self.advance();
+                    self.expect(&TokenKind::OpenParen)?;
+                    let mut vars = Vec::new();
+                    loop {
+                        let by_ref = self.eat(&TokenKind::Ampersand);
+                        let name = match self.peek().clone() {
+                            TokenKind::Variable(name) => {
+                                self.advance();
+                                name
+                            }
+                            _ => {
+                                return Err(ParseError {
+                                    message: "expected variable name in use clause".into(),
+                                    span: self.span(),
+                                });
+                            }
+                        };
+                        vars.push(ClosureUse {
+                            variable: name,
+                            by_ref,
+                        });
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&TokenKind::CloseParen)?;
+                    vars
+                } else {
+                    Vec::new()
+                };
+
+                let return_type = if self.eat(&TokenKind::Colon) {
+                    Some(self.parse_type_hint()?)
+                } else {
+                    None
+                };
+
+                let body = self.parse_block()?;
+
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Closure {
+                        is_static: false,
+                        params,
+                        use_vars,
+                        return_type,
+                        body,
+                    },
+                })
+            }
+            TokenKind::Fn => {
+                self.advance();
+                self.expect(&TokenKind::OpenParen)?;
+                let params = self.parse_params()?;
+                self.expect(&TokenKind::CloseParen)?;
+                let return_type = if self.eat(&TokenKind::Colon) {
+                    Some(self.parse_type_hint()?)
+                } else {
+                    None
+                };
+                self.expect(&TokenKind::DoubleArrow)?;
+                let body = self.parse_expression()?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::ArrowFunction {
+                        is_static: false,
+                        params,
+                        return_type,
+                        body: Box::new(body),
+                    },
+                })
+            }
+            TokenKind::Static if matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::Function | TokenKind::Fn)
+            ) => {
+                self.advance(); // static
+                if matches!(self.peek(), TokenKind::Fn) {
+                    self.advance();
+                    self.expect(&TokenKind::OpenParen)?;
+                    let params = self.parse_params()?;
+                    self.expect(&TokenKind::CloseParen)?;
+                    let return_type = if self.eat(&TokenKind::Colon) {
+                        Some(self.parse_type_hint()?)
+                    } else {
+                        None
+                    };
+                    self.expect(&TokenKind::DoubleArrow)?;
+                    let body = self.parse_expression()?;
+                    Ok(Expr {
+                        span,
+                        kind: ExprKind::ArrowFunction {
+                            is_static: true,
+                            params,
+                            return_type,
+                            body: Box::new(body),
+                        },
+                    })
+                } else {
+                    self.advance(); // function
+                    self.expect(&TokenKind::OpenParen)?;
+                    let params = self.parse_params()?;
+                    self.expect(&TokenKind::CloseParen)?;
+                    let use_vars = Vec::new(); // TODO: parse use clause
+                    let return_type = if self.eat(&TokenKind::Colon) {
+                        Some(self.parse_type_hint()?)
+                    } else {
+                        None
+                    };
+                    let body = self.parse_block()?;
+                    Ok(Expr {
+                        span,
+                        kind: ExprKind::Closure {
+                            is_static: true,
+                            params,
+                            use_vars,
+                            return_type,
+                            body,
+                        },
+                    })
+                }
+            }
+            TokenKind::Match => {
+                self.advance();
+                self.expect(&TokenKind::OpenParen)?;
+                let subject = self.parse_expression()?;
+                self.expect(&TokenKind::CloseParen)?;
+                self.expect(&TokenKind::OpenBrace)?;
+
+                let mut arms = Vec::new();
+                while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+                    if self.eat(&TokenKind::Default) {
+                        self.expect(&TokenKind::DoubleArrow)?;
+                        let body = self.parse_expression()?;
+                        arms.push(MatchArm {
+                            conditions: None,
+                            body,
+                        });
+                    } else {
+                        let mut conditions = vec![self.parse_expression()?];
+                        while self.eat(&TokenKind::Comma) {
+                            if matches!(self.peek(), TokenKind::DoubleArrow) {
+                                break; // trailing comma
+                            }
+                            conditions.push(self.parse_expression()?);
+                        }
+                        self.expect(&TokenKind::DoubleArrow)?;
+                        let body = self.parse_expression()?;
+                        arms.push(MatchArm {
+                            conditions: Some(conditions),
+                            body,
+                        });
+                    }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::CloseBrace)?;
+
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Match {
+                        subject: Box::new(subject),
+                        arms,
+                    },
+                })
+            }
+            TokenKind::Include => {
+                self.advance();
+                let path = self.parse_expression()?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Include {
+                        kind: IncludeKind::Include,
+                        path: Box::new(path),
+                    },
+                })
+            }
+            TokenKind::IncludeOnce => {
+                self.advance();
+                let path = self.parse_expression()?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Include {
+                        kind: IncludeKind::IncludeOnce,
+                        path: Box::new(path),
+                    },
+                })
+            }
+            TokenKind::Require => {
+                self.advance();
+                let path = self.parse_expression()?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Include {
+                        kind: IncludeKind::Require,
+                        path: Box::new(path),
+                    },
+                })
+            }
+            TokenKind::RequireOnce => {
+                self.advance();
+                let path = self.parse_expression()?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Include {
+                        kind: IncludeKind::RequireOnce,
+                        path: Box::new(path),
+                    },
+                })
+            }
+            TokenKind::Yield => {
+                self.advance();
+                if matches!(
+                    self.peek(),
+                    TokenKind::Semicolon | TokenKind::CloseParen | TokenKind::CloseBracket
+                ) {
+                    Ok(Expr {
+                        span,
+                        kind: ExprKind::Yield(None),
+                    })
+                } else {
+                    let value = self.parse_expression()?;
+                    Ok(Expr {
+                        span,
+                        kind: ExprKind::Yield(Some(Box::new(value))),
+                    })
+                }
+            }
+            TokenKind::YieldFrom => {
+                self.advance();
+                let value = self.parse_expression()?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::YieldFrom(Box::new(value)),
+                })
+            }
+            TokenKind::Ellipsis => {
+                self.advance();
+                let expr = self.parse_expression()?;
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Spread(Box::new(expr)),
+                })
+            }
+            _ => Err(ParseError {
+                message: format!("unexpected token {:?}", self.peek()),
+                span,
+            }),
+        }
+    }
+
+    fn parse_arguments(&mut self) -> ParseResult<Vec<Argument>> {
+        let mut args = Vec::new();
+        if matches!(self.peek(), TokenKind::CloseParen) {
+            return Ok(args);
+        }
+
+        loop {
+            let unpack = self.eat(&TokenKind::Ellipsis);
+
+            // Check for named arguments: name: value
+            let name = if let TokenKind::Identifier(ident) = self.peek().clone() {
+                if self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::Colon) {
+                    self.advance(); // identifier
+                    self.advance(); // colon
+                    Some(ident)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let value = self.parse_expression()?;
+            args.push(Argument {
+                name,
+                value,
+                unpack,
+            });
+
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            // Allow trailing comma
+            if matches!(self.peek(), TokenKind::CloseParen) {
+                break;
+            }
+        }
+
+        Ok(args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn parse(source: &[u8]) -> ParseResult<Program> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        parser.parse()
+    }
+
+    #[test]
+    fn test_echo_string() {
+        let prog = parse(b"<?php echo \"hello\";").unwrap();
+        assert_eq!(prog.statements.len(), 1);
+        match &prog.statements[0].kind {
+            StmtKind::Echo(exprs) => {
+                assert_eq!(exprs.len(), 1);
+                match &exprs[0].kind {
+                    ExprKind::String(s) => assert_eq!(s, b"hello"),
+                    other => panic!("expected String, got {:?}", other),
+                }
+            }
+            other => panic!("expected Echo, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_variable_assignment() {
+        let prog = parse(b"<?php $x = 42;").unwrap();
+        match &prog.statements[0].kind {
+            StmtKind::Expression(expr) => match &expr.kind {
+                ExprKind::Assign { target, value } => {
+                    match &target.kind {
+                        ExprKind::Variable(name) => assert_eq!(name, b"x"),
+                        other => panic!("expected Variable, got {:?}", other),
+                    }
+                    match &value.kind {
+                        ExprKind::Int(42) => {}
+                        other => panic!("expected Int(42), got {:?}", other),
+                    }
+                }
+                other => panic!("expected Assign, got {:?}", other),
+            },
+            other => panic!("expected Expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_binary_ops() {
+        let prog = parse(b"<?php $a + $b * $c;").unwrap();
+        match &prog.statements[0].kind {
+            StmtKind::Expression(expr) => match &expr.kind {
+                ExprKind::BinaryOp { op, left, right } => {
+                    assert_eq!(*op, BinaryOp::Add);
+                    matches!(&left.kind, ExprKind::Variable(_));
+                    matches!(&right.kind, ExprKind::BinaryOp { .. });
+                }
+                other => panic!("expected BinaryOp, got {:?}", other),
+            },
+            other => panic!("expected Expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_function_call() {
+        let prog = parse(b"<?php strlen(\"hello\");").unwrap();
+        match &prog.statements[0].kind {
+            StmtKind::Expression(expr) => match &expr.kind {
+                ExprKind::FunctionCall { name, args } => {
+                    match &name.kind {
+                        ExprKind::Identifier(name) => assert_eq!(name, b"strlen"),
+                        other => panic!("expected Identifier, got {:?}", other),
+                    }
+                    assert_eq!(args.len(), 1);
+                }
+                other => panic!("expected FunctionCall, got {:?}", other),
+            },
+            other => panic!("expected Expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_if_else() {
+        let prog = parse(b"<?php if ($x > 0) { echo \"positive\"; } else { echo \"non-positive\"; }").unwrap();
+        match &prog.statements[0].kind {
+            StmtKind::If {
+                condition,
+                body,
+                else_body,
+                ..
+            } => {
+                matches!(&condition.kind, ExprKind::BinaryOp { .. });
+                assert_eq!(body.len(), 1);
+                assert!(else_body.is_some());
+            }
+            other => panic!("expected If, got {:?}", other),
+        }
+    }
+}

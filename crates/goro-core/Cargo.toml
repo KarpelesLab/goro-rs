@@ -1,0 +1,8 @@
+[package]
+name = "goro-core"
+version = "0.1.0"
+edition = "2024"
+description = "PHP engine core: values, compiler, and VM for goro-rs"
+
+[dependencies]
+goro-parser = { path = "../goro-parser" }

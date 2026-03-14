@@ -1,0 +1,636 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::io::Write;
+use std::rc::Rc;
+
+use crate::array::{ArrayKey, PhpArray};
+use crate::opcode::{Op, OpArray, OpCode, OperandType};
+use crate::string::PhpString;
+use crate::value::Value;
+
+/// Built-in function signature
+pub type BuiltinFn = fn(&mut Vm, &[Value]) -> Result<Value, VmError>;
+
+/// VM runtime error
+#[derive(Debug)]
+pub struct VmError {
+    pub message: String,
+    pub line: u32,
+}
+
+impl std::fmt::Display for VmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fatal error on line {}: {}", self.line, self.message)
+    }
+}
+
+impl std::error::Error for VmError {}
+
+/// Pending function call being assembled
+struct PendingCall {
+    name: PhpString,
+    args: Vec<Value>,
+}
+
+/// The virtual machine / executor
+pub struct Vm {
+    /// Output buffer
+    output: Vec<u8>,
+    /// Registered built-in functions
+    functions: HashMap<Vec<u8>, BuiltinFn>,
+    /// Global variables (for script-level execution)
+    globals: HashMap<Vec<u8>, Value>,
+    /// Pending function call being set up
+    pending_call: Option<PendingCall>,
+}
+
+impl Vm {
+    pub fn new() -> Self {
+        Self {
+            output: Vec::new(),
+            functions: HashMap::new(),
+            globals: HashMap::new(),
+            pending_call: None,
+        }
+    }
+
+    /// Register a built-in function
+    pub fn register_function(&mut self, name: &[u8], func: BuiltinFn) {
+        self.functions.insert(name.to_ascii_lowercase(), func);
+    }
+
+    /// Get the output buffer contents
+    pub fn output(&self) -> &[u8] {
+        &self.output
+    }
+
+    /// Take the output buffer
+    pub fn take_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.output)
+    }
+
+    /// Write to the output buffer
+    pub fn write_output(&mut self, data: &[u8]) {
+        self.output.extend_from_slice(data);
+    }
+
+    /// Execute an op_array
+    pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
+        let mut ip: usize = 0;
+
+        // Allocate CV and temporary storage
+        let cv_count = op_array.cv_names.len();
+        let temp_count = op_array.temp_count as usize;
+        let mut cvs: Vec<Value> = vec![Value::Undef; cv_count];
+        let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
+
+        loop {
+            if ip >= op_array.ops.len() {
+                return Ok(Value::Null);
+            }
+
+            let op = &op_array.ops[ip];
+            ip += 1;
+
+            match op.opcode {
+                OpCode::Nop => {}
+
+                OpCode::Echo => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let s = val.to_php_string();
+                    self.output.extend_from_slice(s.as_bytes());
+                }
+
+                OpCode::Print => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let s = val.to_php_string();
+                    self.output.extend_from_slice(s.as_bytes());
+                    self.write_operand(&op.result, Value::Long(1), &mut cvs, &mut tmps);
+                }
+
+                OpCode::Assign => {
+                    let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, val, &mut cvs, &mut tmps);
+                }
+
+                OpCode::Add => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, a.add(&b), &mut cvs, &mut tmps);
+                }
+                OpCode::Sub => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, a.sub(&b), &mut cvs, &mut tmps);
+                }
+                OpCode::Mul => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, a.mul(&b), &mut cvs, &mut tmps);
+                }
+                OpCode::Div => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    match a.div(&b) {
+                        Ok(result) => self.write_operand(&op.result, result, &mut cvs, &mut tmps),
+                        Err(msg) => {
+                            return Err(VmError {
+                                message: msg.to_string(),
+                                line: op.line,
+                            });
+                        }
+                    }
+                }
+                OpCode::Mod => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    match a.modulo(&b) {
+                        Ok(result) => self.write_operand(&op.result, result, &mut cvs, &mut tmps),
+                        Err(msg) => {
+                            return Err(VmError {
+                                message: msg.to_string(),
+                                line: op.line,
+                            });
+                        }
+                    }
+                }
+                OpCode::Pow => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, a.pow(&b), &mut cvs, &mut tmps);
+                }
+                OpCode::Concat => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, a.concat(&b), &mut cvs, &mut tmps);
+                }
+                OpCode::Negate => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, a.negate(), &mut cvs, &mut tmps);
+                }
+
+                OpCode::BitwiseAnd => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        Value::Long(a.to_long() & b.to_long()),
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::BitwiseOr => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        Value::Long(a.to_long() | b.to_long()),
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::BitwiseXor => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        Value::Long(a.to_long() ^ b.to_long()),
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::BitwiseNot => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        Value::Long(!a.to_long()),
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::ShiftLeft => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        Value::Long(a.to_long().wrapping_shl(b.to_long() as u32)),
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::ShiftRight => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        Value::Long(a.to_long().wrapping_shr(b.to_long() as u32)),
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+
+                OpCode::BooleanNot => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if a.is_truthy() { Value::False } else { Value::True },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+
+                // Comparisons
+                OpCode::Equal => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if a.equals(&b) { Value::True } else { Value::False },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::NotEqual => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if a.equals(&b) { Value::False } else { Value::True },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::Identical => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if a.identical(&b) { Value::True } else { Value::False },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::NotIdentical => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if a.identical(&b) { Value::False } else { Value::True },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::Less => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if a.compare(&b) < 0 { Value::True } else { Value::False },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::LessEqual => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if a.compare(&b) <= 0 { Value::True } else { Value::False },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::Greater => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if a.compare(&b) > 0 { Value::True } else { Value::False },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::GreaterEqual => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if a.compare(&b) >= 0 { Value::True } else { Value::False },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::Spaceship => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, Value::Long(a.compare(&b)), &mut cvs, &mut tmps);
+                }
+
+                // Compound assignments
+                OpCode::AssignAdd => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, cv_val.add(&rhs), &mut cvs, &mut tmps);
+                }
+                OpCode::AssignSub => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, cv_val.sub(&rhs), &mut cvs, &mut tmps);
+                }
+                OpCode::AssignMul => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, cv_val.mul(&rhs), &mut cvs, &mut tmps);
+                }
+                OpCode::AssignDiv => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    match cv_val.div(&rhs) {
+                        Ok(result) => self.write_operand(&op.op1, result, &mut cvs, &mut tmps),
+                        Err(msg) => return Err(VmError { message: msg.to_string(), line: op.line }),
+                    }
+                }
+                OpCode::AssignMod => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    match cv_val.modulo(&rhs) {
+                        Ok(result) => self.write_operand(&op.op1, result, &mut cvs, &mut tmps),
+                        Err(msg) => return Err(VmError { message: msg.to_string(), line: op.line }),
+                    }
+                }
+                OpCode::AssignPow => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, cv_val.pow(&rhs), &mut cvs, &mut tmps);
+                }
+                OpCode::AssignConcat => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, cv_val.concat(&rhs), &mut cvs, &mut tmps);
+                }
+                OpCode::AssignBitwiseAnd => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() & rhs.to_long()), &mut cvs, &mut tmps);
+                }
+                OpCode::AssignBitwiseOr => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() | rhs.to_long()), &mut cvs, &mut tmps);
+                }
+                OpCode::AssignBitwiseXor => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() ^ rhs.to_long()), &mut cvs, &mut tmps);
+                }
+                OpCode::AssignShiftLeft => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long().wrapping_shl(rhs.to_long() as u32)), &mut cvs, &mut tmps);
+                }
+                OpCode::AssignShiftRight => {
+                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long().wrapping_shr(rhs.to_long() as u32)), &mut cvs, &mut tmps);
+                }
+
+                // Increment / Decrement
+                OpCode::PreIncrement => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let new_val = val.add(&Value::Long(1));
+                    self.write_operand(&op.op1, new_val.clone(), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, new_val, &mut cvs, &mut tmps);
+                }
+                OpCode::PreDecrement => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let new_val = val.sub(&Value::Long(1));
+                    self.write_operand(&op.op1, new_val.clone(), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, new_val, &mut cvs, &mut tmps);
+                }
+                OpCode::PostIncrement => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let new_val = val.add(&Value::Long(1));
+                    self.write_operand(&op.result, val, &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps);
+                }
+                OpCode::PostDecrement => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let new_val = val.sub(&Value::Long(1));
+                    self.write_operand(&op.result, val, &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps);
+                }
+
+                // Control flow
+                OpCode::Jmp => {
+                    if let OperandType::JmpTarget(target) = op.op1 {
+                        ip = target as usize;
+                    }
+                }
+                OpCode::JmpZ => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if !val.is_truthy() {
+                        if let OperandType::JmpTarget(target) = op.op2 {
+                            ip = target as usize;
+                        }
+                    }
+                }
+                OpCode::JmpNz => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if val.is_truthy() {
+                        if let OperandType::JmpTarget(target) = op.op2 {
+                            ip = target as usize;
+                        }
+                    }
+                }
+
+                // Function calls
+                OpCode::InitFCall => {
+                    let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let name = name_val.to_php_string();
+                    self.pending_call = Some(PendingCall {
+                        name,
+                        args: Vec::new(),
+                    });
+                }
+                OpCode::SendVal => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if let Some(ref mut call) = self.pending_call {
+                        call.args.push(val);
+                    }
+                }
+                OpCode::DoFCall => {
+                    let call = self.pending_call.take().ok_or_else(|| VmError {
+                        message: "no pending function call".into(),
+                        line: op.line,
+                    })?;
+
+                    let func_name_lower: Vec<u8> = call.name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                    if let Some(func) = self.functions.get(&func_name_lower).copied() {
+                        let result = func(self, &call.args).map_err(|e| VmError {
+                            message: e.message,
+                            line: op.line,
+                        })?;
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps);
+                    } else {
+                        return Err(VmError {
+                            message: format!(
+                                "Call to undefined function {}()",
+                                call.name.to_string_lossy()
+                            ),
+                            line: op.line,
+                        });
+                    }
+                }
+
+                OpCode::Return => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    return Ok(val);
+                }
+
+                // Casts
+                OpCode::CastInt => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, Value::Long(val.to_long()), &mut cvs, &mut tmps);
+                }
+                OpCode::CastFloat => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        Value::Double(val.to_double()),
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::CastString => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        Value::String(val.to_php_string()),
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::CastBool => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        if val.is_truthy() { Value::True } else { Value::False },
+                        &mut cvs,
+                        &mut tmps,
+                    );
+                }
+                OpCode::CastArray => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let arr = match val {
+                        Value::Array(a) => a,
+                        other => {
+                            let mut arr = PhpArray::new();
+                            arr.push(other);
+                            Rc::new(RefCell::new(arr))
+                        }
+                    };
+                    self.write_operand(&op.result, Value::Array(arr), &mut cvs, &mut tmps);
+                }
+
+                // Arrays
+                OpCode::ArrayNew => {
+                    let arr = Rc::new(RefCell::new(PhpArray::new()));
+                    self.write_operand(&op.result, Value::Array(arr), &mut cvs, &mut tmps);
+                }
+                OpCode::ArrayAppend => {
+                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Value::Array(arr) = arr_val {
+                        arr.borrow_mut().push(val);
+                    }
+                }
+                OpCode::ArraySet => {
+                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                    if let Value::Array(arr) = arr_val {
+                        let key = match key_val {
+                            Value::Long(n) => ArrayKey::Int(n),
+                            Value::String(s) => ArrayKey::String(s),
+                            other => ArrayKey::Int(other.to_long()),
+                        };
+                        arr.borrow_mut().set(key, val);
+                    }
+                }
+                OpCode::ArrayGet => {
+                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let result = if let Value::Array(arr) = &arr_val {
+                        let key = match &key_val {
+                            Value::Long(n) => ArrayKey::Int(*n),
+                            Value::String(s) => ArrayKey::String(s.clone()),
+                            other => ArrayKey::Int(other.to_long()),
+                        };
+                        arr.borrow().get(&key).cloned().unwrap_or(Value::Null)
+                    } else if let Value::String(s) = &arr_val {
+                        // String offset access
+                        let idx = key_val.to_long();
+                        let bytes = s.as_bytes();
+                        if idx >= 0 && (idx as usize) < bytes.len() {
+                            Value::String(PhpString::from_bytes(&[bytes[idx as usize]]))
+                        } else {
+                            Value::String(PhpString::empty())
+                        }
+                    } else {
+                        Value::Null
+                    };
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps);
+                }
+
+                OpCode::LoadConst | OpCode::FastConcat | OpCode::TypeCheck => {
+                    // TODO: implement
+                }
+            }
+        }
+    }
+
+    fn read_operand(
+        &self,
+        operand: &OperandType,
+        cvs: &[Value],
+        tmps: &[Value],
+        literals: &[Value],
+    ) -> Value {
+        match operand {
+            OperandType::Cv(idx) => cvs.get(*idx as usize).cloned().unwrap_or(Value::Null),
+            OperandType::Const(idx) => literals.get(*idx as usize).cloned().unwrap_or(Value::Null),
+            OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned().unwrap_or(Value::Null),
+            OperandType::Unused => Value::Null,
+            OperandType::JmpTarget(_) => Value::Null,
+        }
+    }
+
+    fn write_operand(
+        &self,
+        operand: &OperandType,
+        value: Value,
+        cvs: &mut [Value],
+        tmps: &mut [Value],
+    ) {
+        match operand {
+            OperandType::Cv(idx) => {
+                if let Some(slot) = cvs.get_mut(*idx as usize) {
+                    *slot = value;
+                }
+            }
+            OperandType::Tmp(idx) => {
+                if let Some(slot) = tmps.get_mut(*idx as usize) {
+                    *slot = value;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Default for Vm {
+    fn default() -> Self {
+        Self::new()
+    }
+}

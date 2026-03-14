@@ -1,0 +1,7 @@
+[package]
+name = "goro-parser"
+version = "0.1.0"
+edition = "2024"
+description = "PHP lexer and parser for goro-rs"
+
+[dependencies]
