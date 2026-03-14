@@ -998,8 +998,15 @@ fn dirname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn basename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let suffix = args.get(1).map(|v| v.to_php_string());
     let s = path.to_string_lossy();
-    let base = std::path::Path::new(&s).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+    let mut base = std::path::Path::new(&s).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+    if let Some(suf) = suffix {
+        let suf_str = suf.to_string_lossy();
+        if base.ends_with(&suf_str) && base.len() > suf_str.len() {
+            base.truncate(base.len() - suf_str.len());
+        }
+    }
     Ok(Value::String(PhpString::from_string(base)))
 }
 fn pathinfo_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

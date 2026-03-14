@@ -31,6 +31,19 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"lcfirst", lcfirst);
     vm.register_function(b"ucwords", ucwords);
     vm.register_function(b"strrev", strrev);
+    vm.register_function(b"addslashes", addslashes);
+    vm.register_function(b"stripslashes", stripslashes);
+    vm.register_function(b"addcslashes", addcslashes);
+    vm.register_function(b"stripcslashes", stripcslashes);
+    vm.register_function(b"str_rot13", str_rot13);
+    vm.register_function(b"strip_tags", strip_tags);
+    vm.register_function(b"quoted_printable_encode", quoted_printable_encode);
+    vm.register_function(b"quoted_printable_decode", quoted_printable_decode);
+    vm.register_function(b"convert_uuencode", convert_uuencode);
+    vm.register_function(b"convert_uudecode", convert_uudecode);
+    vm.register_function(b"str_getcsv", str_getcsv);
+    vm.register_function(b"rtrim", rtrim); // alias chop
+    vm.register_function(b"chop", rtrim);
 }
 
 fn strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -476,4 +489,217 @@ fn strrev(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut bytes = s.as_bytes().to_vec();
     bytes.reverse();
     Ok(Value::String(PhpString::from_vec(bytes)))
+}
+
+fn addslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let mut result = Vec::new();
+    for &b in s.as_bytes() {
+        match b {
+            b'\'' | b'"' | b'\\' => { result.push(b'\\'); result.push(b); }
+            0 => { result.push(b'\\'); result.push(b'0'); }
+            _ => result.push(b),
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn stripslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'0' => { result.push(0); i += 2; }
+                ch => { result.push(ch); i += 2; }
+            }
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn addcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let charlist = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let chars = charlist.as_bytes();
+    let mut result = Vec::new();
+    for &b in s.as_bytes() {
+        if chars.contains(&b) {
+            match b {
+                b'\n' => result.extend_from_slice(b"\\n"),
+                b'\r' => result.extend_from_slice(b"\\r"),
+                b'\t' => result.extend_from_slice(b"\\t"),
+                0 => result.extend_from_slice(b"\\000"),
+                _ => { result.push(b'\\'); result.push(b); }
+            }
+        } else {
+            result.push(b);
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn stripcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'n' => { result.push(b'\n'); i += 2; }
+                b'r' => { result.push(b'\r'); i += 2; }
+                b't' => { result.push(b'\t'); i += 2; }
+                b'v' => { result.push(0x0B); i += 2; }
+                b'a' => { result.push(0x07); i += 2; }
+                b'f' => { result.push(0x0C); i += 2; }
+                b'\\' => { result.push(b'\\'); i += 2; }
+                b'0'..=b'7' => {
+                    // Octal
+                    let mut oct = vec![bytes[i + 1]];
+                    let mut j = i + 2;
+                    while j < bytes.len() && oct.len() < 3 && bytes[j] >= b'0' && bytes[j] <= b'7' {
+                        oct.push(bytes[j]);
+                        j += 1;
+                    }
+                    let s_oct: String = oct.iter().map(|&b| b as char).collect();
+                    result.push(u8::from_str_radix(&s_oct, 8).unwrap_or(0));
+                    i = j;
+                }
+                b'x' => {
+                    // Hex
+                    let mut j = i + 2;
+                    let mut hex = Vec::new();
+                    while j < bytes.len() && hex.len() < 2 && bytes[j].is_ascii_hexdigit() {
+                        hex.push(bytes[j]);
+                        j += 1;
+                    }
+                    if !hex.is_empty() {
+                        let s_hex: String = hex.iter().map(|&b| b as char).collect();
+                        result.push(u8::from_str_radix(&s_hex, 16).unwrap_or(0));
+                    }
+                    i = j;
+                }
+                ch => { result.push(ch); i += 2; }
+            }
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn str_rot13(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let result: Vec<u8> = s.as_bytes().iter().map(|&b| {
+        match b {
+            b'a'..=b'm' | b'A'..=b'M' => b + 13,
+            b'n'..=b'z' | b'N'..=b'Z' => b - 13,
+            _ => b,
+        }
+    }).collect();
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut in_tag = false;
+    for &b in bytes {
+        match b {
+            b'<' => in_tag = true,
+            b'>' => in_tag = false,
+            _ if !in_tag => result.push(b),
+            _ => {}
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn quoted_printable_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let mut result = Vec::new();
+    for &b in s.as_bytes() {
+        if (b >= 33 && b <= 126 && b != b'=') || b == b'\t' || b == b' ' {
+            result.push(b);
+        } else {
+            result.push(b'=');
+            result.extend_from_slice(format!("{:02X}", b).as_bytes());
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn quoted_printable_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'=' && i + 2 < bytes.len() && bytes[i+1].is_ascii_hexdigit() && bytes[i+2].is_ascii_hexdigit() {
+            let hex: String = [bytes[i+1] as char, bytes[i+2] as char].iter().collect();
+            result.push(u8::from_str_radix(&hex, 16).unwrap_or(0));
+            i += 3;
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn convert_uuencode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::empty()))
+}
+
+fn convert_uudecode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::empty()))
+}
+
+fn str_getcsv(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::array::PhpArray;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let sep = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b","));
+    let delim = sep.as_bytes().first().copied().unwrap_or(b',');
+
+    let mut result = PhpArray::new();
+    let mut current = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_quotes = false;
+
+    while i < bytes.len() {
+        if bytes[i] == b'"' && !in_quotes {
+            in_quotes = true;
+            i += 1;
+        } else if bytes[i] == b'"' && in_quotes {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                current.push(b'"');
+                i += 2;
+            } else {
+                in_quotes = false;
+                i += 1;
+            }
+        } else if bytes[i] == delim && !in_quotes {
+            result.push(Value::String(PhpString::from_vec(current.clone())));
+            current.clear();
+            i += 1;
+        } else {
+            current.push(bytes[i]);
+            i += 1;
+        }
+    }
+    result.push(Value::String(PhpString::from_vec(current)));
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
