@@ -1866,10 +1866,25 @@ impl Compiler {
             }
 
             ExprKind::Instanceof { expr, class } => {
-                // Stub: return false for now
-                let _ = self.compile_expr(expr)?;
-                let idx = self.op_array.add_literal(Value::False);
-                Ok(OperandType::Const(idx))
+                let obj = self.compile_expr(expr)?;
+                let class_name = match &class.kind {
+                    ExprKind::Identifier(name) => name.clone(),
+                    _ => {
+                        let _ = self.compile_expr(class)?;
+                        let idx = self.op_array.add_literal(Value::False);
+                        return Ok(OperandType::Const(idx));
+                    }
+                };
+                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::TypeCheck,
+                    op1: obj,
+                    op2: OperandType::Const(name_idx),
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::Include { kind, path } => {

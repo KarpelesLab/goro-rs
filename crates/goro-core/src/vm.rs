@@ -810,7 +810,47 @@ impl Vm {
                     }
                 }
 
-                OpCode::LoadConst | OpCode::FastConcat | OpCode::TypeCheck => {
+                OpCode::TypeCheck => {
+                    // instanceof check: op1 = value, op2 = class name
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let class_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                    let result = if let Value::Object(obj) = &val {
+                        let obj_borrow = obj.borrow();
+                        let obj_class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                        if obj_class_lower == class_lower {
+                            Value::True
+                        } else {
+                            // Walk the class hierarchy
+                            let mut current = obj_class_lower.clone();
+                            let mut found = false;
+                            loop {
+                                if let Some(class_def) = self.classes.get(&current) {
+                                    if let Some(ref parent) = class_def.parent {
+                                        let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if parent_lower == class_lower {
+                                            found = true;
+                                            break;
+                                        }
+                                        current = parent_lower;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            if found { Value::True } else { Value::False }
+                        }
+                    } else {
+                        Value::False
+                    };
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::LoadConst | OpCode::FastConcat => {
                     // TODO: implement
                 }
 
@@ -875,6 +915,7 @@ impl Vm {
                             }
                         }
                     }
+                    // stdClass is always available even without declaration
 
                     self.write_operand(
                         &op.result,
