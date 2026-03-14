@@ -4,25 +4,25 @@ A PHP 8.5 implementation in Rust.
 
 ## Status
 
-Early development. Core language features work, OOP is not yet implemented.
+Early development. Core language features and basic OOP work.
 
 **Test Suite Progress** (PHP 8.5.4 official tests):
 
 | Test Directory | Pass | Total | Rate |
 |---|---|---|---|
-| tests/lang | 39 | 213 | 18.3% |
+| tests/lang | 48 | 213 | 22.5% |
 | tests/basic | 8 | 110 | 7.3% |
-| Zend/tests | ~80 | 871 | ~9.2% |
-| **Total** | **127** | **1194** | **10.6%** |
+| Zend/tests (500) | 62 | 500 | 12.4% |
+| **Sampled Total** | **118** | **823** | **14.3%** |
 
 ## Features
 
 ### Working
 - Full execution pipeline: PHP source -> lexer -> parser -> AST -> bytecode -> VM
-- Types: null, bool, int, float, string (binary-safe), array (ordered hash map)
+- Types: null, bool, int, float, string (binary-safe), array (ordered hash map), object
 - Arithmetic, comparison, bitwise, logical operators with short-circuit evaluation
 - String interpolation, concatenation, type juggling
-- Control flow: if/elseif/else, while, do-while, for, foreach, switch, match, break/continue
+- Control flow: if/elseif/else, while, do-while, for, foreach, switch, match, break N/continue N
 - User-defined functions with parameters, return values, recursion
 - Static variables in functions
 - Global variables (`global $var`)
@@ -34,8 +34,8 @@ Early development. Core language features work, OOP is not yet implemented.
 - Virtual filesystem abstraction for security sandboxing
 
 ### Not Yet Implemented
-- Classes, interfaces, traits, enums (OOP)
-- Exceptions (try/catch/throw)
+- Full OOP (inheritance, interfaces, traits, enums, magic methods)
+- Exceptions (try/catch/throw with proper error types)
 - Closures and arrow functions
 - References (`&`)
 - include/require
