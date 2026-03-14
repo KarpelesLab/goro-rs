@@ -1679,8 +1679,8 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                // Call constructor if there are arguments
-                if !args.is_empty() {
+                // Always call constructor (it may have default params or side effects)
+                {
                     let constructor_name = self.op_array.add_literal(
                         Value::String(PhpString::from_bytes(b"__construct"))
                     );

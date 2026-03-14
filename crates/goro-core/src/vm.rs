@@ -577,13 +577,19 @@ impl Vm {
 
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
-                        return Err(VmError {
-                            message: format!(
-                                "Call to undefined function {}()",
-                                call.name.to_string_lossy()
-                            ),
-                            line: op.line,
-                        });
+                        // If it's a constructor call and the class has no __construct, silently succeed
+                        let name_bytes = call.name.as_bytes();
+                        if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
+                            self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                        } else {
+                            return Err(VmError {
+                                message: format!(
+                                    "Call to undefined function {}()",
+                                    call.name.to_string_lossy()
+                                ),
+                                line: op.line,
+                            });
+                        }
                     }
                 }
 

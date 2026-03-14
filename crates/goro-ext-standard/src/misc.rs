@@ -99,6 +99,36 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_column", array_column);
     vm.register_function(b"array_count_values", array_count_values);
     vm.register_function(b"array_rand", array_rand);
+    vm.register_function(b"register_shutdown_function", register_shutdown_fn);
+    vm.register_function(b"interface_exists", interface_exists_fn);
+    vm.register_function(b"trait_exists", trait_exists_fn);
+    vm.register_function(b"gc_collect_cycles", gc_collect_fn);
+    vm.register_function(b"gc_enabled", gc_enabled_fn);
+    vm.register_function(b"gc_disable", gc_disable_fn);
+    vm.register_function(b"gc_enable", gc_enable_fn);
+    vm.register_function(b"get_object_vars", get_object_vars_fn);
+    vm.register_function(b"get_class", get_class_fn);
+    vm.register_function(b"serialize", serialize_fn);
+    vm.register_function(b"unserialize", unserialize_fn);
+    vm.register_function(b"memory_get_usage", memory_get_usage_fn);
+    vm.register_function(b"memory_get_peak_usage", memory_get_peak_fn);
+    vm.register_function(b"sleep", sleep_fn);
+    vm.register_function(b"usleep", usleep_fn);
+    vm.register_function(b"uniqid", uniqid_fn);
+    vm.register_function(b"sys_get_temp_dir", sys_get_temp_dir_fn);
+    vm.register_function(b"tempnam", tempnam_fn);
+    vm.register_function(b"getenv", getenv_fn);
+    vm.register_function(b"putenv", putenv_fn);
+    vm.register_function(b"spl_autoload_register", spl_autoload_register_fn);
+    vm.register_function(b"class_alias", class_alias_fn);
+    vm.register_function(b"is_a", is_a_fn);
+    vm.register_function(b"is_subclass_of", is_subclass_of_fn);
+    vm.register_function(b"get_parent_class", get_parent_class_fn);
+    vm.register_function(b"get_called_class", get_called_class_fn);
+    vm.register_function(b"get_defined_vars", get_defined_vars_fn);
+    vm.register_function(b"get_defined_functions", get_defined_functions_fn);
+    vm.register_function(b"array_first", array_first_fn);
+    vm.register_function(b"array_last", array_last_fn);
 
     // Date
     vm.register_function(b"time", time_fn);
@@ -1026,4 +1056,120 @@ fn preg_split(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 fn preg_quote(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(args.first().cloned().unwrap_or(Value::Null))
+}
+
+// Additional commonly needed stubs
+fn register_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
+fn interface_exists_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn trait_exists_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn gc_collect_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
+fn gc_enabled_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn gc_disable_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
+fn gc_enable_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
+fn get_object_vars_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(obj)) = args.first() {
+        let obj = obj.borrow();
+        let mut arr = PhpArray::new();
+        for (name, val) in &obj.properties {
+            arr.set(
+                goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
+                val.clone(),
+            );
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+    } else {
+        Ok(Value::False)
+    }
+}
+fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(obj)) = args.first() {
+        let obj = obj.borrow();
+        Ok(Value::String(PhpString::from_vec(obj.class_name.clone())))
+    } else {
+        Ok(Value::False)
+    }
+}
+fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    let s = serialize_value(val);
+    Ok(Value::String(PhpString::from_string(s)))
+}
+fn serialize_value(val: &Value) -> String {
+    match val {
+        Value::Null | Value::Undef => "N;".to_string(),
+        Value::True => "b:1;".to_string(),
+        Value::False => "b:0;".to_string(),
+        Value::Long(n) => format!("i:{};", n),
+        Value::Double(f) => format!("d:{};", f),
+        Value::String(s) => format!("s:{}:\"{}\";", s.len(), s.to_string_lossy()),
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            let mut result = format!("a:{}:{{", arr.len());
+            for (key, val) in arr.iter() {
+                match key {
+                    goro_core::array::ArrayKey::Int(n) => result.push_str(&format!("i:{};", n)),
+                    goro_core::array::ArrayKey::String(s) => result.push_str(&format!("s:{}:\"{}\";", s.len(), s.to_string_lossy())),
+                }
+                result.push_str(&serialize_value(val));
+            }
+            result.push('}');
+            result
+        }
+        Value::Object(_) => "N;".to_string(), // TODO: proper object serialization
+    }
+}
+fn unserialize_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False) // stub
+}
+fn memory_get_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(1024 * 1024)) // stub: 1MB
+}
+fn memory_get_peak_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(2 * 1024 * 1024)) // stub: 2MB
+}
+fn sleep_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
+fn usleep_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
+fn uniqid_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    use std::time::SystemTime;
+    let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    Ok(Value::String(PhpString::from_string(format!("{:x}{:05x}", t.as_secs(), t.subsec_micros()))))
+}
+fn sys_get_temp_dir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"/tmp")))
+}
+fn tempnam_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"/tmp/goro_tmp")))
+}
+fn getenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name_str: &str = &name.to_string_lossy();
+    match std::env::var(name_str) {
+        Ok(val) => Ok(Value::String(PhpString::from_string(val))),
+        Err(_) => Ok(Value::False),
+    }
+}
+fn putenv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn spl_autoload_register_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn class_alias_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn is_a_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn is_subclass_of_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn get_parent_class_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn get_called_class_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn get_defined_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+fn get_defined_functions_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+fn array_first_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let arr = arr.borrow();
+        Ok(arr.iter().next().map(|(_, v)| v.clone()).unwrap_or(Value::Null))
+    } else { Ok(Value::Null) }
+}
+fn array_last_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let arr = arr.borrow();
+        Ok(arr.iter().last().map(|(_, v)| v.clone()).unwrap_or(Value::Null))
+    } else { Ok(Value::Null) }
 }
