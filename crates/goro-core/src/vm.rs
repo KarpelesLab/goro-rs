@@ -817,7 +817,32 @@ impl Vm {
                 OpCode::DeclareClass => {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let class_idx = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_long() as usize;
-                    if let Some(class) = self.pending_classes.get(class_idx).cloned() {
+                    if let Some(mut class) = self.pending_classes.get(class_idx).cloned() {
+                        // Resolve inheritance: copy parent methods/properties
+                        if let Some(parent_name) = &class.parent.clone() {
+                            let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(parent) = self.classes.get(&parent_lower).cloned() {
+                                // Inherit methods (child overrides take precedence)
+                                for (method_name, method) in &parent.methods {
+                                    if !class.methods.contains_key(method_name) {
+                                        class.methods.insert(method_name.clone(), method.clone());
+                                    }
+                                }
+                                // Inherit properties (child overrides take precedence)
+                                let child_prop_names: Vec<Vec<u8>> = class.properties.iter().map(|p| p.name.clone()).collect();
+                                for prop in &parent.properties {
+                                    if !child_prop_names.contains(&prop.name) {
+                                        class.properties.push(prop.clone());
+                                    }
+                                }
+                                // Inherit constants
+                                for (const_name, const_val) in &parent.constants {
+                                    if !class.constants.contains_key(const_name) {
+                                        class.constants.insert(const_name.clone(), const_val.clone());
+                                    }
+                                }
+                            }
+                        }
                         let name_lower: Vec<u8> = name_val.to_php_string().as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
                         self.classes.insert(name_lower, class);
                     }
