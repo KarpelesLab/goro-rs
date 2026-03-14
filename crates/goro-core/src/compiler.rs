@@ -652,9 +652,18 @@ impl Compiler {
             }
 
             StmtKind::Global(vars) => {
-                // global $var - just skip for now (TODO: proper global scope)
                 for name in vars {
-                    self.op_array.get_or_create_cv(name);
+                    let cv = self.op_array.get_or_create_cv(name);
+                    let name_idx = self.op_array.add_literal(
+                        Value::String(PhpString::from_vec(name.clone()))
+                    );
+                    self.op_array.emit(Op {
+                        opcode: OpCode::BindGlobal,
+                        op1: OperandType::Cv(cv),
+                        op2: OperandType::Const(name_idx),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
                 }
                 Ok(())
             }

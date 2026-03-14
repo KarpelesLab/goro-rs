@@ -43,6 +43,10 @@ pub struct Vm {
     pending_calls: Vec<PendingCall>,
     /// Static variable storage (keyed by "funcname::varname")
     static_vars: HashMap<Vec<u8>, Value>,
+    /// Global variables
+    globals: HashMap<Vec<u8>, Value>,
+    /// Whether we're executing the top-level script (vs a function)
+    is_global_scope: bool,
 }
 
 impl Vm {
@@ -53,6 +57,8 @@ impl Vm {
             user_functions: HashMap::new(),
             pending_calls: Vec::new(),
             static_vars: HashMap::new(),
+            globals: HashMap::new(),
+            is_global_scope: true,
         }
     }
 
@@ -84,8 +90,10 @@ impl Vm {
 
     /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
+        self.is_global_scope = true;
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
-        self.execute_op_array(op_array, cvs)
+        let result = self.execute_op_array(op_array, cvs)?;
+        Ok(result)
     }
 
     /// Execute an op_array with pre-initialized CVs
@@ -96,6 +104,8 @@ impl Vm {
         let mut foreach_positions: HashMap<u32, usize> = HashMap::new();
         // Maps CV index -> static var key (for saving back on write)
         let mut static_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
+        // Maps CV index -> global var name (for saving back on write)
+        let mut global_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
 
         loop {
             if ip >= op_array.ops.len() {
@@ -503,6 +513,20 @@ impl Vm {
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned() {
                         // User-defined function - execute its op_array
+                        let was_global = self.is_global_scope;
+                        self.is_global_scope = false;
+
+                        // Save caller's globals before the call
+                        if was_global {
+                            for (i, cv) in cvs.iter().enumerate() {
+                                if !matches!(cv, Value::Undef) {
+                                    if let Some(name) = op_array.cv_names.get(i) {
+                                        self.globals.insert(name.clone(), cv.clone());
+                                    }
+                                }
+                            }
+                        }
+
                         // Set up parameters as CVs
                         let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
                         for (i, arg) in call.args.iter().enumerate() {
@@ -513,6 +537,29 @@ impl Vm {
 
                         // Execute the function's op_array
                         let result = self.execute_op_array(&user_fn, func_cvs)?;
+
+                        self.is_global_scope = was_global;
+
+                        // Reload globals into caller's CVs after the function returns
+                        if was_global {
+                            for (i, name) in op_array.cv_names.iter().enumerate() {
+                                if let Some(val) = self.globals.get(name) {
+                                    if i < cvs.len() {
+                                        cvs[i] = val.clone();
+                                    }
+                                }
+                            }
+                        } else {
+                            // In a non-global calling scope, reload any global-bound CVs
+                            for (cv_idx, name) in &global_cv_keys {
+                                if let Some(val) = self.globals.get(name) {
+                                    if (*cv_idx as usize) < cvs.len() {
+                                        cvs[*cv_idx as usize] = val.clone();
+                                    }
+                                }
+                            }
+                        }
+
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
                         return Err(VmError {
@@ -527,6 +574,22 @@ impl Vm {
 
                 OpCode::Return => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // Save global-bound CVs back to globals
+                    for (cv_idx, name) in &global_cv_keys {
+                        if let Some(cv_val) = cvs.get(*cv_idx as usize) {
+                            self.globals.insert(name.clone(), cv_val.clone());
+                        }
+                    }
+                    // In global scope, save all CVs as globals
+                    if self.is_global_scope {
+                        for (i, cv) in cvs.iter().enumerate() {
+                            if !matches!(cv, Value::Undef) {
+                                if let Some(name) = op_array.cv_names.get(i) {
+                                    self.globals.insert(name.clone(), cv.clone());
+                                }
+                            }
+                        }
+                    }
                     return Ok(val);
                 }
 
@@ -681,6 +744,19 @@ impl Vm {
                             };
                             self.write_operand(&op.result, key_val, &mut cvs, &mut tmps, &static_cv_keys);
                         }
+                    }
+                }
+
+                OpCode::BindGlobal => {
+                    let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let name = name_val.to_php_string().as_bytes().to_vec();
+                    // Load the current global value into the CV
+                    if let Some(val) = self.globals.get(&name) {
+                        self.write_operand(&op.op1, val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                    }
+                    // Register this CV as global so writes are synced
+                    if let OperandType::Cv(cv_idx) = op.op1 {
+                        global_cv_keys.insert(cv_idx, name);
                     }
                 }
 

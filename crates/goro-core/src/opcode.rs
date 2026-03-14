@@ -115,6 +115,8 @@ pub enum OpCode {
     LoadConst,
     /// Initialize a static variable: op1 = CV, op2 = default value (const), result = static key name (const)
     StaticVarInit,
+    /// Bind a global variable: op1 = CV, op2 = variable name (const)
+    BindGlobal,
 
     // ---- Cast ----
     CastInt,
