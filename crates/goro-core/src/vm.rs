@@ -41,6 +41,8 @@ pub struct Vm {
     user_functions: HashMap<Vec<u8>, OpArray>,
     /// Stack of pending function calls (supports nested calls)
     pending_calls: Vec<PendingCall>,
+    /// Static variable storage (keyed by "funcname::varname")
+    static_vars: HashMap<Vec<u8>, Value>,
 }
 
 impl Vm {
@@ -50,6 +52,7 @@ impl Vm {
             functions: HashMap::new(),
             user_functions: HashMap::new(),
             pending_calls: Vec::new(),
+            static_vars: HashMap::new(),
         }
     }
 
@@ -91,6 +94,8 @@ impl Vm {
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
         let mut foreach_positions: HashMap<u32, usize> = HashMap::new();
+        // Maps CV index -> static var key (for saving back on write)
+        let mut static_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
 
         loop {
             if ip >= op_array.ops.len() {
@@ -113,34 +118,34 @@ impl Vm {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let s = val.to_php_string();
                     self.output.extend_from_slice(s.as_bytes());
-                    self.write_operand(&op.result, Value::Long(1), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, Value::Long(1), &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 OpCode::Assign => {
                     let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, val, &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 OpCode::Add => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, a.add(&b), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, a.add(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Sub => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, a.sub(&b), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, a.sub(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Mul => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, a.mul(&b), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, a.mul(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Div => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     match a.div(&b) {
-                        Ok(result) => self.write_operand(&op.result, result, &mut cvs, &mut tmps),
+                        Ok(result) => self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys),
                         Err(msg) => {
                             return Err(VmError {
                                 message: msg.to_string(),
@@ -153,7 +158,7 @@ impl Vm {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     match a.modulo(&b) {
-                        Ok(result) => self.write_operand(&op.result, result, &mut cvs, &mut tmps),
+                        Ok(result) => self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys),
                         Err(msg) => {
                             return Err(VmError {
                                 message: msg.to_string(),
@@ -165,16 +170,16 @@ impl Vm {
                 OpCode::Pow => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, a.pow(&b), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, a.pow(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Concat => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, a.concat(&b), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, a.concat(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Negate => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, a.negate(), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, a.negate(), &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 OpCode::BitwiseAnd => {
@@ -185,6 +190,7 @@ impl Vm {
                         Value::Long(a.to_long() & b.to_long()),
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::BitwiseOr => {
@@ -195,6 +201,7 @@ impl Vm {
                         Value::Long(a.to_long() | b.to_long()),
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::BitwiseXor => {
@@ -205,6 +212,7 @@ impl Vm {
                         Value::Long(a.to_long() ^ b.to_long()),
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::BitwiseNot => {
@@ -214,6 +222,7 @@ impl Vm {
                         Value::Long(!a.to_long()),
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::ShiftLeft => {
@@ -224,6 +233,7 @@ impl Vm {
                         Value::Long(a.to_long().wrapping_shl(b.to_long() as u32)),
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::ShiftRight => {
@@ -234,6 +244,7 @@ impl Vm {
                         Value::Long(a.to_long().wrapping_shr(b.to_long() as u32)),
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
 
@@ -244,6 +255,7 @@ impl Vm {
                         if a.is_truthy() { Value::False } else { Value::True },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
 
@@ -256,6 +268,7 @@ impl Vm {
                         if a.equals(&b) { Value::True } else { Value::False },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::NotEqual => {
@@ -266,6 +279,7 @@ impl Vm {
                         if a.equals(&b) { Value::False } else { Value::True },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::Identical => {
@@ -276,6 +290,7 @@ impl Vm {
                         if a.identical(&b) { Value::True } else { Value::False },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::NotIdentical => {
@@ -286,6 +301,7 @@ impl Vm {
                         if a.identical(&b) { Value::False } else { Value::True },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::Less => {
@@ -296,6 +312,7 @@ impl Vm {
                         if a.compare(&b) < 0 { Value::True } else { Value::False },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::LessEqual => {
@@ -306,6 +323,7 @@ impl Vm {
                         if a.compare(&b) <= 0 { Value::True } else { Value::False },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::Greater => {
@@ -316,6 +334,7 @@ impl Vm {
                         if a.compare(&b) > 0 { Value::True } else { Value::False },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::GreaterEqual => {
@@ -326,35 +345,36 @@ impl Vm {
                         if a.compare(&b) >= 0 { Value::True } else { Value::False },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::Spaceship => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(a.compare(&b)), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, Value::Long(a.compare(&b)), &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 // Compound assignments
                 OpCode::AssignAdd => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.add(&rhs), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, cv_val.add(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignSub => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.sub(&rhs), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, cv_val.sub(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignMul => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.mul(&rhs), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, cv_val.mul(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignDiv => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     match cv_val.div(&rhs) {
-                        Ok(result) => self.write_operand(&op.op1, result, &mut cvs, &mut tmps),
+                        Ok(result) => self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys),
                         Err(msg) => return Err(VmError { message: msg.to_string(), line: op.line }),
                     }
                 }
@@ -362,70 +382,70 @@ impl Vm {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     match cv_val.modulo(&rhs) {
-                        Ok(result) => self.write_operand(&op.op1, result, &mut cvs, &mut tmps),
+                        Ok(result) => self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys),
                         Err(msg) => return Err(VmError { message: msg.to_string(), line: op.line }),
                     }
                 }
                 OpCode::AssignPow => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.pow(&rhs), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, cv_val.pow(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignConcat => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.concat(&rhs), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, cv_val.concat(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignBitwiseAnd => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() & rhs.to_long()), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() & rhs.to_long()), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignBitwiseOr => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() | rhs.to_long()), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() | rhs.to_long()), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignBitwiseXor => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() ^ rhs.to_long()), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() ^ rhs.to_long()), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignShiftLeft => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long().wrapping_shl(rhs.to_long() as u32)), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long().wrapping_shl(rhs.to_long() as u32)), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignShiftRight => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long().wrapping_shr(rhs.to_long() as u32)), &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, Value::Long(cv_val.to_long().wrapping_shr(rhs.to_long() as u32)), &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 // Increment / Decrement
                 OpCode::PreIncrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let new_val = val.add(&Value::Long(1));
-                    self.write_operand(&op.op1, new_val.clone(), &mut cvs, &mut tmps);
-                    self.write_operand(&op.result, new_val, &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, new_val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(&op.result, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::PreDecrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let new_val = val.sub(&Value::Long(1));
-                    self.write_operand(&op.op1, new_val.clone(), &mut cvs, &mut tmps);
-                    self.write_operand(&op.result, new_val, &mut cvs, &mut tmps);
+                    self.write_operand(&op.op1, new_val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(&op.result, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::PostIncrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let new_val = val.add(&Value::Long(1));
-                    self.write_operand(&op.result, val, &mut cvs, &mut tmps);
-                    self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::PostDecrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let new_val = val.sub(&Value::Long(1));
-                    self.write_operand(&op.result, val, &mut cvs, &mut tmps);
-                    self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 // Control flow
@@ -480,7 +500,7 @@ impl Vm {
                             message: e.message,
                             line: op.line,
                         })?;
-                        self.write_operand(&op.result, result, &mut cvs, &mut tmps);
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned() {
                         // User-defined function - execute its op_array
                         // Set up parameters as CVs
@@ -493,7 +513,7 @@ impl Vm {
 
                         // Execute the function's op_array
                         let result = self.execute_op_array(&user_fn, func_cvs)?;
-                        self.write_operand(&op.result, result, &mut cvs, &mut tmps);
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
                         return Err(VmError {
                             message: format!(
@@ -513,7 +533,7 @@ impl Vm {
                 // Casts
                 OpCode::CastInt => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(val.to_long()), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, Value::Long(val.to_long()), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::CastFloat => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -522,6 +542,7 @@ impl Vm {
                         Value::Double(val.to_double()),
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::CastString => {
@@ -531,6 +552,7 @@ impl Vm {
                         Value::String(val.to_php_string()),
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::CastBool => {
@@ -540,6 +562,7 @@ impl Vm {
                         if val.is_truthy() { Value::True } else { Value::False },
                         &mut cvs,
                         &mut tmps,
+                        &static_cv_keys,
                     );
                 }
                 OpCode::CastArray => {
@@ -552,13 +575,13 @@ impl Vm {
                             Rc::new(RefCell::new(arr))
                         }
                     };
-                    self.write_operand(&op.result, Value::Array(arr), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, Value::Array(arr), &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 // Arrays
                 OpCode::ArrayNew => {
                     let arr = Rc::new(RefCell::new(PhpArray::new()));
-                    self.write_operand(&op.result, Value::Array(arr), &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, Value::Array(arr), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::ArrayAppend => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -602,13 +625,13 @@ impl Vm {
                     } else {
                         Value::Null
                     };
-                    self.write_operand(&op.result, result, &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 OpCode::ForeachInit => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // Store array in the iterator tmp slot
-                    self.write_operand(&op.result, arr_val, &mut cvs, &mut tmps);
+                    self.write_operand(&op.result, arr_val, &mut cvs, &mut tmps, &static_cv_keys);
                     // Reset iteration position
                     let iter_idx = match op.result { OperandType::Tmp(idx) => idx, _ => 0 };
                     foreach_positions.insert(iter_idx, 0usize);
@@ -629,7 +652,7 @@ impl Vm {
                             }
                         } else {
                             let (_, value) = entries[pos];
-                            self.write_operand(&op.result, value.clone(), &mut cvs, &mut tmps);
+                            self.write_operand(&op.result, value.clone(), &mut cvs, &mut tmps, &static_cv_keys);
                             foreach_positions.insert(iter_idx, pos + 1);
                         }
                     } else {
@@ -656,8 +679,26 @@ impl Vm {
                                 ArrayKey::Int(n) => Value::Long(*n),
                                 ArrayKey::String(s) => Value::String(s.clone()),
                             };
-                            self.write_operand(&op.result, key_val, &mut cvs, &mut tmps);
+                            self.write_operand(&op.result, key_val, &mut cvs, &mut tmps, &static_cv_keys);
                         }
+                    }
+                }
+
+                OpCode::StaticVarInit => {
+                    let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                    let key = key_val.to_php_string().as_bytes().to_vec();
+
+                    if let Some(existing) = self.static_vars.get(&key) {
+                        self.write_operand(&op.op1, existing.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                    } else {
+                        let default = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                        self.write_operand(&op.op1, default.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                        self.static_vars.insert(key.clone(), default);
+                    }
+
+                    // Register this CV as static so writes are persisted
+                    if let OperandType::Cv(cv_idx) = op.op1 {
+                        static_cv_keys.insert(cv_idx, key);
                     }
                 }
 
@@ -696,16 +737,21 @@ impl Vm {
     }
 
     fn write_operand(
-        &self,
+        &mut self,
         operand: &OperandType,
         value: Value,
         cvs: &mut [Value],
         tmps: &mut [Value],
+        static_cv_keys: &HashMap<u32, Vec<u8>>,
     ) {
         match operand {
             OperandType::Cv(idx) => {
                 if let Some(slot) = cvs.get_mut(*idx as usize) {
-                    *slot = value;
+                    *slot = value.clone();
+                }
+                // If this CV is a static variable, persist the value
+                if let Some(key) = static_cv_keys.get(idx) {
+                    self.static_vars.insert(key.clone(), value);
                 }
             }
             OperandType::Tmp(idx) => {

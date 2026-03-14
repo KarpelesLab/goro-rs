@@ -194,6 +194,42 @@ impl Parser {
                     span,
                 })
             }
+            TokenKind::Static if matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::Variable(_))
+            ) => {
+                // static $var = expr;
+                self.advance(); // consume 'static'
+                let mut vars = Vec::new();
+                loop {
+                    let name = match self.peek().clone() {
+                        TokenKind::Variable(name) => {
+                            self.advance();
+                            name
+                        }
+                        _ => {
+                            return Err(ParseError {
+                                message: "expected variable after 'static'".into(),
+                                span: self.span(),
+                            });
+                        }
+                    };
+                    let default = if self.eat(&TokenKind::Assign) {
+                        Some(self.parse_expression()?)
+                    } else {
+                        None
+                    };
+                    vars.push((name, default));
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::StaticVar(vars),
+                    span,
+                })
+            }
             TokenKind::Function => self.parse_function_decl(),
             TokenKind::Class
             | TokenKind::Abstract

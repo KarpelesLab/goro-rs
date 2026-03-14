@@ -1,7 +1,8 @@
+pub mod math;
+pub mod misc;
 pub mod output;
 pub mod strings;
 pub mod type_funcs;
-pub mod math;
 
 use goro_core::vm::Vm;
 
@@ -11,4 +12,5 @@ pub fn register_standard_functions(vm: &mut Vm) {
     strings::register(vm);
     type_funcs::register(vm);
     math::register(vm);
+    misc::register(vm);
 }

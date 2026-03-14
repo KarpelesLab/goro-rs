@@ -113,6 +113,8 @@ pub enum OpCode {
     // ---- Variables ----
     /// Load a constant value into a temporary
     LoadConst,
+    /// Initialize a static variable: op1 = CV, op2 = default value (const), result = static key name (const)
+    StaticVarInit,
 
     // ---- Cast ----
     CastInt,
