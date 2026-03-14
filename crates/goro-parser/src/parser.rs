@@ -234,7 +234,10 @@ impl Parser {
             TokenKind::Class
             | TokenKind::Abstract
             | TokenKind::Final
-            | TokenKind::Readonly => self.parse_class_decl(),
+            | TokenKind::Readonly
+            | TokenKind::Interface
+            | TokenKind::Trait
+            | TokenKind::Enum => self.parse_class_decl(),
             TokenKind::Try => self.parse_try_catch(),
             TokenKind::Throw => {
                 self.advance();
@@ -594,10 +597,17 @@ impl Parser {
     fn parse_function_decl(&mut self) -> ParseResult<Statement> {
         let span = self.span();
         self.advance(); // function
+        // Optional & for return-by-reference
+        self.eat(&TokenKind::Ampersand);
         let name = match self.peek().clone() {
             TokenKind::Identifier(name) => {
                 self.advance();
                 name
+            }
+            _ if self.is_semi_reserved_keyword() => {
+                let kw = self.keyword_to_identifier();
+                self.advance();
+                kw
             }
             _ => {
                 return Err(ParseError {
@@ -745,10 +755,38 @@ impl Parser {
     }
 
     fn parse_simple_type(&mut self) -> ParseResult<TypeHint> {
+        // Handle leading backslash for fully qualified names
+        if self.eat(&TokenKind::Backslash) {
+            // Qualified name
+            let mut name = Vec::new();
+            loop {
+                match self.peek().clone() {
+                    TokenKind::Identifier(part) => {
+                        self.advance();
+                        if !name.is_empty() { name.push(b'\\'); }
+                        name.extend_from_slice(&part);
+                    }
+                    _ => break,
+                }
+                if !self.eat(&TokenKind::Backslash) { break; }
+            }
+            return Ok(TypeHint::Simple(name));
+        }
         match self.peek().clone() {
             TokenKind::Identifier(name) => {
                 self.advance();
-                Ok(TypeHint::Simple(name))
+                // Check for qualified name continuation
+                let mut full_name = name;
+                while self.eat(&TokenKind::Backslash) {
+                    if let TokenKind::Identifier(part) = self.peek().clone() {
+                        self.advance();
+                        full_name.push(b'\\');
+                        full_name.extend_from_slice(&part);
+                    } else {
+                        break;
+                    }
+                }
+                Ok(TypeHint::Simple(full_name))
             }
             TokenKind::Array => {
                 self.advance();
@@ -773,6 +811,11 @@ impl Parser {
             TokenKind::Static => {
                 self.advance();
                 Ok(TypeHint::Simple(b"static".to_vec()))
+            }
+            TokenKind::Var => {
+                // PHP 4 compat: var is sometimes used in old code
+                self.advance();
+                Ok(TypeHint::Simple(b"var".to_vec()))
             }
             _ => Err(ParseError {
                 message: format!("expected type name, found {:?}", self.peek()),
@@ -803,11 +846,27 @@ impl Parser {
             }
         }
 
-        self.expect(&TokenKind::Class)?;
+        // Accept class, interface, trait, or enum
+        match self.peek() {
+            TokenKind::Class | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => {
+                self.advance();
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "expected class, interface, trait, or enum keyword".into(),
+                    span: self.span(),
+                });
+            }
+        }
         let name = match self.peek().clone() {
             TokenKind::Identifier(name) => {
                 self.advance();
                 name
+            }
+            _ if self.is_semi_reserved_keyword() => {
+                let kw = self.keyword_to_identifier();
+                self.advance();
+                kw
             }
             _ => {
                 return Err(ParseError {
@@ -919,10 +978,18 @@ impl Parser {
         match self.peek() {
             TokenKind::Function => {
                 self.advance();
+                // Optional & for return-by-reference
+                self.eat(&TokenKind::Ampersand);
                 let name = match self.peek().clone() {
                     TokenKind::Identifier(name) => {
                         self.advance();
                         name
+                    }
+                    // Allow keywords as method names
+                    _ if self.is_semi_reserved_keyword() => {
+                        let kw = self.keyword_to_identifier();
+                        self.advance();
+                        kw
                     }
                     _ => {
                         return Err(ParseError {
@@ -1051,18 +1118,31 @@ impl Parser {
 
             let mut types = Vec::new();
             loop {
-                let type_name = match self.peek().clone() {
-                    TokenKind::Identifier(name) => {
-                        self.advance();
-                        vec![name]
+                // Parse qualified name: [\]Identifier[\Identifier]*
+                self.eat(&TokenKind::Backslash); // optional leading backslash
+                let mut type_name = Vec::new();
+                loop {
+                    match self.peek().clone() {
+                        TokenKind::Identifier(name) => {
+                            self.advance();
+                            type_name.push(name);
+                        }
+                        _ if self.is_semi_reserved_keyword() => {
+                            type_name.push(self.keyword_to_identifier());
+                            self.advance();
+                        }
+                        _ if type_name.is_empty() => {
+                            return Err(ParseError {
+                                message: "expected exception class name".into(),
+                                span: self.span(),
+                            });
+                        }
+                        _ => break,
                     }
-                    _ => {
-                        return Err(ParseError {
-                            message: "expected exception class name".into(),
-                            span: self.span(),
-                        });
+                    if !self.eat(&TokenKind::Backslash) {
+                        break;
                     }
-                };
+                }
                 types.push(type_name);
                 if !self.eat(&TokenKind::Pipe) {
                     break;
@@ -2558,6 +2638,88 @@ impl Parser {
         }
 
         Ok(args)
+    }
+
+    /// Check if current token is a semi-reserved keyword that can be used as a method/function name
+    fn is_semi_reserved_keyword(&self) -> bool {
+        matches!(
+            self.peek(),
+            TokenKind::List | TokenKind::Array | TokenKind::Callable | TokenKind::Static
+            | TokenKind::Abstract | TokenKind::Final | TokenKind::Private | TokenKind::Protected
+            | TokenKind::Public | TokenKind::Readonly | TokenKind::Clone | TokenKind::New
+            | TokenKind::Throw | TokenKind::Yield | TokenKind::YieldFrom | TokenKind::Print
+            | TokenKind::Echo | TokenKind::Isset | TokenKind::Unset | TokenKind::Empty
+            | TokenKind::Match | TokenKind::Switch | TokenKind::Case | TokenKind::Default
+            | TokenKind::Break | TokenKind::Continue | TokenKind::Return | TokenKind::If
+            | TokenKind::Else | TokenKind::ElseIf | TokenKind::While | TokenKind::Do
+            | TokenKind::For | TokenKind::Foreach | TokenKind::As | TokenKind::Try
+            | TokenKind::Catch | TokenKind::Finally | TokenKind::Class | TokenKind::Interface
+            | TokenKind::Extends | TokenKind::Implements | TokenKind::Trait | TokenKind::Const
+            | TokenKind::Enum | TokenKind::Fn | TokenKind::Function | TokenKind::Namespace
+            | TokenKind::Use | TokenKind::Var | TokenKind::Global | TokenKind::Goto
+            | TokenKind::Instanceof | TokenKind::Insteadof
+        )
+    }
+
+    /// Convert a keyword token to its identifier bytes
+    fn keyword_to_identifier(&self) -> Vec<u8> {
+        match self.peek() {
+            TokenKind::List => b"list".to_vec(),
+            TokenKind::Array => b"array".to_vec(),
+            TokenKind::Callable => b"callable".to_vec(),
+            TokenKind::Static => b"static".to_vec(),
+            TokenKind::Abstract => b"abstract".to_vec(),
+            TokenKind::Final => b"final".to_vec(),
+            TokenKind::Private => b"private".to_vec(),
+            TokenKind::Protected => b"protected".to_vec(),
+            TokenKind::Public => b"public".to_vec(),
+            TokenKind::Readonly => b"readonly".to_vec(),
+            TokenKind::Clone => b"clone".to_vec(),
+            TokenKind::New => b"new".to_vec(),
+            TokenKind::Throw => b"throw".to_vec(),
+            TokenKind::Yield => b"yield".to_vec(),
+            TokenKind::YieldFrom => b"yield_from".to_vec(),
+            TokenKind::Print => b"print".to_vec(),
+            TokenKind::Echo => b"echo".to_vec(),
+            TokenKind::Isset => b"isset".to_vec(),
+            TokenKind::Unset => b"unset".to_vec(),
+            TokenKind::Empty => b"empty".to_vec(),
+            TokenKind::Match => b"match".to_vec(),
+            TokenKind::Switch => b"switch".to_vec(),
+            TokenKind::Case => b"case".to_vec(),
+            TokenKind::Default => b"default".to_vec(),
+            TokenKind::Break => b"break".to_vec(),
+            TokenKind::Continue => b"continue".to_vec(),
+            TokenKind::Return => b"return".to_vec(),
+            TokenKind::If => b"if".to_vec(),
+            TokenKind::Else => b"else".to_vec(),
+            TokenKind::ElseIf => b"elseif".to_vec(),
+            TokenKind::While => b"while".to_vec(),
+            TokenKind::Do => b"do".to_vec(),
+            TokenKind::For => b"for".to_vec(),
+            TokenKind::Foreach => b"foreach".to_vec(),
+            TokenKind::As => b"as".to_vec(),
+            TokenKind::Try => b"try".to_vec(),
+            TokenKind::Catch => b"catch".to_vec(),
+            TokenKind::Finally => b"finally".to_vec(),
+            TokenKind::Class => b"class".to_vec(),
+            TokenKind::Interface => b"interface".to_vec(),
+            TokenKind::Extends => b"extends".to_vec(),
+            TokenKind::Implements => b"implements".to_vec(),
+            TokenKind::Trait => b"trait".to_vec(),
+            TokenKind::Const => b"const".to_vec(),
+            TokenKind::Enum => b"enum".to_vec(),
+            TokenKind::Fn => b"fn".to_vec(),
+            TokenKind::Function => b"function".to_vec(),
+            TokenKind::Namespace => b"namespace".to_vec(),
+            TokenKind::Use => b"use".to_vec(),
+            TokenKind::Var => b"var".to_vec(),
+            TokenKind::Global => b"global".to_vec(),
+            TokenKind::Goto => b"goto".to_vec(),
+            TokenKind::Instanceof => b"instanceof".to_vec(),
+            TokenKind::Insteadof => b"insteadof".to_vec(),
+            _ => vec![],
+        }
     }
 }
 
