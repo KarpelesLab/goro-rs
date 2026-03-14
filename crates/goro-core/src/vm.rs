@@ -1,10 +1,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Write;
 use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
-use crate::opcode::{Op, OpArray, OpCode, OperandType};
+use crate::opcode::{OpArray, OpCode, OperandType};
 use crate::string::PhpString;
 use crate::value::Value;
 
@@ -12,7 +11,7 @@ use crate::value::Value;
 pub type BuiltinFn = fn(&mut Vm, &[Value]) -> Result<Value, VmError>;
 
 /// VM runtime error
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VmError {
     pub message: String,
     pub line: u32,
@@ -38,8 +37,8 @@ pub struct Vm {
     output: Vec<u8>,
     /// Registered built-in functions
     functions: HashMap<Vec<u8>, BuiltinFn>,
-    /// Global variables (for script-level execution)
-    globals: HashMap<Vec<u8>, Value>,
+    /// User-defined functions (compiled op arrays)
+    user_functions: HashMap<Vec<u8>, OpArray>,
     /// Pending function call being set up
     pending_call: Option<PendingCall>,
 }
@@ -49,9 +48,15 @@ impl Vm {
         Self {
             output: Vec::new(),
             functions: HashMap::new(),
-            globals: HashMap::new(),
+            user_functions: HashMap::new(),
             pending_call: None,
         }
+    }
+
+    /// Register a user-defined function
+    pub fn register_user_function(&mut self, name: &[u8], op_array: OpArray) {
+        self.user_functions
+            .insert(name.to_ascii_lowercase(), op_array);
     }
 
     /// Register a built-in function
@@ -74,14 +79,16 @@ impl Vm {
         self.output.extend_from_slice(data);
     }
 
-    /// Execute an op_array
+    /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
-        let mut ip: usize = 0;
+        let cvs = vec![Value::Undef; op_array.cv_names.len()];
+        self.execute_op_array(op_array, cvs)
+    }
 
-        // Allocate CV and temporary storage
-        let cv_count = op_array.cv_names.len();
+    /// Execute an op_array with pre-initialized CVs
+    fn execute_op_array(&mut self, op_array: &OpArray, mut cvs: Vec<Value>) -> Result<Value, VmError> {
+        let mut ip: usize = 0;
         let temp_count = op_array.temp_count as usize;
-        let mut cvs: Vec<Value> = vec![Value::Undef; cv_count];
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
 
         loop {
@@ -467,10 +474,24 @@ impl Vm {
                     let func_name_lower: Vec<u8> = call.name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
 
                     if let Some(func) = self.functions.get(&func_name_lower).copied() {
+                        // Built-in function
                         let result = func(self, &call.args).map_err(|e| VmError {
                             message: e.message,
                             line: op.line,
                         })?;
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps);
+                    } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned() {
+                        // User-defined function - execute its op_array
+                        // Set up parameters as CVs
+                        let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                        for (i, arg) in call.args.iter().enumerate() {
+                            if i < func_cvs.len() {
+                                func_cvs[i] = arg.clone();
+                            }
+                        }
+
+                        // Execute the function's op_array
+                        let result = self.execute_op_array(&user_fn, func_cvs)?;
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps);
                     } else {
                         return Err(VmError {
@@ -581,6 +602,17 @@ impl Vm {
                         Value::Null
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps);
+                }
+
+                OpCode::DeclareFunction => {
+                    let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let func_idx_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let func_idx = func_idx_val.to_long() as usize;
+
+                    if let Some(func_op_array) = op_array.child_functions.get(func_idx) {
+                        let name = name_val.to_php_string();
+                        self.register_user_function(name.as_bytes(), func_op_array.clone());
+                    }
                 }
 
                 OpCode::LoadConst | OpCode::FastConcat | OpCode::TypeCheck => {

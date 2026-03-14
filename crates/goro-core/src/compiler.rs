@@ -285,7 +285,7 @@ impl Compiler {
                 body,
                 ..
             } => {
-                // For now, compile functions as a sub-OpArray stored in the literal pool
+                // Compile the function body into a sub-OpArray
                 let mut func_compiler = Compiler::new();
                 func_compiler.op_array.name = name.clone();
 
@@ -308,10 +308,22 @@ impl Compiler {
                     line: 0,
                 });
 
-                // Store function in engine's function table (handled at runtime)
-                // For now, we use a special literal to store the compiled function
-                // This will be reworked when we add proper function support
-                let _ = func_compiler.op_array;
+                // Store the compiled function and emit a DeclareFunction opcode
+                let func_idx = self.op_array.child_functions.len() as u32;
+                self.op_array.child_functions.push(func_compiler.op_array);
+
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                let idx_literal = self.op_array.add_literal(Value::Long(func_idx as i64));
+
+                self.op_array.emit(Op {
+                    opcode: OpCode::DeclareFunction,
+                    op1: OperandType::Const(name_idx),
+                    op2: OperandType::Const(idx_literal),
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
 
                 Ok(())
             }

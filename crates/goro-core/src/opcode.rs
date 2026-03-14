@@ -107,6 +107,8 @@ pub enum OpCode {
     DoFCall,
     /// Return op1 from current function
     Return,
+    /// Declare a user function: op1 = name (const), op2 = function OpArray index (const)
+    DeclareFunction,
 
     // ---- Variables ----
     /// Load a constant value into a temporary
@@ -154,6 +156,8 @@ pub struct OpArray {
     pub temp_count: u32,
     /// Function name (empty for top-level script)
     pub name: Vec<u8>,
+    /// Nested function OpArrays (for DeclareFunction)
+    pub child_functions: Vec<OpArray>,
 }
 
 impl OpArray {
@@ -164,6 +168,7 @@ impl OpArray {
             cv_names: Vec::new(),
             temp_count: 0,
             name: Vec::new(),
+            child_functions: Vec::new(),
         }
     }
 

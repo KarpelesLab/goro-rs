@@ -1,5 +1,6 @@
 pub mod array;
 pub mod compiler;
+pub mod function;
 pub mod opcode;
 pub mod string;
 pub mod value;
