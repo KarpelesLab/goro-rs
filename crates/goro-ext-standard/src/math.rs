@@ -20,6 +20,34 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"php_sapi_name", php_sapi_name);
     vm.register_function(b"defined", defined);
     vm.register_function(b"function_exists", function_exists);
+    vm.register_function(b"sin", sin_fn);
+    vm.register_function(b"cos", cos_fn);
+    vm.register_function(b"tan", tan_fn);
+    vm.register_function(b"asin", asin_fn);
+    vm.register_function(b"acos", acos_fn);
+    vm.register_function(b"atan", atan_fn);
+    vm.register_function(b"atan2", atan2_fn);
+    vm.register_function(b"log", log_fn);
+    vm.register_function(b"log10", log10_fn);
+    vm.register_function(b"log2", log2_fn);
+    vm.register_function(b"exp", exp_fn);
+    vm.register_function(b"pi", pi_fn);
+    vm.register_function(b"hypot", hypot);
+    vm.register_function(b"deg2rad", deg2rad_fn);
+    vm.register_function(b"rad2deg", rad2deg_fn);
+    vm.register_function(b"base_convert", base_convert_fn);
+    vm.register_function(b"bindec", bindec_fn);
+    vm.register_function(b"octdec", octdec_fn);
+    vm.register_function(b"hexdec", hexdec_fn);
+    vm.register_function(b"decbin", decbin_fn);
+    vm.register_function(b"decoct", decoct_fn);
+    vm.register_function(b"dechex", dechex_fn);
+    vm.register_function(b"is_nan", is_nan_fn);
+    vm.register_function(b"is_infinite", is_infinite_fn);
+    vm.register_function(b"is_finite", is_finite_fn);
+    vm.register_function(b"array_product", array_product);
+    vm.register_function(b"random_int", random_int);
+    vm.register_function(b"random_bytes", random_bytes_fn);
 }
 
 fn abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -217,4 +245,129 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let _ = name_lower;
     let _ = vm;
     Ok(Value::False)
+}
+
+fn sin_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().sin()))
+}
+fn cos_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().cos()))
+}
+fn tan_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().tan()))
+}
+fn asin_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().asin()))
+}
+fn acos_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().acos()))
+}
+fn atan_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().atan()))
+}
+fn atan2_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let y = args.first().unwrap_or(&Value::Null).to_double();
+    let x = args.get(1).unwrap_or(&Value::Null).to_double();
+    Ok(Value::Double(y.atan2(x)))
+}
+fn log_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null).to_double();
+    let base = args.get(1).map(|v| v.to_double());
+    Ok(Value::Double(match base {
+        Some(b) => val.log(b),
+        None => val.ln(),
+    }))
+}
+fn log10_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().log10()))
+}
+fn log2_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().log2()))
+}
+fn exp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().exp()))
+}
+fn pi_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(std::f64::consts::PI))
+}
+fn hypot(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let x = args.first().unwrap_or(&Value::Null).to_double();
+    let y = args.get(1).unwrap_or(&Value::Null).to_double();
+    Ok(Value::Double(x.hypot(y)))
+}
+fn deg2rad_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().to_radians()))
+}
+fn rad2deg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().to_degrees()))
+}
+fn base_convert_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let num_str = args.first().unwrap_or(&Value::Null).to_php_string();
+    let from_base = args.get(1).map(|v| v.to_long()).unwrap_or(10) as u32;
+    let to_base = args.get(2).map(|v| v.to_long()).unwrap_or(10) as u32;
+    let val = i64::from_str_radix(&num_str.to_string_lossy(), from_base).unwrap_or(0);
+    let result = match to_base {
+        2 => format!("{:b}", val),
+        8 => format!("{:o}", val),
+        16 => format!("{:x}", val),
+        10 => format!("{}", val),
+        _ => format!("{}", val),
+    };
+    Ok(Value::String(goro_core::string::PhpString::from_string(result)))
+}
+fn bindec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(Value::Long(i64::from_str_radix(&s.to_string_lossy(), 2).unwrap_or(0)))
+}
+fn octdec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(Value::Long(i64::from_str_radix(&s.to_string_lossy(), 8).unwrap_or(0)))
+}
+fn hexdec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(Value::Long(i64::from_str_radix(&s.to_string_lossy(), 16).unwrap_or(0)))
+}
+fn decbin_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(goro_core::string::PhpString::from_string(format!("{:b}", args.first().unwrap_or(&Value::Null).to_long()))))
+}
+fn decoct_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(goro_core::string::PhpString::from_string(format!("{:o}", args.first().unwrap_or(&Value::Null).to_long()))))
+}
+fn dechex_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(goro_core::string::PhpString::from_string(format!("{:x}", args.first().unwrap_or(&Value::Null).to_long()))))
+}
+fn is_nan_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(if args.first().unwrap_or(&Value::Null).to_double().is_nan() { Value::True } else { Value::False })
+}
+fn is_infinite_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(if args.first().unwrap_or(&Value::Null).to_double().is_infinite() { Value::True } else { Value::False })
+}
+fn is_finite_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(if args.first().unwrap_or(&Value::Null).to_double().is_finite() { Value::True } else { Value::False })
+}
+fn array_product(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let arr = arr.borrow();
+        let mut product = Value::Long(1);
+        for (_, v) in arr.iter() {
+            product = product.mul(v);
+        }
+        Ok(product)
+    } else {
+        Ok(Value::Long(0))
+    }
+}
+fn random_int(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let min = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let max = args.get(1).map(|v| v.to_long()).unwrap_or(i64::MAX);
+    use std::time::SystemTime;
+    let seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+    let range = (max - min + 1) as u64;
+    if range == 0 { return Ok(Value::Long(min)); }
+    Ok(Value::Long(min + (seed % range) as i64))
+}
+fn random_bytes_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let len = args.first().map(|v| v.to_long()).unwrap_or(16) as usize;
+    let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 13) as u8).collect(); // Not cryptographic!
+    Ok(Value::String(goro_core::string::PhpString::from_vec(bytes)))
 }

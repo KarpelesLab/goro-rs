@@ -41,6 +41,8 @@ pub struct Compiler {
     pub compiled_classes: Vec<ClassEntry>,
     /// Current class name (for __CLASS__, __METHOD__)
     current_class: Option<Vec<u8>>,
+    /// Current parent class name (for parent::)
+    current_parent_class: Option<Vec<u8>>,
 }
 
 impl Compiler {
@@ -50,6 +52,7 @@ impl Compiler {
             loop_stack: Vec::new(),
             compiled_classes: Vec::new(),
             current_class: None,
+            current_parent_class: None,
         }
     }
 
@@ -809,6 +812,7 @@ impl Compiler {
                                 let mut method_compiler = Compiler::new();
                                 method_compiler.op_array.name = method_name.clone();
                                 method_compiler.current_class = Some(name.clone());
+                                method_compiler.current_parent_class = extends.clone();
 
                                 // First CV is always $this (for non-static methods)
                                 if !is_static {
@@ -1979,8 +1983,17 @@ impl Compiler {
                     }
                 };
 
+                // Resolve self:: and parent:: to actual class names
+                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") || class_name.eq_ignore_ascii_case(b"static") {
+                    self.current_class.clone().unwrap_or(class_name.clone())
+                } else if class_name.eq_ignore_ascii_case(b"parent") {
+                    self.current_parent_class.clone().unwrap_or(class_name.clone())
+                } else {
+                    class_name.clone()
+                };
+
                 // Compile as a function call: ClassName::method => function "classname::method"
-                let mut func_name = class_name.clone();
+                let mut func_name = resolved_class;
                 func_name.extend_from_slice(b"::");
                 func_name.extend_from_slice(method);
                 let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(func_name)));

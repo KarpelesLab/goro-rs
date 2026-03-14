@@ -844,6 +844,16 @@ impl Vm {
                             }
                         }
                         let name_lower: Vec<u8> = name_val.to_php_string().as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_name_orig = name_val.to_php_string().as_bytes().to_vec();
+
+                        // Register all methods as callable functions: ClassName::methodName
+                        for (method_name, method) in &class.methods {
+                            let mut func_name = class_name_orig.clone();
+                            func_name.extend_from_slice(b"::");
+                            func_name.extend_from_slice(&method.name);
+                            self.user_functions.insert(func_name.to_ascii_lowercase(), method.op_array.clone());
+                        }
+
                         self.classes.insert(name_lower, class);
                     }
                 }
