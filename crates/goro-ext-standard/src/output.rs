@@ -63,8 +63,23 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
-        Value::Object(_) => {
-            vm.write_output(format!("{}object(...)\n", prefix).as_bytes()); // TODO: implement object var_dump
+        Value::Object(obj) => {
+            let obj_borrow = obj.borrow();
+            let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+            let prop_count = obj_borrow.properties.len();
+            vm.write_output(
+                format!("{}object({})#{} ({}) {{\n", prefix, class_name, obj_borrow.object_id, prop_count).as_bytes(),
+            );
+            // Sort properties for consistent output
+            let mut props: Vec<_> = obj_borrow.properties.iter().collect();
+            props.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (name, value) in &props {
+                let name_str = String::from_utf8_lossy(name);
+                vm.write_output(format!("{}  [\"{}\"]=>", prefix, name_str).as_bytes());
+                vm.write_output(b"\n");
+                var_dump_value(vm, value, indent + 2);
+            }
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
     }
 }
