@@ -1032,10 +1032,124 @@ impl Compiler {
                         });
                         Ok(OperandType::Cv(cv))
                     }
-                    _ => Err(CompileError {
-                        message: "invalid compound assignment target".into(),
-                        line: expr.span.line,
-                    }),
+                    ExprKind::ArrayAccess { array, index } => {
+                        // $arr[$key] op= $val
+                        // Read current: tmp = $arr[$key]
+                        // Compute: tmp2 = tmp op $val
+                        // Write back: $arr[$key] = tmp2
+                        let arr = self.compile_expr(array)?;
+                        let idx = if let Some(idx_expr) = index {
+                            self.compile_expr(idx_expr)?
+                        } else {
+                            return Err(CompileError {
+                                message: "cannot use [] for compound assignment".into(),
+                                line: expr.span.line,
+                            });
+                        };
+
+                        let read_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayGet,
+                            op1: arr,
+                            op2: idx,
+                            result: OperandType::Tmp(read_tmp),
+                            line: expr.span.line,
+                        });
+
+                        let result_tmp = self.op_array.alloc_temp();
+                        let bin_opcode = match op {
+                            BinaryOp::Add => OpCode::Add,
+                            BinaryOp::Sub => OpCode::Sub,
+                            BinaryOp::Mul => OpCode::Mul,
+                            BinaryOp::Div => OpCode::Div,
+                            BinaryOp::Mod => OpCode::Mod,
+                            BinaryOp::Concat => OpCode::Concat,
+                            _ => OpCode::Add,
+                        };
+                        self.op_array.emit(Op {
+                            opcode: bin_opcode,
+                            op1: OperandType::Tmp(read_tmp),
+                            op2: val,
+                            result: OperandType::Tmp(result_tmp),
+                            line: expr.span.line,
+                        });
+
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArraySet,
+                            op1: arr,
+                            op2: OperandType::Tmp(result_tmp),
+                            result: idx,
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Tmp(result_tmp))
+                    }
+                    ExprKind::PropertyAccess { object, property, .. } => {
+                        // $obj->prop op= $val
+                        let obj = self.compile_expr(object)?;
+                        let prop_name = match &property.kind {
+                            ExprKind::Identifier(name) => name.clone(),
+                            _ => return Ok(val),
+                        };
+                        let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(prop_name)));
+
+                        let read_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::PropertyGet,
+                            op1: obj,
+                            op2: OperandType::Const(name_idx),
+                            result: OperandType::Tmp(read_tmp),
+                            line: expr.span.line,
+                        });
+
+                        let result_tmp = self.op_array.alloc_temp();
+                        let bin_opcode = match op {
+                            BinaryOp::Add => OpCode::Add,
+                            BinaryOp::Sub => OpCode::Sub,
+                            BinaryOp::Mul => OpCode::Mul,
+                            BinaryOp::Div => OpCode::Div,
+                            BinaryOp::Mod => OpCode::Mod,
+                            BinaryOp::Concat => OpCode::Concat,
+                            _ => OpCode::Add,
+                        };
+                        self.op_array.emit(Op {
+                            opcode: bin_opcode,
+                            op1: OperandType::Tmp(read_tmp),
+                            op2: val,
+                            result: OperandType::Tmp(result_tmp),
+                            line: expr.span.line,
+                        });
+
+                        self.op_array.emit(Op {
+                            opcode: OpCode::PropertySet,
+                            op1: obj,
+                            op2: OperandType::Tmp(result_tmp),
+                            result: OperandType::Const(name_idx),
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Tmp(result_tmp))
+                    }
+                    _ => {
+                        // For any other target, try to compile it as read-modify-write
+                        let target_val = self.compile_expr(target)?;
+                        let result_tmp = self.op_array.alloc_temp();
+                        let bin_opcode = match op {
+                            BinaryOp::Add => OpCode::Add,
+                            BinaryOp::Sub => OpCode::Sub,
+                            BinaryOp::Mul => OpCode::Mul,
+                            BinaryOp::Div => OpCode::Div,
+                            BinaryOp::Mod => OpCode::Mod,
+                            BinaryOp::Concat => OpCode::Concat,
+                            _ => OpCode::Add,
+                        };
+                        self.op_array.emit(Op {
+                            opcode: bin_opcode,
+                            op1: target_val,
+                            op2: val,
+                            result: OperandType::Tmp(result_tmp),
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Tmp(result_tmp))
+                    }
                 }
             }
 
