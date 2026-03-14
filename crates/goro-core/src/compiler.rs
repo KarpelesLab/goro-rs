@@ -468,19 +468,15 @@ impl Compiler {
                     continue_target: None,
                 });
 
-                // For each case, emit: compare, jmp if not equal, body
-                let mut next_case_jumps = Vec::new();
-                let mut fall_through = false;
+                // Switch compilation strategy:
+                // 1. Emit all comparisons first, jumping to the matching body
+                // 2. Then emit all bodies in order (supporting fall-through)
 
-                for case in cases {
-                    // Patch the previous "next case" jump to here
-                    if !next_case_jumps.is_empty() && !fall_through {
-                        let here = self.op_array.current_offset();
-                        for jmp in next_case_jumps.drain(..) {
-                            self.op_array.patch_jump(jmp, here);
-                        }
-                    }
+                let mut case_body_jumps = Vec::new(); // (jmp_to_body_idx, case_index)
+                let mut default_index: Option<usize> = None;
 
+                // Phase 1: emit comparisons
+                for (i, case) in cases.iter().enumerate() {
                     if let Some(case_val) = &case.value {
                         let case_op = self.compile_expr(case_val)?;
                         let cmp_tmp = self.op_array.alloc_temp();
@@ -491,27 +487,53 @@ impl Compiler {
                             result: OperandType::Tmp(cmp_tmp),
                             line: stmt.span.line,
                         });
+                        // If match, jump to this case's body
                         let jmp = self.op_array.emit(Op {
-                            opcode: OpCode::JmpZ,
+                            opcode: OpCode::JmpNz,
                             op1: OperandType::Tmp(cmp_tmp),
-                            op2: OperandType::JmpTarget(0),
+                            op2: OperandType::JmpTarget(0), // patched later
                             result: OperandType::Unused,
                             line: stmt.span.line,
                         });
-                        next_case_jumps.push(jmp);
+                        case_body_jumps.push((jmp, i));
+                    } else {
+                        default_index = Some(i);
                     }
-                    // default case: no comparison needed
+                }
 
+                // If no case matched and there's a default, jump to default body
+                // Otherwise jump past the switch
+                let jmp_to_default_or_end = self.op_array.emit(Op {
+                    opcode: OpCode::Jmp,
+                    op1: OperandType::JmpTarget(0), // patched later
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+
+                // Phase 2: emit bodies
+                let mut body_offsets = Vec::new();
+                for case in cases {
+                    let offset = self.op_array.current_offset();
+                    body_offsets.push(offset);
                     for s in &case.body {
                         self.compile_stmt(s)?;
                     }
-                    fall_through = true;
+                    // Fall through to next case's body (no implicit break)
                 }
 
-                // Patch remaining next_case jumps
                 let after_switch = self.op_array.current_offset();
-                for jmp in next_case_jumps {
-                    self.op_array.patch_jump(jmp, after_switch);
+
+                // Patch comparison jumps to their corresponding body offsets
+                for (jmp, case_idx) in case_body_jumps {
+                    self.op_array.patch_jump(jmp, body_offsets[case_idx]);
+                }
+
+                // Patch default/end jump
+                if let Some(def_idx) = default_index {
+                    self.op_array.patch_jump(jmp_to_default_or_end, body_offsets[def_idx]);
+                } else {
+                    self.op_array.patch_jump(jmp_to_default_or_end, after_switch);
                 }
 
                 let ctx = self.loop_stack.pop().unwrap();
