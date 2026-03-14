@@ -238,6 +238,76 @@ impl Parser {
             | TokenKind::Interface
             | TokenKind::Trait
             | TokenKind::Enum => self.parse_class_decl(),
+            TokenKind::Const => {
+                // const FOO = value;
+                self.advance();
+                let name = match self.peek().clone() {
+                    TokenKind::Identifier(name) => { self.advance(); name }
+                    _ if self.is_semi_reserved_keyword() => {
+                        let kw = self.keyword_to_identifier();
+                        self.advance();
+                        kw
+                    }
+                    _ => return Err(ParseError {
+                        message: "expected constant name".into(),
+                        span: self.span(),
+                    }),
+                };
+                self.expect(&TokenKind::Assign)?;
+                let value = self.parse_expression()?;
+                self.expect_semicolon()?;
+                // Treat as a declare directive
+                Ok(Statement {
+                    kind: StmtKind::Declare {
+                        directives: vec![(name, value)],
+                        body: None,
+                    },
+                    span,
+                })
+            }
+            TokenKind::Namespace => {
+                self.advance();
+                // namespace Name\Space;  or  namespace Name\Space { ... }
+                let mut name_parts = Vec::new();
+                if matches!(self.peek(), TokenKind::Identifier(_)) {
+                    loop {
+                        match self.peek().clone() {
+                            TokenKind::Identifier(part) => {
+                                self.advance();
+                                name_parts.push(part);
+                            }
+                            _ => break,
+                        }
+                        if !self.eat(&TokenKind::Backslash) {
+                            break;
+                        }
+                    }
+                }
+                let body = if matches!(self.peek(), TokenKind::OpenBrace) {
+                    let stmts = self.parse_block()?;
+                    Some(stmts)
+                } else {
+                    self.expect_semicolon()?;
+                    None
+                };
+                Ok(Statement {
+                    kind: StmtKind::NamespaceDecl {
+                        name: if name_parts.is_empty() { None } else { Some(name_parts) },
+                        body,
+                    },
+                    span,
+                })
+            }
+            TokenKind::Use => {
+                // use statements
+                self.advance();
+                // Skip use declarations for now
+                while !matches!(self.peek(), TokenKind::Semicolon | TokenKind::Eof) {
+                    self.advance();
+                }
+                self.expect_semicolon()?;
+                Ok(Statement { kind: StmtKind::Nop, span })
+            }
             TokenKind::Try => self.parse_try_catch(),
             TokenKind::Throw => {
                 self.advance();
@@ -2294,6 +2364,23 @@ impl Parser {
                         self.advance();
                         Expr { kind: ExprKind::Variable(name), span: class_span }
                     }
+                    TokenKind::Backslash => {
+                        // Fully qualified: new \Foo\Bar()
+                        self.advance();
+                        let mut full_name = Vec::new();
+                        loop {
+                            match self.peek().clone() {
+                                TokenKind::Identifier(part) => {
+                                    self.advance();
+                                    if !full_name.is_empty() { full_name.push(b'\\'); }
+                                    full_name.extend_from_slice(&part);
+                                }
+                                _ => break,
+                            }
+                            if !self.eat(&TokenKind::Backslash) { break; }
+                        }
+                        Expr { kind: ExprKind::Identifier(full_name), span: class_span }
+                    }
                     _ => self.parse_primary()?,
                 };
                 let args = if matches!(self.peek(), TokenKind::OpenParen) {
@@ -2616,6 +2703,84 @@ impl Parser {
                     span,
                     kind: ExprKind::Spread(Box::new(expr)),
                 })
+            }
+            TokenKind::Backslash => {
+                // Fully qualified name like \Exception, \Foo\Bar
+                self.advance();
+                let mut name = Vec::new();
+                loop {
+                    match self.peek().clone() {
+                        TokenKind::Identifier(part) => {
+                            self.advance();
+                            if !name.is_empty() { name.push(b'\\'); }
+                            name.extend_from_slice(&part);
+                        }
+                        _ if self.is_semi_reserved_keyword() => {
+                            if !name.is_empty() { name.push(b'\\'); }
+                            name.extend_from_slice(&self.keyword_to_identifier());
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                    if !self.eat(&TokenKind::Backslash) {
+                        break;
+                    }
+                }
+                // Check if this is a function call or static access
+                if matches!(self.peek(), TokenKind::OpenParen) {
+                    self.advance();
+                    let args = self.parse_arguments()?;
+                    let end_span = self.span();
+                    self.expect(&TokenKind::CloseParen)?;
+                    Ok(Expr {
+                        span: span.merge(end_span),
+                        kind: ExprKind::FunctionCall {
+                            name: Box::new(Expr {
+                                kind: ExprKind::Identifier(name),
+                                span,
+                            }),
+                            args,
+                        },
+                    })
+                } else {
+                    Ok(Expr {
+                        kind: ExprKind::Identifier(name),
+                        span,
+                    })
+                }
+            }
+            TokenKind::Static => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Identifier(b"static".to_vec()),
+                    span,
+                })
+            }
+            _ if self.is_semi_reserved_keyword() => {
+                // Allow keywords used as identifiers in expression context
+                let name = self.keyword_to_identifier();
+                self.advance();
+                if matches!(self.peek(), TokenKind::OpenParen) {
+                    self.advance();
+                    let args = self.parse_arguments()?;
+                    let end_span = self.span();
+                    self.expect(&TokenKind::CloseParen)?;
+                    Ok(Expr {
+                        span: span.merge(end_span),
+                        kind: ExprKind::FunctionCall {
+                            name: Box::new(Expr {
+                                kind: ExprKind::Identifier(name),
+                                span,
+                            }),
+                            args,
+                        },
+                    })
+                } else {
+                    Ok(Expr {
+                        kind: ExprKind::Identifier(name),
+                        span,
+                    })
+                }
             }
             _ => Err(ParseError {
                 message: format!("unexpected token {:?}", self.peek()),
