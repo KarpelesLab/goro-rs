@@ -112,7 +112,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                         );
                     }
                 }
-                print_r_value(value, buf, indent + 4);
+                print_r_value(value, buf, indent + 8);
                 buf.push(b'\n');
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
