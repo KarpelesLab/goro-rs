@@ -5,49 +5,49 @@
 Get `<?php echo "Hello, World!\n";` working end-to-end.
 
 - [x] Project structure (Cargo workspace)
-- [ ] **Lexer**: Tokenize basic PHP (`<?php`, strings, integers, identifiers, operators, `;`)
-- [ ] **Parser**: Parse `echo` statement, string/integer literals, basic expressions
-- [ ] **AST**: Define initial node types (Echo, Literal, BinaryOp)
-- [ ] **Compiler**: Compile echo + literals to bytecodes
-- [ ] **Opcodes**: ECHO, RETURN, NOP, basic arithmetic (ADD, SUB, MUL, DIV, MOD, CONCAT)
-- [ ] **VM**: Execute opcodes, manage a single call frame
-- [ ] **Value**: Null, Bool, Long, Double, String (basic)
-- [ ] **CLI SAPI**: Read file or `-r` string, run it, print output
-- [ ] **PHPT runner**: Parse .phpt files, run --FILE--, compare with --EXPECT--
+- [x] **Lexer**: Tokenize basic PHP (`<?php`, strings, integers, identifiers, operators, `;`)
+- [x] **Parser**: Parse `echo` statement, string/integer literals, basic expressions
+- [x] **AST**: Define initial node types (Echo, Literal, BinaryOp)
+- [x] **Compiler**: Compile echo + literals to bytecodes
+- [x] **Opcodes**: ECHO, RETURN, NOP, basic arithmetic (ADD, SUB, MUL, DIV, MOD, CONCAT)
+- [x] **VM**: Execute opcodes, manage a single call frame
+- [x] **Value**: Null, Bool, Long, Double, String (basic)
+- [x] **CLI SAPI**: Read file or `-r` string, run it, print output
+- [x] **PHPT runner**: Parse .phpt files, run --FILE--, compare with --EXPECT--
 
 ## Phase 2: Variables & Expressions
 
-- [ ] Variable assignment (`$x = ...`)
-- [ ] All arithmetic operators (`+`, `-`, `*`, `/`, `%`, `**`)
-- [ ] String concatenation (`.`)
-- [ ] Comparison operators (`==`, `===`, `!=`, `!==`, `<`, `>`, `<=`, `>=`, `<=>`)
-- [ ] Logical operators (`&&`, `||`, `!`, `and`, `or`, `xor`)
-- [ ] Bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`)
-- [ ] Assignment operators (`+=`, `-=`, `.=`, etc.)
-- [ ] Increment/decrement (`++`, `--`)
-- [ ] Type juggling / coercion (string↔int, int↔float, truthy/falsy)
-- [ ] String interpolation (`"Hello $name"`, `"Hello {$name}"`)
+- [x] Variable assignment (`$x = ...`)
+- [x] All arithmetic operators (`+`, `-`, `*`, `/`, `%`, `**`)
+- [x] String concatenation (`.`)
+- [x] Comparison operators (`==`, `===`, `!=`, `!==`, `<`, `>`, `<=`, `>=`, `<=>`)
+- [x] Logical operators (`&&`, `||`, `!`, `and`, `or`, `xor`)
+- [x] Bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`)
+- [x] Assignment operators (`+=`, `-=`, `.=`, etc.)
+- [x] Increment/decrement (`++`, `--`)
+- [x] Type juggling / coercion (string↔int, int↔float, truthy/falsy)
+- [x] String interpolation (`"Hello $name"`, `"Hello {$name}"`)
 - [ ] Heredoc / Nowdoc
 - [ ] Constants (`define()`, `const`)
-- [ ] Ternary (`?:`), null coalescing (`??`), null coalescing assignment (`??=`)
+- [x] Ternary (`?:`), null coalescing (`??`), null coalescing assignment (`??=`)
 
 ## Phase 3: Control Flow
 
-- [ ] `if` / `elseif` / `else`
-- [ ] `while` / `do-while`
-- [ ] `for`
-- [ ] `foreach` (arrays)
-- [ ] `switch` / `case` / `default`
-- [ ] `match` expression
-- [ ] `break` / `continue` (with levels)
-- [ ] `return`
+- [x] `if` / `elseif` / `else`
+- [x] `while` / `do-while`
+- [x] `for`
+- [x] `foreach` (arrays)
+- [x] `switch` / `case` / `default`
+- [x] `match` expression
+- [x] `break` / `continue` (with levels)
+- [x] `return`
 - [ ] `goto` / labels
 - [ ] `declare(strict_types=1)`
 
 ## Phase 4: Functions
 
-- [ ] Function declarations
-- [ ] Function calls (user-defined and built-in)
+- [x] Function declarations
+- [x] Function calls (user-defined and built-in)
 - [ ] Default parameter values
 - [ ] Variadic parameters (`...$args`)
 - [ ] Argument unpacking (`func(...$args)`)

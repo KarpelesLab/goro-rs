@@ -39,8 +39,8 @@ pub struct Vm {
     functions: HashMap<Vec<u8>, BuiltinFn>,
     /// User-defined functions (compiled op arrays)
     user_functions: HashMap<Vec<u8>, OpArray>,
-    /// Pending function call being set up
-    pending_call: Option<PendingCall>,
+    /// Stack of pending function calls (supports nested calls)
+    pending_calls: Vec<PendingCall>,
 }
 
 impl Vm {
@@ -49,7 +49,7 @@ impl Vm {
             output: Vec::new(),
             functions: HashMap::new(),
             user_functions: HashMap::new(),
-            pending_call: None,
+            pending_calls: Vec::new(),
         }
     }
 
@@ -455,19 +455,19 @@ impl Vm {
                 OpCode::InitFCall => {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let name = name_val.to_php_string();
-                    self.pending_call = Some(PendingCall {
+                    self.pending_calls.push(PendingCall {
                         name,
                         args: Vec::new(),
                     });
                 }
                 OpCode::SendVal => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    if let Some(ref mut call) = self.pending_call {
+                    if let Some(call) = self.pending_calls.last_mut() {
                         call.args.push(val);
                     }
                 }
                 OpCode::DoFCall => {
-                    let call = self.pending_call.take().ok_or_else(|| VmError {
+                    let call = self.pending_calls.pop().ok_or_else(|| VmError {
                         message: "no pending function call".into(),
                         line: op.line,
                     })?;

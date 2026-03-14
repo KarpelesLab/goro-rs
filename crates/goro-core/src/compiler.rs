@@ -1204,6 +1204,109 @@ impl Compiler {
                 self.compile_expr(inner)
             }
 
+            ExprKind::Match { subject, arms } => {
+                let subj = self.compile_expr(subject)?;
+                let subj_tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::Assign,
+                    op1: OperandType::Tmp(subj_tmp),
+                    op2: subj,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
+
+                let result_tmp = self.op_array.alloc_temp();
+                let mut end_jumps = Vec::new();
+
+                for arm in arms {
+                    if let Some(conditions) = &arm.conditions {
+                        // Non-default arm: check each condition with ===
+                        let mut arm_match_jumps = Vec::new();
+                        for cond in conditions {
+                            let cond_val = self.compile_expr(cond)?;
+                            let cmp_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::Identical,
+                                op1: OperandType::Tmp(subj_tmp),
+                                op2: cond_val,
+                                result: OperandType::Tmp(cmp_tmp),
+                                line: expr.span.line,
+                            });
+                            let jmp = self.op_array.emit(Op {
+                                opcode: OpCode::JmpNz,
+                                op1: OperandType::Tmp(cmp_tmp),
+                                op2: OperandType::JmpTarget(0),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                            arm_match_jumps.push(jmp);
+                        }
+
+                        // If none matched, jump to next arm
+                        let jmp_next = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+
+                        // Patch match jumps to here (body start)
+                        let body_start = self.op_array.current_offset();
+                        for jmp in arm_match_jumps {
+                            self.op_array.patch_jump(jmp, body_start);
+                        }
+
+                        // Compile body
+                        let body_val = self.compile_expr(&arm.body)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Tmp(result_tmp),
+                            op2: body_val,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        let jmp_end = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        end_jumps.push(jmp_end);
+
+                        // Patch "next arm" jump
+                        let next_arm = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_next, next_arm);
+                    } else {
+                        // Default arm
+                        let body_val = self.compile_expr(&arm.body)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Tmp(result_tmp),
+                            op2: body_val,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        let jmp_end = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        end_jumps.push(jmp_end);
+                    }
+                }
+
+                let end = self.op_array.current_offset();
+                for jmp in end_jumps {
+                    self.op_array.patch_jump(jmp, end);
+                }
+
+                Ok(OperandType::Tmp(result_tmp))
+            }
+
             ExprKind::Identifier(name) => {
                 // A bare identifier used as an expression could be a constant
                 let idx = self
