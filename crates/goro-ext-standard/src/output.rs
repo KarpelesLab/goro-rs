@@ -31,8 +31,8 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             vm.write_output(format!("{}int({})\n", prefix, n).as_bytes());
         }
         Value::Double(f) => {
-            // PHP's var_dump uses up to 14 significant digits
-            vm.write_output(format!("{}float({})\n", prefix, format_float(*f)).as_bytes());
+            // var_dump uses serialize_precision (-1 in PHP 8 = shortest representation)
+            vm.write_output(format!("{}float({})\n", prefix, format_php_float_serialize(*f)).as_bytes());
         }
         Value::String(s) => {
             vm.write_output(
@@ -161,6 +161,19 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, _indent: usize) {
             buf.extend_from_slice(b"array (...)"); // simplified
         }
     }
+}
+
+/// Format a float using serialize_precision=-1 (shortest unique representation)
+/// This is what PHP 8 uses for var_dump, var_export, json_encode, etc.
+fn format_php_float_serialize(f: f64) -> String {
+    if f.is_infinite() {
+        return if f.is_sign_positive() { "INF".to_string() } else { "-INF".to_string() };
+    }
+    if f.is_nan() {
+        return "NAN".to_string();
+    }
+    // Rust's Display for f64 already produces the shortest exact representation
+    format!("{}", f)
 }
 
 fn format_float(f: f64) -> String {

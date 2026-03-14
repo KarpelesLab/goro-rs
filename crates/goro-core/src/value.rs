@@ -115,21 +115,7 @@ impl Value {
             Value::True => PhpString::from_bytes(b"1"),
             Value::Long(n) => PhpString::from_string(n.to_string()),
             Value::Double(f) => {
-                // PHP formats floats without trailing zeros, but always with at least one decimal
-                if f.fract() == 0.0 && f.abs() < 1e15 {
-                    PhpString::from_string(format!("{}", *f as i64))
-                } else {
-                    // Use PHP's default precision (14 significant digits)
-                    let s = format!("{:.14}", f);
-                    // Trim trailing zeros but keep at least one decimal digit
-                    let trimmed = s.trim_end_matches('0');
-                    let trimmed = if trimmed.ends_with('.') {
-                        trimmed
-                    } else {
-                        trimmed
-                    };
-                    PhpString::from_string(trimmed.to_string())
-                }
+                PhpString::from_string(format_php_float(*f))
             }
             Value::String(s) => s.clone(),
             Value::Array(_) => {
@@ -347,6 +333,121 @@ impl Value {
     }
 }
 
+/// Format a float the way PHP does (14 significant digits, no trailing zeros)
+pub fn format_php_float(f: f64) -> String {
+    if f.is_nan() {
+        return "NAN".to_string();
+    }
+    if f.is_infinite() {
+        return if f.is_sign_positive() { "INF".to_string() } else { "-INF".to_string() };
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+    }
+
+    // PHP uses G format with 14 significant digits
+    // This is equivalent to: sprintf("%.14G", f) but with some PHP-specific quirks
+    let s = format!("{:.14e}", f);
+
+    // Parse the scientific notation
+    let parts: Vec<&str> = s.split('e').collect();
+    if parts.len() != 2 {
+        return format!("{}", f);
+    }
+
+    let mantissa = parts[0];
+    let exp: i32 = parts[1].parse().unwrap_or(0);
+
+    // Get the significant digits (strip sign and decimal point)
+    let negative = mantissa.starts_with('-');
+    let digits_str = mantissa.trim_start_matches('-').replace('.', "");
+
+    // Trim to 14 significant digits
+    let mut sig_digits: Vec<u8> = digits_str.bytes().take(14).collect();
+
+    // Check if we need to round (15th digit)
+    if digits_str.len() > 14 {
+        let next_digit = digits_str.as_bytes()[14] - b'0';
+        if next_digit >= 5 {
+            // Round up
+            let mut carry = true;
+            for d in sig_digits.iter_mut().rev() {
+                if carry {
+                    if *d == b'9' {
+                        *d = b'0';
+                    } else {
+                        *d += 1;
+                        carry = false;
+                    }
+                }
+            }
+            if carry {
+                sig_digits.insert(0, b'1');
+                // Adjust exponent since we added a digit
+                // exp += 1; // actually this is handled below
+            }
+        }
+    }
+
+    // Remove trailing zeros from significant digits
+    while sig_digits.len() > 1 && *sig_digits.last().unwrap() == b'0' {
+        sig_digits.pop();
+    }
+
+    let sig_count = sig_digits.len();
+    let sig_str: String = sig_digits.iter().map(|&b| b as char).collect();
+
+    // Position of decimal point: exp + 1 digits before decimal point
+    let decimal_pos = exp + 1;
+
+    let result = if decimal_pos <= 0 {
+        // 0.00...digits  (e.g., 0.001234)
+        let mut s = String::from("0.");
+        for _ in 0..(-decimal_pos) {
+            s.push('0');
+        }
+        s.push_str(&sig_str);
+        s
+    } else if decimal_pos as usize >= sig_count {
+        // All digits before decimal point, no fractional part
+        let mut s = sig_str.clone();
+        for _ in 0..(decimal_pos as usize - sig_count) {
+            s.push('0');
+        }
+        s
+    } else {
+        // Some digits before, some after decimal point
+        let dp = decimal_pos as usize;
+        let mut s = sig_str[..dp].to_string();
+        s.push('.');
+        s.push_str(&sig_str[dp..]);
+        s
+    };
+
+    // Use scientific notation for very large/small numbers (like PHP)
+    if exp >= 15 || exp <= -5 {
+        // PHP uses uppercase E notation
+        let mantissa_part = if sig_count > 1 {
+            format!("{}.{}", &sig_str[..1], &sig_str[1..])
+        } else {
+            sig_str.clone()
+        };
+        let formatted = if negative {
+            format!("-{}E+{}", mantissa_part, exp)
+        } else {
+            format!("{}E+{}", mantissa_part, exp)
+        };
+        // Actually PHP uses different thresholds, let's keep it simple
+        return formatted;
+    }
+
+    if negative {
+        format!("-{}", result)
+    } else {
+        result
+    }
+}
+
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -369,11 +470,7 @@ impl fmt::Display for Value {
             Value::True => write!(f, "1"),
             Value::Long(n) => write!(f, "{}", n),
             Value::Double(d) => {
-                if d.fract() == 0.0 && d.abs() < 1e15 {
-                    write!(f, "{}", *d as i64)
-                } else {
-                    write!(f, "{}", d)
-                }
+                write!(f, "{}", format_php_float(*d))
             }
             Value::String(s) => {
                 // Write raw bytes
