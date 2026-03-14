@@ -35,6 +35,7 @@ fn gettype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::Double(_) => "double",
         Value::String(_) => "string",
         Value::Array(_) => "array",
+        Value::Object(_) => "object",
     };
     Ok(Value::String(PhpString::from_bytes(type_name.as_bytes())))
 }

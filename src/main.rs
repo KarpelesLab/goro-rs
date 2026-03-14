@@ -85,8 +85,8 @@ fn run_code(source: &[u8]) {
 
     // Compile
     let compiler = Compiler::new();
-    let op_array = match compiler.compile(&program) {
-        Ok(ops) => ops,
+    let (op_array, compiled_classes) = match compiler.compile(&program) {
+        Ok(result) => result,
         Err(e) => {
             eprintln!("{}", e);
             process::exit(255);
@@ -96,6 +96,10 @@ fn run_code(source: &[u8]) {
     // Execute
     let mut vm = Vm::new();
     goro_ext_standard::register_standard_functions(&mut vm);
+    // Register compiled classes
+    for class in compiled_classes {
+        vm.register_class(class);
+    }
 
     match vm.execute(&op_array) {
         Ok(_) => {

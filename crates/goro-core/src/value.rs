@@ -3,6 +3,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::array::PhpArray;
+use crate::object::PhpObject;
 use crate::string::PhpString;
 
 /// The core value type (equivalent to zval in PHP)
@@ -16,7 +17,7 @@ pub enum Value {
     Double(f64),
     String(PhpString),
     Array(Rc<RefCell<PhpArray>>),
-    // Object, Resource, Reference - to be added later
+    Object(Rc<RefCell<PhpObject>>),
 }
 
 impl Value {
@@ -33,6 +34,7 @@ impl Value {
                 !data.is_empty() && data != b"0"
             }
             Value::Array(arr) => !arr.borrow().is_empty(),
+            Value::Object(_) => true,
         }
     }
 
@@ -40,13 +42,14 @@ impl Value {
 
     pub fn type_name(&self) -> &'static str {
         match self {
-            Value::Undef => "NULL", // undefined acts as null
+            Value::Undef => "NULL",
             Value::Null => "NULL",
             Value::False | Value::True => "bool",
             Value::Long(_) => "int",
             Value::Double(_) => "float",
             Value::String(_) => "string",
             Value::Array(_) => "array",
+            Value::Object(_) => "object",
         }
     }
 
@@ -88,6 +91,7 @@ impl Value {
             Value::Array(arr) => {
                 if arr.borrow().is_empty() { 0 } else { 1 }
             }
+            Value::Object(_) => 1,
         }
     }
 
@@ -105,6 +109,7 @@ impl Value {
             Value::Array(arr) => {
                 if arr.borrow().is_empty() { 0.0 } else { 1.0 }
             }
+            Value::Object(_) => 1.0,
         }
     }
 
@@ -118,9 +123,11 @@ impl Value {
                 PhpString::from_string(format_php_float(*f))
             }
             Value::String(s) => s.clone(),
-            Value::Array(_) => {
-                // PHP emits a notice and returns "Array"
-                PhpString::from_bytes(b"Array")
+            Value::Array(_) => PhpString::from_bytes(b"Array"),
+            Value::Object(obj) => {
+                let obj = obj.borrow();
+                // PHP tries __toString magic method; for now return class name
+                PhpString::from_vec(obj.class_name.clone())
             }
         }
     }
@@ -285,7 +292,7 @@ impl Value {
                 // Leading numeric portion
                 Value::Long(self.to_long())
             }
-            Value::Array(_) => Value::Long(if self.is_truthy() { 1 } else { 0 }),
+            Value::Array(_) | Value::Object(_) => Value::Long(if self.is_truthy() { 1 } else { 0 }),
         }
     }
 
@@ -476,6 +483,10 @@ impl fmt::Debug for Value {
             Value::Double(n) => write!(f, "float({})", n),
             Value::String(s) => write!(f, "string({:?})", s.to_string_lossy()),
             Value::Array(arr) => write!(f, "array({})", arr.borrow().len()),
+            Value::Object(obj) => {
+                let obj = obj.borrow();
+                write!(f, "object({})", String::from_utf8_lossy(&obj.class_name))
+            }
         }
     }
 }
@@ -490,10 +501,10 @@ impl fmt::Display for Value {
                 write!(f, "{}", format_php_float(*d))
             }
             Value::String(s) => {
-                // Write raw bytes
                 f.write_str(&s.to_string_lossy())
             }
             Value::Array(_) => write!(f, "Array"),
+            Value::Object(_) => write!(f, "Object"),
         }
     }
 }

@@ -2270,7 +2270,32 @@ impl Parser {
             }
             TokenKind::New => {
                 self.advance();
-                let class = self.parse_primary()?;
+                // Parse class name (not a full primary expression - don't consume parens)
+                let class_span = self.span();
+                let class = match self.peek().clone() {
+                    TokenKind::Identifier(name) => {
+                        self.advance();
+                        // Handle qualified names: Foo\Bar\Baz
+                        let mut full_name = name;
+                        while self.eat(&TokenKind::Backslash) {
+                            if let TokenKind::Identifier(part) = self.peek().clone() {
+                                self.advance();
+                                full_name.push(b'\\');
+                                full_name.extend_from_slice(&part);
+                            }
+                        }
+                        Expr { kind: ExprKind::Identifier(full_name), span: class_span }
+                    }
+                    TokenKind::Static => {
+                        self.advance();
+                        Expr { kind: ExprKind::Identifier(b"static".to_vec()), span: class_span }
+                    }
+                    TokenKind::Variable(name) => {
+                        self.advance();
+                        Expr { kind: ExprKind::Variable(name), span: class_span }
+                    }
+                    _ => self.parse_primary()?,
+                };
                 let args = if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
                     let args = self.parse_arguments()?;

@@ -63,6 +63,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
+        Value::Object(_) => {
+            vm.write_output(format!("{}object(...)\n", prefix).as_bytes()); // TODO: implement object var_dump
+        }
     }
 }
 
@@ -117,6 +120,9 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
         }
+        Value::Object(_) => {
+            buf.extend_from_slice(b"Object"); // TODO: implement object print_r
+        }
     }
 }
 
@@ -159,6 +165,9 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, _indent: usize) {
         }
         Value::Array(_) => {
             buf.extend_from_slice(b"array (...)"); // simplified
+        }
+        Value::Object(_) => {
+            buf.extend_from_slice(b"(object) array(...)"); // TODO: implement object var_export
         }
     }
 }

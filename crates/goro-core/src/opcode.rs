@@ -143,6 +143,18 @@ pub enum OpCode {
     /// Fetch key for current iteration: op1 = iterator (tmp), result = key (tmp)
     ForeachKey,
 
+    // ---- OOP ----
+    /// Create a new object: op1 = class name (const), result = object (tmp)
+    NewObject,
+    /// Get property: op1 = object, op2 = property name (const), result = value (tmp)
+    PropertyGet,
+    /// Set property: op1 = object, op2 = value, result = property name (const)
+    PropertySet,
+    /// Call method: op1 = object, op2 = method name (const)
+    InitMethodCall,
+    /// Declare a class: op1 = class name (const), op2 = class def index (const)
+    DeclareClass,
+
     // ---- Type checking ----
     TypeCheck,
 

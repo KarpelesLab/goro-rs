@@ -130,13 +130,16 @@ fn execute_php(source: &[u8]) -> Result<Vec<u8>, String> {
 
     // Compile
     let compiler = Compiler::new();
-    let op_array = compiler
+    let (op_array, compiled_classes) = compiler
         .compile(&program)
         .map_err(|e| format!("Compile error: {}", e))?;
 
     // Execute
     let mut vm = Vm::new();
     goro_ext_standard::register_standard_functions(&mut vm);
+    for class in compiled_classes {
+        vm.register_class(class);
+    }
     vm.execute(&op_array)
         .map_err(|e| format!("Runtime error: {}", e))?;
 

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
+use crate::object::{ClassEntry, PhpObject};
 use crate::opcode::{OpArray, OpCode, OperandType};
 use crate::string::PhpString;
 use crate::value::Value;
@@ -45,6 +46,12 @@ pub struct Vm {
     static_vars: HashMap<Vec<u8>, Value>,
     /// Global variables
     globals: HashMap<Vec<u8>, Value>,
+    /// Class table
+    classes: HashMap<Vec<u8>, ClassEntry>,
+    /// Next object ID
+    next_object_id: u64,
+    /// Pending class definitions (from compiler, indexed by position)
+    pending_classes: Vec<ClassEntry>,
     /// Whether we're executing the top-level script (vs a function)
     is_global_scope: bool,
 }
@@ -58,8 +65,16 @@ impl Vm {
             pending_calls: Vec::new(),
             static_vars: HashMap::new(),
             globals: HashMap::new(),
+            classes: HashMap::new(),
+            next_object_id: 1,
+            pending_classes: Vec::new(),
             is_global_scope: true,
         }
+    }
+
+    /// Register a class (from the compiler's compiled_classes list)
+    pub fn register_class(&mut self, class: ClassEntry) {
+        self.pending_classes.push(class);
     }
 
     /// Register a user-defined function
@@ -791,6 +806,109 @@ impl Vm {
 
                 OpCode::LoadConst | OpCode::FastConcat | OpCode::TypeCheck => {
                     // TODO: implement
+                }
+
+                OpCode::DeclareClass => {
+                    let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let class_idx = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_long() as usize;
+                    if let Some(class) = self.pending_classes.get(class_idx).cloned() {
+                        let name_lower: Vec<u8> = name_val.to_php_string().as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        self.classes.insert(name_lower, class);
+                    }
+                }
+
+                OpCode::NewObject => {
+                    let class_name = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let name_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                    let obj_id = self.next_object_id;
+                    self.next_object_id += 1;
+
+                    let mut obj = PhpObject::new(class_name.as_bytes().to_vec(), obj_id);
+
+                    // Initialize properties from class definition
+                    if let Some(class) = self.classes.get(&name_lower) {
+                        for prop in &class.properties {
+                            if !prop.is_static {
+                                obj.set_property(prop.name.clone(), prop.default.clone());
+                            }
+                        }
+                    }
+
+                    self.write_operand(
+                        &op.result,
+                        Value::Object(Rc::new(RefCell::new(obj))),
+                        &mut cvs, &mut tmps, &static_cv_keys,
+                    );
+                }
+
+                OpCode::PropertyGet => {
+                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let prop_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
+
+                    let result = if let Value::Object(obj) = &obj_val {
+                        obj.borrow().get_property(prop_name.as_bytes())
+                    } else {
+                        Value::Null
+                    };
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::PropertySet => {
+                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let prop_name = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals).to_php_string();
+
+                    if let Value::Object(obj) = &obj_val {
+                        obj.borrow_mut().set_property(prop_name.as_bytes().to_vec(), value);
+                    }
+                }
+
+                OpCode::InitMethodCall => {
+                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let method_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
+
+                    if let Value::Object(obj) = &obj_val {
+                        let obj_borrow = obj.borrow();
+                        let class_name_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let method_name_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                        // Find the method in the class
+                        if let Some(class) = self.classes.get(&class_name_lower) {
+                            if let Some(method) = class.get_method(&method_name_lower) {
+                                // Create a synthetic function name for the pending call
+                                let mut func_name = obj_borrow.class_name.clone();
+                                func_name.extend_from_slice(b"::");
+                                func_name.extend_from_slice(&method.name);
+
+                                // Register the method as a temporary user function
+                                let call_name = PhpString::from_vec(func_name.clone());
+                                self.user_functions.insert(func_name.to_ascii_lowercase(), method.op_array.clone());
+
+                                // Push the pending call with $this as the first implicit arg
+                                self.pending_calls.push(PendingCall {
+                                    name: call_name,
+                                    args: vec![obj_val.clone()], // $this is first arg, mapped to CV 0
+                                });
+                            } else {
+                                // Method not found - push a dummy call that will fail
+                                self.pending_calls.push(PendingCall {
+                                    name: method_name,
+                                    args: vec![],
+                                });
+                            }
+                        } else {
+                            self.pending_calls.push(PendingCall {
+                                name: method_name,
+                                args: vec![],
+                            });
+                        }
+                    } else {
+                        self.pending_calls.push(PendingCall {
+                            name: method_name,
+                            args: vec![],
+                        });
+                    }
                 }
             }
         }

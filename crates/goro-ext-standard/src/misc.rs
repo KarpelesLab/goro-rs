@@ -970,6 +970,7 @@ fn json_encode_value(val: &Value) -> String {
                 format!("{{{}}}", parts.join(","))
             }
         }
+        Value::Object(_) => "null".to_string(), // TODO: implement object JSON encoding
     }
 }
 

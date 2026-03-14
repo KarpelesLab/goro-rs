@@ -1,5 +1,6 @@
 use goro_parser::ast::*;
 
+use crate::object::{ClassEntry, MethodDef, PropertyDef, Visibility as ObjVisibility};
 use crate::opcode::{Op, OpArray, OpCode, OperandType};
 use crate::string::PhpString;
 use crate::value::Value;
@@ -36,6 +37,8 @@ pub struct Compiler {
     op_array: OpArray,
     /// Stack of loop contexts for break/continue
     loop_stack: Vec<LoopContext>,
+    /// Compiled class entries (stored in the compiler, passed to VM)
+    pub compiled_classes: Vec<ClassEntry>,
 }
 
 impl Compiler {
@@ -43,11 +46,26 @@ impl Compiler {
         Self {
             op_array: OpArray::new(),
             loop_stack: Vec::new(),
+            compiled_classes: Vec::new(),
+        }
+    }
+
+    /// Extract the numeric level from a break/continue expression.
+    /// `break` and `break 1` both return 1 (innermost loop).
+    /// `break 2` returns 2 (two levels out), etc.
+    fn extract_break_continue_level(level_expr: &Option<Expr>) -> usize {
+        match level_expr {
+            Some(expr) => match &expr.kind {
+                ExprKind::Int(n) if *n >= 1 => *n as usize,
+                _ => 1,
+            },
+            None => 1,
         }
     }
 
     /// Compile a complete program
-    pub fn compile(mut self, program: &Program) -> CompileResult<OpArray> {
+    /// Compile a program, returning the op_array and compiled classes
+    pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>)> {
         for stmt in &program.statements {
             self.compile_stmt(stmt)?;
         }
@@ -60,7 +78,7 @@ impl Compiler {
             result: OperandType::Unused,
             line: 0,
         });
-        Ok(self.op_array)
+        Ok((self.op_array, self.compiled_classes))
     }
 
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {
@@ -544,7 +562,8 @@ impl Compiler {
                 Ok(())
             }
 
-            StmtKind::Break(_) => {
+            StmtKind::Break(level_expr) => {
+                let level = Self::extract_break_continue_level(level_expr);
                 let jmp = self.op_array.emit(Op {
                     opcode: OpCode::Jmp,
                     op1: OperandType::JmpTarget(0),
@@ -552,13 +571,16 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
-                if let Some(ctx) = self.loop_stack.last_mut() {
-                    ctx.break_jumps.push(jmp);
+                let stack_len = self.loop_stack.len();
+                if level <= stack_len {
+                    let target_index = stack_len - level;
+                    self.loop_stack[target_index].break_jumps.push(jmp);
                 }
                 Ok(())
             }
 
-            StmtKind::Continue(_) => {
+            StmtKind::Continue(level_expr) => {
+                let level = Self::extract_break_continue_level(level_expr);
                 let jmp = self.op_array.emit(Op {
                     opcode: OpCode::Jmp,
                     op1: OperandType::JmpTarget(0),
@@ -566,8 +588,10 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
-                if let Some(ctx) = self.loop_stack.last_mut() {
-                    ctx.continue_jumps.push(jmp);
+                let stack_len = self.loop_stack.len();
+                if level <= stack_len {
+                    let target_index = stack_len - level;
+                    self.loop_stack[target_index].continue_jumps.push(jmp);
                 }
                 Ok(())
             }
@@ -738,9 +762,124 @@ impl Compiler {
                 Ok(())
             }
 
-            StmtKind::ClassDecl { .. } => {
-                // TODO: implement class support
-                // For now, skip class declarations silently
+            StmtKind::ClassDecl { name, modifiers, extends, implements, body } => {
+                let mut class = ClassEntry::new(name.clone());
+                class.parent = extends.clone();
+                class.interfaces = implements.clone();
+                class.is_abstract = modifiers.is_abstract;
+                class.is_final = modifiers.is_final;
+
+                for member in body {
+                    match member {
+                        ClassMember::Property { name: prop_name, default, visibility, is_static, .. } => {
+                            let default_val = if let Some(expr) = default {
+                                // Compile the default value expression (constants only)
+                                match &expr.kind {
+                                    ExprKind::Int(n) => Value::Long(*n),
+                                    ExprKind::Float(f) => Value::Double(*f),
+                                    ExprKind::String(s) => Value::String(PhpString::from_vec(s.clone())),
+                                    ExprKind::True => Value::True,
+                                    ExprKind::False => Value::False,
+                                    ExprKind::Null => Value::Null,
+                                    ExprKind::Array(elements) if elements.is_empty() => {
+                                        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(crate::array::PhpArray::new())))
+                                    }
+                                    _ => Value::Null,
+                                }
+                            } else {
+                                Value::Null
+                            };
+                            let vis = match visibility {
+                                Visibility::Public => ObjVisibility::Public,
+                                Visibility::Protected => ObjVisibility::Protected,
+                                Visibility::Private => ObjVisibility::Private,
+                            };
+                            class.properties.push(PropertyDef {
+                                name: prop_name.clone(),
+                                default: default_val,
+                                is_static: *is_static,
+                                visibility: vis,
+                            });
+                        }
+                        ClassMember::Method { name: method_name, params, body: method_body, visibility, is_static, is_abstract, .. } => {
+                            if let Some(body_stmts) = method_body {
+                                let mut method_compiler = Compiler::new();
+                                method_compiler.op_array.name = method_name.clone();
+
+                                // First CV is always $this (for non-static methods)
+                                if !is_static {
+                                    method_compiler.op_array.get_or_create_cv(b"this");
+                                }
+
+                                // Set up parameter CVs
+                                for param in params {
+                                    method_compiler.op_array.get_or_create_cv(&param.name);
+                                }
+
+                                for s in body_stmts {
+                                    method_compiler.compile_stmt(s)?;
+                                }
+
+                                // Implicit return null
+                                let null_idx = method_compiler.op_array.add_literal(Value::Null);
+                                method_compiler.op_array.emit(Op {
+                                    opcode: OpCode::Return,
+                                    op1: OperandType::Const(null_idx),
+                                    op2: OperandType::Unused,
+                                    result: OperandType::Unused,
+                                    line: 0,
+                                });
+
+                                let vis = match visibility {
+                                    Visibility::Public => ObjVisibility::Public,
+                                    Visibility::Protected => ObjVisibility::Protected,
+                                    Visibility::Private => ObjVisibility::Private,
+                                };
+
+                                let param_count = params.len();
+                                let lower_name: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                class.methods.insert(lower_name, MethodDef {
+                                    name: method_name.clone(),
+                                    op_array: method_compiler.op_array,
+                                    param_count,
+                                    is_static: *is_static,
+                                    is_abstract: *is_abstract,
+                                    visibility: vis,
+                                });
+                            }
+                        }
+                        ClassMember::ClassConstant { name: const_name, value: const_expr, .. } => {
+                            let val = match &const_expr.kind {
+                                ExprKind::Int(n) => Value::Long(*n),
+                                ExprKind::Float(f) => Value::Double(*f),
+                                ExprKind::String(s) => Value::String(PhpString::from_vec(s.clone())),
+                                ExprKind::True => Value::True,
+                                ExprKind::False => Value::False,
+                                ExprKind::Null => Value::Null,
+                                _ => Value::Null,
+                            };
+                            class.constants.insert(const_name.clone(), val);
+                        }
+                        ClassMember::TraitUse { .. } => {
+                            // TODO: trait support
+                        }
+                    }
+                }
+
+                // Store the class and emit a DeclareClass opcode
+                let class_idx = self.compiled_classes.len();
+                self.compiled_classes.push(class);
+
+                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name.clone())));
+                let idx_literal = self.op_array.add_literal(Value::Long(class_idx as i64));
+                self.op_array.emit(Op {
+                    opcode: OpCode::DeclareClass,
+                    op1: OperandType::Const(name_idx),
+                    op2: OperandType::Const(idx_literal),
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+
                 Ok(())
             }
 
@@ -834,6 +973,22 @@ impl Compiler {
                                 line: expr.span.line,
                             });
                         }
+                        Ok(val)
+                    }
+                    ExprKind::PropertyAccess { object, property, .. } => {
+                        let obj = self.compile_expr(object)?;
+                        let prop_name = match &property.kind {
+                            ExprKind::Identifier(name) => name.clone(),
+                            _ => return Ok(val),
+                        };
+                        let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(prop_name)));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::PropertySet,
+                            op1: obj,
+                            op2: val,
+                            result: OperandType::Const(name_idx),
+                            line: expr.span.line,
+                        });
                         Ok(val)
                     }
                     _ => Err(CompileError {
@@ -1502,10 +1657,62 @@ impl Compiler {
             }
 
             ExprKind::New { class, args } => {
-                // Stub: return null for now
-                // TODO: proper object construction
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+                // Get class name
+                let class_name = match &class.kind {
+                    ExprKind::Identifier(name) => name.clone(),
+                    _ => {
+                        let _ = self.compile_expr(class)?;
+                        let idx = self.op_array.add_literal(Value::Null);
+                        return Ok(OperandType::Const(idx));
+                    }
+                };
+
+                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                let tmp = self.op_array.alloc_temp();
+
+                // Create the object
+                self.op_array.emit(Op {
+                    opcode: OpCode::NewObject,
+                    op1: OperandType::Const(name_idx),
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+
+                // Call constructor if there are arguments
+                if !args.is_empty() {
+                    let constructor_name = self.op_array.add_literal(
+                        Value::String(PhpString::from_bytes(b"__construct"))
+                    );
+                    self.op_array.emit(Op {
+                        opcode: OpCode::InitMethodCall,
+                        op1: OperandType::Tmp(tmp),
+                        op2: OperandType::Const(constructor_name),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    for (i, arg) in args.iter().enumerate() {
+                        let val = self.compile_expr(&arg.value)?;
+                        let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::SendVal,
+                            op1: val,
+                            op2: OperandType::Const(pos_idx),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                    }
+                    let discard_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::DoFCall,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(discard_tmp),
+                        line: expr.span.line,
+                    });
+                }
+
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::Instanceof { expr, class } => {
@@ -1608,15 +1815,63 @@ impl Compiler {
             }
 
             ExprKind::PropertyAccess { object, property, .. } => {
-                let _ = self.compile_expr(object)?;
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+                let obj = self.compile_expr(object)?;
+                let prop_name = match &property.kind {
+                    ExprKind::Identifier(name) => name.clone(),
+                    _ => {
+                        let _ = self.compile_expr(property)?;
+                        return Ok(obj); // fallback
+                    }
+                };
+                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(prop_name)));
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::PropertyGet,
+                    op1: obj,
+                    op2: OperandType::Const(name_idx),
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::MethodCall { object, method, args, .. } => {
-                let _ = self.compile_expr(object)?;
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+                let obj = self.compile_expr(object)?;
+                let method_name = match &method.kind {
+                    ExprKind::Identifier(name) => name.clone(),
+                    _ => b"__invoke".to_vec(),
+                };
+                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(method_name)));
+
+                self.op_array.emit(Op {
+                    opcode: OpCode::InitMethodCall,
+                    op1: obj,
+                    op2: OperandType::Const(name_idx),
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
+
+                for (i, arg) in args.iter().enumerate() {
+                    let val = self.compile_expr(&arg.value)?;
+                    let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SendVal,
+                        op1: val,
+                        op2: OperandType::Const(pos_idx),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                }
+
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::DoFCall,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::DynamicVariable(inner) => {
