@@ -315,6 +315,18 @@ impl Value {
             (Value::String(_), Value::Long(_)) | (Value::Long(_), Value::String(_)) => {
                 self.to_double() == other.to_double()
             }
+            (Value::Array(a), Value::Array(b)) => {
+                let a = a.borrow();
+                let b = b.borrow();
+                if a.len() != b.len() { return false; }
+                for (key, a_val) in a.iter() {
+                    match b.get(key) {
+                        Some(b_val) => if !a_val.equals(b_val) { return false; },
+                        None => return false,
+                    }
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -328,6 +340,18 @@ impl Value {
             (Value::Long(a), Value::Long(b)) => a == b,
             (Value::Double(a), Value::Double(b)) => a == b,
             (Value::String(a), Value::String(b)) => a.as_bytes() == b.as_bytes(),
+            (Value::Array(a), Value::Array(b)) => {
+                let a = a.borrow();
+                let b = b.borrow();
+                if a.len() != b.len() { return false; }
+                for (key, a_val) in a.iter() {
+                    match b.get(key) {
+                        Some(b_val) => if !a_val.identical(b_val) { return false; },
+                        None => return false,
+                    }
+                }
+                true
+            }
             _ => false,
         }
     }
