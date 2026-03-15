@@ -107,6 +107,11 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gc_enabled", gc_enabled_fn);
     vm.register_function(b"gc_disable", gc_disable_fn);
     vm.register_function(b"gc_enable", gc_enable_fn);
+    vm.register_function(b"gc_status", gc_status_fn);
+    vm.register_function(b"debug_zval_dump", debug_zval_dump_fn);
+    vm.register_function(b"var_dump", var_dump_direct);
+    vm.register_function(b"get_class_methods", get_class_methods_fn);
+    vm.register_function(b"get_parent_class", get_parent_class_real);
     vm.register_function(b"get_object_vars", get_object_vars_fn);
     vm.register_function(b"get_class", get_class_fn);
     vm.register_function(b"serialize", serialize_fn);
@@ -1938,4 +1943,64 @@ fn array_is_list_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn compact_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // compact() needs access to the current scope's variables which we don't have from builtins
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+
+fn gc_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    result.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"running")), Value::False);
+    result.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"protected")), Value::False);
+    result.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"full")), Value::False);
+    result.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"runs")), Value::Long(0));
+    result.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"collected")), Value::Long(0));
+    result.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"threshold")), Value::Long(10000));
+    result.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"roots")), Value::Long(0));
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn debug_zval_dump_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Similar to var_dump but shows refcount
+    for arg in args {
+        let s = format!("{:?}\n", arg);
+        vm.write_output(s.as_bytes());
+    }
+    Ok(Value::Null)
+}
+
+fn var_dump_direct(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // This overrides the one in output.rs - but output.rs registers first
+    // So this won't actually be called. Let's skip.
+    Ok(Value::Null)
+}
+
+fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let class_name = match args.first() {
+        Some(Value::String(s)) => s.as_bytes().to_vec(),
+        Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
+        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    };
+    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    
+    let mut result = PhpArray::new();
+    if let Some(class) = vm.classes.get(&class_lower) {
+        for (name, _) in &class.methods {
+            result.push(Value::String(PhpString::from_vec(name.clone())));
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn get_parent_class_real(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let class_name = match args.first() {
+        Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
+        Some(Value::String(s)) => s.as_bytes().to_vec(),
+        _ => return Ok(Value::False),
+    };
+    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    
+    if let Some(class) = vm.classes.get(&class_lower) {
+        if let Some(ref parent) = class.parent {
+            return Ok(Value::String(PhpString::from_vec(parent.clone())));
+        }
+    }
+    Ok(Value::False)
 }

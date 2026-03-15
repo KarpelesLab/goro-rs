@@ -1302,6 +1302,21 @@ impl Vm {
                                     name: call_name,
                                     args: vec![obj_val.clone()], // $this is first arg, mapped to CV 0
                                 });
+                            } else if let Some(call_method) = class.get_method(b"__call") {
+                                // __call magic method fallback
+                                let mut func_name = class_name_orig.clone();
+                                func_name.extend_from_slice(b"::__call");
+                                let call_name = PhpString::from_vec(func_name.clone());
+                                self.user_functions.insert(func_name.to_ascii_lowercase(), call_method.op_array.clone());
+
+                                // Build args array for __call($name, $args)
+                                // $this is CV[0], method name is CV[1], args array is CV[2]
+                                let method_name_val = Value::String(method_name.clone());
+                                // Args will be added by SendVal opcodes, collected in DoFCall
+                                self.pending_calls.push(PendingCall {
+                                    name: call_name,
+                                    args: vec![obj_val.clone(), method_name_val],
+                                });
                             } else {
                                 // Method not found - push call with $this
                                 self.pending_calls.push(PendingCall {
