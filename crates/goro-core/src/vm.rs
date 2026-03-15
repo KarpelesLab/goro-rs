@@ -815,11 +815,7 @@ impl Vm {
                     let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
                     if let Value::Array(arr) = arr_val {
-                        let key = match key_val {
-                            Value::Long(n) => ArrayKey::Int(n),
-                            Value::String(s) => ArrayKey::String(s),
-                            other => ArrayKey::Int(other.to_long()),
-                        };
+                        let key = Self::value_to_array_key(key_val);
                         arr.borrow_mut().set(key, val);
                     }
                 }
@@ -827,11 +823,7 @@ impl Vm {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let result = if let Value::Array(arr) = &arr_val {
-                        let key = match &key_val {
-                            Value::Long(n) => ArrayKey::Int(*n),
-                            Value::String(s) => ArrayKey::String(s.clone()),
-                            other => ArrayKey::Int(other.to_long()),
-                        };
+                        let key = Self::value_to_array_key(key_val.clone());
                         arr.borrow().get(&key).cloned().unwrap_or(Value::Null)
                     } else if let Value::String(s) = &arr_val {
                         // String offset access
@@ -1297,6 +1289,32 @@ impl Vm {
                     }
                 }
             }
+        }
+    }
+
+    /// Convert a value to an array key (PHP coerces numeric strings to int keys)
+    fn value_to_array_key(val: Value) -> ArrayKey {
+        match val {
+            Value::Long(n) => ArrayKey::Int(n),
+            Value::String(s) => {
+                // PHP converts numeric strings to integer keys
+                let bytes = s.as_bytes();
+                let s_str = s.to_string_lossy();
+                let trimmed = s_str.trim();
+                if !trimmed.is_empty() {
+                    if let Ok(n) = trimmed.parse::<i64>() {
+                        // Only convert if the string is exactly the integer representation
+                        if n.to_string() == trimmed {
+                            return ArrayKey::Int(n);
+                        }
+                    }
+                }
+                ArrayKey::String(s)
+            }
+            Value::Double(f) => ArrayKey::Int(f as i64),
+            Value::True => ArrayKey::Int(1),
+            Value::False | Value::Null | Value::Undef => ArrayKey::Int(0),
+            Value::Object(_) | Value::Array(_) => ArrayKey::Int(0),
         }
     }
 
