@@ -999,7 +999,10 @@ impl Vm {
                     let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
 
                     let val = if let Some(class) = self.classes.get(&class_lower) {
-                        class.static_properties.get(prop_name.as_bytes()).cloned().unwrap_or(Value::Null)
+                        // Check static properties first, then constants
+                        class.static_properties.get(prop_name.as_bytes()).cloned()
+                            .or_else(|| class.constants.get(prop_name.as_bytes()).cloned())
+                            .unwrap_or(Value::Null)
                     } else {
                         Value::Null
                     };

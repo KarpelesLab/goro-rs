@@ -2134,9 +2134,28 @@ impl Compiler {
                     return Ok(OperandType::Const(idx));
                 }
 
-                // For now, return the constant value as null (TODO: runtime class constant lookup)
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+                // Try to find the constant at compile time in already-compiled classes
+                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") || class_name.eq_ignore_ascii_case(b"static") {
+                    self.current_class.clone().unwrap_or(class_name.clone())
+                } else if class_name.eq_ignore_ascii_case(b"parent") {
+                    self.current_parent_class.clone().unwrap_or(class_name.clone())
+                } else {
+                    class_name.clone()
+                };
+
+                // Use runtime lookup via StaticPropGet (class constants are stored similarly)
+                let class_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(resolved_class)));
+                let const_name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(constant.clone())));
+                let tmp = self.op_array.alloc_temp();
+                // Reuse StaticPropGet for class constants (VM will check both)
+                self.op_array.emit(Op {
+                    opcode: OpCode::StaticPropGet,
+                    op1: OperandType::Const(class_idx),
+                    op2: OperandType::Const(const_name_idx),
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::StaticMethodCall { class, method, args } => {
