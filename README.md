@@ -11,9 +11,9 @@ Early development. Core language features and basic OOP work.
 | Test Directory | Pass | Total | Rate |
 |---|---|---|---|
 | tests/lang | 43 | 213 | 20.2% |
-| Zend/tests | 124 | 871 | 14.2% |
+| Zend/tests (500) | 88 | 500 | 17.6% |
 | ext/standard (sampled) | ~25 | 200 | ~12.5% |
-| **Total** | **~192** | **~1284** | **~15.0%** |
+| **Estimated Total** | **~200** | **~1284** | **~15.6%** |
 
 ## Features
 
@@ -27,6 +27,8 @@ Early development. Core language features and basic OOP work.
 - Closures (`function() { }`) and arrow functions (`fn() =>`)
 - parent::method() calls with correct hierarchy resolution
 - Magic constants: __CLASS__, __METHOD__, __FUNCTION__, __LINE__
+- Exception handling: try/catch/finally with cross-function propagation
+- Built-in Exception/Error classes with getMessage(), getCode()
 - User-defined functions with parameters, return values, recursion
 - Static variables in functions
 - Global variables (`global $var`)
@@ -38,8 +40,8 @@ Early development. Core language features and basic OOP work.
 - Virtual filesystem abstraction for security sandboxing
 
 ### Not Yet Implemented
-- Full OOP (interfaces, traits, enums, abstract classes, magic methods beyond __construct)
-- Exceptions (try/catch/throw with proper Error class hierarchy)
+- Full OOP (interfaces, traits, enums, abstract classes, magic methods)
+- Full exception hierarchy (only basic Exception/Error supported)
 - References (`&`)
 - include/require
 - Namespaces
