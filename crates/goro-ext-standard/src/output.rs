@@ -70,10 +70,8 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             vm.write_output(
                 format!("{}object({})#{} ({}) {{\n", prefix, class_name, obj_borrow.object_id, prop_count).as_bytes(),
             );
-            // Sort properties for consistent output
-            let mut props: Vec<_> = obj_borrow.properties.iter().collect();
-            props.sort_by(|(a, _), (b, _)| a.cmp(b));
-            for (name, value) in &props {
+            // Properties are in declaration order (Vec preserves insertion order)
+            for (name, value) in &obj_borrow.properties {
                 let name_str = String::from_utf8_lossy(name);
                 vm.write_output(format!("{}  [\"{}\"]=>", prefix, name_str).as_bytes());
                 vm.write_output(b"\n");

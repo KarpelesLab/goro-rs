@@ -74,7 +74,8 @@ impl ClassEntry {
 #[derive(Debug, Clone)]
 pub struct PhpObject {
     pub class_name: Vec<u8>,
-    pub properties: HashMap<Vec<u8>, Value>,
+    /// Properties stored as ordered Vec to preserve declaration order
+    pub properties: Vec<(Vec<u8>, Value)>,
     pub object_id: u64,
 }
 
@@ -82,16 +83,30 @@ impl PhpObject {
     pub fn new(class_name: Vec<u8>, object_id: u64) -> Self {
         Self {
             class_name,
-            properties: HashMap::new(),
+            properties: Vec::new(),
             object_id,
         }
     }
 
     pub fn get_property(&self, name: &[u8]) -> Value {
-        self.properties.get(name).cloned().unwrap_or(Value::Null)
+        self.properties.iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::Null)
     }
 
     pub fn set_property(&mut self, name: Vec<u8>, value: Value) {
-        self.properties.insert(name, value);
+        // Update existing or append new
+        for (k, v) in &mut self.properties {
+            if *k == name {
+                *v = value;
+                return;
+            }
+        }
+        self.properties.push((name, value));
+    }
+
+    pub fn has_property(&self, name: &[u8]) -> bool {
+        self.properties.iter().any(|(k, _)| k == name)
     }
 }
