@@ -734,9 +734,11 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let value = args.get(1).cloned().unwrap_or(Value::Null);
     let key = name.as_bytes().to_vec();
-    let old = vm.constants.get(&key).cloned().unwrap_or(Value::False);
+    let old = vm.constants.get(&key).cloned();
+    // Actually update the value
     vm.constants.insert(key, value);
-    Ok(old)
+    // Return old value or false if not previously set
+    Ok(old.unwrap_or(Value::False))
 }
 fn ini_get(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();

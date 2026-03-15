@@ -74,7 +74,19 @@ impl Vm {
             pending_classes: Vec::new(),
             is_global_scope: true,
             current_exception: None,
-            constants: HashMap::new(),
+            constants: {
+                let mut c = HashMap::new();
+                // Default ini values
+                c.insert(b"arg_separator.output".to_vec(), Value::String(PhpString::from_bytes(b"&")));
+                c.insert(b"precision".to_vec(), Value::Long(14));
+                c.insert(b"serialize_precision".to_vec(), Value::Long(-1));
+                c.insert(b"error_reporting".to_vec(), Value::Long(32767));
+                c.insert(b"display_errors".to_vec(), Value::Long(1));
+                c.insert(b"memory_limit".to_vec(), Value::String(PhpString::from_bytes(b"128M")));
+                c.insert(b"max_execution_time".to_vec(), Value::Long(30));
+                c.insert(b"default_charset".to_vec(), Value::String(PhpString::from_bytes(b"UTF-8")));
+                c
+            },
         }
     }
 
@@ -143,7 +155,7 @@ impl Vm {
 
                 OpCode::Echo => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let s = val.to_php_string();
+                    let s = self.value_to_string(&val);
                     self.output.extend_from_slice(s.as_bytes());
                 }
 
@@ -208,7 +220,11 @@ impl Vm {
                 OpCode::Concat => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, a.concat(&b), &mut cvs, &mut tmps, &static_cv_keys);
+                    let a_str = self.value_to_string(&a);
+                    let b_str = self.value_to_string(&b);
+                    let mut result = a_str.as_bytes().to_vec();
+                    result.extend_from_slice(b_str.as_bytes());
+                    self.write_operand(&op.result, Value::String(PhpString::from_vec(result)), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Negate => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -1282,6 +1298,27 @@ impl Vm {
                 }
             }
         }
+    }
+
+    /// Convert a value to string, calling __toString for objects if available
+    fn value_to_string(&mut self, val: &Value) -> PhpString {
+        if let Value::Object(obj) = val {
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let has_tostring = self.classes.get(&class_lower)
+                .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                .unwrap_or(false);
+            if has_tostring {
+                let method = self.classes.get(&class_lower).unwrap().get_method(b"__tostring").unwrap().op_array.clone();
+                let mut method_cvs = vec![Value::Undef; method.cv_names.len()];
+                if !method_cvs.is_empty() {
+                    method_cvs[0] = val.clone();
+                }
+                if let Ok(result) = self.execute_op_array(&method, method_cvs) {
+                    return result.to_php_string();
+                }
+            }
+        }
+        val.to_php_string()
     }
 
     fn read_operand(
