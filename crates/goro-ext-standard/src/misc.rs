@@ -159,6 +159,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"header", header_fn);
     vm.register_function(b"headers_sent", headers_sent_fn);
     vm.register_function(b"http_response_code", http_response_code_fn);
+    vm.register_function(b"spl_object_hash", spl_object_hash_fn);
+    vm.register_function(b"spl_object_id", spl_object_id_fn);
 
     // Date
     vm.register_function(b"time", time_fn);
@@ -1397,4 +1399,30 @@ fn array_any_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let arr = arr.borrow();
         Ok(if arr.values().any(|v| v.is_truthy()) { Value::True } else { Value::False })
     } else { Ok(Value::False) }
+}
+
+fn spl_object_hash_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(obj)) = args.first() {
+        let id = obj.borrow().object_id;
+        Ok(Value::String(PhpString::from_string(format!("{:032x}", id))))
+    } else {
+        Err(VmError { message: "spl_object_hash() expects an object".into(), line: 0 })
+    }
+}
+fn spl_object_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(obj)) = args.first() {
+        Ok(Value::Long(obj.borrow().object_id as i64))
+    } else {
+        Err(VmError { message: "spl_object_id() expects an object".into(), line: 0 })
+    }
+}
+fn str_contains_builtin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let h = args.first().unwrap_or(&Value::Null).to_php_string();
+    let n = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    if n.is_empty() { return Ok(Value::True); }
+    let hb = h.as_bytes(); let nb = n.as_bytes();
+    for i in 0..=hb.len().saturating_sub(nb.len()) {
+        if hb.len() >= i + nb.len() && &hb[i..i+nb.len()] == nb { return Ok(Value::True); }
+    }
+    Ok(Value::False)
 }
