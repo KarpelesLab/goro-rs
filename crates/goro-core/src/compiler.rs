@@ -1149,10 +1149,51 @@ impl Compiler {
                         });
                         Ok(val)
                     }
-                    _ => Err(CompileError {
-                        message: "invalid assignment target".into(),
-                        line: expr.span.line,
-                    }),
+                    _ => {
+                        // Check for destructuring: list($a, $b) = $arr or [$a, $b] = $arr
+                        let vars: Vec<Option<Vec<u8>>> = match &target.kind {
+                            ExprKind::Array(elems) => {
+                                elems.iter().map(|e| {
+                                    if let ExprKind::Variable(name) = &e.value.kind { Some(name.clone()) } else { None }
+                                }).collect()
+                            }
+                            ExprKind::FunctionCall { name, args } if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) => {
+                                args.iter().map(|a| {
+                                    if let ExprKind::Variable(name) = &a.value.kind { Some(name.clone()) } else { None }
+                                }).collect()
+                            }
+                            _ => {
+                                return Err(CompileError {
+                                    message: "invalid assignment target".into(),
+                                    line: expr.span.line,
+                                });
+                            }
+                        };
+
+                        let arr_op = val;
+                        for (i, var_name) in vars.iter().enumerate() {
+                            if let Some(name) = var_name {
+                                let cv = self.op_array.get_or_create_cv(name);
+                                let idx_const = self.op_array.add_literal(Value::Long(i as i64));
+                                let tmp = self.op_array.alloc_temp();
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArrayGet,
+                                    op1: arr_op,
+                                    op2: OperandType::Const(idx_const),
+                                    result: OperandType::Tmp(tmp),
+                                    line: expr.span.line,
+                                });
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::Assign,
+                                    op1: OperandType::Cv(cv),
+                                    op2: OperandType::Tmp(tmp),
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                            }
+                        }
+                        Ok(arr_op)
+                    }
                 }
             }
 
