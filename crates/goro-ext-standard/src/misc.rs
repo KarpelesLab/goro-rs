@@ -624,15 +624,48 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_filter(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
+        let callback = args.get(1);
         let mut result = PhpArray::new();
-        for (key, val) in arr.iter() {
-            if val.is_truthy() {
-                result.set(key.clone(), val.clone());
+
+        if let Some(cb) = callback {
+            // Get callback function
+            let (func_name, captured) = match cb {
+                Value::String(s) => (s.as_bytes().to_vec(), vec![]),
+                Value::Array(cb_arr) => {
+                    let cb = cb_arr.borrow();
+                    let vals: Vec<Value> = cb.values().cloned().collect();
+                    if vals.is_empty() { return Ok(Value::Array(Rc::new(RefCell::new(result)))); }
+                    (vals[0].to_php_string().as_bytes().to_vec(), vals[1..].to_vec())
+                }
+                _ => { return Ok(Value::Array(Rc::new(RefCell::new(result)))); }
+            };
+            let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+            if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+                for (key, val) in arr.iter() {
+                    let keep = builtin(vm, &[val.clone()])?.is_truthy();
+                    if keep { result.set(key.clone(), val.clone()); }
+                }
+            } else if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                for (key, val) in arr.iter() {
+                    let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                    let mut idx = 0;
+                    for cv in &captured { if idx < fn_cvs.len() { fn_cvs[idx] = cv.clone(); idx += 1; } }
+                    if idx < fn_cvs.len() { fn_cvs[idx] = val.clone(); }
+                    let keep = vm.execute_fn(&user_fn, fn_cvs)?.is_truthy();
+                    if keep { result.set(key.clone(), val.clone()); }
+                }
+            }
+        } else {
+            // No callback - filter falsy values
+            for (key, val) in arr.iter() {
+                if val.is_truthy() { result.set(key.clone(), val.clone()); }
             }
         }
+
         Ok(Value::Array(Rc::new(RefCell::new(result))))
     } else {
         Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
