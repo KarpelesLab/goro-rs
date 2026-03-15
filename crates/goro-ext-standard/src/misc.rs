@@ -333,13 +333,56 @@ fn is_callable(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => Ok(Value::False),
     }
 }
-fn call_user_func(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // TODO: implement proper callable invocation
-    // For now, if the first arg is a string (function name), try to call it
+fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() { return Ok(Value::Null); }
+
+    let callback = &args[0];
+    let call_args: Vec<Value> = args[1..].to_vec();
+
+    // Get function name and captured vars
+    let (func_name, mut captured) = match callback {
+        Value::String(s) => (s.as_bytes().to_vec(), vec![]),
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            let vals: Vec<Value> = arr.values().cloned().collect();
+            if vals.is_empty() { return Ok(Value::Null); }
+            let name = vals[0].to_php_string().as_bytes().to_vec();
+            (name, vals[1..].to_vec())
+        }
+        _ => return Ok(Value::Null),
+    };
+
+    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    // Try builtin first
+    if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+        return builtin(vm, &call_args);
+    }
+
+    // Try user function
+    if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+        let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+        let mut idx = 0;
+        for cv in &captured { if idx < fn_cvs.len() { fn_cvs[idx] = cv.clone(); idx += 1; } }
+        for arg in &call_args { if idx < fn_cvs.len() { fn_cvs[idx] = arg.clone(); idx += 1; } }
+        return vm.execute_fn(&user_fn, fn_cvs);
+    }
+
     Ok(Value::Null)
 }
-fn call_user_func_array(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
+fn call_user_func_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 2 { return Ok(Value::Null); }
+    let callback = args[0].clone();
+    let params = match &args[1] {
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            arr.values().cloned().collect::<Vec<_>>()
+        }
+        _ => vec![],
+    };
+    let mut call_args = vec![callback];
+    call_args.extend(params);
+    call_user_func(vm, &call_args)
 }
 
 // === Array functions ===
