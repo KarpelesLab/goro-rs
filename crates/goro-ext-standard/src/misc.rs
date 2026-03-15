@@ -384,8 +384,21 @@ fn array_shift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_unshift(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0)) // stub
+fn array_unshift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr_mut = arr.borrow_mut();
+        let existing: Vec<Value> = arr_mut.values().cloned().collect();
+        let new_values: Vec<Value> = args[1..].to_vec();
+
+        let mut new_arr = PhpArray::new();
+        for val in &new_values { new_arr.push(val.clone()); }
+        for val in &existing { new_arr.push(val.clone()); }
+        *arr_mut = new_arr;
+
+        Ok(Value::Long((new_values.len() + existing.len()) as i64))
+    } else {
+        Ok(Value::Long(0))
+    }
 }
 
 fn array_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
