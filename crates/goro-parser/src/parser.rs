@@ -1983,12 +1983,52 @@ impl Parser {
                                 },
                             };
                         }
+                    } else if matches!(self.peek(), TokenKind::Variable(_)) {
+                        // $obj->$var  (dynamic property access)
+                        let prop_span = self.span();
+                        let var_name = match self.peek().clone() {
+                            TokenKind::Variable(name) => { self.advance(); name }
+                            _ => unreachable!(),
+                        };
+                        let prop_expr = Expr {
+                            kind: ExprKind::Variable(var_name),
+                            span: prop_span,
+                        };
+                        if matches!(self.peek(), TokenKind::OpenParen) {
+                            self.advance();
+                            let args = self.parse_arguments()?;
+                            let end_span = self.span();
+                            self.expect(&TokenKind::CloseParen)?;
+                            expr = Expr {
+                                span: expr.span.merge(end_span),
+                                kind: ExprKind::MethodCall {
+                                    object: Box::new(expr),
+                                    method: Box::new(prop_expr),
+                                    args,
+                                    nullsafe: false,
+                                },
+                            };
+                        } else {
+                            expr = Expr {
+                                span: expr.span.merge(prop_span),
+                                kind: ExprKind::PropertyAccess {
+                                    object: Box::new(expr),
+                                    property: Box::new(prop_expr),
+                                    nullsafe: false,
+                                },
+                            };
+                        }
                     } else {
                         let prop_span = self.span();
                         let name = match self.peek().clone() {
                             TokenKind::Identifier(name) => {
                                 self.advance();
                                 name
+                            }
+                            _ if self.is_semi_reserved_keyword() => {
+                                let kw = self.keyword_to_identifier();
+                                self.advance();
+                                kw
                             }
                             _ => {
                                 return Err(ParseError {
@@ -2363,6 +2403,48 @@ impl Parser {
                     TokenKind::Variable(name) => {
                         self.advance();
                         Expr { kind: ExprKind::Variable(name), span: class_span }
+                    }
+                    TokenKind::Class => {
+                        // Anonymous class: new class { ... }
+                        self.advance();
+                        // Parse optional constructor args
+                        let args = if matches!(self.peek(), TokenKind::OpenParen) {
+                            self.advance();
+                            let args = self.parse_arguments()?;
+                            self.expect(&TokenKind::CloseParen)?;
+                            args
+                        } else { Vec::new() };
+                        // Parse optional extends/implements
+                        if self.eat(&TokenKind::Extends) {
+                            // Skip parent class name
+                            while matches!(self.peek(), TokenKind::Identifier(_) | TokenKind::Backslash) {
+                                self.advance();
+                            }
+                        }
+                        if self.eat(&TokenKind::Implements) {
+                            loop {
+                                while matches!(self.peek(), TokenKind::Identifier(_) | TokenKind::Backslash) {
+                                    self.advance();
+                                }
+                                if !self.eat(&TokenKind::Comma) { break; }
+                            }
+                        }
+                        // Parse class body (skip it)
+                        if matches!(self.peek(), TokenKind::OpenBrace) {
+                            let mut depth = 0;
+                            loop {
+                                match self.peek() {
+                                    TokenKind::OpenBrace => { self.advance(); depth += 1; }
+                                    TokenKind::CloseBrace => { self.advance(); depth -= 1; if depth == 0 { break; } }
+                                    TokenKind::Eof => break,
+                                    _ => { self.advance(); }
+                                }
+                            }
+                        }
+                        Expr { kind: ExprKind::New {
+                            class: Box::new(Expr { kind: ExprKind::Identifier(b"anonymous".to_vec()), span: class_span }),
+                            args,
+                        }, span }
                     }
                     TokenKind::Backslash => {
                         // Fully qualified: new \Foo\Bar()
