@@ -322,6 +322,7 @@ impl Value {
     /// PHP === comparison
     pub fn identical(&self, other: &Value) -> bool {
         match (self, other) {
+            (Value::Undef, Value::Undef) => true,
             (Value::Null, Value::Null) => true,
             (Value::True, Value::True) | (Value::False, Value::False) => true,
             (Value::Long(a), Value::Long(b)) => a == b,

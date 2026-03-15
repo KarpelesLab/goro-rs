@@ -612,9 +612,39 @@ impl Compiler {
                 let mut func_compiler = Compiler::new();
                 func_compiler.op_array.name = name.clone();
 
-                // Set up parameter CVs
+                // Set up parameter CVs and default values
                 for param in params {
-                    func_compiler.op_array.get_or_create_cv(&param.name);
+                    let cv = func_compiler.op_array.get_or_create_cv(&param.name);
+                    if let Some(default_expr) = &param.default {
+                        // Emit: if param is Undef, set to default
+                        let default_val = func_compiler.compile_expr(default_expr)?;
+                        // Check if CV is Undef (null check + type check)
+                        let null_idx = func_compiler.op_array.add_literal(Value::Undef);
+                        let check_tmp = func_compiler.op_array.alloc_temp();
+                        func_compiler.op_array.emit(Op {
+                            opcode: OpCode::Identical,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Const(null_idx),
+                            result: OperandType::Tmp(check_tmp),
+                            line: 0,
+                        });
+                        let jmp_skip = func_compiler.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: OperandType::Tmp(check_tmp),
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: 0,
+                        });
+                        func_compiler.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Cv(cv),
+                            op2: default_val,
+                            result: OperandType::Unused,
+                            line: 0,
+                        });
+                        let after = func_compiler.op_array.current_offset();
+                        func_compiler.op_array.patch_jump(jmp_skip, after);
+                    }
                 }
 
                 for s in body {
@@ -869,9 +899,37 @@ impl Compiler {
                                     method_compiler.op_array.get_or_create_cv(b"this");
                                 }
 
-                                // Set up parameter CVs
+                                // Set up parameter CVs with default values
                                 for param in params {
-                                    method_compiler.op_array.get_or_create_cv(&param.name);
+                                    let cv = method_compiler.op_array.get_or_create_cv(&param.name);
+                                    if let Some(default_expr) = &param.default {
+                                        let default_val = method_compiler.compile_expr(default_expr)?;
+                                        let undef_idx = method_compiler.op_array.add_literal(Value::Undef);
+                                        let check_tmp = method_compiler.op_array.alloc_temp();
+                                        method_compiler.op_array.emit(Op {
+                                            opcode: OpCode::Identical,
+                                            op1: OperandType::Cv(cv),
+                                            op2: OperandType::Const(undef_idx),
+                                            result: OperandType::Tmp(check_tmp),
+                                            line: 0,
+                                        });
+                                        let jmp_skip = method_compiler.op_array.emit(Op {
+                                            opcode: OpCode::JmpZ,
+                                            op1: OperandType::Tmp(check_tmp),
+                                            op2: OperandType::JmpTarget(0),
+                                            result: OperandType::Unused,
+                                            line: 0,
+                                        });
+                                        method_compiler.op_array.emit(Op {
+                                            opcode: OpCode::Assign,
+                                            op1: OperandType::Cv(cv),
+                                            op2: default_val,
+                                            result: OperandType::Unused,
+                                            line: 0,
+                                        });
+                                        let after = method_compiler.op_array.current_offset();
+                                        method_compiler.op_array.patch_jump(jmp_skip, after);
+                                    }
                                 }
 
                                 for s in body_stmts {
