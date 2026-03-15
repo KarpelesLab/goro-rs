@@ -2224,11 +2224,60 @@ impl Parser {
                 loop {
                     match self.peek().clone() {
                         TokenKind::Variable(name) => {
+                            let var_span = self.span();
                             self.advance();
-                            parts.push(StringPart::Expr(Expr {
+                            let mut expr = Expr {
                                 kind: ExprKind::Variable(name),
-                                span: self.span(),
-                            }));
+                                span: var_span,
+                            };
+                            // Check for ->property access
+                            if matches!(self.peek(), TokenKind::Arrow) {
+                                self.advance(); // consume ->
+                                if let TokenKind::Identifier(prop_name) = self.peek().clone() {
+                                    self.advance();
+                                    expr = Expr {
+                                        kind: ExprKind::PropertyAccess {
+                                            object: Box::new(expr),
+                                            property: Box::new(Expr {
+                                                kind: ExprKind::Identifier(prop_name),
+                                                span: var_span,
+                                            }),
+                                            nullsafe: false,
+                                        },
+                                        span: var_span,
+                                    };
+                                }
+                            }
+                            // Check for [index] access
+                            else if matches!(self.peek(), TokenKind::OpenBracket) {
+                                self.advance(); // consume [
+                                let index = match self.peek().clone() {
+                                    TokenKind::LongNumber(n) => {
+                                        self.advance();
+                                        Expr { kind: ExprKind::Int(n), span: var_span }
+                                    }
+                                    TokenKind::Variable(idx_name) => {
+                                        self.advance();
+                                        Expr { kind: ExprKind::Variable(idx_name), span: var_span }
+                                    }
+                                    TokenKind::Identifier(key) => {
+                                        self.advance();
+                                        Expr { kind: ExprKind::String(key), span: var_span }
+                                    }
+                                    _ => Expr { kind: ExprKind::Int(0), span: var_span },
+                                };
+                                if matches!(self.peek(), TokenKind::CloseBracket) {
+                                    self.advance(); // consume ]
+                                }
+                                expr = Expr {
+                                    kind: ExprKind::ArrayAccess {
+                                        array: Box::new(expr),
+                                        index: Some(Box::new(index)),
+                                    },
+                                    span: var_span,
+                                };
+                            }
+                            parts.push(StringPart::Expr(expr));
                         }
                         TokenKind::InterpolatedStringPart(s) => {
                             self.advance();

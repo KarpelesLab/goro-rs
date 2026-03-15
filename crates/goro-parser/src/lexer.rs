@@ -391,6 +391,68 @@ impl<'a> Lexer<'a> {
                         TokenKind::Variable(var_name),
                         Span::new(self.pos as u32, self.pos as u32, self.line),
                     ));
+                    // Check for ->property access (e.g., "$obj->name")
+                    if self.peek() == Some(b'-') && self.peek_at(1) == Some(b'>') {
+                        self.advance(); // consume -
+                        self.advance(); // consume >
+                        self.pending.push(Token::new(
+                            TokenKind::Arrow,
+                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                        ));
+                        if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
+                            let prop_name = self.scan_identifier();
+                            self.pending.push(Token::new(
+                                TokenKind::Identifier(prop_name),
+                                Span::new(self.pos as u32, self.pos as u32, self.line),
+                            ));
+                        }
+                    }
+                    // Check for [index] access (e.g., "$arr[0]", "$arr[$key]")
+                    else if self.peek() == Some(b'[') {
+                        self.advance(); // consume [
+                        self.pending.push(Token::new(
+                            TokenKind::OpenBracket,
+                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                        ));
+                        // Scan index: could be number, string, or variable
+                        match self.peek() {
+                            Some(b'0'..=b'9') => {
+                                let num_kind = self.scan_number();
+                                self.pending.push(Token::new(
+                                    num_kind,
+                                    Span::new(self.pos as u32, self.pos as u32, self.line),
+                                ));
+                            }
+                            Some(b'$') => {
+                                self.advance();
+                                let idx_var = self.scan_identifier();
+                                self.pending.push(Token::new(
+                                    TokenKind::Variable(idx_var),
+                                    Span::new(self.pos as u32, self.pos as u32, self.line),
+                                ));
+                            }
+                            Some(b'\'') | Some(b'"') => {
+                                // Skip for now - string key in interpolation
+                            }
+                            _ => {
+                                // Bare identifier as key
+                                if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
+                                    let key = self.scan_identifier();
+                                    self.pending.push(Token::new(
+                                        TokenKind::Identifier(key),
+                                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                                    ));
+                                }
+                            }
+                        }
+                        if self.peek() == Some(b']') {
+                            self.advance();
+                            self.pending.push(Token::new(
+                                TokenKind::CloseBracket,
+                                Span::new(self.pos as u32, self.pos as u32, self.line),
+                            ));
+                        }
+                    }
                 }
                 Some(ch) => {
                     self.advance();
