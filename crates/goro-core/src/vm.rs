@@ -1035,6 +1035,45 @@ impl Vm {
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::IncludeFile => {
+                    let path_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let path_str = path_val.to_php_string().to_string_lossy();
+
+                    // Try to read and execute the file
+                    let path: &str = &path_str;
+                    let result = match std::fs::read(path) {
+                        Ok(source) => {
+                            // Compile and execute
+                            let mut lexer = goro_parser::Lexer::new(&source);
+                            let tokens = lexer.tokenize();
+                            let mut parser = goro_parser::Parser::new(tokens);
+                            match parser.parse() {
+                                Ok(program) => {
+                                    let compiler = crate::compiler::Compiler::new();
+                                    match compiler.compile(&program) {
+                                        Ok((inc_op_array, inc_classes)) => {
+                                            // Register classes from included file
+                                            for class in inc_classes {
+                                                self.pending_classes.push(class);
+                                            }
+                                            // Execute included file's op_array
+                                            let inc_cvs = vec![Value::Undef; inc_op_array.cv_names.len()];
+                                            match self.execute_op_array(&inc_op_array, inc_cvs) {
+                                                Ok(v) => v,
+                                                Err(_) => Value::False,
+                                            }
+                                        }
+                                        Err(_) => Value::False,
+                                    }
+                                }
+                                Err(_) => Value::False,
+                            }
+                        }
+                        Err(_) => Value::False,
+                    };
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
                 OpCode::LoadConst | OpCode::FastConcat => {
                     // TODO: implement
                 }

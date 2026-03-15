@@ -2032,10 +2032,16 @@ impl Compiler {
             }
 
             ExprKind::Include { kind, path } => {
-                // TODO: implement proper include/require
-                let _ = self.compile_expr(path)?;
-                let idx = self.op_array.add_literal(Value::True);
-                Ok(OperandType::Const(idx))
+                let path_op = self.compile_expr(path)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::IncludeFile,
+                    op1: path_op,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::Eval(inner) => {
