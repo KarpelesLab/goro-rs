@@ -313,69 +313,144 @@ pub fn do_sprintf(args: &[Value]) -> String {
     let format = args[0].to_php_string();
     let format_bytes = format.as_bytes();
 
-    let mut result = Vec::new();
+    let mut result = String::new();
     let mut arg_idx = 1;
     let mut i = 0;
 
     while i < format_bytes.len() {
         if format_bytes[i] == b'%' {
             i += 1;
-            if i >= format_bytes.len() {
-                break;
-            }
+            if i >= format_bytes.len() { break; }
             if format_bytes[i] == b'%' {
-                result.push(b'%');
+                result.push('%');
                 i += 1;
                 continue;
             }
 
-            // Simple format specifier parsing
-            // Skip flags, width, precision for now - handle basic %s, %d, %f
+            // Parse format specifier: %[flags][width][.precision]type
+            // Flags: -, +, space, 0, '
+            let mut pad_char = b' ';
+            let mut left_align = false;
+            let mut show_sign = false;
+            let mut pad_zero = false;
+
+            // Flags
+            loop {
+                if i >= format_bytes.len() { break; }
+                match format_bytes[i] {
+                    b'-' => { left_align = true; i += 1; }
+                    b'+' => { show_sign = true; i += 1; }
+                    b'0' => { pad_zero = true; pad_char = b'0'; i += 1; }
+                    b' ' => { i += 1; } // space flag
+                    b'\'' => {
+                        i += 1;
+                        if i < format_bytes.len() { pad_char = format_bytes[i]; i += 1; }
+                    }
+                    _ => break,
+                }
+            }
+
+            // Width
+            let mut width: usize = 0;
+            while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
+                width = width * 10 + (format_bytes[i] - b'0') as usize;
+                i += 1;
+            }
+
+            // Precision
+            let mut precision: Option<usize> = None;
+            if i < format_bytes.len() && format_bytes[i] == b'.' {
+                i += 1;
+                let mut prec = 0;
+                while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
+                    prec = prec * 10 + (format_bytes[i] - b'0') as usize;
+                    i += 1;
+                }
+                precision = Some(prec);
+            }
+
+            if i >= format_bytes.len() { break; }
             let spec = format_bytes[i];
+            i += 1;
+
             let arg = args.get(arg_idx).unwrap_or(&Value::Null);
             arg_idx += 1;
 
-            match spec {
+            let formatted = match spec {
                 b's' => {
-                    result.extend_from_slice(arg.to_php_string().as_bytes());
+                    let s = arg.to_php_string().to_string_lossy();
+                    if let Some(prec) = precision {
+                        s.chars().take(prec).collect::<String>()
+                    } else {
+                        s
+                    }
                 }
                 b'd' => {
-                    result.extend_from_slice(arg.to_long().to_string().as_bytes());
+                    let n = arg.to_long();
+                    if show_sign && n >= 0 { format!("+{}", n) } else { n.to_string() }
                 }
-                b'f' => {
-                    result.extend_from_slice(
-                        format!("{:.6}", arg.to_double()).as_bytes(),
-                    );
+                b'f' | b'F' => {
+                    let f = arg.to_double();
+                    let prec = precision.unwrap_or(6);
+                    if show_sign && f >= 0.0 { format!("+{:.prec$}", f) } else { format!("{:.prec$}", f) }
                 }
-                b'x' => {
-                    result.extend_from_slice(format!("{:x}", arg.to_long()).as_bytes());
+                b'e' => {
+                    let f = arg.to_double();
+                    let prec = precision.unwrap_or(6);
+                    format!("{:.prec$e}", f)
                 }
-                b'X' => {
-                    result.extend_from_slice(format!("{:X}", arg.to_long()).as_bytes());
+                b'E' => {
+                    let f = arg.to_double();
+                    let prec = precision.unwrap_or(6);
+                    format!("{:.prec$E}", f)
                 }
-                b'o' => {
-                    result.extend_from_slice(format!("{:o}", arg.to_long()).as_bytes());
+                b'g' | b'G' => {
+                    let f = arg.to_double();
+                    let prec = precision.unwrap_or(6);
+                    // Use shorter of %e and %f
+                    let ef = format!("{:.prec$e}", f);
+                    let ff = format!("{:.prec$}", f);
+                    if ef.len() < ff.len() { ef } else { ff }
                 }
-                b'b' => {
-                    result.extend_from_slice(format!("{:b}", arg.to_long()).as_bytes());
-                }
-                b'c' => {
-                    result.push(arg.to_long() as u8);
-                }
+                b'x' => format!("{:x}", arg.to_long()),
+                b'X' => format!("{:X}", arg.to_long()),
+                b'o' => format!("{:o}", arg.to_long()),
+                b'b' => format!("{:b}", arg.to_long()),
+                b'c' => String::from(arg.to_long() as u8 as char),
+                b'u' => format!("{}", arg.to_long() as u64),
                 _ => {
-                    result.push(b'%');
-                    result.push(spec);
-                    arg_idx -= 1; // didn't consume arg
+                    arg_idx -= 1;
+                    format!("%{}", spec as char)
                 }
+            };
+
+            // Apply width and padding
+            if width > 0 && formatted.len() < width {
+                let padding = width - formatted.len();
+                if left_align {
+                    result.push_str(&formatted);
+                    for _ in 0..padding { result.push(pad_char as char); }
+                } else {
+                    // For zero-padding with sign, put sign before zeros
+                    if pad_zero && (formatted.starts_with('-') || formatted.starts_with('+')) {
+                        result.push(formatted.chars().next().unwrap());
+                        for _ in 0..padding { result.push('0'); }
+                        result.push_str(&formatted[1..]);
+                    } else {
+                        for _ in 0..padding { result.push(pad_char as char); }
+                        result.push_str(&formatted);
+                    }
+                }
+            } else {
+                result.push_str(&formatted);
             }
-            i += 1;
         } else {
-            result.push(format_bytes[i]);
+            result.push(format_bytes[i] as char);
             i += 1;
         }
     }
 
-    String::from_utf8_lossy(&result).into_owned()
+    result
 }
 
 fn nl2br(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
