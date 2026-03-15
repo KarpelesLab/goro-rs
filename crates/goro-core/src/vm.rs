@@ -54,6 +54,8 @@ pub struct Vm {
     pending_classes: Vec<ClassEntry>,
     /// Whether we're executing the top-level script (vs a function)
     is_global_scope: bool,
+    /// Current exception being thrown (used during try/catch)
+    current_exception: Option<Value>,
 }
 
 impl Vm {
@@ -69,6 +71,7 @@ impl Vm {
             next_object_id: 1,
             pending_classes: Vec::new(),
             is_global_scope: true,
+            current_exception: None,
         }
     }
 
@@ -119,6 +122,8 @@ impl Vm {
         let mut foreach_positions: HashMap<u32, usize> = HashMap::new();
         // Maps CV index -> static var key (for saving back on write)
         let mut static_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
+        // Exception handler stack: (catch_target, finally_target, exception_tmp_idx)
+        let mut exception_handlers: Vec<(u32, u32, u32)> = Vec::new();
         // Maps CV index -> global var name (for saving back on write)
         let mut global_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
 
@@ -519,7 +524,11 @@ impl Vm {
 
                     let func_name_lower: Vec<u8> = call.name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
 
-                    if let Some(func) = self.functions.get(&func_name_lower).copied() {
+                    // Handle built-in return (for getter methods on objects)
+                    if func_name_lower == b"__builtin_return" {
+                        let result = call.args.first().cloned().unwrap_or(Value::Null);
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
                         // Built-in function
                         let result = func(self, &call.args).map_err(|e| VmError {
                             message: e.message,
@@ -580,6 +589,23 @@ impl Vm {
                         // If it's a constructor call and the class has no __construct, silently succeed
                         let name_bytes = call.name.as_bytes();
                         if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
+                            // For Exception-like classes, set message/code from args
+                            if !call.args.is_empty() {
+                                // First arg (after $this) is message, second is code
+                                // args[0] = $this (for method calls)
+                                let this_idx = if call.args.len() > 1 { 0 } else { usize::MAX };
+                                if this_idx == 0 {
+                                    if let Value::Object(obj) = &call.args[0] {
+                                        let mut obj_mut = obj.borrow_mut();
+                                        if call.args.len() > 1 {
+                                            obj_mut.set_property(b"message".to_vec(), call.args[1].clone());
+                                        }
+                                        if call.args.len() > 2 {
+                                            obj_mut.set_property(b"code".to_vec(), call.args[2].clone());
+                                        }
+                                    }
+                                }
+                            }
                             self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
                         } else {
                             return Err(VmError {
@@ -884,6 +910,50 @@ impl Vm {
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::TryBegin => {
+                    let catch_target = match op.op1 { OperandType::JmpTarget(t) => t, _ => 0 };
+                    let finally_target = match op.op2 { OperandType::JmpTarget(t) => t, _ => 0 };
+                    // Allocate a tmp to hold the caught exception
+                    let exc_tmp = if temp_count > 0 { (temp_count - 1) as u32 } else { 0 };
+                    exception_handlers.push((catch_target, finally_target, exc_tmp));
+                }
+
+                OpCode::TryEnd => {
+                    exception_handlers.pop();
+                }
+
+                OpCode::CatchException => {
+                    // Store current exception into the CV
+                    if let Some(exc) = self.current_exception.take() {
+                        self.write_operand(&op.op1, exc, &mut cvs, &mut tmps, &static_cv_keys);
+                    }
+                }
+
+                OpCode::Throw => {
+                    let exc_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+
+                    if let Some((catch_target, _finally_target, _exc_tmp)) = exception_handlers.pop() {
+                        // Store exception for the catch block to access
+                        self.current_exception = Some(exc_val);
+                        // Jump to catch handler
+                        ip = catch_target as usize;
+                    } else {
+                        // No handler - return error
+                        let msg = if let Value::Object(obj) = &exc_val {
+                            let obj = obj.borrow();
+                            let class = String::from_utf8_lossy(&obj.class_name).to_string();
+                            let message = obj.get_property(b"message");
+                            format!("Uncaught {}: {}", class, message.to_php_string().to_string_lossy())
+                        } else {
+                            format!("Uncaught exception: {}", exc_val.to_php_string().to_string_lossy())
+                        };
+                        return Err(VmError {
+                            message: msg,
+                            line: op.line,
+                        });
+                    }
+                }
+
                 OpCode::LoadConst | OpCode::FastConcat => {
                     // TODO: implement
                 }
@@ -941,6 +1011,23 @@ impl Vm {
 
                     let mut obj = PhpObject::new(class_name.as_bytes().to_vec(), obj_id);
 
+                    // Built-in Exception/Error classes get default properties
+                    if name_lower == b"exception" || name_lower == b"error"
+                        || name_lower == b"runtimeexception" || name_lower == b"logicexception"
+                        || name_lower == b"invalidargumentexception" || name_lower == b"typeerror"
+                        || name_lower == b"valueerror" || name_lower == b"overflowexception"
+                        || name_lower == b"underflowexception" || name_lower == b"rangeerror"
+                        || name_lower == b"badmethodcallexception" || name_lower == b"badfunctioncallexception"
+                        || name_lower == b"lengthexception" || name_lower == b"outofrangeexception"
+                        || name_lower == b"unexpectedvalueexception" || name_lower == b"domainexception"
+                        || name_lower == b"arithmeticerror" || name_lower == b"divisionbyzeroerror"
+                    {
+                        obj.set_property(b"message".to_vec(), Value::String(PhpString::empty()));
+                        obj.set_property(b"code".to_vec(), Value::Long(0));
+                        obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
+                        obj.set_property(b"line".to_vec(), Value::Long(0));
+                    }
+
                     // Initialize properties from class definition
                     if let Some(class) = self.classes.get(&name_lower) {
                         for prop in &class.properties {
@@ -949,7 +1036,6 @@ impl Vm {
                             }
                         }
                     }
-                    // stdClass is always available even without declaration
 
                     self.write_operand(
                         &op.result,
@@ -985,15 +1071,36 @@ impl Vm {
                     let method_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
 
                     if let Value::Object(obj) = &obj_val {
-                        let obj_borrow = obj.borrow();
-                        let class_name_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_name_orig;
+                        let class_name_lower: Vec<u8>;
                         let method_name_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let builtin_result;
+                        {
+                            let obj_borrow = obj.borrow();
+                            class_name_orig = obj_borrow.class_name.clone();
+                            class_name_lower = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            builtin_result = match method_name_lower.as_slice() {
+                                b"getmessage" => Some(obj_borrow.get_property(b"message")),
+                                b"getcode" => Some(obj_borrow.get_property(b"code")),
+                                b"getfile" => Some(obj_borrow.get_property(b"file")),
+                                b"getline" => Some(obj_borrow.get_property(b"line")),
+                                b"gettrace" | b"gettracestring" | b"gettracerasstring" | b"getprevious" => Some(Value::Null),
+                                b"__tostring" => Some(obj_borrow.get_property(b"message")),
+                                _ => None,
+                            };
+                        } // obj_borrow dropped here
 
+                        if let Some(result) = builtin_result {
+                            self.pending_calls.push(PendingCall {
+                                name: PhpString::from_bytes(b"__builtin_return"),
+                                args: vec![result],
+                            });
+                        } else
                         // Find the method in the class
                         if let Some(class) = self.classes.get(&class_name_lower) {
                             if let Some(method) = class.get_method(&method_name_lower) {
                                 // Create a synthetic function name for the pending call
-                                let mut func_name = obj_borrow.class_name.clone();
+                                let mut func_name = class_name_orig.clone();
                                 func_name.extend_from_slice(b"::");
                                 func_name.extend_from_slice(&method.name);
 
@@ -1007,19 +1114,21 @@ impl Vm {
                                     args: vec![obj_val.clone()], // $this is first arg, mapped to CV 0
                                 });
                             } else {
-                                // Method not found - push a dummy call that will fail
+                                // Method not found - push call with $this
                                 self.pending_calls.push(PendingCall {
                                     name: method_name,
-                                    args: vec![],
+                                    args: vec![obj_val.clone()],
                                 });
                             }
                         } else {
+                            // Class not found in class table - push call with $this
                             self.pending_calls.push(PendingCall {
                                 name: method_name,
-                                args: vec![],
+                                args: vec![obj_val.clone()],
                             });
                         }
                     } else {
+                        // Not an object - push call without $this
                         self.pending_calls.push(PendingCall {
                             name: method_name,
                             args: vec![],

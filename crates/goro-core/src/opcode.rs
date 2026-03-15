@@ -156,6 +156,16 @@ pub enum OpCode {
     /// Declare a class: op1 = class name (const), op2 = class def index (const)
     DeclareClass,
 
+    // ---- Exceptions ----
+    /// Throw: op1 = exception value. Sets VM exception state.
+    Throw,
+    /// Begin try block: op1 = jump target for catch, op2 = jump target for finally
+    TryBegin,
+    /// End try/catch, clear exception handler
+    TryEnd,
+    /// Catch: store the current exception into CV. op1 = CV target
+    CatchException,
+
     // ---- Type checking ----
     TypeCheck,
 

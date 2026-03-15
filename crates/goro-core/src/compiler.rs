@@ -715,19 +715,10 @@ impl Compiler {
             }
 
             StmtKind::Throw(expr) => {
-                // For now, treat throw as a fatal error - output the message
                 let val = self.compile_expr(expr)?;
                 self.op_array.emit(Op {
-                    opcode: OpCode::Echo,
+                    opcode: OpCode::Throw,
                     op1: val,
-                    op2: OperandType::Unused,
-                    result: OperandType::Unused,
-                    line: stmt.span.line,
-                });
-                let null_idx = self.op_array.add_literal(Value::Null);
-                self.op_array.emit(Op {
-                    opcode: OpCode::Return,
-                    op1: OperandType::Const(null_idx),
                     op2: OperandType::Unused,
                     result: OperandType::Unused,
                     line: stmt.span.line,
@@ -736,34 +727,90 @@ impl Compiler {
             }
 
             StmtKind::TryCatch { try_body, catches, finally_body } => {
-                // Simplified try/catch: just execute the try body
-                // TODO: proper exception handling
+                // Emit TryBegin with jump target for catch handler
+                let try_begin = self.op_array.emit(Op {
+                    opcode: OpCode::TryBegin,
+                    op1: OperandType::JmpTarget(0), // catch target (patched)
+                    op2: OperandType::JmpTarget(0), // finally target (patched)
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+
+                // Compile try body
                 for s in try_body {
                     self.compile_stmt(s)?;
                 }
-                // Skip catch bodies for now (jump over them)
-                let jmp_end = self.op_array.emit(Op {
-                    opcode: OpCode::Jmp,
-                    op1: OperandType::JmpTarget(0),
+
+                // End of try: clear exception handler and jump to finally/end
+                self.op_array.emit(Op {
+                    opcode: OpCode::TryEnd,
+                    op1: OperandType::Unused,
                     op2: OperandType::Unused,
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
-                // Compile catch bodies (unreachable for now, but avoids compile errors)
-                for catch in catches {
+                let jmp_after_try = self.op_array.emit(Op {
+                    opcode: OpCode::Jmp,
+                    op1: OperandType::JmpTarget(0), // patched to finally/end
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+
+                // Compile catch blocks
+                let catch_start = self.op_array.current_offset();
+                let mut end_of_catch_jumps = Vec::new();
+
+                for (_i, catch) in catches.iter().enumerate() {
+                    // Assign exception to variable if specified
+                    if let Some(var_name) = &catch.variable {
+                        let cv = self.op_array.get_or_create_cv(var_name);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::CatchException,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    }
+
                     for s in &catch.body {
                         self.compile_stmt(s)?;
                     }
+
+                    // Jump to finally/end after catch body
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    end_of_catch_jumps.push(jmp);
                 }
-                if let Some(finally_stmts) = finally_body {
+
+                // Patch TryBegin to point to catch start
+                self.op_array.ops[try_begin as usize].op1 = OperandType::JmpTarget(catch_start);
+
+                // Compile finally block
+                let finally_or_end = if let Some(finally_stmts) = finally_body {
                     let finally_start = self.op_array.current_offset();
-                    self.op_array.patch_jump(jmp_end, finally_start);
                     for s in finally_stmts {
                         self.compile_stmt(s)?;
                     }
+                    // Patch TryBegin's finally target
+                    self.op_array.ops[try_begin as usize].op2 = OperandType::JmpTarget(finally_start);
+                    self.op_array.current_offset()
                 } else {
                     let end = self.op_array.current_offset();
-                    self.op_array.patch_jump(jmp_end, end);
+                    self.op_array.ops[try_begin as usize].op2 = OperandType::JmpTarget(end);
+                    end
+                };
+
+                // Patch all jump-to-end targets
+                self.op_array.patch_jump(jmp_after_try, finally_or_end);
+                for jmp in end_of_catch_jumps {
+                    self.op_array.patch_jump(jmp, finally_or_end);
                 }
                 Ok(())
             }
