@@ -54,6 +54,8 @@ pub struct Vm {
     pending_classes: Vec<ClassEntry>,
     /// Whether we're executing the top-level script (vs a function)
     is_global_scope: bool,
+    /// User-defined constants (from define())
+    pub constants: HashMap<Vec<u8>, Value>,
     /// Current exception being thrown (used during try/catch)
     current_exception: Option<Value>,
 }
@@ -72,6 +74,7 @@ impl Vm {
             pending_classes: Vec::new(),
             is_global_scope: true,
             current_exception: None,
+            constants: HashMap::new(),
         }
     }
 
@@ -1018,6 +1021,18 @@ impl Vm {
                     if let Some(class) = self.classes.get_mut(&class_lower) {
                         class.static_properties.insert(prop_name.as_bytes().to_vec(), value);
                     }
+                }
+
+                OpCode::ConstLookup => {
+                    let name = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let name_bytes = name.as_bytes();
+                    // Look up in constants table
+                    let val = self.constants.get(name_bytes).cloned()
+                        .unwrap_or_else(|| {
+                            // If not found, return the name as a string (PHP warning: undefined constant)
+                            Value::String(name.clone())
+                        });
+                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 OpCode::LoadConst | OpCode::FastConcat => {

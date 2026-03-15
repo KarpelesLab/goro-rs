@@ -258,15 +258,16 @@ fn trigger_error(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // === Constants ===
 
-fn define(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // TODO: implement constant table
+fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let value = args.get(1).cloned().unwrap_or(Value::Null);
+    vm.constants.insert(name.as_bytes().to_vec(), value);
     Ok(Value::True)
 }
 
-fn constant(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    // Return the constant name as its value (stub)
-    Ok(Value::String(name))
+    Ok(vm.constants.get(name.as_bytes()).cloned().unwrap_or(Value::Null))
 }
 
 // === Output buffering ===

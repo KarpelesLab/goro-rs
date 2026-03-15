@@ -1932,7 +1932,19 @@ impl Compiler {
                     b"sort_flag_case" => Value::Long(8),
                     b"array_filter_use_both" => Value::Long(1),
                     b"array_filter_use_key" => Value::Long(2),
-                    _ => Value::String(PhpString::from_vec(name.clone())),
+                    _ => {
+                        // Unknown identifier - emit runtime constant lookup
+                        let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name.clone())));
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ConstLookup,
+                            op1: OperandType::Const(name_idx),
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(tmp));
+                    }
                 };
                 let idx = self.op_array.add_literal(val);
                 Ok(OperandType::Const(idx))

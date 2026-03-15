@@ -230,9 +230,9 @@ fn php_sapi_name(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     )))
 }
 
-fn defined(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // TODO: implement constant table lookup
-    Ok(Value::False)
+fn defined(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(if vm.constants.contains_key(name.as_bytes()) { Value::True } else { Value::False })
 }
 
 fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
