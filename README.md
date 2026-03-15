@@ -12,9 +12,9 @@ Early development. Core language features and basic OOP work.
 |---|---|---|---|
 | tests/lang | 48 | 213 | 22.5% |
 | tests/basic | 10 | 110 | 9.1% |
-| Zend/tests | 148 | 871 | 17.0% |
+| Zend/tests | 150 | 871 | 17.2% |
 | ext/standard (sampled) | ~35 | 400 | ~8.8% |
-| **Total** | **~241** | **~1594** | **~14.5%** |
+| **Total** | **~243** | **~1594** | **~14.5%** |
 
 ## Features
 
