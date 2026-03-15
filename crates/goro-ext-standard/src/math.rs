@@ -48,6 +48,14 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_product", array_product);
     vm.register_function(b"random_int", random_int);
     vm.register_function(b"random_bytes", random_bytes_fn);
+    vm.register_function(b"sinh", sinh_fn);
+    vm.register_function(b"cosh", cosh_fn);
+    vm.register_function(b"tanh", tanh_fn);
+    vm.register_function(b"asinh", asinh_fn);
+    vm.register_function(b"acosh", acosh_fn);
+    vm.register_function(b"atanh", atanh_fn);
+    vm.register_function(b"fdiv", fdiv_fn);
+    vm.register_function(b"array_sum", array_sum);
 }
 
 fn abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -370,4 +378,27 @@ fn random_bytes_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let len = args.first().map(|v| v.to_long()).unwrap_or(16) as usize;
     let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 13) as u8).collect(); // Not cryptographic!
     Ok(Value::String(goro_core::string::PhpString::from_vec(bytes)))
+}
+fn sinh_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().sinh()))
+}
+fn cosh_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().cosh()))
+}
+fn tanh_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().tanh()))
+}
+fn asinh_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().asinh()))
+}
+fn acosh_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().acosh()))
+}
+fn atanh_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(args.first().unwrap_or(&Value::Null).to_double().atanh()))
+}
+fn fdiv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = args.first().unwrap_or(&Value::Null).to_double();
+    let b = args.get(1).unwrap_or(&Value::Null).to_double();
+    Ok(Value::Double(a / b))
 }
