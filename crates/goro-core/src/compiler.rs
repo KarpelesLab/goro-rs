@@ -72,8 +72,26 @@ impl Compiler {
     /// Compile a complete program
     /// Compile a program, returning the op_array and compiled classes
     pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>)> {
+        // First pass: compile all top-level function and class declarations
+        // This enables forward references (calling a function before it's declared)
         for stmt in &program.statements {
-            self.compile_stmt(stmt)?;
+            match &stmt.kind {
+                StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => {
+                    self.compile_stmt(stmt)?;
+                }
+                _ => {}
+            }
+        }
+        // Second pass: compile everything else
+        for stmt in &program.statements {
+            match &stmt.kind {
+                StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => {
+                    // Already compiled in first pass
+                }
+                _ => {
+                    self.compile_stmt(stmt)?;
+                }
+            }
         }
         // Emit implicit return null at end of script
         let null_idx = self.op_array.add_literal(Value::Null);
