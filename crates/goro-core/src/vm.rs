@@ -1571,6 +1571,43 @@ impl Vm {
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
 
+                    // Check for abstract class or interface
+                    if let Some(class) = self.classes.get(&name_lower) {
+                        if class.is_abstract || class.is_interface {
+                            // Create an Error object and throw it
+                            let err_msg = if class.is_interface {
+                                format!(
+                                    "Cannot instantiate interface {}",
+                                    class_name.to_string_lossy()
+                                )
+                            } else {
+                                format!(
+                                    "Cannot instantiate abstract class {}",
+                                    class_name.to_string_lossy()
+                                )
+                            };
+                            let err_id = self.next_object_id;
+                            self.next_object_id += 1;
+                            let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
+                            err_obj.set_property(
+                                b"message".to_vec(),
+                                Value::String(PhpString::from_string(err_msg.clone())),
+                            );
+                            self.current_exception =
+                                Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: err_msg,
+                                    line: op.line,
+                                });
+                            }
+                        }
+                    }
+
                     let obj_id = self.next_object_id;
                     self.next_object_id += 1;
 
