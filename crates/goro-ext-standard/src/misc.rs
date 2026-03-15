@@ -921,8 +921,36 @@ fn get_class(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value
 fn get_declared_classes(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
 }
-fn property_exists(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn method_exists(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn property_exists(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let class_or_obj = args.first().unwrap_or(&Value::Null);
+    let prop_name = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    match class_or_obj {
+        Value::Object(obj) => {
+            Ok(if obj.borrow().has_property(prop_name.as_bytes()) { Value::True } else { Value::False })
+        }
+        _ => Ok(Value::False),
+    }
+}
+fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let class_or_obj = args.first().unwrap_or(&Value::Null);
+    let method_name = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    let class_lower: Vec<u8> = match class_or_obj {
+        Value::Object(obj) => {
+            let obj = obj.borrow();
+            obj.class_name.iter().map(|c| c.to_ascii_lowercase()).collect()
+        }
+        Value::String(s) => s.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect(),
+        _ => return Ok(Value::False),
+    };
+
+    Ok(if let Some(class) = vm.classes.get(&class_lower) {
+        if class.methods.contains_key(&method_lower) { Value::True } else { Value::False }
+    } else {
+        Value::False
+    })
+}
 fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(match args.first() {
         Some(Value::Object(_)) => Value::True,
@@ -1133,7 +1161,7 @@ fn strripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn strcmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args.first().unwrap_or(&Value::Null).to_php_string();
     let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    Ok(Value::Long(a.as_bytes().cmp(b.as_bytes()) as i64))
+    Ok(Value::Long(php_strcmp(a.as_bytes(), b.as_bytes())))
 }
 fn strncmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -1141,20 +1169,35 @@ fn strncmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let n = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
     let sa = &a.as_bytes()[..n.min(a.len())];
     let sb = &b.as_bytes()[..n.min(b.len())];
-    Ok(Value::Long(sa.cmp(sb) as i64))
+    Ok(Value::Long(php_strcmp(sa, sb)))
 }
 fn strcasecmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
-    Ok(Value::Long(a.cmp(&b) as i64))
+    let s1 = args.first().unwrap_or(&Value::Null).to_php_string();
+    let s2 = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let a: Vec<u8> = s1.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect();
+    let b: Vec<u8> = s2.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect();
+    Ok(Value::Long(php_strcmp(&a, &b)))
 }
 fn strncasecmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
+    let s1 = args.first().unwrap_or(&Value::Null).to_php_string();
+    let s2 = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let a: Vec<u8> = s1.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect();
+    let b: Vec<u8> = s2.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect();
     let n = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
     let sa = &a[..n.min(a.len())];
     let sb = &b[..n.min(b.len())];
-    Ok(Value::Long(sa.cmp(sb) as i64))
+    Ok(Value::Long(php_strcmp(sa, sb)))
+}
+
+/// PHP-style string comparison returning the byte difference (not just -1/0/1)
+fn php_strcmp(a: &[u8], b: &[u8]) -> i64 {
+    let min_len = a.len().min(b.len());
+    for i in 0..min_len {
+        if a[i] != b[i] {
+            return (a[i] as i64) - (b[i] as i64);
+        }
+    }
+    (a.len() as i64) - (b.len() as i64)
 }
 fn str_contains_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let h = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -1314,8 +1357,29 @@ fn preg_quote(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // Additional commonly needed stubs
 fn register_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
-fn interface_exists_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn trait_exists_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name_lower: Vec<u8> = name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    // Check both user-defined and built-in interfaces
+    let is_builtin = matches!(name_lower.as_slice(),
+        b"iterator" | b"iteratoraggregate" | b"throwable" | b"arrayaccess"
+        | b"serializable" | b"countable" | b"stringable" | b"traversable"
+    );
+    Ok(if is_builtin || vm.classes.get(&name_lower).map(|c| c.is_interface).unwrap_or(false) {
+        Value::True
+    } else {
+        Value::False
+    })
+}
+fn trait_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name_lower: Vec<u8> = name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    Ok(if vm.classes.get(&name_lower).map(|c| c.is_trait).unwrap_or(false) {
+        Value::True
+    } else {
+        Value::False
+    })
+}
 fn gc_collect_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
 fn gc_enabled_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn gc_disable_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
