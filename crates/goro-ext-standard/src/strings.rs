@@ -363,7 +363,26 @@ pub fn do_sprintf(args: &[Value]) -> String {
                 continue;
             }
 
-            // Parse format specifier: %[flags][width][.precision]type
+            // Parse format specifier: %[argnum$][flags][width][.precision]type
+            // Check for argument position: %N$ (e.g., %1$s, %2$d)
+            let mut use_arg_idx = arg_idx;
+            {
+                let save_i = i;
+                let mut num = 0usize;
+                let mut has_num = false;
+                while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
+                    num = num * 10 + (format_bytes[i] - b'0') as usize;
+                    has_num = true;
+                    i += 1;
+                }
+                if has_num && i < format_bytes.len() && format_bytes[i] == b'$' {
+                    use_arg_idx = num; // 1-based index
+                    i += 1; // skip $
+                } else {
+                    i = save_i; // not a position specifier, backtrack
+                }
+            }
+
             // Flags: -, +, space, 0, '
             let mut pad_char = b' ';
             let mut left_align = false;
@@ -428,8 +447,10 @@ pub fn do_sprintf(args: &[Value]) -> String {
             let spec = format_bytes[i];
             i += 1;
 
-            let arg = args.get(arg_idx).unwrap_or(&Value::Null);
-            arg_idx += 1;
+            let arg = args.get(use_arg_idx).unwrap_or(&Value::Null);
+            if use_arg_idx == arg_idx {
+                arg_idx += 1;
+            }
 
             let formatted = match spec {
                 b's' => {
