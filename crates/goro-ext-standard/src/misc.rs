@@ -244,9 +244,12 @@ pub fn register(vm: &mut Vm) {
 
 // === Error handling ===
 
-fn error_reporting(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Stub: just return the current level (E_ALL)
-    Ok(Value::Long(32767))
+fn error_reporting(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let old = vm.error_reporting;
+    if let Some(level) = args.first() {
+        vm.error_reporting = level.to_long();
+    }
+    Ok(Value::Long(old))
 }
 
 fn set_error_handler(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

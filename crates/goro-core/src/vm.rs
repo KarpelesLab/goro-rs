@@ -58,6 +58,8 @@ pub struct Vm {
     pub constants: HashMap<Vec<u8>, Value>,
     /// Current exception being thrown (used during try/catch)
     current_exception: Option<Value>,
+    /// Error reporting level
+    error_reporting: i64,
 }
 
 impl Vm {
@@ -74,6 +76,7 @@ impl Vm {
             pending_classes: Vec::new(),
             is_global_scope: true,
             current_exception: None,
+            error_reporting: 32767, // E_ALL
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -87,6 +90,14 @@ impl Vm {
                 c.insert(b"default_charset".to_vec(), Value::String(PhpString::from_bytes(b"UTF-8")));
                 c
             },
+        }
+    }
+
+    /// Emit a PHP warning message to output
+    pub fn emit_warning(&mut self, msg: &str) {
+        if self.error_reporting > 0 {
+            let warning = format!("\nWarning: {} in Unknown on line 0\n", msg);
+            self.output.extend_from_slice(warning.as_bytes());
         }
     }
 
