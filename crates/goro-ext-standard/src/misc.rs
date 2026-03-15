@@ -309,8 +309,20 @@ fn func_get_arg(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn function_exists(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
-fn is_callable(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn is_callable(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    match val {
+        Value::String(s) => {
+            // Check if function name exists (simplified)
+            Ok(Value::True) // Most string callables are valid
+        }
+        Value::Object(_) => Ok(Value::True), // Objects with __invoke
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            Ok(if arr.len() == 2 { Value::True } else { Value::False })
+        }
+        _ => Ok(Value::False),
+    }
 }
 fn call_user_func(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // TODO: implement proper callable invocation
@@ -716,8 +728,18 @@ fn key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // === Misc ===
 
-fn ini_set(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn ini_get(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let value = args.get(1).cloned().unwrap_or(Value::Null);
+    let key = name.as_bytes().to_vec();
+    let old = vm.constants.get(&key).cloned().unwrap_or(Value::False);
+    vm.constants.insert(key, value);
+    Ok(old)
+}
+fn ini_get(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(vm.constants.get(name.as_bytes()).cloned().unwrap_or(Value::False))
+}
 fn ini_restore(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
 fn set_time_limit(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn php_assert(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

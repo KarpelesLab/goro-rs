@@ -349,6 +349,34 @@ impl Value {
                 let b = *b as f64;
                 if *a < b { -1 } else if *a > b { 1 } else { 0 }
             }
+            (Value::Array(a), Value::Array(b)) => {
+                let a = a.borrow();
+                let b = b.borrow();
+                // Compare by size first
+                if a.len() != b.len() {
+                    return if a.len() < b.len() { -1 } else { 1 };
+                }
+                // Compare element by element
+                for (key, a_val) in a.iter() {
+                    if let Some(b_val) = b.get(key) {
+                        let cmp = a_val.compare(b_val);
+                        if cmp != 0 { return cmp; }
+                    } else {
+                        return 1; // key exists in a but not b
+                    }
+                }
+                0
+            }
+            (Value::Null | Value::Undef, Value::Null | Value::Undef) => 0,
+            (Value::Null | Value::Undef, _) => -1,
+            (_, Value::Null | Value::Undef) => 1,
+            (Value::String(a), Value::String(b)) => {
+                match a.as_bytes().cmp(b.as_bytes()) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                }
+            }
             _ => {
                 let a = self.to_double();
                 let b = other.to_double();
