@@ -1136,8 +1136,47 @@ fn substr_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::Long(count))
 }
-fn substr_replace(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::String(PhpString::empty())) }
-fn str_ireplace(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::String(PhpString::empty())) }
+fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let subject = args.first().unwrap_or(&Value::Null).to_php_string();
+    let replacement = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let start = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let length = args.get(3).map(|v| Some(v.to_long())).unwrap_or(None);
+
+    let bytes = subject.as_bytes();
+    let len = bytes.len() as i64;
+    let s = if start < 0 { (len + start).max(0) as usize } else { start.min(len) as usize };
+    let e = match length {
+        Some(l) if l < 0 => (len + l).max(s as i64) as usize,
+        Some(l) => (s + l as usize).min(bytes.len()),
+        None => bytes.len(),
+    };
+
+    let mut result = Vec::new();
+    result.extend_from_slice(&bytes[..s]);
+    result.extend_from_slice(replacement.as_bytes());
+    if e < bytes.len() { result.extend_from_slice(&bytes[e..]); }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+fn str_ireplace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let search = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
+    let replace = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let subject = args.get(2).unwrap_or(&Value::Null).to_php_string();
+
+    let subj = subject.to_string_lossy();
+    let subj_lower = subj.to_lowercase();
+    let mut result = String::new();
+    let mut i = 0;
+    while i < subj.len() {
+        if i + search.len() <= subj_lower.len() && &subj_lower[i..i+search.len()] == search.as_str() {
+            result.push_str(&replace.to_string_lossy());
+            i += search.len();
+        } else {
+            result.push(subj.as_bytes()[i] as char);
+            i += 1;
+        }
+    }
+    Ok(Value::String(PhpString::from_string(result)))
+}
 fn stripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let h = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
     let n = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
