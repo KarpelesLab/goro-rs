@@ -130,6 +130,13 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_first", array_first_fn);
     vm.register_function(b"array_last", array_last_fn);
     vm.register_function(b"array_change_key_case", array_change_key_case_fn);
+    vm.register_function(b"array_diff_key", array_diff_key_fn);
+    vm.register_function(b"array_diff_assoc", array_diff_assoc_fn);
+    vm.register_function(b"array_diff_uassoc", array_diff_uassoc_fn);
+    vm.register_function(b"array_intersect_key", array_intersect_key_fn);
+    vm.register_function(b"array_intersect_assoc", array_intersect_assoc_fn);
+    vm.register_function(b"array_all", array_all_fn);
+    vm.register_function(b"array_any", array_any_fn);
     vm.register_function(b"array_multisort", array_multisort_fn);
     vm.register_function(b"highlight_string", highlight_string_fn);
     vm.register_function(b"fopen", fopen_fn);
@@ -1275,3 +1282,97 @@ fn scandir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Valu
 fn header_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
 fn headers_sent_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn http_response_code_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(200)) }
+
+fn array_diff_key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 2 { return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))); }
+    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
+        let a = a.borrow();
+        let b = b.borrow();
+        let b_keys: Vec<_> = b.keys().cloned().collect();
+        let mut result = PhpArray::new();
+        for (key, val) in a.iter() {
+            if !b_keys.contains(key) {
+                result.set(key.clone(), val.clone());
+            }
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    } else {
+        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    }
+}
+
+fn array_diff_assoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 2 { return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))); }
+    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
+        let a = a.borrow();
+        let b = b.borrow();
+        let mut result = PhpArray::new();
+        for (key, val) in a.iter() {
+            let b_val = b.get(key);
+            if b_val.is_none() || !b_val.unwrap().equals(val) {
+                result.set(key.clone(), val.clone());
+            }
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    } else {
+        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    }
+}
+
+fn array_intersect_key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 2 { return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))); }
+    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
+        let a = a.borrow();
+        let b = b.borrow();
+        let b_keys: Vec<_> = b.keys().cloned().collect();
+        let mut result = PhpArray::new();
+        for (key, val) in a.iter() {
+            if b_keys.contains(key) {
+                result.set(key.clone(), val.clone());
+            }
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    } else {
+        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    }
+}
+
+fn array_intersect_assoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 2 { return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))); }
+    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
+        let a = a.borrow();
+        let b = b.borrow();
+        let mut result = PhpArray::new();
+        for (key, val) in a.iter() {
+            if let Some(b_val) = b.get(key) {
+                if b_val.equals(val) {
+                    result.set(key.clone(), val.clone());
+                }
+            }
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    } else {
+        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    }
+}
+
+fn array_diff_uassoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Simplified: same as array_diff_assoc (ignores the callback for now)
+    array_diff_assoc_fn(_vm, args)
+}
+
+fn array_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // PHP 8.5: array_all($array, $callback) - returns true if all elements pass callback
+    // Without callable support, just check truthiness
+    if let Some(Value::Array(arr)) = args.first() {
+        let arr = arr.borrow();
+        Ok(if arr.values().all(|v| v.is_truthy()) { Value::True } else { Value::False })
+    } else { Ok(Value::False) }
+}
+
+fn array_any_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let arr = arr.borrow();
+        Ok(if arr.values().any(|v| v.is_truthy()) { Value::True } else { Value::False })
+    } else { Ok(Value::False) }
+}
