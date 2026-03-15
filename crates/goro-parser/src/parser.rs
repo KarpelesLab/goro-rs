@@ -2961,6 +2961,15 @@ impl Parser {
             return Ok(args);
         }
 
+        // First-class callable syntax: foo(...)
+        if matches!(self.peek(), TokenKind::Ellipsis) {
+            if self.tokens.get(self.pos + 1).is_some_and(|t| matches!(t.kind, TokenKind::CloseParen)) {
+                self.advance(); // consume ...
+                // Return empty args - the caller should interpret this as a callable reference
+                return Ok(args);
+            }
+        }
+
         loop {
             let unpack = self.eat(&TokenKind::Ellipsis);
 
