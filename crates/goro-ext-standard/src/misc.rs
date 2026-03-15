@@ -827,7 +827,36 @@ fn str_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let num = args.first().map(|v| v.to_double()).unwrap_or(0.0);
     let decimals = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
-    Ok(Value::String(PhpString::from_string(format!("{:.prec$}", num, prec = decimals))))
+    let dec_point = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| ".".to_string());
+    let thousands_sep = args.get(3).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| ",".to_string());
+
+    // Round first (PHP rounds half up)
+    let factor = 10f64.powi(decimals as i32);
+    let rounded = (num.abs() * factor).round() / factor;
+    let formatted = format!("{:.prec$}", rounded, prec = decimals);
+    let parts: Vec<&str> = formatted.split('.').collect();
+    let int_part = parts[0];
+    let dec_part = parts.get(1).unwrap_or(&"");
+
+    // Add thousands separator
+    let int_bytes = int_part.as_bytes();
+    let mut with_sep = String::new();
+    let len = int_bytes.len();
+    for (i, &b) in int_bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            with_sep.push_str(&thousands_sep);
+        }
+        with_sep.push(b as char);
+    }
+
+    let mut result = String::new();
+    if num < 0.0 { result.push('-'); }
+    result.push_str(&with_sep);
+    if decimals > 0 {
+        result.push_str(&dec_point);
+        result.push_str(dec_part);
+    }
+    Ok(Value::String(PhpString::from_string(result)))
 }
 
 fn money_format(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
