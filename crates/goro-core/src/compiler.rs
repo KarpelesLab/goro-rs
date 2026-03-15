@@ -631,8 +631,12 @@ impl Compiler {
                 func_compiler.op_array.name = name.clone();
 
                 // Set up parameter CVs and default values
+                func_compiler.op_array.param_count = params.len() as u32;
                 for param in params {
                     let cv = func_compiler.op_array.get_or_create_cv(&param.name);
+                    if param.variadic {
+                        func_compiler.op_array.variadic_param = Some(cv);
+                    }
                     if let Some(default_expr) = &param.default {
                         // Emit: if param is Undef, set to default
                         let default_val = func_compiler.compile_expr(default_expr)?;

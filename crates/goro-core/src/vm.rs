@@ -628,11 +628,29 @@ impl Vm {
                             }
                         }
 
-                        // Set up parameters as CVs
+                        // Set up parameters as CVs (handle variadic)
                         let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                        for (i, arg) in call.args.iter().enumerate() {
-                            if i < func_cvs.len() {
-                                func_cvs[i] = arg.clone();
+                        if let Some(variadic_idx) = user_fn.variadic_param {
+                            let vi = variadic_idx as usize;
+                            // Regular params first
+                            for (i, arg) in call.args.iter().enumerate() {
+                                if i < vi {
+                                    if i < func_cvs.len() { func_cvs[i] = arg.clone(); }
+                                }
+                            }
+                            // Pack remaining args into an array for the variadic param
+                            let mut variadic_arr = crate::array::PhpArray::new();
+                            for arg in call.args.iter().skip(vi) {
+                                variadic_arr.push(arg.clone());
+                            }
+                            if vi < func_cvs.len() {
+                                func_cvs[vi] = Value::Array(Rc::new(RefCell::new(variadic_arr)));
+                            }
+                        } else {
+                            for (i, arg) in call.args.iter().enumerate() {
+                                if i < func_cvs.len() {
+                                    func_cvs[i] = arg.clone();
+                                }
                             }
                         }
 
