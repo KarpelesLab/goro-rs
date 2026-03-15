@@ -11,9 +11,9 @@ Early development. Core language features and basic OOP work.
 | Test Directory | Pass | Total | Rate |
 |---|---|---|---|
 | tests/lang | 43 | 213 | 20.2% |
-| Zend/tests | 132 | 871 | 15.2% |
+| Zend/tests | 138 | 871 | 15.8% |
 | ext/standard (sampled) | ~25 | 200 | ~12.5% |
-| **Total** | **~200** | **~1284** | **~15.6%** |
+| **Total** | **~206** | **~1284** | **~16.0%** |
 
 ## Features
 
