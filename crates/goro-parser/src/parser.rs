@@ -1041,11 +1041,46 @@ impl Parser {
                     is_readonly = true;
                     self.advance();
                 }
+                TokenKind::Var => {
+                    // PHP 4 compat: var = public
+                    visibility = Visibility::Public;
+                    self.advance();
+                }
                 _ => break,
             }
         }
 
         match self.peek() {
+            TokenKind::Use => {
+                // trait use
+                self.advance();
+                let mut traits = Vec::new();
+                loop {
+                    match self.peek().clone() {
+                        TokenKind::Identifier(name) => {
+                            self.advance();
+                            traits.push(name);
+                        }
+                        _ => break,
+                    }
+                    if !self.eat(&TokenKind::Comma) { break; }
+                }
+                // Handle trait conflict resolution block
+                if matches!(self.peek(), TokenKind::OpenBrace) {
+                    let mut depth = 0;
+                    loop {
+                        match self.peek() {
+                            TokenKind::OpenBrace => { self.advance(); depth += 1; }
+                            TokenKind::CloseBrace => { self.advance(); depth -= 1; if depth == 0 { break; } }
+                            TokenKind::Eof => break,
+                            _ => { self.advance(); }
+                        }
+                    }
+                } else {
+                    self.expect_semicolon()?;
+                }
+                return Ok(ClassMember::TraitUse { traits, adaptations: vec![] });
+            }
             TokenKind::Function => {
                 self.advance();
                 // Optional & for return-by-reference

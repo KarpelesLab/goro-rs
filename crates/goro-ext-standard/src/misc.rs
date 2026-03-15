@@ -306,6 +306,8 @@ fn is_callable(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 fn call_user_func(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // TODO: implement proper callable invocation
+    // For now, if the first arg is a string (function name), try to call it
     Ok(Value::Null)
 }
 fn call_user_func_array(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
