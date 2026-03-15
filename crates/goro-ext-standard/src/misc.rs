@@ -555,10 +555,70 @@ fn in_array(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
-fn array_map(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // TODO: needs closure/callable support
-    if let Some(Value::Array(arr)) = _args.get(1) {
-        Ok(Value::Array(arr.clone()))
+fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let callback = args.first().cloned().unwrap_or(Value::Null);
+    let array = args.get(1);
+
+    if let Some(Value::Array(arr)) = array {
+        let arr = arr.borrow();
+        let mut result = PhpArray::new();
+
+        // Get callback function name
+        let (func_name, captured_args) = match &callback {
+            Value::String(s) => (s.as_bytes().to_vec(), vec![]),
+            Value::Array(cb_arr) => {
+                let cb = cb_arr.borrow();
+                let vals: Vec<Value> = cb.values().cloned().collect();
+                if vals.is_empty() {
+                    return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                }
+                let name = vals[0].to_php_string().as_bytes().to_vec();
+                let captured: Vec<Value> = vals[1..].to_vec();
+                (name, captured)
+            }
+            Value::Null => {
+                // null callback = identity
+                for (key, val) in arr.iter() {
+                    result.set(key.clone(), val.clone());
+                }
+                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+            }
+            _ => return Ok(Value::Array(Rc::new(RefCell::new(result)))),
+        };
+
+        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+        // Check for builtin function
+        if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+            for (key, val) in arr.iter() {
+                let mapped = builtin(vm, &[val.clone()])?;
+                result.set(key.clone(), mapped);
+            }
+        } else if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+            for (key, val) in arr.iter() {
+                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                // Pass captured vars first, then the element
+                let mut arg_idx = 0;
+                for cv in &captured_args {
+                    if arg_idx < fn_cvs.len() {
+                        fn_cvs[arg_idx] = cv.clone();
+                        arg_idx += 1;
+                    }
+                }
+                if arg_idx < fn_cvs.len() {
+                    fn_cvs[arg_idx] = val.clone();
+                }
+                let mapped = vm.execute_fn(&user_fn, fn_cvs)?;
+                result.set(key.clone(), mapped);
+            }
+        } else {
+            // Function not found - return original array
+            for (key, val) in arr.iter() {
+                result.set(key.clone(), val.clone());
+            }
+        }
+
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
     } else {
         Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
     }

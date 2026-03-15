@@ -37,9 +37,9 @@ pub struct Vm {
     /// Output buffer
     output: Vec<u8>,
     /// Registered built-in functions
-    functions: HashMap<Vec<u8>, BuiltinFn>,
+    pub functions: HashMap<Vec<u8>, BuiltinFn>,
     /// User-defined functions (compiled op arrays)
-    user_functions: HashMap<Vec<u8>, OpArray>,
+    pub user_functions: HashMap<Vec<u8>, OpArray>,
     /// Stack of pending function calls (supports nested calls)
     pending_calls: Vec<PendingCall>,
     /// Static variable storage (keyed by "funcname::varname")
@@ -88,6 +88,11 @@ impl Vm {
                 c
             },
         }
+    }
+
+    /// Execute a function OpArray with given CVs (public interface for ext crates)
+    pub fn execute_fn(&mut self, op_array: &OpArray, cvs: Vec<Value>) -> Result<Value, VmError> {
+        self.execute_op_array(op_array, cvs)
     }
 
     /// Register a class (from the compiler's compiled_classes list)
