@@ -560,9 +560,47 @@ impl Vm {
                         }
 
                         // Execute the function's op_array
-                        let result = self.execute_op_array(&user_fn, func_cvs)?;
+                        let call_result = self.execute_op_array(&user_fn, func_cvs);
 
                         self.is_global_scope = was_global;
+
+                        let result = match call_result {
+                            Ok(v) => v,
+                            Err(e) => {
+                                // Check if we have an exception handler for uncaught exceptions
+                                if let Some(exc) = self.current_exception.take() {
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        self.current_exception = Some(exc);
+                                        ip = catch_target as usize;
+                                        // Reload globals
+                                        if was_global {
+                                            for (i, name) in op_array.cv_names.iter().enumerate() {
+                                                if let Some(val) = self.globals.get(name) {
+                                                    if i < cvs.len() { cvs[i] = val.clone(); }
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    } else {
+                                        self.current_exception = Some(exc);
+                                        return Err(e);
+                                    }
+                                }
+                                // Check if there's a stored exception from the called function
+                                if let Some(exc) = self.current_exception.take() {
+                                    if !exception_handlers.is_empty() {
+                                        self.current_exception = Some(exc);
+                                        let (catch_target, _, _) = exception_handlers.pop().unwrap();
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        self.current_exception = Some(exc);
+                                        return Err(e);
+                                    }
+                                }
+                                return Err(e);
+                            }
+                        };
 
                         // Reload globals into caller's CVs after the function returns
                         if was_global {
@@ -938,7 +976,7 @@ impl Vm {
                         // Jump to catch handler
                         ip = catch_target as usize;
                     } else {
-                        // No handler - return error
+                        // No handler - store exception and return error
                         let msg = if let Value::Object(obj) = &exc_val {
                             let obj = obj.borrow();
                             let class = String::from_utf8_lossy(&obj.class_name).to_string();
@@ -947,6 +985,7 @@ impl Vm {
                         } else {
                             format!("Uncaught exception: {}", exc_val.to_php_string().to_string_lossy())
                         };
+                        self.current_exception = Some(exc_val);
                         return Err(VmError {
                             message: msg,
                             line: op.line,
