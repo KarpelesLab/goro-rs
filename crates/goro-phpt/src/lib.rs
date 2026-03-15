@@ -147,7 +147,112 @@ fn execute_php(source: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn matches_expectf(pattern: &str, actual: &str) -> bool {
-    // Simple EXPECTF matching: convert %d, %s, %f, etc. to regex patterns
+    // Line-by-line EXPECTF matching
+    let pattern_lines: Vec<&str> = pattern.lines().collect();
+    let actual_lines: Vec<&str> = actual.lines().collect();
+
+    if pattern_lines.len() != actual_lines.len() {
+        // Try with trimmed trailing empty lines
+        let p_trimmed: Vec<&str> = pattern.trim_end().lines().collect();
+        let a_trimmed: Vec<&str> = actual.trim_end().lines().collect();
+        if p_trimmed.len() != a_trimmed.len() {
+            return false;
+        }
+        return p_trimmed.iter().zip(a_trimmed.iter()).all(|(p, a)| match_expectf_line(p, a));
+    }
+
+    pattern_lines.iter().zip(actual_lines.iter()).all(|(p, a)| match_expectf_line(p, a))
+}
+
+/// Match a single line with EXPECTF patterns
+fn match_expectf_line(pattern: &str, actual: &str) -> bool {
+    let pb = pattern.as_bytes();
+    let ab = actual.as_bytes();
+    let mut pi = 0;
+    let mut ai = 0;
+
+    while pi < pb.len() && ai < ab.len() {
+        if pb[pi] == b'%' && pi + 1 < pb.len() {
+            match pb[pi + 1] {
+                b'd' => {
+                    pi += 2;
+                    // Match optional - and digits
+                    if ai < ab.len() && ab[ai] == b'-' { ai += 1; }
+                    if ai >= ab.len() || !ab[ai].is_ascii_digit() { return false; }
+                    while ai < ab.len() && ab[ai].is_ascii_digit() { ai += 1; }
+                }
+                b'i' => {
+                    pi += 2;
+                    if ai < ab.len() && (ab[ai] == b'+' || ab[ai] == b'-') { ai += 1; }
+                    if ai >= ab.len() || !ab[ai].is_ascii_digit() { return false; }
+                    while ai < ab.len() && ab[ai].is_ascii_digit() { ai += 1; }
+                }
+                b's' => {
+                    pi += 2;
+                    // Match non-whitespace
+                    if ai >= ab.len() || ab[ai] == b' ' || ab[ai] == b'\t' { return false; }
+                    while ai < ab.len() && ab[ai] != b' ' && ab[ai] != b'\t' && ab[ai] != b'\n' { ai += 1; }
+                }
+                b'S' | b'a' | b'A' => {
+                    pi += 2;
+                    // Match anything - greedy
+                    // Look ahead for next literal char in pattern
+                    if pi >= pb.len() {
+                        ai = ab.len(); // consume rest
+                    } else {
+                        // Find next literal char
+                        let next_literal = if pb[pi] == b'%' { None } else { Some(pb[pi]) };
+                        if let Some(nc) = next_literal {
+                            // Advance ai until we find nc
+                            while ai < ab.len() && ab[ai] != nc { ai += 1; }
+                        } else {
+                            ai = ab.len();
+                        }
+                    }
+                }
+                b'f' => {
+                    pi += 2;
+                    if ai < ab.len() && ab[ai] == b'-' { ai += 1; }
+                    while ai < ab.len() && (ab[ai].is_ascii_digit() || ab[ai] == b'.') { ai += 1; }
+                }
+                b'x' => {
+                    pi += 2;
+                    while ai < ab.len() && ab[ai].is_ascii_hexdigit() { ai += 1; }
+                }
+                b'e' => {
+                    pi += 2;
+                    if ai < ab.len() && (ab[ai] == b'/' || ab[ai] == b'\\') { ai += 1; }
+                }
+                b'w' => {
+                    pi += 2;
+                    while ai < ab.len() && (ab[ai] == b' ' || ab[ai] == b'\t') { ai += 1; }
+                }
+                b'c' => {
+                    pi += 2;
+                    if ai < ab.len() { ai += 1; }
+                }
+                b'%' => {
+                    pi += 2;
+                    if ai < ab.len() && ab[ai] == b'%' { ai += 1; } else { return false; }
+                }
+                _ => {
+                    // Unknown pattern, treat as literal
+                    if pb[pi] != ab[ai] { return false; }
+                    pi += 1; ai += 1;
+                }
+            }
+        } else {
+            if pb[pi] != ab[ai] { return false; }
+            pi += 1; ai += 1;
+        }
+    }
+
+    // Both should be consumed
+    pi >= pb.len() && ai >= ab.len()
+}
+
+fn _old_matches_expectf(pattern: &str, actual: &str) -> bool {
+    // Old regex-based approach (kept for reference)
     let mut regex_str = String::from("^");
     let pattern_bytes = pattern.as_bytes();
     let mut i = 0;
