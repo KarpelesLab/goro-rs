@@ -60,6 +60,8 @@ pub struct Vm {
     current_exception: Option<Value>,
     /// Error reporting level
     pub error_reporting: i64,
+    /// Recursion depth for magic methods (prevent infinite recursion)
+    magic_depth: u32,
 }
 
 impl Vm {
@@ -77,6 +79,7 @@ impl Vm {
             is_global_scope: true,
             current_exception: None,
             error_reporting: 32767, // E_ALL
+            magic_depth: 0,
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -1239,18 +1242,21 @@ impl Vm {
 
                     let result = if let Value::Object(obj) = &obj_val {
                         let prop = obj.borrow().get_property(prop_name.as_bytes());
-                        if matches!(prop, Value::Null) && !obj.borrow().has_property(prop_name.as_bytes()) {
-                            // Try __get magic method
+                        if matches!(prop, Value::Null) && !obj.borrow().has_property(prop_name.as_bytes()) && self.magic_depth < 5 {
+                            // Try __get magic method (with recursion guard)
                             let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             let has_get = self.classes.get(&class_lower)
                                 .map(|c| c.methods.contains_key(&b"__get".to_vec()))
                                 .unwrap_or(false);
                             if has_get {
+                                self.magic_depth += 1;
                                 let method = self.classes.get(&class_lower).unwrap().get_method(b"__get").unwrap().op_array.clone();
                                 let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
                                 if fn_cvs.len() > 0 { fn_cvs[0] = obj_val.clone(); } // $this
                                 if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); } // $name
-                                self.execute_op_array(&method, fn_cvs).unwrap_or(Value::Null)
+                                let result = self.execute_op_array(&method, fn_cvs).unwrap_or(Value::Null);
+                                self.magic_depth -= 1;
+                                result
                             } else {
                                 Value::Null
                             }
@@ -1274,7 +1280,7 @@ impl Vm {
                         let has_set = self.classes.get(&class_lower)
                             .map(|c| c.methods.contains_key(&b"__set".to_vec()))
                             .unwrap_or(false);
-                        if has_set && !obj.borrow().has_property(prop_name.as_bytes()) {
+                        if has_set && !obj.borrow().has_property(prop_name.as_bytes()) && self.magic_depth < 5 {
                             let method = self.classes.get(&class_lower).unwrap().get_method(b"__set").unwrap().op_array.clone();
                             let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
                             if fn_cvs.len() > 0 { fn_cvs[0] = obj_val.clone(); }
