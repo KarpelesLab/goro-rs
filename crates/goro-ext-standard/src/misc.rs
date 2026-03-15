@@ -514,8 +514,53 @@ fn array_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_splice(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) // stub
+fn array_splice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+        let length = args.get(2).map(|v| Some(v.to_long())).unwrap_or(None);
+        let replacement = args.get(3);
+
+        let mut arr_mut = arr.borrow_mut();
+        let entries: Vec<Value> = arr_mut.values().cloned().collect();
+        let total = entries.len() as i64;
+
+        let start = if offset < 0 { (total + offset).max(0) as usize } else { offset.min(total) as usize };
+        let len = match length {
+            Some(l) if l < 0 => ((total + l) as usize).saturating_sub(start),
+            Some(l) => l as usize,
+            None => entries.len() - start,
+        };
+        let end = (start + len).min(entries.len());
+
+        // Extract removed elements
+        let removed: Vec<Value> = entries[start..end].to_vec();
+
+        // Build new array
+        let mut new_entries: Vec<Value> = entries[..start].to_vec();
+        if let Some(repl) = replacement {
+            if let Value::Array(repl_arr) = repl {
+                let repl_arr = repl_arr.borrow();
+                for (_, v) in repl_arr.iter() {
+                    new_entries.push(v.clone());
+                }
+            } else {
+                new_entries.push(repl.clone());
+            }
+        }
+        new_entries.extend_from_slice(&entries[end..]);
+
+        // Replace the array contents
+        let mut new_arr = PhpArray::new();
+        for val in new_entries { new_arr.push(val); }
+        *arr_mut = new_arr;
+
+        // Return removed elements
+        let mut removed_arr = PhpArray::new();
+        for val in removed { removed_arr.push(val); }
+        Ok(Value::Array(Rc::new(RefCell::new(removed_arr))))
+    } else {
+        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    }
 }
 
 fn array_search(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
