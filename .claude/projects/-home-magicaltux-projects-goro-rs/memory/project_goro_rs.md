@@ -10,10 +10,13 @@ goro-rs is a PHP 8.5.4 implementation in Rust, targeting full compatibility with
 
 **How to apply:** When implementing features, follow PHP 8.5.4 semantics exactly. Use the PHPT test suite as the correctness benchmark. Minimize external dependencies. All file access goes through the VFS trait.
 
-Key design:
-- Workspace with crates: goro-parser, goro-core, goro-vfs, goro-sapi, goro-ext-standard, goro-phpt
-- Pipeline: source → lexer (tokens) → parser (AST) → compiler (bytecodes) → VM (execution)
-- Value type is a Rust enum (not heap-allocated for simple types)
-- Arrays are ordered hash maps (PhpArray) with packed optimization planned
-- Functions registered via `vm.register_function(name, fn_ptr)`
-- Remote: github.com:KarpelesLab/goro-rs.git, branch: master
+**Current state (as of 2026-03-15):**
+- ~230 official PHP tests passing (lang 48/213, Zend 137/871, ext/standard ~35/400)
+- Workspace: goro-parser, goro-core, goro-vfs, goro-sapi, goro-ext-standard, goro-phpt
+- Pipeline: source → lexer → parser → AST → compiler → bytecodes → VM
+- Working: variables, arrays, objects, classes with inheritance, closures, exceptions, static props, default params, 400+ built-in functions
+- Missing: full interface/trait support, references, include/require, proper error messages
+
+**Remote:** github.com:KarpelesLab/goro-rs.git, branch: master
+**PHP test suite:** /tmp/php-8.5-tests/ (cloned from php-src)
+**Test runner:** run bash loops extracting --FILE-- and --EXPECT-- sections
