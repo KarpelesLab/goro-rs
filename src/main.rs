@@ -112,13 +112,30 @@ fn run_code(source: &[u8]) {
         Err(e) => {
             // Print any output generated before the error
             let output = vm.take_output();
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
             if !output.is_empty() {
-                let stdout = std::io::stdout();
-                let mut handle = stdout.lock();
                 handle.write_all(&output).ok();
-                handle.flush().ok();
             }
-            eprintln!("\n{}", e);
+            // Format fatal error like PHP does (to stdout, not stderr)
+            if let Some(exc) = vm.current_exception.take() {
+                if let goro_core::value::Value::Object(obj) = &exc {
+                    let obj = obj.borrow();
+                    let class = String::from_utf8_lossy(&obj.class_name);
+                    let msg = obj.get_property(b"message");
+                    let msg_str = msg.to_php_string().to_string_lossy();
+                    let fatal = format!(
+                        "\nFatal error: Uncaught {}: {} in Unknown:0\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line 0\n",
+                        class, msg_str
+                    );
+                    handle.write_all(fatal.as_bytes()).ok();
+                } else {
+                    write!(handle, "\nFatal error: {}\n", e).ok();
+                }
+            } else {
+                write!(handle, "\nFatal error: {}\n", e).ok();
+            }
+            handle.flush().ok();
             process::exit(255);
         }
     }

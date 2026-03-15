@@ -57,7 +57,7 @@ pub struct Vm {
     /// User-defined constants (from define())
     pub constants: HashMap<Vec<u8>, Value>,
     /// Current exception being thrown (used during try/catch)
-    current_exception: Option<Value>,
+    pub current_exception: Option<Value>,
     /// Error reporting level
     pub error_reporting: i64,
     /// Recursion depth for magic methods (prevent infinite recursion)
