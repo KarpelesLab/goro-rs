@@ -129,6 +129,9 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"get_defined_functions", get_defined_functions_fn);
     vm.register_function(b"array_first", array_first_fn);
     vm.register_function(b"array_last", array_last_fn);
+    vm.register_function(b"usort", usort_fn);
+    vm.register_function(b"uasort", uasort_fn);
+    vm.register_function(b"uksort", uksort_fn);
     vm.register_function(b"array_change_key_case", array_change_key_case_fn);
     vm.register_function(b"array_diff_key", array_diff_key_fn);
     vm.register_function(b"array_diff_assoc", array_diff_assoc_fn);
@@ -763,8 +766,35 @@ fn array_intersect(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn sort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn rsort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn sort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        let mut entries: Vec<Value> = arr.values().cloned().collect();
+        entries.sort_by(|a, b| {
+            let cmp = a.compare(b);
+            if cmp < 0 { std::cmp::Ordering::Less } else if cmp > 0 { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Equal }
+        });
+        // Rebuild array with sequential integer keys
+        let mut new_arr = PhpArray::new();
+        for val in entries { new_arr.push(val); }
+        *arr = new_arr;
+    }
+    Ok(Value::True)
+}
+fn rsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        let mut entries: Vec<Value> = arr.values().cloned().collect();
+        entries.sort_by(|a, b| {
+            let cmp = b.compare(a);
+            if cmp < 0 { std::cmp::Ordering::Less } else if cmp > 0 { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Equal }
+        });
+        let mut new_arr = PhpArray::new();
+        for val in entries { new_arr.push(val); }
+        *arr = new_arr;
+    }
+    Ok(Value::True)
+}
 fn asort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn arsort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn ksort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
@@ -1550,3 +1580,43 @@ fn str_contains_builtin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     }
     Ok(Value::False)
 }
+
+fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
+        let mut arr_mut = arr.borrow_mut();
+        let mut entries: Vec<Value> = arr_mut.values().cloned().collect();
+
+        let (func_name, captured) = match callback {
+            Value::String(s) => (s.as_bytes().to_vec(), vec![]),
+            Value::Array(cb) => {
+                let cb = cb.borrow();
+                let vals: Vec<Value> = cb.values().cloned().collect();
+                if vals.is_empty() { return Ok(Value::True); }
+                (vals[0].to_php_string().as_bytes().to_vec(), vals[1..].to_vec())
+            }
+            _ => return Ok(Value::True),
+        };
+        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+        if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+            entries.sort_by(|a, b| {
+                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                let mut idx = 0;
+                for cv in &captured { if idx < fn_cvs.len() { fn_cvs[idx] = cv.clone(); idx += 1; } }
+                if idx < fn_cvs.len() { fn_cvs[idx] = a.clone(); idx += 1; }
+                if idx < fn_cvs.len() { fn_cvs[idx] = b.clone(); }
+                let result = vm.execute_fn(&user_fn, fn_cvs).unwrap_or(Value::Long(0));
+                let cmp = result.to_long();
+                if cmp < 0 { std::cmp::Ordering::Less } else if cmp > 0 { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Equal }
+            });
+        }
+
+        let mut new_arr = PhpArray::new();
+        for val in entries { new_arr.push(val); }
+        *arr_mut = new_arr;
+    }
+    Ok(Value::True)
+}
+
+fn uasort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn uksort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
