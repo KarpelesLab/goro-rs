@@ -129,6 +129,29 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"get_defined_functions", get_defined_functions_fn);
     vm.register_function(b"array_first", array_first_fn);
     vm.register_function(b"array_last", array_last_fn);
+    vm.register_function(b"array_change_key_case", array_change_key_case_fn);
+    vm.register_function(b"array_multisort", array_multisort_fn);
+    vm.register_function(b"highlight_string", highlight_string_fn);
+    vm.register_function(b"fopen", fopen_fn);
+    vm.register_function(b"fclose", fclose_fn);
+    vm.register_function(b"fread", fread_fn);
+    vm.register_function(b"fwrite", fwrite_fn);
+    vm.register_function(b"fgets", fgets_fn);
+    vm.register_function(b"feof", feof_fn);
+    vm.register_function(b"rewind", rewind_fn);
+    vm.register_function(b"fseek", fseek_fn);
+    vm.register_function(b"ftell", ftell_fn);
+    vm.register_function(b"fflush", fflush_fn);
+    vm.register_function(b"unlink", unlink_fn);
+    vm.register_function(b"rename", rename_fn);
+    vm.register_function(b"copy", copy_fn);
+    vm.register_function(b"mkdir", mkdir_fn);
+    vm.register_function(b"rmdir", rmdir_fn);
+    vm.register_function(b"glob", glob_fn);
+    vm.register_function(b"scandir", scandir_fn);
+    vm.register_function(b"header", header_fn);
+    vm.register_function(b"headers_sent", headers_sent_fn);
+    vm.register_function(b"http_response_code", http_response_code_fn);
 
     // Date
     vm.register_function(b"time", time_fn);
@@ -909,16 +932,11 @@ fn str_contains_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn wordwrap(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::String(PhpString::empty())) }
 fn printf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Delegate to sprintf then echo
-    use crate::strings;
-    let s = strings::register; // just to reference crate
-    // Actually, call sprintf logic
-    let formatted = goro_core::vm::Vm::new(); // placeholder
-    // For now, just echo the format string
-    if let Some(val) = args.first() {
-        vm.write_output(val.to_php_string().as_bytes());
-    }
-    Ok(Value::Long(0))
+    // Use the sprintf implementation from strings module
+    let formatted = crate::strings::do_sprintf(args);
+    let len = formatted.len();
+    vm.write_output(formatted.as_bytes());
+    Ok(Value::Long(len as i64))
 }
 fn fprintf_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
 fn sscanf_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
@@ -1173,3 +1191,69 @@ fn array_last_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(arr.iter().last().map(|(_, v)| v.clone()).unwrap_or(Value::Null))
     } else { Ok(Value::Null) }
 }
+
+fn array_change_key_case_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let case = args.get(1).map(|v| v.to_long()).unwrap_or(0); // 0=lower, 1=upper
+        let arr = arr.borrow();
+        let mut result = PhpArray::new();
+        for (key, val) in arr.iter() {
+            let new_key = match key {
+                goro_core::array::ArrayKey::String(s) => {
+                    let bytes = s.as_bytes();
+                    let transformed: Vec<u8> = if case == 0 {
+                        bytes.iter().map(|b| b.to_ascii_lowercase()).collect()
+                    } else {
+                        bytes.iter().map(|b| b.to_ascii_uppercase()).collect()
+                    };
+                    goro_core::array::ArrayKey::String(PhpString::from_vec(transformed))
+                }
+                other => other.clone(),
+            };
+            result.set(new_key, val.clone());
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn array_multisort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True) // stub
+}
+
+fn highlight_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Very basic stub - just returns the code wrapped in HTML
+    let code = args.first().unwrap_or(&Value::Null).to_php_string();
+    let ret = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let html = format!("<code><span style=\"color: #000000\">{}</span>\n</code>", code.to_string_lossy());
+    if ret {
+        Ok(Value::String(PhpString::from_string(html)))
+    } else {
+        vm.write_output(html.as_bytes());
+        Ok(Value::True)
+    }
+}
+
+fn fopen_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False) // stub
+}
+fn fclose_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn fread_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn fwrite_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn fgets_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn feof_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn rewind_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn fseek_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
+fn ftell_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
+fn fflush_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn unlink_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn rename_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn copy_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn mkdir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn rmdir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn glob_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
+fn scandir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn header_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
+fn headers_sent_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn http_response_code_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(200)) }

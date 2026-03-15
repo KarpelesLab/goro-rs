@@ -303,6 +303,13 @@ fn sprintf(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: 0,
         });
     }
+    let result = do_sprintf(args);
+    Ok(Value::String(PhpString::from_vec(result.into_bytes())))
+}
+
+/// Shared sprintf implementation used by both sprintf() and printf()
+pub fn do_sprintf(args: &[Value]) -> String {
+    if args.is_empty() { return String::new(); }
     let format = args[0].to_php_string();
     let format_bytes = format.as_bytes();
 
@@ -368,7 +375,7 @@ fn sprintf(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    Ok(Value::String(PhpString::from_vec(result)))
+    String::from_utf8_lossy(&result).into_owned()
 }
 
 fn nl2br(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
