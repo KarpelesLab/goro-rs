@@ -59,7 +59,7 @@ pub struct Vm {
     /// Current exception being thrown (used during try/catch)
     current_exception: Option<Value>,
     /// Error reporting level
-    error_reporting: i64,
+    pub error_reporting: i64,
 }
 
 impl Vm {
