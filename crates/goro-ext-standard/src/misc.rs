@@ -458,14 +458,29 @@ fn array_pop(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_shift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
-        let mut arr = arr.borrow_mut();
-        if arr.is_empty() {
+        let mut arr_mut = arr.borrow_mut();
+        if arr_mut.is_empty() {
             return Ok(Value::Null);
         }
-        let entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let (first_key, first_val) = entries.first().unwrap();
-        arr.remove(first_key);
-        Ok(first_val.clone())
+        let entries: Vec<_> = arr_mut
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let first_val = entries[0].1.clone();
+        // Re-index: rebuild array with sequential integer keys
+        let mut new_arr = PhpArray::new();
+        for (key, val) in entries.iter().skip(1) {
+            match key {
+                goro_core::array::ArrayKey::String(s) => {
+                    new_arr.set(goro_core::array::ArrayKey::String(s.clone()), val.clone());
+                }
+                goro_core::array::ArrayKey::Int(_) => {
+                    new_arr.push(val.clone()); // Re-index integer keys
+                }
+            }
+        }
+        *arr_mut = new_arr;
+        Ok(first_val)
     } else {
         Ok(Value::Null)
     }
