@@ -652,12 +652,16 @@ pub fn format_php_float(f: f64) -> String {
         } else {
             sig_str.clone()
         };
-        let formatted = if negative {
-            format!("-{}E+{}", mantissa_part, exp)
+        let exp_str = if exp >= 0 {
+            format!("E+{}", exp)
         } else {
-            format!("{}E+{}", mantissa_part, exp)
+            format!("E{}", exp)
         };
-        // Actually PHP uses different thresholds, let's keep it simple
+        let formatted = if negative {
+            format!("-{}{}", mantissa_part, exp_str)
+        } else {
+            format!("{}{}", mantissa_part, exp_str)
+        };
         return formatted;
     }
 
