@@ -1336,7 +1336,13 @@ impl Compiler {
                             BinaryOp::Mul => OpCode::Mul,
                             BinaryOp::Div => OpCode::Div,
                             BinaryOp::Mod => OpCode::Mod,
+                            BinaryOp::Pow => OpCode::Pow,
                             BinaryOp::Concat => OpCode::Concat,
+                            BinaryOp::BitwiseAnd => OpCode::BitwiseAnd,
+                            BinaryOp::BitwiseOr => OpCode::BitwiseOr,
+                            BinaryOp::BitwiseXor => OpCode::BitwiseXor,
+                            BinaryOp::ShiftLeft => OpCode::ShiftLeft,
+                            BinaryOp::ShiftRight => OpCode::ShiftRight,
                             _ => OpCode::Add,
                         };
                         self.op_array.emit(Op {
@@ -1385,7 +1391,13 @@ impl Compiler {
                             BinaryOp::Mul => OpCode::Mul,
                             BinaryOp::Div => OpCode::Div,
                             BinaryOp::Mod => OpCode::Mod,
+                            BinaryOp::Pow => OpCode::Pow,
                             BinaryOp::Concat => OpCode::Concat,
+                            BinaryOp::BitwiseAnd => OpCode::BitwiseAnd,
+                            BinaryOp::BitwiseOr => OpCode::BitwiseOr,
+                            BinaryOp::BitwiseXor => OpCode::BitwiseXor,
+                            BinaryOp::ShiftLeft => OpCode::ShiftLeft,
+                            BinaryOp::ShiftRight => OpCode::ShiftRight,
                             _ => OpCode::Add,
                         };
                         self.op_array.emit(Op {
@@ -1415,7 +1427,13 @@ impl Compiler {
                             BinaryOp::Mul => OpCode::Mul,
                             BinaryOp::Div => OpCode::Div,
                             BinaryOp::Mod => OpCode::Mod,
+                            BinaryOp::Pow => OpCode::Pow,
                             BinaryOp::Concat => OpCode::Concat,
+                            BinaryOp::BitwiseAnd => OpCode::BitwiseAnd,
+                            BinaryOp::BitwiseOr => OpCode::BitwiseOr,
+                            BinaryOp::BitwiseXor => OpCode::BitwiseXor,
+                            BinaryOp::ShiftLeft => OpCode::ShiftLeft,
+                            BinaryOp::ShiftRight => OpCode::ShiftRight,
                             _ => OpCode::Add,
                         };
                         self.op_array.emit(Op {
