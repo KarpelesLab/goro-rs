@@ -1935,15 +1935,93 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
-            ExprKind::Closure { params, body, .. } => {
-                // TODO: proper closure support
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+            ExprKind::Closure { params, body, use_vars, .. } => {
+                // Compile closure body as a child function
+                let closure_id = self.op_array.child_functions.len();
+                let closure_name = format!("__closure_{}", closure_id).into_bytes();
+
+                let mut closure_compiler = Compiler::new();
+                closure_compiler.op_array.name = closure_name.clone();
+                closure_compiler.current_class = self.current_class.clone();
+                closure_compiler.current_parent_class = self.current_parent_class.clone();
+
+                // Set up use vars as the first CVs (before params)
+                for use_var in use_vars {
+                    closure_compiler.op_array.get_or_create_cv(&use_var.variable);
+                }
+                // Set up parameter CVs
+                for param in params {
+                    closure_compiler.op_array.get_or_create_cv(&param.name);
+                }
+
+                for s in body {
+                    closure_compiler.compile_stmt(s)?;
+                }
+
+                let null_idx = closure_compiler.op_array.add_literal(Value::Null);
+                closure_compiler.op_array.emit(Op {
+                    opcode: OpCode::Return,
+                    op1: OperandType::Const(null_idx),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: 0,
+                });
+
+                self.op_array.child_functions.push(closure_compiler.op_array);
+
+                // Emit DeclareFunction for the closure
+                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name.clone())));
+                let func_idx = self.op_array.add_literal(Value::Long((self.op_array.child_functions.len() - 1) as i64));
+                self.op_array.emit(Op {
+                    opcode: OpCode::DeclareFunction,
+                    op1: OperandType::Const(name_idx),
+                    op2: OperandType::Const(func_idx),
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
+
+                // Return the closure name as a callable string
+                // The VM will look it up as a user function
+                let name_val_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name)));
+                Ok(OperandType::Const(name_val_idx))
             }
 
-            ExprKind::ArrowFunction { .. } => {
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+            ExprKind::ArrowFunction { params, body, .. } => {
+                // Arrow function: fn($x) => $x * 2
+                // Compile as a closure with a single return statement
+                let closure_id = self.op_array.child_functions.len();
+                let closure_name = format!("__arrow_{}", closure_id).into_bytes();
+
+                let mut closure_compiler = Compiler::new();
+                closure_compiler.op_array.name = closure_name.clone();
+
+                for param in params {
+                    closure_compiler.op_array.get_or_create_cv(&param.name);
+                }
+
+                let body_val = closure_compiler.compile_expr(body)?;
+                closure_compiler.op_array.emit(Op {
+                    opcode: OpCode::Return,
+                    op1: body_val,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
+
+                self.op_array.child_functions.push(closure_compiler.op_array);
+
+                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name.clone())));
+                let func_idx = self.op_array.add_literal(Value::Long((self.op_array.child_functions.len() - 1) as i64));
+                self.op_array.emit(Op {
+                    opcode: OpCode::DeclareFunction,
+                    op1: OperandType::Const(name_idx),
+                    op2: OperandType::Const(func_idx),
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
+
+                let name_val_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name)));
+                Ok(OperandType::Const(name_val_idx))
             }
 
             ExprKind::Yield(_) | ExprKind::YieldFrom(_) => {
