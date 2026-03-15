@@ -1331,7 +1331,61 @@ impl Parser {
     // ---- Expression parsing (Pratt parser) ----
 
     pub fn parse_expression(&mut self) -> ParseResult<Expr> {
-        self.parse_assignment()
+        self.parse_logical_or_low()
+    }
+
+    /// Low-precedence 'or' (lower than assignment)
+    fn parse_logical_or_low(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_logical_xor_low()?;
+        while matches!(self.peek(), TokenKind::Or) {
+            self.advance();
+            let right = self.parse_logical_xor_low()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::LogicalOr,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    /// Low-precedence 'xor' (lower than assignment, higher than 'or')
+    fn parse_logical_xor_low(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_logical_and_low()?;
+        while matches!(self.peek(), TokenKind::Xor) {
+            self.advance();
+            let right = self.parse_logical_and_low()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::LogicalXor,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    /// Low-precedence 'and' (lower than assignment, higher than 'xor')
+    fn parse_logical_and_low(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_assignment()?;
+        while matches!(self.peek(), TokenKind::And) {
+            self.advance();
+            let right = self.parse_assignment()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::LogicalAnd,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
     }
 
     fn parse_assignment(&mut self) -> ParseResult<Expr> {
