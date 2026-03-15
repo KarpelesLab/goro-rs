@@ -11,9 +11,9 @@ Early development. Core language features and basic OOP work.
 | Test Directory | Pass | Total | Rate |
 |---|---|---|---|
 | tests/lang | 43 | 213 | 20.2% |
-| Zend/tests | 118 | 871 | 13.5% |
-| ext/standard (sampled) | 23 | 200 | 11.5% |
-| **Total** | **184** | **1284** | **14.3%** |
+| Zend/tests | 122 | 871 | 14.0% |
+| ext/standard (sampled) | ~25 | 200 | ~12.5% |
+| **Total** | **~190** | **~1284** | **~14.8%** |
 
 ## Features
 
@@ -21,8 +21,12 @@ Early development. Core language features and basic OOP work.
 - Full execution pipeline: PHP source -> lexer -> parser -> AST -> bytecode -> VM
 - Types: null, bool, int, float, string (binary-safe), array (ordered hash map), object
 - Arithmetic, comparison, bitwise, logical operators with short-circuit evaluation
-- String interpolation, concatenation, type juggling
+- String interpolation, concatenation, type juggling, cast operators
 - Control flow: if/elseif/else, while, do-while, for, foreach, switch, match, break N/continue N
+- Classes with properties, methods, constructors, inheritance, instanceof
+- Closures (`function() { }`) and arrow functions (`fn() =>`)
+- parent::method() calls with correct hierarchy resolution
+- Magic constants: __CLASS__, __METHOD__, __FUNCTION__, __LINE__
 - User-defined functions with parameters, return values, recursion
 - Static variables in functions
 - Global variables (`global $var`)
@@ -34,9 +38,8 @@ Early development. Core language features and basic OOP work.
 - Virtual filesystem abstraction for security sandboxing
 
 ### Not Yet Implemented
-- Full OOP (inheritance, interfaces, traits, enums, magic methods)
-- Exceptions (try/catch/throw with proper error types)
-- Closures and arrow functions
+- Full OOP (interfaces, traits, enums, abstract classes, magic methods beyond __construct)
+- Exceptions (try/catch/throw with proper Error class hierarchy)
 - References (`&`)
 - include/require
 - Namespaces
