@@ -258,8 +258,32 @@ fn format_php_float_serialize(f: f64) -> String {
     if f.is_nan() {
         return "NAN".to_string();
     }
-    // Rust's Display for f64 already produces the shortest exact representation
-    format!("{}", f)
+    // PHP serialize_precision=-1: shortest exact representation
+    // Use scientific notation for very large/small numbers
+    let abs = f.abs();
+    if abs != 0.0 && (abs >= 1e20 || abs < 1e-4) {
+        // Use scientific notation like PHP
+        let s = format!("{:e}", f);
+        if let Some(pos) = s.find('e') {
+            let mut mantissa = s[..pos].to_string();
+            let exp: i32 = s[pos+1..].parse().unwrap_or(0);
+            // Ensure at least one decimal digit
+            if !mantissa.contains('.') {
+                mantissa.push_str(".0");
+            } else if mantissa.ends_with('.') {
+                mantissa.push('0');
+            }
+            if exp >= 0 {
+                format!("{}E+{}", mantissa, exp)
+            } else {
+                format!("{}E{}", mantissa, exp)
+            }
+        } else {
+            s
+        }
+    } else {
+        format!("{}", f)
+    }
 }
 
 fn format_float(f: f64) -> String {
