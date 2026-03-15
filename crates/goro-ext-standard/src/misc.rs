@@ -57,6 +57,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_map", array_map);
     vm.register_function(b"array_filter", array_filter);
     vm.register_function(b"array_walk", array_walk);
+    vm.register_function(b"array_reduce", array_reduce_fn);
     vm.register_function(b"array_combine", array_combine);
     vm.register_function(b"array_chunk", array_chunk);
     vm.register_function(b"array_pad", array_pad);
@@ -1652,3 +1653,45 @@ fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn uasort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn uksort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+
+fn array_reduce_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arr = match args.first() {
+        Some(Value::Array(a)) => a.borrow(),
+        _ => return Ok(Value::Null),
+    };
+    let callback = args.get(1);
+    let initial = args.get(2).cloned().unwrap_or(Value::Null);
+
+    let entries: Vec<Value> = arr.values().cloned().collect();
+    drop(arr);
+
+    let (func_name, captured) = match callback {
+        Some(Value::String(s)) => (s.as_bytes().to_vec(), vec![]),
+        Some(Value::Array(cb)) => {
+            let cb = cb.borrow();
+            let vals: Vec<Value> = cb.values().cloned().collect();
+            if vals.is_empty() { return Ok(initial); }
+            (vals[0].to_php_string().as_bytes().to_vec(), vals[1..].to_vec())
+        }
+        _ => return Ok(initial),
+    };
+    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    let mut carry = initial;
+    if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+        for val in entries {
+            let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+            let mut idx = 0;
+            for cv in &captured { if idx < fn_cvs.len() { fn_cvs[idx] = cv.clone(); idx += 1; } }
+            if idx < fn_cvs.len() { fn_cvs[idx] = carry; idx += 1; }
+            if idx < fn_cvs.len() { fn_cvs[idx] = val; }
+            carry = vm.execute_fn(&user_fn, fn_cvs)?;
+        }
+    } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+        for val in entries {
+            carry = builtin(vm, &[carry, val])?;
+        }
+    }
+
+    Ok(carry)
+}
