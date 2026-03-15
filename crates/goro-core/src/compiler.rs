@@ -2130,10 +2130,42 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                // Return the closure name as a callable string
-                // The VM will look it up as a user function
-                let name_val_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name)));
-                Ok(OperandType::Const(name_val_idx))
+                // If there are use vars, create an array [closure_name, use_val_1, use_val_2, ...]
+                if !use_vars.is_empty() {
+                    let arr_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ArrayNew,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(arr_tmp),
+                        line: expr.span.line,
+                    });
+                    // First element: closure name
+                    let name_val = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name)));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ArrayAppend,
+                        op1: OperandType::Tmp(arr_tmp),
+                        op2: OperandType::Const(name_val),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    // Subsequent elements: captured use var values
+                    for use_var in use_vars {
+                        let cv = self.op_array.get_or_create_cv(&use_var.variable);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayAppend,
+                            op1: OperandType::Tmp(arr_tmp),
+                            op2: OperandType::Cv(cv),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                    }
+                    Ok(OperandType::Tmp(arr_tmp))
+                } else {
+                    // No use vars - just return the closure name
+                    let name_val_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name)));
+                    Ok(OperandType::Const(name_val_idx))
+                }
             }
 
             ExprKind::ArrowFunction { params, body, .. } => {

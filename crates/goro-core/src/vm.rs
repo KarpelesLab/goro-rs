@@ -507,11 +507,30 @@ impl Vm {
                 // Function calls
                 OpCode::InitFCall => {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let name = name_val.to_php_string();
-                    self.pending_calls.push(PendingCall {
-                        name,
-                        args: Vec::new(),
-                    });
+                    // Check if this is a closure array [name, use_val_1, use_val_2, ...]
+                    if let Value::Array(arr) = &name_val {
+                        let arr = arr.borrow();
+                        let mut values: Vec<Value> = arr.values().cloned().collect();
+                        if !values.is_empty() {
+                            let name = values.remove(0).to_php_string();
+                            // Remaining values are captured use vars - prepend as args
+                            self.pending_calls.push(PendingCall {
+                                name,
+                                args: values, // use vars as initial args
+                            });
+                        } else {
+                            self.pending_calls.push(PendingCall {
+                                name: PhpString::empty(),
+                                args: Vec::new(),
+                            });
+                        }
+                    } else {
+                        let name = name_val.to_php_string();
+                        self.pending_calls.push(PendingCall {
+                            name,
+                            args: Vec::new(),
+                        });
+                    }
                 }
                 OpCode::SendVal => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
