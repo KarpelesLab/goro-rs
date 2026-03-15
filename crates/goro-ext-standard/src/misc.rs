@@ -715,14 +715,29 @@ fn php_assert(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     Ok(if val.is_truthy() { Value::True } else { Value::False })
 }
-fn class_exists(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name_lower: Vec<u8> = name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    // Check built-in classes
+    let is_builtin = matches!(name_lower.as_slice(),
+        b"stdclass" | b"exception" | b"error" | b"typeerror" | b"valueerror"
+        | b"runtimeexception" | b"logicexception" | b"invalidargumentexception"
+        | b"badmethodcallexception" | b"closure" | b"generator"
+    );
+    Ok(if is_builtin || vm.classes.contains_key(&name_lower) { Value::True } else { Value::False })
+}
 fn get_class(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn get_declared_classes(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
 }
 fn property_exists(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn method_exists(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn is_object(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(match args.first() {
+        Some(Value::Object(_)) => Value::True,
+        _ => Value::False,
+    })
+}
 fn date_default_timezone_set(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn setlocale(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn debug_zval_refcount(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }

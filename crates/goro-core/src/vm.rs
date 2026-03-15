@@ -47,7 +47,7 @@ pub struct Vm {
     /// Global variables
     globals: HashMap<Vec<u8>, Value>,
     /// Class table
-    classes: HashMap<Vec<u8>, ClassEntry>,
+    pub classes: HashMap<Vec<u8>, ClassEntry>,
     /// Next object ID
     next_object_id: u64,
     /// Pending class definitions (from compiler, indexed by position)
