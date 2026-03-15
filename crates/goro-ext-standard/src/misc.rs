@@ -130,6 +130,9 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"get_defined_functions", get_defined_functions_fn);
     vm.register_function(b"array_first", array_first_fn);
     vm.register_function(b"array_last", array_last_fn);
+    vm.register_function(b"array_key_first", array_key_first_fn);
+    vm.register_function(b"array_key_last", array_key_last_fn);
+    vm.register_function(b"array_is_list", array_is_list_fn);
     vm.register_function(b"usort", usort_fn);
     vm.register_function(b"uasort", uasort_fn);
     vm.register_function(b"uksort", uksort_fn);
@@ -1903,4 +1906,36 @@ fn array_reduce_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     Ok(carry)
+}
+
+fn array_key_first_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let arr = arr.borrow();
+        Ok(arr.iter().next().map(|(k, _)| match k {
+            goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
+            goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),
+        }).unwrap_or(Value::Null))
+    } else { Ok(Value::Null) }
+}
+fn array_key_last_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let arr = arr.borrow();
+        Ok(arr.iter().last().map(|(k, _)| match k {
+            goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
+            goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),
+        }).unwrap_or(Value::Null))
+    } else { Ok(Value::Null) }
+}
+fn array_is_list_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let arr = arr.borrow();
+        let is_list = arr.iter().enumerate().all(|(i, (k, _))| {
+            matches!(k, goro_core::array::ArrayKey::Int(n) if *n == i as i64)
+        });
+        Ok(if is_list { Value::True } else { Value::False })
+    } else { Ok(Value::False) }
+}
+fn compact_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // compact() needs access to the current scope's variables which we don't have from builtins
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
 }
