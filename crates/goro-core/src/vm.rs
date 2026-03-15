@@ -993,6 +993,30 @@ impl Vm {
                     }
                 }
 
+                OpCode::StaticPropGet => {
+                    let class_name = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let prop_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                    let val = if let Some(class) = self.classes.get(&class_lower) {
+                        class.static_properties.get(prop_name.as_bytes()).cloned().unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    };
+                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::StaticPropSet => {
+                    let class_name = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let prop_name = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                    if let Some(class) = self.classes.get_mut(&class_lower) {
+                        class.static_properties.insert(prop_name.as_bytes().to_vec(), value);
+                    }
+                }
+
                 OpCode::LoadConst | OpCode::FastConcat => {
                     // TODO: implement
                 }
@@ -1022,6 +1046,12 @@ impl Vm {
                                 for (const_name, const_val) in &parent.constants {
                                     if !class.constants.contains_key(const_name) {
                                         class.constants.insert(const_name.clone(), const_val.clone());
+                                    }
+                                }
+                                // Inherit static properties
+                                for (prop_name, prop_val) in &parent.static_properties {
+                                    if !class.static_properties.contains_key(prop_name) {
+                                        class.static_properties.insert(prop_name.clone(), prop_val.clone());
                                     }
                                 }
                             }

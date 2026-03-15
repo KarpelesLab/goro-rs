@@ -847,6 +847,9 @@ impl Compiler {
                                 Visibility::Protected => ObjVisibility::Protected,
                                 Visibility::Private => ObjVisibility::Private,
                             };
+                            if *is_static {
+                                class.static_properties.insert(prop_name.clone(), default_val.clone());
+                            }
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
                                 default: default_val,
@@ -1042,6 +1045,30 @@ impl Compiler {
                             op1: obj,
                             op2: val,
                             result: OperandType::Const(name_idx),
+                            line: expr.span.line,
+                        });
+                        Ok(val)
+                    }
+                    ExprKind::StaticPropertyAccess { class, property } => {
+                        let class_name = match &class.kind {
+                            ExprKind::Identifier(name) => {
+                                if name.eq_ignore_ascii_case(b"self") || name.eq_ignore_ascii_case(b"static") {
+                                    self.current_class.clone().unwrap_or(name.clone())
+                                } else if name.eq_ignore_ascii_case(b"parent") {
+                                    self.current_parent_class.clone().unwrap_or(name.clone())
+                                } else {
+                                    name.clone()
+                                }
+                            }
+                            _ => return Ok(val),
+                        };
+                        let class_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                        let prop_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(property.clone())));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropSet,
+                            op1: OperandType::Const(class_idx),
+                            op2: val,
+                            result: OperandType::Const(prop_idx),
                             line: expr.span.line,
                         });
                         Ok(val)
@@ -2171,15 +2198,34 @@ impl Compiler {
             }
 
             ExprKind::StaticPropertyAccess { class, property } => {
-                let _ = self.compile_expr(class)?;
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
-            }
-
-            ExprKind::StaticPropertyAccess { class, property } => {
-                let _ = self.compile_expr(class)?;
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+                let class_name = match &class.kind {
+                    ExprKind::Identifier(name) => {
+                        // Resolve self/static/parent
+                        if name.eq_ignore_ascii_case(b"self") || name.eq_ignore_ascii_case(b"static") {
+                            self.current_class.clone().unwrap_or(name.clone())
+                        } else if name.eq_ignore_ascii_case(b"parent") {
+                            self.current_parent_class.clone().unwrap_or(name.clone())
+                        } else {
+                            name.clone()
+                        }
+                    }
+                    _ => {
+                        let _ = self.compile_expr(class)?;
+                        let idx = self.op_array.add_literal(Value::Null);
+                        return Ok(OperandType::Const(idx));
+                    }
+                };
+                let class_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                let prop_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(property.clone())));
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::StaticPropGet,
+                    op1: OperandType::Const(class_idx),
+                    op2: OperandType::Const(prop_idx),
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::PropertyAccess { object, property, .. } => {

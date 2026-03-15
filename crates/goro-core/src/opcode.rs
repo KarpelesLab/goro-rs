@@ -155,6 +155,10 @@ pub enum OpCode {
     InitMethodCall,
     /// Declare a class: op1 = class name (const), op2 = class def index (const)
     DeclareClass,
+    /// Get static property: op1 = class name (const), op2 = prop name (const), result = value
+    StaticPropGet,
+    /// Set static property: op1 = class name (const), op2 = value, result = prop name (const)
+    StaticPropSet,
 
     // ---- Exceptions ----
     /// Throw: op1 = exception value. Sets VM exception state.
