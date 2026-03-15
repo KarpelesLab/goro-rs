@@ -2441,19 +2441,32 @@ impl Compiler {
             }
 
             ExprKind::AssignRef { target, value } => {
-                // For now, treat assign-ref as regular assign
-                let val = self.compile_expr(value)?;
-                match &target.kind {
-                    ExprKind::Variable(name) => {
-                        let cv = self.op_array.get_or_create_cv(name);
+                // $target = &$value  — both CVs share the same reference
+                match (&target.kind, &value.kind) {
+                    (ExprKind::Variable(target_name), ExprKind::Variable(value_name)) => {
+                        let target_cv = self.op_array.get_or_create_cv(target_name);
+                        let value_cv = self.op_array.get_or_create_cv(value_name);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::AssignRef,
+                            op1: OperandType::Cv(target_cv),
+                            op2: OperandType::Cv(value_cv),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Cv(target_cv))
+                    }
+                    (ExprKind::Variable(target_name), _) => {
+                        // $target = &<expr> — evaluate expr, assign to target, then make both reference
+                        let val = self.compile_expr(value)?;
+                        let target_cv = self.op_array.get_or_create_cv(target_name);
                         self.op_array.emit(Op {
                             opcode: OpCode::Assign,
-                            op1: OperandType::Cv(cv),
+                            op1: OperandType::Cv(target_cv),
                             op2: val,
                             result: OperandType::Unused,
                             line: expr.span.line,
                         });
-                        Ok(OperandType::Cv(cv))
+                        Ok(OperandType::Cv(target_cv))
                     }
                     _ => {
                         let idx = self.op_array.add_literal(Value::Null);

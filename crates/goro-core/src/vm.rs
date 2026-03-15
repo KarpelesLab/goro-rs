@@ -187,6 +187,26 @@ impl Vm {
                     self.write_operand(&op.op1, val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::AssignRef => {
+                    // Both op1 and op2 must be CVs. Make them share the same Reference.
+                    if let (OperandType::Cv(target_idx), OperandType::Cv(value_idx)) = (op.op1, op.op2) {
+                        let ti = target_idx as usize;
+                        let vi = value_idx as usize;
+                        // Get or create a reference cell for the value variable
+                        let ref_cell = if let Value::Reference(r) = &cvs[vi] {
+                            // Value is already a reference, share it
+                            r.clone()
+                        } else {
+                            // Wrap the current value in a new reference
+                            let r = Rc::new(RefCell::new(cvs[vi].clone()));
+                            cvs[vi] = Value::Reference(r.clone());
+                            r
+                        };
+                        // Point the target to the same reference
+                        cvs[ti] = Value::Reference(ref_cell);
+                    }
+                }
+
                 OpCode::Add => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
@@ -1331,6 +1351,7 @@ impl Vm {
             Value::True => ArrayKey::Int(1),
             Value::False | Value::Null | Value::Undef => ArrayKey::Int(0),
             Value::Object(_) | Value::Array(_) => ArrayKey::Int(0),
+            Value::Reference(r) => Self::value_to_array_key(r.borrow().clone()),
         }
     }
 
@@ -1363,7 +1384,11 @@ impl Vm {
         literals: &[Value],
     ) -> Value {
         match operand {
-            OperandType::Cv(idx) => cvs.get(*idx as usize).cloned().unwrap_or(Value::Null),
+            OperandType::Cv(idx) => {
+                let val = cvs.get(*idx as usize).cloned().unwrap_or(Value::Null);
+                // Auto-deref references when reading
+                val.deref()
+            }
             OperandType::Const(idx) => literals.get(*idx as usize).cloned().unwrap_or(Value::Null),
             OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned().unwrap_or(Value::Null),
             OperandType::Unused => Value::Null,
@@ -1382,7 +1407,12 @@ impl Vm {
         match operand {
             OperandType::Cv(idx) => {
                 if let Some(slot) = cvs.get_mut(*idx as usize) {
-                    *slot = value.clone();
+                    // If the CV holds a reference, write through the reference
+                    if let Value::Reference(r) = slot {
+                        *r.borrow_mut() = value.clone();
+                    } else {
+                        *slot = value.clone();
+                    }
                 }
                 // If this CV is a static variable, persist the value
                 if let Some(key) = static_cv_keys.get(idx) {

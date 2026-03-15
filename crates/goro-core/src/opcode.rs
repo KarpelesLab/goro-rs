@@ -66,6 +66,8 @@ pub enum OpCode {
     // ---- Assignment ----
     /// Assign op2 to CV(op1), result = value
     Assign,
+    /// Assign by reference: both CV(op1) and CV(op2) share the same Rc<RefCell<Value>>
+    AssignRef,
     /// Compound assign: CV(op1) op= op2
     AssignAdd,
     AssignSub,

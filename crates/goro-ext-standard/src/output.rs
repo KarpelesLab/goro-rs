@@ -79,6 +79,64 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
+        Value::Reference(r) => {
+            // Show the inner value with & prefix (PHP shows &int(42), &string(...), etc.)
+            let inner = r.borrow().clone();
+            var_dump_value_ref(vm, &inner, indent, &prefix);
+        }
+    }
+}
+
+fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str) {
+    match val {
+        Value::Null | Value::Undef => {
+            vm.write_output(format!("{}&NULL\n", prefix).as_bytes());
+        }
+        Value::True => {
+            vm.write_output(format!("{}&bool(true)\n", prefix).as_bytes());
+        }
+        Value::False => {
+            vm.write_output(format!("{}&bool(false)\n", prefix).as_bytes());
+        }
+        Value::Long(n) => {
+            vm.write_output(format!("{}&int({})\n", prefix, n).as_bytes());
+        }
+        Value::Double(f) => {
+            vm.write_output(format!("{}&float({})\n", prefix, format_php_float_serialize(*f)).as_bytes());
+        }
+        Value::String(s) => {
+            vm.write_output(
+                format!(
+                    "{}&string({}) \"{}\"\n",
+                    prefix,
+                    s.len(),
+                    s.to_string_lossy()
+                )
+                .as_bytes(),
+            );
+        }
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            vm.write_output(format!("{}&array({}) {{\n", prefix, arr.len()).as_bytes());
+            for (key, value) in arr.iter() {
+                match key {
+                    goro_core::array::ArrayKey::Int(n) => {
+                        vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
+                    }
+                    goro_core::array::ArrayKey::String(s) => {
+                        vm.write_output(
+                            format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes(),
+                        );
+                    }
+                }
+                var_dump_value(vm, value, indent + 2);
+            }
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
+        }
+        _ => {
+            // For other types (Object, nested Reference), just dump normally
+            var_dump_value(vm, val, indent);
+        }
     }
 }
 
@@ -136,6 +194,9 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
         Value::Object(_) => {
             buf.extend_from_slice(b"Object"); // TODO: implement object print_r
         }
+        Value::Reference(r) => {
+            print_r_value(&r.borrow(), buf, indent);
+        }
     }
 }
 
@@ -181,6 +242,9 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, _indent: usize) {
         }
         Value::Object(_) => {
             buf.extend_from_slice(b"(object) array(...)"); // TODO: implement object var_export
+        }
+        Value::Reference(r) => {
+            var_export_value(&r.borrow(), buf, _indent);
         }
     }
 }

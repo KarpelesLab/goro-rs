@@ -1232,7 +1232,7 @@ fn strncasecmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// PHP-style string comparison returning the byte difference (not just -1/0/1)
-fn php_strcmp(a: &[u8], b: &[u8]) -> i64 {
+pub fn php_strcmp(a: &[u8], b: &[u8]) -> i64 {
     let min_len = a.len().min(b.len());
     for i in 0..min_len {
         if a[i] != b[i] {
@@ -1340,6 +1340,7 @@ fn json_encode_value(val: &Value) -> String {
             }
         }
         Value::Object(_) => "null".to_string(), // TODO: implement object JSON encoding
+        Value::Reference(r) => json_encode_value(&r.borrow()),
     }
 }
 
@@ -1476,6 +1477,7 @@ fn serialize_value(val: &Value) -> String {
             result
         }
         Value::Object(_) => "N;".to_string(), // TODO: proper object serialization
+        Value::Reference(r) => serialize_value(&r.borrow()),
     }
 }
 fn unserialize_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
