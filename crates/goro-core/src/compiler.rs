@@ -1407,7 +1407,7 @@ impl Compiler {
                     CastType::String => OpCode::CastString,
                     CastType::Bool => OpCode::CastBool,
                     CastType::Array => OpCode::CastArray,
-                    CastType::Object => OpCode::Nop, // TODO: object cast
+                    CastType::Object => OpCode::CastObject,
                     CastType::Unset => OpCode::Nop,  // (unset) is deprecated
                 };
                 self.op_array.emit(Op {

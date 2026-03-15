@@ -124,6 +124,7 @@ pub enum OpCode {
     CastString,
     CastBool,
     CastArray,
+    CastObject,
 
     // ---- Array ----
     /// Create a new empty array, result = new array

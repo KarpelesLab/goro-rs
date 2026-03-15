@@ -662,6 +662,40 @@ impl Vm {
                     self.write_operand(&op.result, Value::Array(arr), &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::CastObject => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let obj = match val {
+                        Value::Object(o) => Value::Object(o),
+                        Value::Array(arr) => {
+                            let arr_borrow = arr.borrow();
+                            let obj_id = self.next_object_id;
+                            self.next_object_id += 1;
+                            let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
+                            for (key, value) in arr_borrow.iter() {
+                                let prop_name = match key {
+                                    ArrayKey::String(s) => s.as_bytes().to_vec(),
+                                    ArrayKey::Int(n) => n.to_string().into_bytes(),
+                                };
+                                obj.set_property(prop_name, value.clone());
+                            }
+                            Value::Object(Rc::new(RefCell::new(obj)))
+                        }
+                        Value::Null | Value::Undef => {
+                            let obj_id = self.next_object_id;
+                            self.next_object_id += 1;
+                            Value::Object(Rc::new(RefCell::new(PhpObject::new(b"stdClass".to_vec(), obj_id))))
+                        }
+                        other => {
+                            let obj_id = self.next_object_id;
+                            self.next_object_id += 1;
+                            let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
+                            obj.set_property(b"scalar".to_vec(), other);
+                            Value::Object(Rc::new(RefCell::new(obj)))
+                        }
+                    };
+                    self.write_operand(&op.result, obj, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
                 // Arrays
                 OpCode::ArrayNew => {
                     let arr = Rc::new(RefCell::new(PhpArray::new()));
