@@ -45,6 +45,12 @@ pub struct Compiler {
     current_parent_class: Option<Vec<u8>>,
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Self {
@@ -426,18 +432,15 @@ impl Compiler {
                 });
 
                 // Assign value to the value variable
-                match &value.kind {
-                    ExprKind::Variable(name) => {
-                        let cv = self.op_array.get_or_create_cv(name);
-                        self.op_array.emit(Op {
-                            opcode: OpCode::Assign,
-                            op1: OperandType::Cv(cv),
-                            op2: OperandType::Tmp(val_tmp),
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
-                    }
-                    _ => {}
+                if let ExprKind::Variable(name) = &value.kind {
+                    let cv = self.op_array.get_or_create_cv(name);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Cv(cv),
+                        op2: OperandType::Tmp(val_tmp),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
                 }
 
                 // Assign key if present
@@ -450,18 +453,15 @@ impl Compiler {
                         result: OperandType::Tmp(key_tmp),
                         line: stmt.span.line,
                     });
-                    match &key_expr.kind {
-                        ExprKind::Variable(name) => {
-                            let cv = self.op_array.get_or_create_cv(name);
-                            self.op_array.emit(Op {
-                                opcode: OpCode::Assign,
-                                op1: OperandType::Cv(cv),
-                                op2: OperandType::Tmp(key_tmp),
-                                result: OperandType::Unused,
-                                line: stmt.span.line,
-                            });
-                        }
-                        _ => {}
+                    if let ExprKind::Variable(name) = &key_expr.kind {
+                        let cv = self.op_array.get_or_create_cv(name);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Tmp(key_tmp),
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
                     }
                 }
 
@@ -573,9 +573,11 @@ impl Compiler {
 
                 // Patch default/end jump
                 if let Some(def_idx) = default_index {
-                    self.op_array.patch_jump(jmp_to_default_or_end, body_offsets[def_idx]);
+                    self.op_array
+                        .patch_jump(jmp_to_default_or_end, body_offsets[def_idx]);
                 } else {
-                    self.op_array.patch_jump(jmp_to_default_or_end, after_switch);
+                    self.op_array
+                        .patch_jump(jmp_to_default_or_end, after_switch);
                 }
 
                 let ctx = self.loop_stack.pop().unwrap();
@@ -621,10 +623,7 @@ impl Compiler {
             }
 
             StmtKind::FunctionDecl {
-                name,
-                params,
-                body,
-                ..
+                name, params, body, ..
             } => {
                 // Compile the function body into a sub-OpArray
                 let mut func_compiler = Compiler::new();
@@ -721,7 +720,9 @@ impl Compiler {
                     let mut key = self.op_array.name.clone();
                     key.extend_from_slice(b"::");
                     key.extend_from_slice(name);
-                    let key_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(key)));
+                    let key_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(key)));
                     self.op_array.emit(Op {
                         opcode: OpCode::StaticVarInit,
                         op1: OperandType::Cv(cv),
@@ -736,9 +737,9 @@ impl Compiler {
             StmtKind::Global(vars) => {
                 for name in vars {
                     let cv = self.op_array.get_or_create_cv(name);
-                    let name_idx = self.op_array.add_literal(
-                        Value::String(PhpString::from_vec(name.clone()))
-                    );
+                    let name_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(name.clone())));
                     self.op_array.emit(Op {
                         opcode: OpCode::BindGlobal,
                         op1: OperandType::Cv(cv),
@@ -778,7 +779,11 @@ impl Compiler {
                 Ok(())
             }
 
-            StmtKind::TryCatch { try_body, catches, finally_body } => {
+            StmtKind::TryCatch {
+                try_body,
+                catches,
+                finally_body,
+            } => {
                 // Emit TryBegin with jump target for catch handler
                 let try_begin = self.op_array.emit(Op {
                     opcode: OpCode::TryBegin,
@@ -813,7 +818,7 @@ impl Compiler {
                 let catch_start = self.op_array.current_offset();
                 let mut end_of_catch_jumps = Vec::new();
 
-                for (_i, catch) in catches.iter().enumerate() {
+                for catch in catches.iter() {
                     // Assign exception to variable if specified
                     if let Some(var_name) = &catch.variable {
                         let cv = self.op_array.get_or_create_cv(var_name);
@@ -851,7 +856,8 @@ impl Compiler {
                         self.compile_stmt(s)?;
                     }
                     // Patch TryBegin's finally target
-                    self.op_array.ops[try_begin as usize].op2 = OperandType::JmpTarget(finally_start);
+                    self.op_array.ops[try_begin as usize].op2 =
+                        OperandType::JmpTarget(finally_start);
                     self.op_array.current_offset()
                 } else {
                     let end = self.op_array.current_offset();
@@ -867,7 +873,13 @@ impl Compiler {
                 Ok(())
             }
 
-            StmtKind::ClassDecl { name, modifiers, extends, implements, body } => {
+            StmtKind::ClassDecl {
+                name,
+                modifiers,
+                extends,
+                implements,
+                body,
+            } => {
                 let mut class = ClassEntry::new(name.clone());
                 class.parent = extends.clone();
                 class.interfaces = implements.clone();
@@ -876,18 +888,28 @@ impl Compiler {
 
                 for member in body {
                     match member {
-                        ClassMember::Property { name: prop_name, default, visibility, is_static, .. } => {
+                        ClassMember::Property {
+                            name: prop_name,
+                            default,
+                            visibility,
+                            is_static,
+                            ..
+                        } => {
                             let default_val = if let Some(expr) = default {
                                 // Compile the default value expression (constants only)
                                 match &expr.kind {
                                     ExprKind::Int(n) => Value::Long(*n),
                                     ExprKind::Float(f) => Value::Double(*f),
-                                    ExprKind::String(s) => Value::String(PhpString::from_vec(s.clone())),
+                                    ExprKind::String(s) => {
+                                        Value::String(PhpString::from_vec(s.clone()))
+                                    }
                                     ExprKind::True => Value::True,
                                     ExprKind::False => Value::False,
                                     ExprKind::Null => Value::Null,
                                     ExprKind::Array(elements) if elements.is_empty() => {
-                                        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(crate::array::PhpArray::new())))
+                                        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+                                            crate::array::PhpArray::new(),
+                                        )))
                                     }
                                     _ => Value::Null,
                                 }
@@ -900,7 +922,9 @@ impl Compiler {
                                 Visibility::Private => ObjVisibility::Private,
                             };
                             if *is_static {
-                                class.static_properties.insert(prop_name.clone(), default_val.clone());
+                                class
+                                    .static_properties
+                                    .insert(prop_name.clone(), default_val.clone());
                             }
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
@@ -909,7 +933,15 @@ impl Compiler {
                                 visibility: vis,
                             });
                         }
-                        ClassMember::Method { name: method_name, params, body: method_body, visibility, is_static, is_abstract, .. } => {
+                        ClassMember::Method {
+                            name: method_name,
+                            params,
+                            body: method_body,
+                            visibility,
+                            is_static,
+                            is_abstract,
+                            ..
+                        } => {
                             if let Some(body_stmts) = method_body {
                                 let mut method_compiler = Compiler::new();
                                 method_compiler.op_array.name = method_name.clone();
@@ -925,8 +957,10 @@ impl Compiler {
                                 for param in params {
                                     let cv = method_compiler.op_array.get_or_create_cv(&param.name);
                                     if let Some(default_expr) = &param.default {
-                                        let default_val = method_compiler.compile_expr(default_expr)?;
-                                        let undef_idx = method_compiler.op_array.add_literal(Value::Undef);
+                                        let default_val =
+                                            method_compiler.compile_expr(default_expr)?;
+                                        let undef_idx =
+                                            method_compiler.op_array.add_literal(Value::Undef);
                                         let check_tmp = method_compiler.op_array.alloc_temp();
                                         method_compiler.op_array.emit(Op {
                                             opcode: OpCode::Identical,
@@ -975,22 +1009,32 @@ impl Compiler {
                                 };
 
                                 let param_count = params.len();
-                                let lower_name: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                class.methods.insert(lower_name, MethodDef {
-                                    name: method_name.clone(),
-                                    op_array: method_compiler.op_array,
-                                    param_count,
-                                    is_static: *is_static,
-                                    is_abstract: *is_abstract,
-                                    visibility: vis,
-                                });
+                                let lower_name: Vec<u8> =
+                                    method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                class.methods.insert(
+                                    lower_name,
+                                    MethodDef {
+                                        name: method_name.clone(),
+                                        op_array: method_compiler.op_array,
+                                        param_count,
+                                        is_static: *is_static,
+                                        is_abstract: *is_abstract,
+                                        visibility: vis,
+                                    },
+                                );
                             }
                         }
-                        ClassMember::ClassConstant { name: const_name, value: const_expr, .. } => {
+                        ClassMember::ClassConstant {
+                            name: const_name,
+                            value: const_expr,
+                            ..
+                        } => {
                             let val = match &const_expr.kind {
                                 ExprKind::Int(n) => Value::Long(*n),
                                 ExprKind::Float(f) => Value::Double(*f),
-                                ExprKind::String(s) => Value::String(PhpString::from_vec(s.clone())),
+                                ExprKind::String(s) => {
+                                    Value::String(PhpString::from_vec(s.clone()))
+                                }
                                 ExprKind::True => Value::True,
                                 ExprKind::False => Value::False,
                                 ExprKind::Null => Value::Null,
@@ -1008,7 +1052,9 @@ impl Compiler {
                 let class_idx = self.compiled_classes.len();
                 self.compiled_classes.push(class);
 
-                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name.clone())));
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
                 let idx_literal = self.op_array.add_literal(Value::Long(class_idx as i64));
                 self.op_array.emit(Op {
                     opcode: OpCode::DeclareClass,
@@ -1034,7 +1080,10 @@ impl Compiler {
             _ => {
                 // Unimplemented statement types
                 Err(CompileError {
-                    message: format!("unimplemented statement: {:?}", std::mem::discriminant(&stmt.kind)),
+                    message: format!(
+                        "unimplemented statement: {:?}",
+                        std::mem::discriminant(&stmt.kind)
+                    ),
                     line: stmt.span.line,
                 })
             }
@@ -1113,13 +1162,17 @@ impl Compiler {
                         }
                         Ok(val)
                     }
-                    ExprKind::PropertyAccess { object, property, .. } => {
+                    ExprKind::PropertyAccess {
+                        object, property, ..
+                    } => {
                         let obj = self.compile_expr(object)?;
                         let prop_name = match &property.kind {
                             ExprKind::Identifier(name) => name.clone(),
                             _ => return Ok(val),
                         };
-                        let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(prop_name)));
+                        let name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(prop_name)));
                         self.op_array.emit(Op {
                             opcode: OpCode::PropertySet,
                             op1: obj,
@@ -1132,7 +1185,9 @@ impl Compiler {
                     ExprKind::StaticPropertyAccess { class, property } => {
                         let class_name = match &class.kind {
                             ExprKind::Identifier(name) => {
-                                if name.eq_ignore_ascii_case(b"self") || name.eq_ignore_ascii_case(b"static") {
+                                if name.eq_ignore_ascii_case(b"self")
+                                    || name.eq_ignore_ascii_case(b"static")
+                                {
                                     self.current_class.clone().unwrap_or(name.clone())
                                 } else if name.eq_ignore_ascii_case(b"parent") {
                                     self.current_parent_class.clone().unwrap_or(name.clone())
@@ -1142,8 +1197,12 @@ impl Compiler {
                             }
                             _ => return Ok(val),
                         };
-                        let class_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
-                        let prop_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(property.clone())));
+                        let class_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(class_name)));
+                        let prop_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(property.clone())));
                         self.op_array.emit(Op {
                             opcode: OpCode::StaticPropSet,
                             op1: OperandType::Const(class_idx),
@@ -1156,15 +1215,26 @@ impl Compiler {
                     _ => {
                         // Check for destructuring: list($a, $b) = $arr or [$a, $b] = $arr
                         let vars: Vec<Option<Vec<u8>>> = match &target.kind {
-                            ExprKind::Array(elems) => {
-                                elems.iter().map(|e| {
-                                    if let ExprKind::Variable(name) = &e.value.kind { Some(name.clone()) } else { None }
-                                }).collect()
-                            }
+                            ExprKind::Array(elems) => elems
+                                .iter()
+                                .map(|e| {
+                                    if let ExprKind::Variable(name) = &e.value.kind {
+                                        Some(name.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect(),
                             ExprKind::FunctionCall { name, args } if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) => {
-                                args.iter().map(|a| {
-                                    if let ExprKind::Variable(name) = &a.value.kind { Some(name.clone()) } else { None }
-                                }).collect()
+                                args.iter()
+                                    .map(|a| {
+                                        if let ExprKind::Variable(name) = &a.value.kind {
+                                            Some(name.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect()
                             }
                             _ => {
                                 return Err(CompileError {
@@ -1286,14 +1356,18 @@ impl Compiler {
                         });
                         Ok(OperandType::Tmp(result_tmp))
                     }
-                    ExprKind::PropertyAccess { object, property, .. } => {
+                    ExprKind::PropertyAccess {
+                        object, property, ..
+                    } => {
                         // $obj->prop op= $val
                         let obj = self.compile_expr(object)?;
                         let prop_name = match &property.kind {
                             ExprKind::Identifier(name) => name.clone(),
                             _ => return Ok(val),
                         };
-                        let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(prop_name)));
+                        let name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(prop_name)));
 
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
@@ -1473,8 +1547,10 @@ impl Compiler {
                     BinaryOp::GreaterEqual => OpCode::GreaterEqual,
                     BinaryOp::Spaceship => OpCode::Spaceship,
                     BinaryOp::LogicalXor => OpCode::BitwiseXor,
-                    BinaryOp::BooleanAnd | BinaryOp::BooleanOr
-                    | BinaryOp::LogicalAnd | BinaryOp::LogicalOr => unreachable!(),
+                    BinaryOp::BooleanAnd
+                    | BinaryOp::BooleanOr
+                    | BinaryOp::LogicalAnd
+                    | BinaryOp::LogicalOr => unreachable!(),
                 };
                 self.op_array.emit(Op {
                     opcode,
@@ -1486,7 +1562,11 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
-            ExprKind::UnaryOp { op, operand, prefix } => {
+            ExprKind::UnaryOp {
+                op,
+                operand,
+                prefix,
+            } => {
                 let val = self.compile_expr(operand)?;
                 let tmp = self.op_array.alloc_temp();
                 let opcode = match (op, prefix) {
@@ -1603,7 +1683,7 @@ impl Compiler {
                     CastType::Bool => OpCode::CastBool,
                     CastType::Array => OpCode::CastArray,
                     CastType::Object => OpCode::CastObject,
-                    CastType::Unset => OpCode::Nop,  // (unset) is deprecated
+                    CastType::Unset => OpCode::Nop, // (unset) is deprecated
                 };
                 self.op_array.emit(Op {
                     opcode,
@@ -1810,9 +1890,7 @@ impl Compiler {
                     });
                 }
                 Ok(result.unwrap_or_else(|| {
-                    let idx = self
-                        .op_array
-                        .add_literal(Value::String(PhpString::empty()));
+                    let idx = self.op_array.add_literal(Value::String(PhpString::empty()));
                     OperandType::Const(idx)
                 }))
             }
@@ -1984,7 +2062,11 @@ impl Compiler {
                     b"e_strict" => Value::Long(2048),
                     b"e_deprecated" => Value::Long(8192),
                     b"php_prefix_separator" | b"directory_separator" | b"path_separator" => {
-                        Value::String(PhpString::from_bytes(if cfg!(windows) { b"\\" } else { b"/" }))
+                        Value::String(PhpString::from_bytes(if cfg!(windows) {
+                            b"\\"
+                        } else {
+                            b"/"
+                        }))
                     }
                     b"str_pad_right" => Value::Long(1),
                     b"str_pad_left" => Value::Long(0),
@@ -1997,7 +2079,9 @@ impl Compiler {
                     b"array_filter_use_key" => Value::Long(2),
                     _ => {
                         // Unknown identifier - emit runtime constant lookup
-                        let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name.clone())));
+                        let name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(name.clone())));
                         let tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::ConstLookup,
@@ -2024,7 +2108,9 @@ impl Compiler {
                     }
                 };
 
-                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(class_name)));
                 let tmp = self.op_array.alloc_temp();
 
                 // Create the object
@@ -2038,9 +2124,9 @@ impl Compiler {
 
                 // Always call constructor (it may have default params or side effects)
                 {
-                    let constructor_name = self.op_array.add_literal(
-                        Value::String(PhpString::from_bytes(b"__construct"))
-                    );
+                    let constructor_name = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_bytes(b"__construct")));
                     self.op_array.emit(Op {
                         opcode: OpCode::InitMethodCall,
                         op1: OperandType::Tmp(tmp),
@@ -2082,7 +2168,9 @@ impl Compiler {
                         return Ok(OperandType::Const(idx));
                     }
                 };
-                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(class_name)));
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::TypeCheck,
@@ -2148,7 +2236,12 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
-            ExprKind::Closure { params, body, use_vars, .. } => {
+            ExprKind::Closure {
+                params,
+                body,
+                use_vars,
+                ..
+            } => {
                 // Compile closure body as a child function
                 let closure_id = self.op_array.child_functions.len();
                 let closure_name = format!("__closure_{}", closure_id).into_bytes();
@@ -2160,7 +2253,9 @@ impl Compiler {
 
                 // Set up use vars as the first CVs (before params)
                 for use_var in use_vars {
-                    closure_compiler.op_array.get_or_create_cv(&use_var.variable);
+                    closure_compiler
+                        .op_array
+                        .get_or_create_cv(&use_var.variable);
                 }
                 // Set up parameter CVs
                 for param in params {
@@ -2180,11 +2275,17 @@ impl Compiler {
                     line: 0,
                 });
 
-                self.op_array.child_functions.push(closure_compiler.op_array);
+                self.op_array
+                    .child_functions
+                    .push(closure_compiler.op_array);
 
                 // Emit DeclareFunction for the closure
-                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name.clone())));
-                let func_idx = self.op_array.add_literal(Value::Long((self.op_array.child_functions.len() - 1) as i64));
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(closure_name.clone())));
+                let func_idx = self.op_array.add_literal(Value::Long(
+                    (self.op_array.child_functions.len() - 1) as i64,
+                ));
                 self.op_array.emit(Op {
                     opcode: OpCode::DeclareFunction,
                     op1: OperandType::Const(name_idx),
@@ -2204,7 +2305,9 @@ impl Compiler {
                         line: expr.span.line,
                     });
                     // First element: closure name
-                    let name_val = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name)));
+                    let name_val = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(closure_name)));
                     self.op_array.emit(Op {
                         opcode: OpCode::ArrayAppend,
                         op1: OperandType::Tmp(arr_tmp),
@@ -2226,7 +2329,9 @@ impl Compiler {
                     Ok(OperandType::Tmp(arr_tmp))
                 } else {
                     // No use vars - just return the closure name
-                    let name_val_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name)));
+                    let name_val_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(closure_name)));
                     Ok(OperandType::Const(name_val_idx))
                 }
             }
@@ -2253,10 +2358,16 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                self.op_array.child_functions.push(closure_compiler.op_array);
+                self.op_array
+                    .child_functions
+                    .push(closure_compiler.op_array);
 
-                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name.clone())));
-                let func_idx = self.op_array.add_literal(Value::Long((self.op_array.child_functions.len() - 1) as i64));
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(closure_name.clone())));
+                let func_idx = self.op_array.add_literal(Value::Long(
+                    (self.op_array.child_functions.len() - 1) as i64,
+                ));
                 self.op_array.emit(Op {
                     opcode: OpCode::DeclareFunction,
                     op1: OperandType::Const(name_idx),
@@ -2265,7 +2376,9 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                let name_val_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(closure_name)));
+                let name_val_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(closure_name)));
                 Ok(OperandType::Const(name_val_idx))
             }
 
@@ -2279,9 +2392,7 @@ impl Compiler {
                 self.compile_expr(inner)
             }
 
-            ExprKind::Spread(inner) => {
-                self.compile_expr(inner)
-            }
+            ExprKind::Spread(inner) => self.compile_expr(inner),
 
             ExprKind::ClassConstAccess { class, constant } => {
                 // Handle ClassName::class, ClassName::CONST, self::CONST
@@ -2296,27 +2407,39 @@ impl Compiler {
 
                 // ClassName::class returns the class name as a string
                 if constant == b"class" {
-                    let resolved = if class_name.eq_ignore_ascii_case(b"self") || class_name.eq_ignore_ascii_case(b"static") {
+                    let resolved = if class_name.eq_ignore_ascii_case(b"self")
+                        || class_name.eq_ignore_ascii_case(b"static")
+                    {
                         self.current_class.clone().unwrap_or_default()
                     } else {
                         class_name.clone()
                     };
-                    let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(resolved)));
+                    let idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(resolved)));
                     return Ok(OperandType::Const(idx));
                 }
 
                 // Try to find the constant at compile time in already-compiled classes
-                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") || class_name.eq_ignore_ascii_case(b"static") {
+                let resolved_class = if class_name.eq_ignore_ascii_case(b"self")
+                    || class_name.eq_ignore_ascii_case(b"static")
+                {
                     self.current_class.clone().unwrap_or(class_name.clone())
                 } else if class_name.eq_ignore_ascii_case(b"parent") {
-                    self.current_parent_class.clone().unwrap_or(class_name.clone())
+                    self.current_parent_class
+                        .clone()
+                        .unwrap_or(class_name.clone())
                 } else {
                     class_name.clone()
                 };
 
                 // Use runtime lookup via StaticPropGet (class constants are stored similarly)
-                let class_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(resolved_class)));
-                let const_name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(constant.clone())));
+                let class_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(resolved_class)));
+                let const_name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(constant.clone())));
                 let tmp = self.op_array.alloc_temp();
                 // Reuse StaticPropGet for class constants (VM will check both)
                 self.op_array.emit(Op {
@@ -2329,7 +2452,11 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
-            ExprKind::StaticMethodCall { class, method, args } => {
+            ExprKind::StaticMethodCall {
+                class,
+                method,
+                args,
+            } => {
                 // Handle ClassName::method() and parent::method()
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => name.clone(),
@@ -2341,10 +2468,14 @@ impl Compiler {
                 };
 
                 // Resolve self:: and parent:: to actual class names
-                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") || class_name.eq_ignore_ascii_case(b"static") {
+                let resolved_class = if class_name.eq_ignore_ascii_case(b"self")
+                    || class_name.eq_ignore_ascii_case(b"static")
+                {
                     self.current_class.clone().unwrap_or(class_name.clone())
                 } else if class_name.eq_ignore_ascii_case(b"parent") {
-                    self.current_parent_class.clone().unwrap_or(class_name.clone())
+                    self.current_parent_class
+                        .clone()
+                        .unwrap_or(class_name.clone())
                 } else {
                     class_name.clone()
                 };
@@ -2353,7 +2484,9 @@ impl Compiler {
                 let mut func_name = resolved_class;
                 func_name.extend_from_slice(b"::");
                 func_name.extend_from_slice(method);
-                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(func_name)));
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(func_name)));
                 let arg_count = self.op_array.add_literal(Value::Long(args.len() as i64));
                 self.op_array.emit(Op {
                     opcode: OpCode::InitFCall,
@@ -2391,7 +2524,9 @@ impl Compiler {
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => {
                         // Resolve self/static/parent
-                        if name.eq_ignore_ascii_case(b"self") || name.eq_ignore_ascii_case(b"static") {
+                        if name.eq_ignore_ascii_case(b"self")
+                            || name.eq_ignore_ascii_case(b"static")
+                        {
                             self.current_class.clone().unwrap_or(name.clone())
                         } else if name.eq_ignore_ascii_case(b"parent") {
                             self.current_parent_class.clone().unwrap_or(name.clone())
@@ -2405,8 +2540,12 @@ impl Compiler {
                         return Ok(OperandType::Const(idx));
                     }
                 };
-                let class_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
-                let prop_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(property.clone())));
+                let class_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(class_name)));
+                let prop_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(property.clone())));
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::StaticPropGet,
@@ -2418,7 +2557,9 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
-            ExprKind::PropertyAccess { object, property, .. } => {
+            ExprKind::PropertyAccess {
+                object, property, ..
+            } => {
                 let obj = self.compile_expr(object)?;
                 let prop_name = match &property.kind {
                     ExprKind::Identifier(name) => name.clone(),
@@ -2427,7 +2568,9 @@ impl Compiler {
                         return Ok(obj); // fallback
                     }
                 };
-                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(prop_name)));
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(prop_name)));
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::PropertyGet,
@@ -2439,13 +2582,20 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
-            ExprKind::MethodCall { object, method, args, .. } => {
+            ExprKind::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 let obj = self.compile_expr(object)?;
                 let method_name = match &method.kind {
                     ExprKind::Identifier(name) => name.clone(),
                     _ => b"__invoke".to_vec(),
                 };
-                let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(method_name)));
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(method_name)));
 
                 self.op_array.emit(Op {
                     opcode: OpCode::InitMethodCall,
@@ -2555,7 +2705,9 @@ impl Compiler {
                 // Qualified constant - just return the last part as a string
                 let empty = vec![];
                 let name = parts.last().unwrap_or(&empty);
-                let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name.clone())));
+                let idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
                 Ok(OperandType::Const(idx))
             }
 

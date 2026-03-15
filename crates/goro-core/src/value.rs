@@ -7,9 +7,10 @@ use crate::object::PhpObject;
 use crate::string::PhpString;
 
 /// The core value type (equivalent to zval in PHP)
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Value {
     Undef,
+    #[default]
     Null,
     False,
     True,
@@ -99,7 +100,9 @@ impl Value {
                 let mut result: i64 = 0;
                 for ch in chars {
                     if ch.is_ascii_digit() {
-                        result = result.wrapping_mul(10).wrapping_add((ch as u8 - b'0') as i64);
+                        result = result
+                            .wrapping_mul(10)
+                            .wrapping_add((ch as u8 - b'0') as i64);
                     } else {
                         break;
                     }
@@ -107,7 +110,11 @@ impl Value {
                 if negative { -result } else { result }
             }
             Value::Array(arr) => {
-                if arr.borrow().is_empty() { 0 } else { 1 }
+                if arr.borrow().is_empty() {
+                    0
+                } else {
+                    1
+                }
             }
             Value::Object(_) => 1,
             Value::Reference(r) => r.borrow().to_long(),
@@ -126,7 +133,11 @@ impl Value {
                 s.parse::<f64>().unwrap_or(0.0)
             }
             Value::Array(arr) => {
-                if arr.borrow().is_empty() { 0.0 } else { 1.0 }
+                if arr.borrow().is_empty() {
+                    0.0
+                } else {
+                    1.0
+                }
             }
             Value::Object(_) => 1.0,
             Value::Reference(r) => r.borrow().to_double(),
@@ -139,9 +150,7 @@ impl Value {
             Value::False => PhpString::empty(),
             Value::True => PhpString::from_bytes(b"1"),
             Value::Long(n) => PhpString::from_string(n.to_string()),
-            Value::Double(f) => {
-                PhpString::from_string(format_php_float(*f))
-            }
+            Value::Double(f) => PhpString::from_string(format_php_float(*f)),
             Value::String(s) => s.clone(),
             Value::Array(_) => PhpString::from_bytes(b"Array"),
             Value::Object(obj) => {
@@ -160,8 +169,12 @@ impl Value {
     // ---- Arithmetic helpers ----
 
     pub fn add(&self, other: &Value) -> Value {
-        if let Value::Reference(r) = self { return r.borrow().add(other); }
-        if let Value::Reference(r) = other { return self.add(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().add(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.add(&r.borrow());
+        }
         match (self, other) {
             // Array + Array = array union
             (Value::Array(a), Value::Array(b)) => {
@@ -180,12 +193,10 @@ impl Value {
                 }
                 Value::Array(std::rc::Rc::new(std::cell::RefCell::new(result)))
             }
-            (Value::Long(a), Value::Long(b)) => {
-                match a.checked_add(*b) {
-                    Some(result) => Value::Long(result),
-                    None => Value::Double(*a as f64 + *b as f64),
-                }
-            }
+            (Value::Long(a), Value::Long(b)) => match a.checked_add(*b) {
+                Some(result) => Value::Long(result),
+                None => Value::Double(*a as f64 + *b as f64),
+            },
             (Value::Double(a), Value::Double(b)) => Value::Double(a + b),
             (Value::Long(a), Value::Double(b)) => Value::Double(*a as f64 + b),
             (Value::Double(a), Value::Long(b)) => Value::Double(a + *b as f64),
@@ -199,15 +210,17 @@ impl Value {
     }
 
     pub fn sub(&self, other: &Value) -> Value {
-        if let Value::Reference(r) = self { return r.borrow().sub(other); }
-        if let Value::Reference(r) = other { return self.sub(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().sub(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.sub(&r.borrow());
+        }
         match (self, other) {
-            (Value::Long(a), Value::Long(b)) => {
-                match a.checked_sub(*b) {
-                    Some(result) => Value::Long(result),
-                    None => Value::Double(*a as f64 - *b as f64),
-                }
-            }
+            (Value::Long(a), Value::Long(b)) => match a.checked_sub(*b) {
+                Some(result) => Value::Long(result),
+                None => Value::Double(*a as f64 - *b as f64),
+            },
             (Value::Double(a), Value::Double(b)) => Value::Double(a - b),
             (Value::Long(a), Value::Double(b)) => Value::Double(*a as f64 - b),
             (Value::Double(a), Value::Long(b)) => Value::Double(a - *b as f64),
@@ -220,15 +233,17 @@ impl Value {
     }
 
     pub fn mul(&self, other: &Value) -> Value {
-        if let Value::Reference(r) = self { return r.borrow().mul(other); }
-        if let Value::Reference(r) = other { return self.mul(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().mul(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.mul(&r.borrow());
+        }
         match (self, other) {
-            (Value::Long(a), Value::Long(b)) => {
-                match a.checked_mul(*b) {
-                    Some(result) => Value::Long(result),
-                    None => Value::Double(*a as f64 * *b as f64),
-                }
-            }
+            (Value::Long(a), Value::Long(b)) => match a.checked_mul(*b) {
+                Some(result) => Value::Long(result),
+                None => Value::Double(*a as f64 * *b as f64),
+            },
             (Value::Double(a), Value::Double(b)) => Value::Double(a * b),
             (Value::Long(a), Value::Double(b)) => Value::Double(*a as f64 * b),
             (Value::Double(a), Value::Long(b)) => Value::Double(a * *b as f64),
@@ -241,8 +256,12 @@ impl Value {
     }
 
     pub fn div(&self, other: &Value) -> Result<Value, &'static str> {
-        if let Value::Reference(r) = self { return r.borrow().div(other); }
-        if let Value::Reference(r) = other { return self.div(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().div(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.div(&r.borrow());
+        }
         let a = self.to_double();
         let b = other.to_double();
         if b == 0.0 {
@@ -250,17 +269,23 @@ impl Value {
         }
         let result = a / b;
         // If both operands were ints and result is a whole number, return int
-        if matches!(self, Value::Long(_)) && matches!(other, Value::Long(_)) {
-            if result.fract() == 0.0 && result.abs() < i64::MAX as f64 {
-                return Ok(Value::Long(result as i64));
-            }
+        if matches!(self, Value::Long(_))
+            && matches!(other, Value::Long(_))
+            && result.fract() == 0.0
+            && result.abs() < i64::MAX as f64
+        {
+            return Ok(Value::Long(result as i64));
         }
         Ok(Value::Double(result))
     }
 
     pub fn modulo(&self, other: &Value) -> Result<Value, &'static str> {
-        if let Value::Reference(r) = self { return r.borrow().modulo(other); }
-        if let Value::Reference(r) = other { return self.modulo(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().modulo(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.modulo(&r.borrow());
+        }
         let a = self.to_long();
         let b = other.to_long();
         if b == 0 {
@@ -270,8 +295,12 @@ impl Value {
     }
 
     pub fn pow(&self, other: &Value) -> Value {
-        if let Value::Reference(r) = self { return r.borrow().pow(other); }
-        if let Value::Reference(r) = other { return self.pow(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().pow(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.pow(&r.borrow());
+        }
         match (self, other) {
             (Value::Long(base), Value::Long(exp)) if *exp >= 0 => {
                 match (*base as u64).checked_pow(*exp as u32) {
@@ -284,8 +313,12 @@ impl Value {
     }
 
     pub fn concat(&self, other: &Value) -> Value {
-        if let Value::Reference(r) = self { return r.borrow().concat(other); }
-        if let Value::Reference(r) = other { return self.concat(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().concat(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.concat(&r.borrow());
+        }
         let a = self.to_php_string();
         let b = other.to_php_string();
         let mut result = a.as_bytes().to_vec();
@@ -337,19 +370,28 @@ impl Value {
 
     /// PHP == comparison
     pub fn equals(&self, other: &Value) -> bool {
-        if let Value::Reference(r) = self { return r.borrow().equals(other); }
-        if let Value::Reference(r) = other { return self.equals(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().equals(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.equals(&r.borrow());
+        }
         match (self, other) {
             (Value::Null | Value::Undef, Value::Null | Value::Undef) => true,
-            (Value::Null | Value::Undef, Value::False) | (Value::False, Value::Null | Value::Undef) => true,
-            (Value::Null | Value::Undef, Value::String(s)) | (Value::String(s), Value::Null | Value::Undef) => s.as_bytes().is_empty(),
-            (Value::Null | Value::Undef, Value::Long(0)) | (Value::Long(0), Value::Null | Value::Undef) => true,
+            (Value::Null | Value::Undef, Value::False)
+            | (Value::False, Value::Null | Value::Undef) => true,
+            (Value::Null | Value::Undef, Value::String(s))
+            | (Value::String(s), Value::Null | Value::Undef) => s.as_bytes().is_empty(),
+            (Value::Null | Value::Undef, Value::Long(0))
+            | (Value::Long(0), Value::Null | Value::Undef) => true,
             (Value::Null | Value::Undef, _) | (_, Value::Null | Value::Undef) => false,
             (Value::True, other) | (other, Value::True) => other.is_truthy(),
             (Value::False, other) | (other, Value::False) => !other.is_truthy(),
             (Value::Long(a), Value::Long(b)) => a == b,
             (Value::Double(a), Value::Double(b)) => a == b,
-            (Value::Long(a), Value::Double(b)) | (Value::Double(b), Value::Long(a)) => *a as f64 == *b,
+            (Value::Long(a), Value::Double(b)) | (Value::Double(b), Value::Long(a)) => {
+                *a as f64 == *b
+            }
             (Value::String(a), Value::String(b)) => a.as_bytes() == b.as_bytes(),
             (Value::String(_), Value::Long(_)) | (Value::Long(_), Value::String(_)) => {
                 self.to_double() == other.to_double()
@@ -357,10 +399,16 @@ impl Value {
             (Value::Array(a), Value::Array(b)) => {
                 let a = a.borrow();
                 let b = b.borrow();
-                if a.len() != b.len() { return false; }
+                if a.len() != b.len() {
+                    return false;
+                }
                 for (key, a_val) in a.iter() {
                     match b.get(key) {
-                        Some(b_val) => if !a_val.equals(b_val) { return false; },
+                        Some(b_val) => {
+                            if !a_val.equals(b_val) {
+                                return false;
+                            }
+                        }
                         None => return false,
                     }
                 }
@@ -372,8 +420,12 @@ impl Value {
 
     /// PHP === comparison
     pub fn identical(&self, other: &Value) -> bool {
-        if let Value::Reference(r) = self { return r.borrow().identical(other); }
-        if let Value::Reference(r) = other { return self.identical(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().identical(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.identical(&r.borrow());
+        }
         match (self, other) {
             (Value::Undef, Value::Undef) => true,
             (Value::Null, Value::Null) => true,
@@ -384,10 +436,16 @@ impl Value {
             (Value::Array(a), Value::Array(b)) => {
                 let a = a.borrow();
                 let b = b.borrow();
-                if a.len() != b.len() { return false; }
+                if a.len() != b.len() {
+                    return false;
+                }
                 for (key, a_val) in a.iter() {
                     match b.get(key) {
-                        Some(b_val) => if !a_val.identical(b_val) { return false; },
+                        Some(b_val) => {
+                            if !a_val.identical(b_val) {
+                                return false;
+                            }
+                        }
                         None => return false,
                     }
                 }
@@ -399,22 +457,50 @@ impl Value {
 
     /// PHP <=> comparison, returns -1, 0, or 1
     pub fn compare(&self, other: &Value) -> i64 {
-        if let Value::Reference(r) = self { return r.borrow().compare(other); }
-        if let Value::Reference(r) = other { return self.compare(&r.borrow()); }
+        if let Value::Reference(r) = self {
+            return r.borrow().compare(other);
+        }
+        if let Value::Reference(r) = other {
+            return self.compare(&r.borrow());
+        }
         match (self, other) {
             (Value::Long(a), Value::Long(b)) => {
-                if a < b { -1 } else if a > b { 1 } else { 0 }
+                if a < b {
+                    -1
+                } else if a > b {
+                    1
+                } else {
+                    0
+                }
             }
             (Value::Double(a), Value::Double(b)) => {
-                if a < b { -1 } else if a > b { 1 } else { 0 }
+                if a < b {
+                    -1
+                } else if a > b {
+                    1
+                } else {
+                    0
+                }
             }
             (Value::Long(a), Value::Double(b)) => {
                 let a = *a as f64;
-                if a < *b { -1 } else if a > *b { 1 } else { 0 }
+                if a < *b {
+                    -1
+                } else if a > *b {
+                    1
+                } else {
+                    0
+                }
             }
             (Value::Double(a), Value::Long(b)) => {
                 let b = *b as f64;
-                if *a < b { -1 } else if *a > b { 1 } else { 0 }
+                if *a < b {
+                    -1
+                } else if *a > b {
+                    1
+                } else {
+                    0
+                }
             }
             (Value::Array(a), Value::Array(b)) => {
                 let a = a.borrow();
@@ -427,7 +513,9 @@ impl Value {
                 for (key, a_val) in a.iter() {
                     if let Some(b_val) = b.get(key) {
                         let cmp = a_val.compare(b_val);
-                        if cmp != 0 { return cmp; }
+                        if cmp != 0 {
+                            return cmp;
+                        }
                     } else {
                         return 1; // key exists in a but not b
                     }
@@ -437,17 +525,21 @@ impl Value {
             (Value::Null | Value::Undef, Value::Null | Value::Undef) => 0,
             (Value::Null | Value::Undef, _) => -1,
             (_, Value::Null | Value::Undef) => 1,
-            (Value::String(a), Value::String(b)) => {
-                match a.as_bytes().cmp(b.as_bytes()) {
-                    std::cmp::Ordering::Less => -1,
-                    std::cmp::Ordering::Equal => 0,
-                    std::cmp::Ordering::Greater => 1,
-                }
-            }
+            (Value::String(a), Value::String(b)) => match a.as_bytes().cmp(b.as_bytes()) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            },
             _ => {
                 let a = self.to_double();
                 let b = other.to_double();
-                if a < b { -1 } else if a > b { 1 } else { 0 }
+                if a < b {
+                    -1
+                } else if a > b {
+                    1
+                } else {
+                    0
+                }
             }
         }
     }
@@ -459,10 +551,18 @@ pub fn format_php_float(f: f64) -> String {
         return "NAN".to_string();
     }
     if f.is_infinite() {
-        return if f.is_sign_positive() { "INF".to_string() } else { "-INF".to_string() };
+        return if f.is_sign_positive() {
+            "INF".to_string()
+        } else {
+            "-INF".to_string()
+        };
     }
     if f == 0.0 {
-        return if f.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+        return if f.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
     }
 
     // PHP uses G format with 14 significant digits
@@ -599,20 +699,12 @@ impl fmt::Display for Value {
             Value::Double(d) => {
                 write!(f, "{}", format_php_float(*d))
             }
-            Value::String(s) => {
-                f.write_str(&s.to_string_lossy())
-            }
+            Value::String(s) => f.write_str(&s.to_string_lossy()),
             Value::Array(_) => write!(f, "Array"),
             Value::Object(_) => write!(f, "Object"),
             Value::Reference(r) => {
                 write!(f, "{}", *r.borrow())
             }
         }
-    }
-}
-
-impl Default for Value {
-    fn default() -> Self {
-        Value::Null
     }
 }

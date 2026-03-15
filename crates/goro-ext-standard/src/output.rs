@@ -1,6 +1,6 @@
 use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::vm::{BuiltinFn, Vm, VmError};
+use goro_core::vm::{Vm, VmError};
 
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"var_dump", var_dump);
@@ -32,7 +32,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
         }
         Value::Double(f) => {
             // var_dump uses serialize_precision (-1 in PHP 8 = shortest representation)
-            vm.write_output(format!("{}float({})\n", prefix, format_php_float_serialize(*f)).as_bytes());
+            vm.write_output(
+                format!("{}float({})\n", prefix, format_php_float_serialize(*f)).as_bytes(),
+            );
         }
         Value::String(s) => {
             vm.write_output(
@@ -68,7 +70,11 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
             let prop_count = obj_borrow.properties.len();
             vm.write_output(
-                format!("{}object({})#{} ({}) {{\n", prefix, class_name, obj_borrow.object_id, prop_count).as_bytes(),
+                format!(
+                    "{}object({})#{} ({}) {{\n",
+                    prefix, class_name, obj_borrow.object_id, prop_count
+                )
+                .as_bytes(),
             );
             // Properties are in declaration order (Vec preserves insertion order)
             for (name, value) in &obj_borrow.properties {
@@ -102,7 +108,9 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str) {
             vm.write_output(format!("{}&int({})\n", prefix, n).as_bytes());
         }
         Value::Double(f) => {
-            vm.write_output(format!("{}&float({})\n", prefix, format_php_float_serialize(*f)).as_bytes());
+            vm.write_output(
+                format!("{}&float({})\n", prefix, format_php_float_serialize(*f)).as_bytes(),
+            );
         }
         Value::String(s) => {
             vm.write_output(
@@ -166,7 +174,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
     match val {
         Value::Null | Value::Undef => buf.extend_from_slice(b""),
         Value::True => buf.extend_from_slice(b"1"),
-        Value::False => {},
+        Value::False => {}
         Value::Long(n) => buf.extend_from_slice(n.to_string().as_bytes()),
         Value::Double(f) => buf.extend_from_slice(format_float(*f).as_bytes()),
         Value::String(s) => buf.extend_from_slice(s.as_bytes()),
@@ -253,7 +261,11 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, _indent: usize) {
 /// This is what PHP 8 uses for var_dump, var_export, json_encode, etc.
 fn format_php_float_serialize(f: f64) -> String {
     if f.is_infinite() {
-        return if f.is_sign_positive() { "INF".to_string() } else { "-INF".to_string() };
+        return if f.is_sign_positive() {
+            "INF".to_string()
+        } else {
+            "-INF".to_string()
+        };
     }
     if f.is_nan() {
         return "NAN".to_string();
@@ -261,12 +273,12 @@ fn format_php_float_serialize(f: f64) -> String {
     // PHP serialize_precision=-1: shortest exact representation
     // Use scientific notation for very large/small numbers
     let abs = f.abs();
-    if abs != 0.0 && (abs >= 1e20 || abs < 1e-4) {
+    if abs != 0.0 && !(1e-4..1e20).contains(&abs) {
         // Use scientific notation like PHP
         let s = format!("{:e}", f);
         if let Some(pos) = s.find('e') {
             let mut mantissa = s[..pos].to_string();
-            let exp: i32 = s[pos+1..].parse().unwrap_or(0);
+            let exp: i32 = s[pos + 1..].parse().unwrap_or(0);
             // Ensure at least one decimal digit
             if !mantissa.contains('.') {
                 mantissa.push_str(".0");
@@ -288,7 +300,11 @@ fn format_php_float_serialize(f: f64) -> String {
 
 fn format_float(f: f64) -> String {
     if f.is_infinite() {
-        if f.is_sign_positive() { "INF".to_string() } else { "-INF".to_string() }
+        if f.is_sign_positive() {
+            "INF".to_string()
+        } else {
+            "-INF".to_string()
+        }
     } else if f.is_nan() {
         "NAN".to_string()
     } else {

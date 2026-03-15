@@ -61,9 +61,7 @@ impl RealVfs {
         if self.allowed_roots.is_empty() {
             return Ok(());
         }
-        let canonical = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         for root in &self.allowed_roots {
             if canonical.starts_with(root) {
                 return Ok(());

@@ -1,7 +1,8 @@
-use crate::token::{keyword_or_identifier, Span, Token, TokenKind};
+use crate::token::{Span, Token, TokenKind, keyword_or_identifier};
 
 /// Lexer state (PHP has multiple scanning modes)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum LexerMode {
     /// Outside PHP tags - everything is inline HTML
     Initial,
@@ -21,6 +22,7 @@ pub struct Lexer<'a> {
     line: u32,
     mode_stack: Vec<LexerMode>,
     /// For heredoc: the label we're looking for to end the string
+    #[allow(dead_code)]
     heredoc_label: Vec<u8>,
     /// Pending tokens (used when one lexer step produces multiple tokens)
     pending: Vec<Token>,
@@ -77,13 +79,14 @@ impl<'a> Lexer<'a> {
         self.remaining().starts_with(prefix)
     }
 
+    #[allow(dead_code)]
     fn starts_with_ci(&self, prefix: &[u8]) -> bool {
         let rem = self.remaining();
         if rem.len() < prefix.len() {
             return false;
         }
         for i in 0..prefix.len() {
-            if rem[i].to_ascii_lowercase() != prefix[i].to_ascii_lowercase() {
+            if !rem[i].eq_ignore_ascii_case(&prefix[i]) {
                 return false;
             }
         }
@@ -183,9 +186,7 @@ impl<'a> Lexer<'a> {
                         .filter(|b| **b != b'_')
                         .map(|&b| b as char)
                         .collect();
-                    return TokenKind::LongNumber(
-                        i64::from_str_radix(&s[2..], 16).unwrap_or(0),
-                    );
+                    return TokenKind::LongNumber(i64::from_str_radix(&s[2..], 16).unwrap_or(0));
                 }
                 Some(b'b' | b'B') => {
                     self.advance();
@@ -202,9 +203,7 @@ impl<'a> Lexer<'a> {
                         .filter(|b| **b != b'_')
                         .map(|&b| b as char)
                         .collect();
-                    return TokenKind::LongNumber(
-                        i64::from_str_radix(&s[2..], 2).unwrap_or(0),
-                    );
+                    return TokenKind::LongNumber(i64::from_str_radix(&s[2..], 2).unwrap_or(0));
                 }
                 Some(b'o' | b'O') => {
                     self.advance();
@@ -221,9 +220,7 @@ impl<'a> Lexer<'a> {
                         .filter(|b| **b != b'_')
                         .map(|&b| b as char)
                         .collect();
-                    return TokenKind::LongNumber(
-                        i64::from_str_radix(&s[2..], 8).unwrap_or(0),
-                    );
+                    return TokenKind::LongNumber(i64::from_str_radix(&s[2..], 8).unwrap_or(0));
                 }
                 _ => {}
             }
@@ -290,21 +287,19 @@ impl<'a> Lexer<'a> {
         loop {
             match self.advance() {
                 Some(b'\'') => break,
-                Some(b'\\') => {
-                    match self.peek() {
-                        Some(b'\'') => {
-                            self.advance();
-                            result.push(b'\'');
-                        }
-                        Some(b'\\') => {
-                            self.advance();
-                            result.push(b'\\');
-                        }
-                        _ => {
-                            result.push(b'\\');
-                        }
+                Some(b'\\') => match self.peek() {
+                    Some(b'\'') => {
+                        self.advance();
+                        result.push(b'\'');
                     }
-                }
+                    Some(b'\\') => {
+                        self.advance();
+                        result.push(b'\\');
+                    }
+                    _ => {
+                        result.push(b'\\');
+                    }
+                },
                 Some(ch) => result.push(ch),
                 None => break,
             }
@@ -372,10 +367,10 @@ impl<'a> Lexer<'a> {
                         None => result.push(b'\\'),
                     }
                 }
-                Some(b'$') if self
-                    .peek_at(1)
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
-                =>
+                Some(b'$')
+                    if self
+                        .peek_at(1)
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') =>
                 {
                     // Variable interpolation
                     // Always emit the current result as an InterpolatedStringPart
@@ -399,7 +394,10 @@ impl<'a> Lexer<'a> {
                             TokenKind::Arrow,
                             Span::new(self.pos as u32, self.pos as u32, self.line),
                         ));
-                        if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
+                        if self
+                            .peek()
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                        {
                             let prop_name = self.scan_identifier();
                             self.pending.push(Token::new(
                                 TokenKind::Identifier(prop_name),
@@ -436,7 +434,10 @@ impl<'a> Lexer<'a> {
                             }
                             _ => {
                                 // Bare identifier as key
-                                if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
+                                if self
+                                    .peek()
+                                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                                {
                                     let key = self.scan_identifier();
                                     self.pending.push(Token::new(
                                         TokenKind::Identifier(key),
@@ -560,7 +561,10 @@ impl<'a> Lexer<'a> {
                         Span::new(start as u32, self.pos as u32, start_line),
                     );
                 }
-                return Token::new(TokenKind::Eof, Span::new(self.pos as u32, self.pos as u32, self.line));
+                return Token::new(
+                    TokenKind::Eof,
+                    Span::new(self.pos as u32, self.pos as u32, self.line),
+                );
             }
 
             if self.starts_with(b"<?php")
@@ -611,11 +615,17 @@ impl<'a> Lexer<'a> {
         let start_line = self.line;
 
         let Some(ch) = self.peek() else {
-            return Token::new(TokenKind::Eof, Span::new(start as u32, start as u32, self.line));
+            return Token::new(
+                TokenKind::Eof,
+                Span::new(start as u32, start as u32, self.line),
+            );
         };
 
         let kind = match ch {
-            b'$' if self.peek_at(1).is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') => {
+            b'$' if self
+                .peek_at(1)
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') =>
+            {
                 self.advance(); // skip $
                 let name = self.scan_identifier();
                 TokenKind::Variable(name)
@@ -671,17 +681,32 @@ impl<'a> Lexer<'a> {
             b'+' => {
                 self.advance();
                 match self.peek() {
-                    Some(b'+') => { self.advance(); TokenKind::Increment }
-                    Some(b'=') => { self.advance(); TokenKind::PlusAssign }
+                    Some(b'+') => {
+                        self.advance();
+                        TokenKind::Increment
+                    }
+                    Some(b'=') => {
+                        self.advance();
+                        TokenKind::PlusAssign
+                    }
                     _ => TokenKind::Plus,
                 }
             }
             b'-' => {
                 self.advance();
                 match self.peek() {
-                    Some(b'-') => { self.advance(); TokenKind::Decrement }
-                    Some(b'=') => { self.advance(); TokenKind::MinusAssign }
-                    Some(b'>') => { self.advance(); TokenKind::Arrow }
+                    Some(b'-') => {
+                        self.advance();
+                        TokenKind::Decrement
+                    }
+                    Some(b'=') => {
+                        self.advance();
+                        TokenKind::MinusAssign
+                    }
+                    Some(b'>') => {
+                        self.advance();
+                        TokenKind::Arrow
+                    }
                     _ => TokenKind::Minus,
                 }
             }
@@ -697,7 +722,10 @@ impl<'a> Lexer<'a> {
                             TokenKind::Pow
                         }
                     }
-                    Some(b'=') => { self.advance(); TokenKind::StarAssign }
+                    Some(b'=') => {
+                        self.advance();
+                        TokenKind::StarAssign
+                    }
                     _ => TokenKind::Star,
                 }
             }
@@ -722,7 +750,10 @@ impl<'a> Lexer<'a> {
             b'.' => {
                 self.advance();
                 match self.peek() {
-                    Some(b'=') => { self.advance(); TokenKind::DotAssign }
+                    Some(b'=') => {
+                        self.advance();
+                        TokenKind::DotAssign
+                    }
                     Some(b'.') if self.peek_at(1) == Some(b'.') => {
                         self.advance();
                         self.advance();
@@ -740,17 +771,32 @@ impl<'a> Lexer<'a> {
             b'&' => {
                 self.advance();
                 match self.peek() {
-                    Some(b'&') => { self.advance(); TokenKind::BooleanAnd }
-                    Some(b'=') => { self.advance(); TokenKind::AmpersandAssign }
+                    Some(b'&') => {
+                        self.advance();
+                        TokenKind::BooleanAnd
+                    }
+                    Some(b'=') => {
+                        self.advance();
+                        TokenKind::AmpersandAssign
+                    }
                     _ => TokenKind::Ampersand,
                 }
             }
             b'|' => {
                 self.advance();
                 match self.peek() {
-                    Some(b'|') => { self.advance(); TokenKind::BooleanOr }
-                    Some(b'=') => { self.advance(); TokenKind::PipeAssign }
-                    Some(b'>') => { self.advance(); TokenKind::PipeGreater }
+                    Some(b'|') => {
+                        self.advance();
+                        TokenKind::BooleanOr
+                    }
+                    Some(b'=') => {
+                        self.advance();
+                        TokenKind::PipeAssign
+                    }
+                    Some(b'>') => {
+                        self.advance();
+                        TokenKind::PipeGreater
+                    }
                     _ => TokenKind::Pipe,
                 }
             }
@@ -763,7 +809,10 @@ impl<'a> Lexer<'a> {
                     TokenKind::Caret
                 }
             }
-            b'~' => { self.advance(); TokenKind::Tilde }
+            b'~' => {
+                self.advance();
+                TokenKind::Tilde
+            }
             b'!' => {
                 self.advance();
                 match self.peek() {
@@ -785,7 +834,10 @@ impl<'a> Lexer<'a> {
                     Some(b'<') => {
                         self.advance();
                         match self.peek() {
-                            Some(b'=') => { self.advance(); TokenKind::ShiftLeftAssign }
+                            Some(b'=') => {
+                                self.advance();
+                                TokenKind::ShiftLeftAssign
+                            }
                             Some(b'<') => {
                                 // Heredoc / Nowdoc
                                 self.advance();
@@ -818,7 +870,10 @@ impl<'a> Lexer<'a> {
                             TokenKind::ShiftRight
                         }
                     }
-                    Some(b'=') => { self.advance(); TokenKind::GreaterEqual }
+                    Some(b'=') => {
+                        self.advance();
+                        TokenKind::GreaterEqual
+                    }
                     _ => TokenKind::Greater,
                 }
             }
@@ -834,7 +889,10 @@ impl<'a> Lexer<'a> {
                             TokenKind::Equal
                         }
                     }
-                    Some(b'>') => { self.advance(); TokenKind::DoubleArrow }
+                    Some(b'>') => {
+                        self.advance();
+                        TokenKind::DoubleArrow
+                    }
                     _ => TokenKind::Assign,
                 }
             }
@@ -873,7 +931,10 @@ impl<'a> Lexer<'a> {
                     _ => TokenKind::QuestionMark,
                 }
             }
-            b'@' => { self.advance(); TokenKind::At }
+            b'@' => {
+                self.advance();
+                TokenKind::At
+            }
             b'(' => {
                 // Try cast first
                 if let Some(cast) = self.try_scan_cast() {
@@ -883,13 +944,34 @@ impl<'a> Lexer<'a> {
                     TokenKind::OpenParen
                 }
             }
-            b')' => { self.advance(); TokenKind::CloseParen }
-            b'[' => { self.advance(); TokenKind::OpenBracket }
-            b']' => { self.advance(); TokenKind::CloseBracket }
-            b'{' => { self.advance(); TokenKind::OpenBrace }
-            b'}' => { self.advance(); TokenKind::CloseBrace }
-            b';' => { self.advance(); TokenKind::Semicolon }
-            b',' => { self.advance(); TokenKind::Comma }
+            b')' => {
+                self.advance();
+                TokenKind::CloseParen
+            }
+            b'[' => {
+                self.advance();
+                TokenKind::OpenBracket
+            }
+            b']' => {
+                self.advance();
+                TokenKind::CloseBracket
+            }
+            b'{' => {
+                self.advance();
+                TokenKind::OpenBrace
+            }
+            b'}' => {
+                self.advance();
+                TokenKind::CloseBrace
+            }
+            b';' => {
+                self.advance();
+                TokenKind::Semicolon
+            }
+            b',' => {
+                self.advance();
+                TokenKind::Comma
+            }
             b':' => {
                 self.advance();
                 if self.peek() == Some(b':') {
@@ -899,7 +981,10 @@ impl<'a> Lexer<'a> {
                     TokenKind::Colon
                 }
             }
-            b'\\' => { self.advance(); TokenKind::Backslash }
+            b'\\' => {
+                self.advance();
+                TokenKind::Backslash
+            }
 
             _ => {
                 // Unknown character - skip it and produce an identifier
@@ -932,10 +1017,8 @@ impl<'a> Lexer<'a> {
         }
         let label = self.source[label_start..self.pos].to_vec();
 
-        if is_nowdoc || self.peek() == Some(b'"') {
-            if matches!(self.peek(), Some(b'\'' | b'"')) {
-                self.advance(); // closing quote
-            }
+        if (is_nowdoc || self.peek() == Some(b'"')) && matches!(self.peek(), Some(b'\'' | b'"')) {
+            self.advance(); // closing quote
         }
 
         // Consume the newline after the label
@@ -950,7 +1033,7 @@ impl<'a> Lexer<'a> {
         let mut content = Vec::new();
         loop {
             // Check for closing label at start of line
-            let line_start = self.pos;
+            let _line_start = self.pos;
             // Allow optional whitespace (indented heredoc)
             let mut indent = Vec::new();
             while matches!(self.peek(), Some(b' ' | b'\t')) {

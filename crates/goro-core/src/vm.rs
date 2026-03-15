@@ -83,14 +83,23 @@ impl Vm {
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
-                c.insert(b"arg_separator.output".to_vec(), Value::String(PhpString::from_bytes(b"&")));
+                c.insert(
+                    b"arg_separator.output".to_vec(),
+                    Value::String(PhpString::from_bytes(b"&")),
+                );
                 c.insert(b"precision".to_vec(), Value::Long(14));
                 c.insert(b"serialize_precision".to_vec(), Value::Long(-1));
                 c.insert(b"error_reporting".to_vec(), Value::Long(32767));
                 c.insert(b"display_errors".to_vec(), Value::Long(1));
-                c.insert(b"memory_limit".to_vec(), Value::String(PhpString::from_bytes(b"128M")));
+                c.insert(
+                    b"memory_limit".to_vec(),
+                    Value::String(PhpString::from_bytes(b"128M")),
+                );
                 c.insert(b"max_execution_time".to_vec(), Value::Long(30));
-                c.insert(b"default_charset".to_vec(), Value::String(PhpString::from_bytes(b"UTF-8")));
+                c.insert(
+                    b"default_charset".to_vec(),
+                    Value::String(PhpString::from_bytes(b"UTF-8")),
+                );
                 c
             },
         }
@@ -149,7 +158,11 @@ impl Vm {
     }
 
     /// Execute an op_array with pre-initialized CVs
-    fn execute_op_array(&mut self, op_array: &OpArray, mut cvs: Vec<Value>) -> Result<Value, VmError> {
+    fn execute_op_array(
+        &mut self,
+        op_array: &OpArray,
+        mut cvs: Vec<Value>,
+    ) -> Result<Value, VmError> {
         let mut ip: usize = 0;
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
@@ -182,7 +195,13 @@ impl Vm {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let s = val.to_php_string();
                     self.output.extend_from_slice(s.as_bytes());
-                    self.write_operand(&op.result, Value::Long(1), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.result,
+                        Value::Long(1),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
 
                 OpCode::Assign => {
@@ -192,7 +211,9 @@ impl Vm {
 
                 OpCode::AssignRef => {
                     // Both op1 and op2 must be CVs. Make them share the same Reference.
-                    if let (OperandType::Cv(target_idx), OperandType::Cv(value_idx)) = (op.op1, op.op2) {
+                    if let (OperandType::Cv(target_idx), OperandType::Cv(value_idx)) =
+                        (op.op1, op.op2)
+                    {
                         let ti = target_idx as usize;
                         let vi = value_idx as usize;
                         // Get or create a reference cell for the value variable
@@ -229,7 +250,13 @@ impl Vm {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     match a.div(&b) {
-                        Ok(result) => self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys),
+                        Ok(result) => self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        ),
                         Err(msg) => {
                             return Err(VmError {
                                 message: msg.to_string(),
@@ -242,7 +269,13 @@ impl Vm {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     match a.modulo(&b) {
-                        Ok(result) => self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys),
+                        Ok(result) => self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        ),
                         Err(msg) => {
                             return Err(VmError {
                                 message: msg.to_string(),
@@ -263,11 +296,23 @@ impl Vm {
                     let b_str = self.value_to_string(&b);
                     let mut result = a_str.as_bytes().to_vec();
                     result.extend_from_slice(b_str.as_bytes());
-                    self.write_operand(&op.result, Value::String(PhpString::from_vec(result)), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.result,
+                        Value::String(PhpString::from_vec(result)),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::Negate => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, a.negate(), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.result,
+                        a.negate(),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
 
                 OpCode::BitwiseAnd => {
@@ -340,7 +385,11 @@ impl Vm {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if a.is_truthy() { Value::False } else { Value::True },
+                        if a.is_truthy() {
+                            Value::False
+                        } else {
+                            Value::True
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -353,7 +402,11 @@ impl Vm {
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if a.equals(&b) { Value::True } else { Value::False },
+                        if a.equals(&b) {
+                            Value::True
+                        } else {
+                            Value::False
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -364,7 +417,11 @@ impl Vm {
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if a.equals(&b) { Value::False } else { Value::True },
+                        if a.equals(&b) {
+                            Value::False
+                        } else {
+                            Value::True
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -375,7 +432,11 @@ impl Vm {
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if a.identical(&b) { Value::True } else { Value::False },
+                        if a.identical(&b) {
+                            Value::True
+                        } else {
+                            Value::False
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -386,7 +447,11 @@ impl Vm {
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if a.identical(&b) { Value::False } else { Value::True },
+                        if a.identical(&b) {
+                            Value::False
+                        } else {
+                            Value::True
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -397,7 +462,11 @@ impl Vm {
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if a.compare(&b) < 0 { Value::True } else { Value::False },
+                        if a.compare(&b) < 0 {
+                            Value::True
+                        } else {
+                            Value::False
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -408,7 +477,11 @@ impl Vm {
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if a.compare(&b) <= 0 { Value::True } else { Value::False },
+                        if a.compare(&b) <= 0 {
+                            Value::True
+                        } else {
+                            Value::False
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -419,7 +492,11 @@ impl Vm {
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if a.compare(&b) > 0 { Value::True } else { Value::False },
+                        if a.compare(&b) > 0 {
+                            Value::True
+                        } else {
+                            Value::False
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -430,7 +507,11 @@ impl Vm {
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if a.compare(&b) >= 0 { Value::True } else { Value::False },
+                        if a.compare(&b) >= 0 {
+                            Value::True
+                        } else {
+                            Value::False
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -439,88 +520,188 @@ impl Vm {
                 OpCode::Spaceship => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(a.compare(&b)), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.result,
+                        Value::Long(a.compare(&b)),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
 
                 // Compound assignments
                 OpCode::AssignAdd => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.add(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        cv_val.add(&rhs),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::AssignSub => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.sub(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        cv_val.sub(&rhs),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::AssignMul => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.mul(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        cv_val.mul(&rhs),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::AssignDiv => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     match cv_val.div(&rhs) {
-                        Ok(result) => self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys),
-                        Err(msg) => return Err(VmError { message: msg.to_string(), line: op.line }),
+                        Ok(result) => self.write_operand(
+                            &op.op1,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        ),
+                        Err(msg) => {
+                            return Err(VmError {
+                                message: msg.to_string(),
+                                line: op.line,
+                            });
+                        }
                     }
                 }
                 OpCode::AssignMod => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     match cv_val.modulo(&rhs) {
-                        Ok(result) => self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys),
-                        Err(msg) => return Err(VmError { message: msg.to_string(), line: op.line }),
+                        Ok(result) => self.write_operand(
+                            &op.op1,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        ),
+                        Err(msg) => {
+                            return Err(VmError {
+                                message: msg.to_string(),
+                                line: op.line,
+                            });
+                        }
                     }
                 }
                 OpCode::AssignPow => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.pow(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        cv_val.pow(&rhs),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::AssignConcat => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.concat(&rhs), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        cv_val.concat(&rhs),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::AssignBitwiseAnd => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() & rhs.to_long()), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        Value::Long(cv_val.to_long() & rhs.to_long()),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::AssignBitwiseOr => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() | rhs.to_long()), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        Value::Long(cv_val.to_long() | rhs.to_long()),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::AssignBitwiseXor => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() ^ rhs.to_long()), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        Value::Long(cv_val.to_long() ^ rhs.to_long()),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::AssignShiftLeft => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long().wrapping_shl(rhs.to_long() as u32)), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        Value::Long(cv_val.to_long().wrapping_shl(rhs.to_long() as u32)),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::AssignShiftRight => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long().wrapping_shr(rhs.to_long() as u32)), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        Value::Long(cv_val.to_long().wrapping_shr(rhs.to_long() as u32)),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
 
                 // Increment / Decrement
                 OpCode::PreIncrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let new_val = val.add(&Value::Long(1));
-                    self.write_operand(&op.op1, new_val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        new_val.clone(),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                     self.write_operand(&op.result, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::PreDecrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let new_val = val.sub(&Value::Long(1));
-                    self.write_operand(&op.op1, new_val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.op1,
+                        new_val.clone(),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                     self.write_operand(&op.result, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::PostIncrement => {
@@ -544,18 +725,18 @@ impl Vm {
                 }
                 OpCode::JmpZ => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    if !val.is_truthy() {
-                        if let OperandType::JmpTarget(target) = op.op2 {
-                            ip = target as usize;
-                        }
+                    if !val.is_truthy()
+                        && let OperandType::JmpTarget(target) = op.op2
+                    {
+                        ip = target as usize;
                     }
                 }
                 OpCode::JmpNz => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    if val.is_truthy() {
-                        if let OperandType::JmpTarget(target) = op.op2 {
-                            ip = target as usize;
-                        }
+                    if val.is_truthy()
+                        && let OperandType::JmpTarget(target) = op.op2
+                    {
+                        ip = target as usize;
                     }
                 }
 
@@ -599,20 +780,38 @@ impl Vm {
                         line: op.line,
                     })?;
 
-                    let func_name_lower: Vec<u8> = call.name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let func_name_lower: Vec<u8> = call
+                        .name
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
 
                     // Handle built-in return (for getter methods on objects)
                     if func_name_lower == b"__builtin_return" {
                         let result = call.args.first().cloned().unwrap_or(Value::Null);
-                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                        self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
                     } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
                         // Built-in function
                         let result = func(self, &call.args).map_err(|e| VmError {
                             message: e.message,
                             line: op.line,
                         })?;
-                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                    } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned() {
+                        self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
+                    {
                         // User-defined function - execute its op_array
                         let was_global = self.is_global_scope;
                         self.is_global_scope = false;
@@ -620,10 +819,10 @@ impl Vm {
                         // Save caller's globals before the call
                         if was_global {
                             for (i, cv) in cvs.iter().enumerate() {
-                                if !matches!(cv, Value::Undef) {
-                                    if let Some(name) = op_array.cv_names.get(i) {
-                                        self.globals.insert(name.clone(), cv.clone());
-                                    }
+                                if !matches!(cv, Value::Undef)
+                                    && let Some(name) = op_array.cv_names.get(i)
+                                {
+                                    self.globals.insert(name.clone(), cv.clone());
                                 }
                             }
                         }
@@ -634,8 +833,8 @@ impl Vm {
                             let vi = variadic_idx as usize;
                             // Regular params first
                             for (i, arg) in call.args.iter().enumerate() {
-                                if i < vi {
-                                    if i < func_cvs.len() { func_cvs[i] = arg.clone(); }
+                                if i < vi && i < func_cvs.len() {
+                                    func_cvs[i] = arg.clone();
                                 }
                             }
                             // Pack remaining args into an array for the variadic param
@@ -670,8 +869,10 @@ impl Vm {
                                         // Reload globals
                                         if was_global {
                                             for (i, name) in op_array.cv_names.iter().enumerate() {
-                                                if let Some(val) = self.globals.get(name) {
-                                                    if i < cvs.len() { cvs[i] = val.clone(); }
+                                                if let Some(val) = self.globals.get(name)
+                                                    && i < cvs.len()
+                                                {
+                                                    cvs[i] = val.clone();
                                                 }
                                             }
                                         }
@@ -685,7 +886,8 @@ impl Vm {
                                 if let Some(exc) = self.current_exception.take() {
                                     if !exception_handlers.is_empty() {
                                         self.current_exception = Some(exc);
-                                        let (catch_target, _, _) = exception_handlers.pop().unwrap();
+                                        let (catch_target, _, _) =
+                                            exception_handlers.pop().unwrap();
                                         ip = catch_target as usize;
                                         continue;
                                     } else {
@@ -700,24 +902,30 @@ impl Vm {
                         // Reload globals into caller's CVs after the function returns
                         if was_global {
                             for (i, name) in op_array.cv_names.iter().enumerate() {
-                                if let Some(val) = self.globals.get(name) {
-                                    if i < cvs.len() {
-                                        cvs[i] = val.clone();
-                                    }
+                                if let Some(val) = self.globals.get(name)
+                                    && i < cvs.len()
+                                {
+                                    cvs[i] = val.clone();
                                 }
                             }
                         } else {
                             // In a non-global calling scope, reload any global-bound CVs
                             for (cv_idx, name) in &global_cv_keys {
-                                if let Some(val) = self.globals.get(name) {
-                                    if (*cv_idx as usize) < cvs.len() {
-                                        cvs[*cv_idx as usize] = val.clone();
-                                    }
+                                if let Some(val) = self.globals.get(name)
+                                    && (*cv_idx as usize) < cvs.len()
+                                {
+                                    cvs[*cv_idx as usize] = val.clone();
                                 }
                             }
                         }
 
-                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                        self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
                     } else {
                         // If it's a constructor call and the class has no __construct, silently succeed
                         let name_bytes = call.name.as_bytes();
@@ -727,19 +935,29 @@ impl Vm {
                                 // First arg (after $this) is message, second is code
                                 // args[0] = $this (for method calls)
                                 let this_idx = if call.args.len() > 1 { 0 } else { usize::MAX };
-                                if this_idx == 0 {
-                                    if let Value::Object(obj) = &call.args[0] {
-                                        let mut obj_mut = obj.borrow_mut();
-                                        if call.args.len() > 1 {
-                                            obj_mut.set_property(b"message".to_vec(), call.args[1].clone());
-                                        }
-                                        if call.args.len() > 2 {
-                                            obj_mut.set_property(b"code".to_vec(), call.args[2].clone());
-                                        }
+                                if this_idx == 0
+                                    && let Value::Object(obj) = &call.args[0]
+                                {
+                                    let mut obj_mut = obj.borrow_mut();
+                                    if call.args.len() > 1 {
+                                        obj_mut.set_property(
+                                            b"message".to_vec(),
+                                            call.args[1].clone(),
+                                        );
+                                    }
+                                    if call.args.len() > 2 {
+                                        obj_mut
+                                            .set_property(b"code".to_vec(), call.args[2].clone());
                                     }
                                 }
                             }
-                            self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.write_operand(
+                                &op.result,
+                                Value::Null,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
                         } else {
                             return Err(VmError {
                                 message: format!(
@@ -763,10 +981,10 @@ impl Vm {
                     // In global scope, save all CVs as globals
                     if self.is_global_scope {
                         for (i, cv) in cvs.iter().enumerate() {
-                            if !matches!(cv, Value::Undef) {
-                                if let Some(name) = op_array.cv_names.get(i) {
-                                    self.globals.insert(name.clone(), cv.clone());
-                                }
+                            if !matches!(cv, Value::Undef)
+                                && let Some(name) = op_array.cv_names.get(i)
+                            {
+                                self.globals.insert(name.clone(), cv.clone());
                             }
                         }
                     }
@@ -776,7 +994,13 @@ impl Vm {
                 // Casts
                 OpCode::CastInt => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(val.to_long()), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.result,
+                        Value::Long(val.to_long()),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::CastFloat => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -802,7 +1026,11 @@ impl Vm {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
                         &op.result,
-                        if val.is_truthy() { Value::True } else { Value::False },
+                        if val.is_truthy() {
+                            Value::True
+                        } else {
+                            Value::False
+                        },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -818,7 +1046,13 @@ impl Vm {
                             Rc::new(RefCell::new(arr))
                         }
                     };
-                    self.write_operand(&op.result, Value::Array(arr), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.result,
+                        Value::Array(arr),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
 
                 OpCode::CastObject => {
@@ -842,7 +1076,10 @@ impl Vm {
                         Value::Null | Value::Undef => {
                             let obj_id = self.next_object_id;
                             self.next_object_id += 1;
-                            Value::Object(Rc::new(RefCell::new(PhpObject::new(b"stdClass".to_vec(), obj_id))))
+                            Value::Object(Rc::new(RefCell::new(PhpObject::new(
+                                b"stdClass".to_vec(),
+                                obj_id,
+                            ))))
                         }
                         other => {
                             let obj_id = self.next_object_id;
@@ -858,7 +1095,13 @@ impl Vm {
                 // Arrays
                 OpCode::ArrayNew => {
                     let arr = Rc::new(RefCell::new(PhpArray::new()));
-                    self.write_operand(&op.result, Value::Array(arr), &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(
+                        &op.result,
+                        Value::Array(arr),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
                 OpCode::ArrayAppend => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -902,12 +1145,18 @@ impl Vm {
                     // Store array in the iterator tmp slot
                     self.write_operand(&op.result, arr_val, &mut cvs, &mut tmps, &static_cv_keys);
                     // Reset iteration position
-                    let iter_idx = match op.result { OperandType::Tmp(idx) => idx, _ => 0 };
+                    let iter_idx = match op.result {
+                        OperandType::Tmp(idx) => idx,
+                        _ => 0,
+                    };
                     foreach_positions.insert(iter_idx, 0usize);
                 }
 
                 OpCode::ForeachNext => {
-                    let iter_idx = match op.op1 { OperandType::Tmp(idx) => idx, _ => 0 };
+                    let iter_idx = match op.op1 {
+                        OperandType::Tmp(idx) => idx,
+                        _ => 0,
+                    };
                     let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
 
@@ -921,7 +1170,13 @@ impl Vm {
                             }
                         } else {
                             let (_, value) = entries[pos];
-                            self.write_operand(&op.result, value.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                            self.write_operand(
+                                &op.result,
+                                value.clone(),
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
                             foreach_positions.insert(iter_idx, pos + 1);
                         }
                     } else {
@@ -933,7 +1188,10 @@ impl Vm {
                 }
 
                 OpCode::ForeachKey => {
-                    let iter_idx = match op.op1 { OperandType::Tmp(idx) => idx, _ => 0 };
+                    let iter_idx = match op.op1 {
+                        OperandType::Tmp(idx) => idx,
+                        _ => 0,
+                    };
                     let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(1);
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
 
@@ -948,7 +1206,13 @@ impl Vm {
                                 ArrayKey::Int(n) => Value::Long(*n),
                                 ArrayKey::String(s) => Value::String(s.clone()),
                             };
-                            self.write_operand(&op.result, key_val, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.write_operand(
+                                &op.result,
+                                key_val,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
                         }
                     }
                 }
@@ -958,7 +1222,13 @@ impl Vm {
                     let name = name_val.to_php_string().as_bytes().to_vec();
                     // Load the current global value into the CV
                     if let Some(val) = self.globals.get(&name) {
-                        self.write_operand(&op.op1, val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                        self.write_operand(
+                            &op.op1,
+                            val.clone(),
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
                     }
                     // Register this CV as global so writes are synced
                     if let OperandType::Cv(cv_idx) = op.op1 {
@@ -971,10 +1241,22 @@ impl Vm {
                     let key = key_val.to_php_string().as_bytes().to_vec();
 
                     if let Some(existing) = self.static_vars.get(&key) {
-                        self.write_operand(&op.op1, existing.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                        self.write_operand(
+                            &op.op1,
+                            existing.clone(),
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
                     } else {
                         let default = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                        self.write_operand(&op.op1, default.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                        self.write_operand(
+                            &op.op1,
+                            default.clone(),
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
                         self.static_vars.insert(key.clone(), default);
                     }
 
@@ -998,12 +1280,22 @@ impl Vm {
                 OpCode::TypeCheck => {
                     // instanceof check: op1 = value, op2 = class name
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let class_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
-                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let class_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let class_lower: Vec<u8> = class_name
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
 
                     let result = if let Value::Object(obj) = &val {
                         let obj_borrow = obj.borrow();
-                        let obj_class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let obj_class_lower: Vec<u8> = obj_borrow
+                            .class_name
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
 
                         if obj_class_lower == class_lower {
                             Value::True
@@ -1014,7 +1306,8 @@ impl Vm {
                             loop {
                                 if let Some(class_def) = self.classes.get(&current) {
                                     if let Some(ref parent) = class_def.parent {
-                                        let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let parent_lower: Vec<u8> =
+                                            parent.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         if parent_lower == class_lower {
                                             found = true;
                                             break;
@@ -1036,10 +1329,20 @@ impl Vm {
                 }
 
                 OpCode::TryBegin => {
-                    let catch_target = match op.op1 { OperandType::JmpTarget(t) => t, _ => 0 };
-                    let finally_target = match op.op2 { OperandType::JmpTarget(t) => t, _ => 0 };
+                    let catch_target = match op.op1 {
+                        OperandType::JmpTarget(t) => t,
+                        _ => 0,
+                    };
+                    let finally_target = match op.op2 {
+                        OperandType::JmpTarget(t) => t,
+                        _ => 0,
+                    };
                     // Allocate a tmp to hold the caught exception
-                    let exc_tmp = if temp_count > 0 { (temp_count - 1) as u32 } else { 0 };
+                    let exc_tmp = if temp_count > 0 {
+                        (temp_count - 1) as u32
+                    } else {
+                        0
+                    };
                     exception_handlers.push((catch_target, finally_target, exc_tmp));
                 }
 
@@ -1057,7 +1360,9 @@ impl Vm {
                 OpCode::Throw => {
                     let exc_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
 
-                    if let Some((catch_target, _finally_target, _exc_tmp)) = exception_handlers.pop() {
+                    if let Some((catch_target, _finally_target, _exc_tmp)) =
+                        exception_handlers.pop()
+                    {
                         // Store exception for the catch block to access
                         self.current_exception = Some(exc_val);
                         // Jump to catch handler
@@ -1068,9 +1373,16 @@ impl Vm {
                             let obj = obj.borrow();
                             let class = String::from_utf8_lossy(&obj.class_name).to_string();
                             let message = obj.get_property(b"message");
-                            format!("Uncaught {}: {}", class, message.to_php_string().to_string_lossy())
+                            format!(
+                                "Uncaught {}: {}",
+                                class,
+                                message.to_php_string().to_string_lossy()
+                            )
                         } else {
-                            format!("Uncaught exception: {}", exc_val.to_php_string().to_string_lossy())
+                            format!(
+                                "Uncaught exception: {}",
+                                exc_val.to_php_string().to_string_lossy()
+                            )
                         };
                         self.current_exception = Some(exc_val);
                         return Err(VmError {
@@ -1081,13 +1393,24 @@ impl Vm {
                 }
 
                 OpCode::StaticPropGet => {
-                    let class_name = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals).to_php_string();
-                    let prop_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
-                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let class_name = self
+                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let prop_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let class_lower: Vec<u8> = class_name
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
 
                     let val = if let Some(class) = self.classes.get(&class_lower) {
                         // Check static properties first, then constants
-                        class.static_properties.get(prop_name.as_bytes()).cloned()
+                        class
+                            .static_properties
+                            .get(prop_name.as_bytes())
+                            .cloned()
                             .or_else(|| class.constants.get(prop_name.as_bytes()).cloned())
                             .unwrap_or(Value::Null)
                     } else {
@@ -1097,25 +1420,36 @@ impl Vm {
                 }
 
                 OpCode::StaticPropSet => {
-                    let class_name = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let class_name = self
+                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
                     let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    let prop_name = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals).to_php_string();
-                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let prop_name = self
+                        .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let class_lower: Vec<u8> = class_name
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
 
                     if let Some(class) = self.classes.get_mut(&class_lower) {
-                        class.static_properties.insert(prop_name.as_bytes().to_vec(), value);
+                        class
+                            .static_properties
+                            .insert(prop_name.as_bytes().to_vec(), value);
                     }
                 }
 
                 OpCode::ConstLookup => {
-                    let name = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let name = self
+                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
                     let name_bytes = name.as_bytes();
                     // Look up in constants table
-                    let val = self.constants.get(name_bytes).cloned()
-                        .unwrap_or_else(|| {
-                            // If not found, return the name as a string (PHP warning: undefined constant)
-                            Value::String(name.clone())
-                        });
+                    let val = self.constants.get(name_bytes).cloned().unwrap_or_else(|| {
+                        // If not found, return the name as a string (PHP warning: undefined constant)
+                        Value::String(name.clone())
+                    });
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
@@ -1141,7 +1475,8 @@ impl Vm {
                                                 self.pending_classes.push(class);
                                             }
                                             // Execute included file's op_array
-                                            let inc_cvs = vec![Value::Undef; inc_op_array.cv_names.len()];
+                                            let inc_cvs =
+                                                vec![Value::Undef; inc_op_array.cv_names.len()];
                                             match self.execute_op_array(&inc_op_array, inc_cvs) {
                                                 Ok(v) => v,
                                                 Err(_) => Value::False,
@@ -1164,11 +1499,14 @@ impl Vm {
 
                 OpCode::DeclareClass => {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let class_idx = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_long() as usize;
+                    let class_idx = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_long() as usize;
                     if let Some(mut class) = self.pending_classes.get(class_idx).cloned() {
                         // Resolve inheritance: copy parent methods/properties
                         if let Some(parent_name) = &class.parent.clone() {
-                            let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let parent_lower: Vec<u8> =
+                                parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(parent) = self.classes.get(&parent_lower).cloned() {
                                 // Inherit methods (child overrides take precedence)
                                 for (method_name, method) in &parent.methods {
@@ -1177,7 +1515,8 @@ impl Vm {
                                     }
                                 }
                                 // Inherit properties (child overrides take precedence)
-                                let child_prop_names: Vec<Vec<u8>> = class.properties.iter().map(|p| p.name.clone()).collect();
+                                let child_prop_names: Vec<Vec<u8>> =
+                                    class.properties.iter().map(|p| p.name.clone()).collect();
                                 for prop in &parent.properties {
                                     if !child_prop_names.contains(&prop.name) {
                                         class.properties.push(prop.clone());
@@ -1186,18 +1525,27 @@ impl Vm {
                                 // Inherit constants
                                 for (const_name, const_val) in &parent.constants {
                                     if !class.constants.contains_key(const_name) {
-                                        class.constants.insert(const_name.clone(), const_val.clone());
+                                        class
+                                            .constants
+                                            .insert(const_name.clone(), const_val.clone());
                                     }
                                 }
                                 // Inherit static properties
                                 for (prop_name, prop_val) in &parent.static_properties {
                                     if !class.static_properties.contains_key(prop_name) {
-                                        class.static_properties.insert(prop_name.clone(), prop_val.clone());
+                                        class
+                                            .static_properties
+                                            .insert(prop_name.clone(), prop_val.clone());
                                     }
                                 }
                             }
                         }
-                        let name_lower: Vec<u8> = name_val.to_php_string().as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let name_lower: Vec<u8> = name_val
+                            .to_php_string()
+                            .as_bytes()
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
                         let class_name_orig = name_val.to_php_string().as_bytes().to_vec();
 
                         // Register all methods as callable functions: ClassName::methodName
@@ -1205,7 +1553,8 @@ impl Vm {
                             let mut func_name = class_name_orig.clone();
                             func_name.extend_from_slice(b"::");
                             func_name.extend_from_slice(&method.name);
-                            self.user_functions.insert(func_name.to_ascii_lowercase(), method.op_array.clone());
+                            self.user_functions
+                                .insert(func_name.to_ascii_lowercase(), method.op_array.clone());
                         }
 
                         self.classes.insert(name_lower, class);
@@ -1213,8 +1562,14 @@ impl Vm {
                 }
 
                 OpCode::NewObject => {
-                    let class_name = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals).to_php_string();
-                    let name_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let class_name = self
+                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let name_lower: Vec<u8> = class_name
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
 
                     let obj_id = self.next_object_id;
                     self.next_object_id += 1;
@@ -1222,19 +1577,31 @@ impl Vm {
                     let mut obj = PhpObject::new(class_name.as_bytes().to_vec(), obj_id);
 
                     // Built-in Exception/Error classes get default properties
-                    if name_lower == b"exception" || name_lower == b"error"
-                        || name_lower == b"runtimeexception" || name_lower == b"logicexception"
-                        || name_lower == b"invalidargumentexception" || name_lower == b"typeerror"
-                        || name_lower == b"valueerror" || name_lower == b"overflowexception"
-                        || name_lower == b"underflowexception" || name_lower == b"rangeerror"
-                        || name_lower == b"badmethodcallexception" || name_lower == b"badfunctioncallexception"
-                        || name_lower == b"lengthexception" || name_lower == b"outofrangeexception"
-                        || name_lower == b"unexpectedvalueexception" || name_lower == b"domainexception"
-                        || name_lower == b"arithmeticerror" || name_lower == b"divisionbyzeroerror"
+                    if name_lower == b"exception"
+                        || name_lower == b"error"
+                        || name_lower == b"runtimeexception"
+                        || name_lower == b"logicexception"
+                        || name_lower == b"invalidargumentexception"
+                        || name_lower == b"typeerror"
+                        || name_lower == b"valueerror"
+                        || name_lower == b"overflowexception"
+                        || name_lower == b"underflowexception"
+                        || name_lower == b"rangeerror"
+                        || name_lower == b"badmethodcallexception"
+                        || name_lower == b"badfunctioncallexception"
+                        || name_lower == b"lengthexception"
+                        || name_lower == b"outofrangeexception"
+                        || name_lower == b"unexpectedvalueexception"
+                        || name_lower == b"domainexception"
+                        || name_lower == b"arithmeticerror"
+                        || name_lower == b"divisionbyzeroerror"
                     {
                         obj.set_property(b"message".to_vec(), Value::String(PhpString::empty()));
                         obj.set_property(b"code".to_vec(), Value::Long(0));
-                        obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
+                        obj.set_property(
+                            b"file".to_vec(),
+                            Value::String(PhpString::from_bytes(b"")),
+                        );
                         obj.set_property(b"line".to_vec(), Value::Long(0));
                     }
 
@@ -1250,29 +1617,56 @@ impl Vm {
                     self.write_operand(
                         &op.result,
                         Value::Object(Rc::new(RefCell::new(obj))),
-                        &mut cvs, &mut tmps, &static_cv_keys,
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
                     );
                 }
 
                 OpCode::PropertyGet => {
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let prop_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let prop_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
 
                     let result = if let Value::Object(obj) = &obj_val {
                         let prop = obj.borrow().get_property(prop_name.as_bytes());
-                        if matches!(prop, Value::Null) && !obj.borrow().has_property(prop_name.as_bytes()) && self.magic_depth < 5 {
+                        if matches!(prop, Value::Null)
+                            && !obj.borrow().has_property(prop_name.as_bytes())
+                            && self.magic_depth < 5
+                        {
                             // Try __get magic method (with recursion guard)
-                            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let has_get = self.classes.get(&class_lower)
+                            let class_lower: Vec<u8> = obj
+                                .borrow()
+                                .class_name
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
+                            let has_get = self
+                                .classes
+                                .get(&class_lower)
                                 .map(|c| c.methods.contains_key(&b"__get".to_vec()))
                                 .unwrap_or(false);
                             if has_get {
                                 self.magic_depth += 1;
-                                let method = self.classes.get(&class_lower).unwrap().get_method(b"__get").unwrap().op_array.clone();
+                                let method = self
+                                    .classes
+                                    .get(&class_lower)
+                                    .unwrap()
+                                    .get_method(b"__get")
+                                    .unwrap()
+                                    .op_array
+                                    .clone();
                                 let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
-                                if fn_cvs.len() > 0 { fn_cvs[0] = obj_val.clone(); } // $this
-                                if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); } // $name
-                                let result = self.execute_op_array(&method, fn_cvs).unwrap_or(Value::Null);
+                                if !fn_cvs.is_empty() {
+                                    fn_cvs[0] = obj_val.clone();
+                                } // $this
+                                if fn_cvs.len() > 1 {
+                                    fn_cvs[1] = Value::String(prop_name.clone());
+                                } // $name
+                                let result = self
+                                    .execute_op_array(&method, fn_cvs)
+                                    .unwrap_or(Value::Null);
                                 self.magic_depth -= 1;
                                 result
                             } else {
@@ -1290,46 +1684,83 @@ impl Vm {
                 OpCode::PropertySet => {
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    let prop_name = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let prop_name = self
+                        .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
 
                     if let Value::Object(obj) = &obj_val {
                         // Check for __set magic method
-                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let has_set = self.classes.get(&class_lower)
+                        let class_lower: Vec<u8> = obj
+                            .borrow()
+                            .class_name
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        let has_set = self
+                            .classes
+                            .get(&class_lower)
                             .map(|c| c.methods.contains_key(&b"__set".to_vec()))
                             .unwrap_or(false);
-                        if has_set && !obj.borrow().has_property(prop_name.as_bytes()) && self.magic_depth < 5 {
-                            let method = self.classes.get(&class_lower).unwrap().get_method(b"__set").unwrap().op_array.clone();
+                        if has_set
+                            && !obj.borrow().has_property(prop_name.as_bytes())
+                            && self.magic_depth < 5
+                        {
+                            let method = self
+                                .classes
+                                .get(&class_lower)
+                                .unwrap()
+                                .get_method(b"__set")
+                                .unwrap()
+                                .op_array
+                                .clone();
                             let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
-                            if fn_cvs.len() > 0 { fn_cvs[0] = obj_val.clone(); }
-                            if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); }
-                            if fn_cvs.len() > 2 { fn_cvs[2] = value; }
+                            if !fn_cvs.is_empty() {
+                                fn_cvs[0] = obj_val.clone();
+                            }
+                            if fn_cvs.len() > 1 {
+                                fn_cvs[1] = Value::String(prop_name.clone());
+                            }
+                            if fn_cvs.len() > 2 {
+                                fn_cvs[2] = value;
+                            }
                             let _ = self.execute_op_array(&method, fn_cvs);
                         } else {
-                            obj.borrow_mut().set_property(prop_name.as_bytes().to_vec(), value);
+                            obj.borrow_mut()
+                                .set_property(prop_name.as_bytes().to_vec(), value);
                         }
                     }
                 }
 
                 OpCode::InitMethodCall => {
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let method_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let method_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
 
                     if let Value::Object(obj) = &obj_val {
                         let class_name_orig;
                         let class_name_lower: Vec<u8>;
-                        let method_name_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let method_name_lower: Vec<u8> = method_name
+                            .as_bytes()
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
                         let builtin_result;
                         {
                             let obj_borrow = obj.borrow();
                             class_name_orig = obj_borrow.class_name.clone();
-                            class_name_lower = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            class_name_lower = obj_borrow
+                                .class_name
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
                             builtin_result = match method_name_lower.as_slice() {
                                 b"getmessage" => Some(obj_borrow.get_property(b"message")),
                                 b"getcode" => Some(obj_borrow.get_property(b"code")),
                                 b"getfile" => Some(obj_borrow.get_property(b"file")),
                                 b"getline" => Some(obj_borrow.get_property(b"line")),
-                                b"gettrace" | b"gettracestring" | b"gettracerasstring" | b"getprevious" => Some(Value::Null),
+                                b"gettrace" | b"gettracestring" | b"gettracerasstring"
+                                | b"getprevious" => Some(Value::Null),
                                 b"__tostring" => Some(obj_borrow.get_property(b"message")),
                                 _ => None,
                             };
@@ -1351,7 +1782,10 @@ impl Vm {
 
                                 // Register the method as a temporary user function
                                 let call_name = PhpString::from_vec(func_name.clone());
-                                self.user_functions.insert(func_name.to_ascii_lowercase(), method.op_array.clone());
+                                self.user_functions.insert(
+                                    func_name.to_ascii_lowercase(),
+                                    method.op_array.clone(),
+                                );
 
                                 // Push the pending call with $this as the first implicit arg
                                 self.pending_calls.push(PendingCall {
@@ -1363,7 +1797,10 @@ impl Vm {
                                 let mut func_name = class_name_orig.clone();
                                 func_name.extend_from_slice(b"::__call");
                                 let call_name = PhpString::from_vec(func_name.clone());
-                                self.user_functions.insert(func_name.to_ascii_lowercase(), call_method.op_array.clone());
+                                self.user_functions.insert(
+                                    func_name.to_ascii_lowercase(),
+                                    call_method.op_array.clone(),
+                                );
 
                                 // Build args array for __call($name, $args)
                                 // $this is CV[0], method name is CV[1], args array is CV[2]
@@ -1408,12 +1845,12 @@ impl Vm {
                 let bytes = s.as_bytes();
                 let s_str = s.to_string_lossy();
                 let trimmed = s_str.trim();
-                if !trimmed.is_empty() {
-                    if let Ok(n) = trimmed.parse::<i64>() {
-                        // Only convert if the string is exactly the integer representation
-                        if n.to_string() == trimmed {
-                            return ArrayKey::Int(n);
-                        }
+                if !trimmed.is_empty()
+                    && let Ok(n) = trimmed.parse::<i64>()
+                {
+                    // Only convert if the string is exactly the integer representation
+                    if n.to_string() == trimmed {
+                        return ArrayKey::Int(n);
                     }
                 }
                 ArrayKey::String(s)
@@ -1429,12 +1866,26 @@ impl Vm {
     /// Convert a value to string, calling __toString for objects if available
     fn value_to_string(&mut self, val: &Value) -> PhpString {
         if let Value::Object(obj) = val {
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let has_tostring = self.classes.get(&class_lower)
+            let class_lower: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            let has_tostring = self
+                .classes
+                .get(&class_lower)
                 .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
                 .unwrap_or(false);
             if has_tostring {
-                let method = self.classes.get(&class_lower).unwrap().get_method(b"__tostring").unwrap().op_array.clone();
+                let method = self
+                    .classes
+                    .get(&class_lower)
+                    .unwrap()
+                    .get_method(b"__tostring")
+                    .unwrap()
+                    .op_array
+                    .clone();
                 let mut method_cvs = vec![Value::Undef; method.cv_names.len()];
                 if !method_cvs.is_empty() {
                     method_cvs[0] = val.clone();

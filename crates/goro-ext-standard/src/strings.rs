@@ -62,13 +62,21 @@ fn strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn strtolower(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    let lower: Vec<u8> = s
+        .as_bytes()
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
     Ok(Value::String(PhpString::from_vec(lower)))
 }
 
 fn strtoupper(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let upper: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_uppercase()).collect();
+    let upper: Vec<u8> = s
+        .as_bytes()
+        .iter()
+        .map(|b| b.to_ascii_uppercase())
+        .collect();
     Ok(Value::String(PhpString::from_vec(upper)))
 }
 
@@ -81,9 +89,18 @@ fn trim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|s| s.as_bytes().to_vec())
         .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
 
-    let start = bytes.iter().position(|b| !chars.contains(b)).unwrap_or(bytes.len());
-    let end = bytes.iter().rposition(|b| !chars.contains(b)).map(|i| i + 1).unwrap_or(start);
-    Ok(Value::String(PhpString::from_vec(bytes[start..end].to_vec())))
+    let start = bytes
+        .iter()
+        .position(|b| !chars.contains(b))
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !chars.contains(b))
+        .map(|i| i + 1)
+        .unwrap_or(start);
+    Ok(Value::String(PhpString::from_vec(
+        bytes[start..end].to_vec(),
+    )))
 }
 
 fn ltrim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -94,7 +111,10 @@ fn ltrim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|v| v.to_php_string())
         .map(|s| s.as_bytes().to_vec())
         .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
-    let start = bytes.iter().position(|b| !chars.contains(b)).unwrap_or(bytes.len());
+    let start = bytes
+        .iter()
+        .position(|b| !chars.contains(b))
+        .unwrap_or(bytes.len());
     Ok(Value::String(PhpString::from_vec(bytes[start..].to_vec())))
 }
 
@@ -106,7 +126,11 @@ fn rtrim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|v| v.to_php_string())
         .map(|s| s.as_bytes().to_vec())
         .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
-    let end = bytes.iter().rposition(|b| !chars.contains(b)).map(|i| i + 1).unwrap_or(0);
+    let end = bytes
+        .iter()
+        .rposition(|b| !chars.contains(b))
+        .map(|i| i + 1)
+        .unwrap_or(0);
     Ok(Value::String(PhpString::from_vec(bytes[..end].to_vec())))
 }
 
@@ -132,7 +156,9 @@ fn substr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::empty()));
     }
 
-    Ok(Value::String(PhpString::from_vec(bytes[start..end].to_vec())))
+    Ok(Value::String(PhpString::from_vec(
+        bytes[start..end].to_vec(),
+    )))
 }
 
 fn strpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -267,10 +293,7 @@ fn explode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn implode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (glue, pieces) = if args.len() >= 2 {
-        (
-            args[0].to_php_string(),
-            &args[1],
-        )
+        (args[0].to_php_string(), &args[1])
     } else {
         (PhpString::empty(), args.first().unwrap_or(&Value::Null))
     };
@@ -318,7 +341,9 @@ fn sprintf(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// Shared sprintf implementation used by both sprintf() and printf()
 pub fn do_sprintf(args: &[Value]) -> String {
-    if args.is_empty() { return String::new(); }
+    if args.is_empty() {
+        return String::new();
+    }
     let format = args[0].to_php_string();
     let format_bytes = format.as_bytes();
 
@@ -329,7 +354,9 @@ pub fn do_sprintf(args: &[Value]) -> String {
     while i < format_bytes.len() {
         if format_bytes[i] == b'%' {
             i += 1;
-            if i >= format_bytes.len() { break; }
+            if i >= format_bytes.len() {
+                break;
+            }
             if format_bytes[i] == b'%' {
                 result.push('%');
                 i += 1;
@@ -345,15 +372,32 @@ pub fn do_sprintf(args: &[Value]) -> String {
 
             // Flags
             loop {
-                if i >= format_bytes.len() { break; }
+                if i >= format_bytes.len() {
+                    break;
+                }
                 match format_bytes[i] {
-                    b'-' => { left_align = true; i += 1; }
-                    b'+' => { show_sign = true; i += 1; }
-                    b'0' => { pad_zero = true; pad_char = b'0'; i += 1; }
-                    b' ' => { i += 1; } // space flag
+                    b'-' => {
+                        left_align = true;
+                        i += 1;
+                    }
+                    b'+' => {
+                        show_sign = true;
+                        i += 1;
+                    }
+                    b'0' => {
+                        pad_zero = true;
+                        pad_char = b'0';
+                        i += 1;
+                    }
+                    b' ' => {
+                        i += 1;
+                    } // space flag
                     b'\'' => {
                         i += 1;
-                        if i < format_bytes.len() { pad_char = format_bytes[i]; i += 1; }
+                        if i < format_bytes.len() {
+                            pad_char = format_bytes[i];
+                            i += 1;
+                        }
                     }
                     _ => break,
                 }
@@ -378,7 +422,9 @@ pub fn do_sprintf(args: &[Value]) -> String {
                 precision = Some(prec);
             }
 
-            if i >= format_bytes.len() { break; }
+            if i >= format_bytes.len() {
+                break;
+            }
             let spec = format_bytes[i];
             i += 1;
 
@@ -396,12 +442,20 @@ pub fn do_sprintf(args: &[Value]) -> String {
                 }
                 b'd' => {
                     let n = arg.to_long();
-                    if show_sign && n >= 0 { format!("+{}", n) } else { n.to_string() }
+                    if show_sign && n >= 0 {
+                        format!("+{}", n)
+                    } else {
+                        n.to_string()
+                    }
                 }
                 b'f' | b'F' => {
                     let f = arg.to_double();
                     let prec = precision.unwrap_or(6);
-                    if show_sign && f >= 0.0 { format!("+{:.prec$}", f) } else { format!("{:.prec$}", f) }
+                    if show_sign && f >= 0.0 {
+                        format!("+{:.prec$}", f)
+                    } else {
+                        format!("{:.prec$}", f)
+                    }
                 }
                 b'e' => {
                     let f = arg.to_double();
@@ -438,15 +492,21 @@ pub fn do_sprintf(args: &[Value]) -> String {
                 let padding = width - formatted.len();
                 if left_align {
                     result.push_str(&formatted);
-                    for _ in 0..padding { result.push(pad_char as char); }
+                    for _ in 0..padding {
+                        result.push(pad_char as char);
+                    }
                 } else {
                     // For zero-padding with sign, put sign before zeros
                     if pad_zero && (formatted.starts_with('-') || formatted.starts_with('+')) {
                         result.push(formatted.chars().next().unwrap());
-                        for _ in 0..padding { result.push('0'); }
+                        for _ in 0..padding {
+                            result.push('0');
+                        }
                         result.push_str(&formatted[1..]);
                     } else {
-                        for _ in 0..padding { result.push(pad_char as char); }
+                        for _ in 0..padding {
+                            result.push(pad_char as char);
+                        }
                         result.push_str(&formatted);
                     }
                 }
@@ -479,7 +539,10 @@ fn nl2br(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn chunk_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let body = args.first().unwrap_or(&Value::Null).to_php_string();
     let chunklen = args.get(1).map(|v| v.to_long()).unwrap_or(76) as usize;
-    let end = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"\r\n"));
+    let end = args
+        .get(2)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b"\r\n"));
 
     let bytes = body.as_bytes();
     let mut result = Vec::new();
@@ -493,7 +556,10 @@ fn chunk_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn str_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null).to_php_string();
     let length = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let pad_string = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b" "));
+    let pad_string = args
+        .get(2)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b" "));
     let pad_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // STR_PAD_RIGHT=1
 
     let bytes = input.as_bytes();
@@ -565,7 +631,8 @@ fn ucwords(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut bytes = s.as_bytes().to_vec();
     let mut capitalize_next = true;
     for b in &mut bytes {
-        if *b == b' ' || *b == b'\t' || *b == b'\r' || *b == b'\n' || *b == b'\x0B' || *b == b'\x0C' {
+        if *b == b' ' || *b == b'\t' || *b == b'\r' || *b == b'\n' || *b == b'\x0B' || *b == b'\x0C'
+        {
             capitalize_next = true;
         } else if capitalize_next {
             *b = b.to_ascii_uppercase();
@@ -587,8 +654,14 @@ fn addslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = Vec::new();
     for &b in s.as_bytes() {
         match b {
-            b'\'' | b'"' | b'\\' => { result.push(b'\\'); result.push(b); }
-            0 => { result.push(b'\\'); result.push(b'0'); }
+            b'\'' | b'"' | b'\\' => {
+                result.push(b'\\');
+                result.push(b);
+            }
+            0 => {
+                result.push(b'\\');
+                result.push(b'0');
+            }
             _ => result.push(b),
         }
     }
@@ -603,8 +676,14 @@ fn stripslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             match bytes[i + 1] {
-                b'0' => { result.push(0); i += 2; }
-                ch => { result.push(ch); i += 2; }
+                b'0' => {
+                    result.push(0);
+                    i += 2;
+                }
+                ch => {
+                    result.push(ch);
+                    i += 2;
+                }
             }
         } else {
             result.push(bytes[i]);
@@ -626,7 +705,10 @@ fn addcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 b'\r' => result.extend_from_slice(b"\\r"),
                 b'\t' => result.extend_from_slice(b"\\t"),
                 0 => result.extend_from_slice(b"\\000"),
-                _ => { result.push(b'\\'); result.push(b); }
+                _ => {
+                    result.push(b'\\');
+                    result.push(b);
+                }
             }
         } else {
             result.push(b);
@@ -643,13 +725,34 @@ fn stripcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             match bytes[i + 1] {
-                b'n' => { result.push(b'\n'); i += 2; }
-                b'r' => { result.push(b'\r'); i += 2; }
-                b't' => { result.push(b'\t'); i += 2; }
-                b'v' => { result.push(0x0B); i += 2; }
-                b'a' => { result.push(0x07); i += 2; }
-                b'f' => { result.push(0x0C); i += 2; }
-                b'\\' => { result.push(b'\\'); i += 2; }
+                b'n' => {
+                    result.push(b'\n');
+                    i += 2;
+                }
+                b'r' => {
+                    result.push(b'\r');
+                    i += 2;
+                }
+                b't' => {
+                    result.push(b'\t');
+                    i += 2;
+                }
+                b'v' => {
+                    result.push(0x0B);
+                    i += 2;
+                }
+                b'a' => {
+                    result.push(0x07);
+                    i += 2;
+                }
+                b'f' => {
+                    result.push(0x0C);
+                    i += 2;
+                }
+                b'\\' => {
+                    result.push(b'\\');
+                    i += 2;
+                }
                 b'0'..=b'7' => {
                     // Octal
                     let mut oct = vec![bytes[i + 1]];
@@ -676,7 +779,10 @@ fn stripcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     i = j;
                 }
-                ch => { result.push(ch); i += 2; }
+                ch => {
+                    result.push(ch);
+                    i += 2;
+                }
             }
         } else {
             result.push(bytes[i]);
@@ -688,13 +794,15 @@ fn stripcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn str_rot13(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let result: Vec<u8> = s.as_bytes().iter().map(|&b| {
-        match b {
+    let result: Vec<u8> = s
+        .as_bytes()
+        .iter()
+        .map(|&b| match b {
             b'a'..=b'm' | b'A'..=b'M' => b + 13,
             b'n'..=b'z' | b'N'..=b'Z' => b - 13,
             _ => b,
-        }
-    }).collect();
+        })
+        .collect();
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
@@ -718,7 +826,7 @@ fn quoted_printable_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let mut result = Vec::new();
     for &b in s.as_bytes() {
-        if (b >= 33 && b <= 126 && b != b'=') || b == b'\t' || b == b' ' {
+        if ((33..=126).contains(&b) && b != b'=') || b == b'\t' || b == b' ' {
             result.push(b);
         } else {
             result.push(b'=');
@@ -734,8 +842,14 @@ fn quoted_printable_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     let mut result = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'=' && i + 2 < bytes.len() && bytes[i+1].is_ascii_hexdigit() && bytes[i+2].is_ascii_hexdigit() {
-            let hex: String = [bytes[i+1] as char, bytes[i+2] as char].iter().collect();
+        if bytes[i] == b'='
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_hexdigit()
+            && bytes[i + 2].is_ascii_hexdigit()
+        {
+            let hex: String = [bytes[i + 1] as char, bytes[i + 2] as char]
+                .iter()
+                .collect();
             result.push(u8::from_str_radix(&hex, 16).unwrap_or(0));
             i += 3;
         } else {
@@ -760,7 +874,10 @@ fn str_getcsv(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use std::rc::Rc;
 
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let sep = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b","));
+    let sep = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b","));
     let delim = sep.as_bytes().first().copied().unwrap_or(b',');
 
     let mut result = PhpArray::new();
@@ -797,7 +914,7 @@ fn str_getcsv(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn strtr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let subject = args.first().unwrap_or(&Value::Null).to_php_string();
-    
+
     // Two forms: strtr($str, $from, $to) or strtr($str, $replacements_array)
     if args.len() >= 3 {
         let from = args[1].to_php_string();
@@ -819,15 +936,18 @@ fn strtr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let replacements = replacements.borrow();
         let mut result = subject.to_string_lossy();
         // Sort by key length descending for correct replacement order
-        let mut pairs: Vec<(String, String)> = replacements.iter().map(|(k, v)| {
-            let key = match k {
-                goro_core::array::ArrayKey::String(s) => s.to_string_lossy(),
-                goro_core::array::ArrayKey::Int(n) => n.to_string(),
-            };
-            (key, v.to_php_string().to_string_lossy())
-        }).collect();
+        let mut pairs: Vec<(String, String)> = replacements
+            .iter()
+            .map(|(k, v)| {
+                let key = match k {
+                    goro_core::array::ArrayKey::String(s) => s.to_string_lossy(),
+                    goro_core::array::ArrayKey::Int(n) => n.to_string(),
+                };
+                (key, v.to_php_string().to_string_lossy())
+            })
+            .collect();
         pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-        
+
         for (from, to) in &pairs {
             result = result.replace(from.as_str(), to.as_str());
         }
@@ -842,7 +962,10 @@ fn str_shuffle(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut bytes = s.as_bytes().to_vec();
     // Simple shuffle using time-based seed
     use std::time::SystemTime;
-    let seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+    let seed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
     let len = bytes.len();
     if len > 1 {
         for i in (1..len).rev() {
@@ -859,18 +982,26 @@ fn substr_compare(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let length = args.get(3).map(|v| v.to_long());
     let case_insensitive = args.get(4).map(|v| v.is_truthy()).unwrap_or(false);
-    
+
     let main_bytes = main_str.as_bytes();
-    let start = if offset < 0 { (main_bytes.len() as i64 + offset).max(0) as usize } else { offset as usize };
-    
-    if start >= main_bytes.len() { return Ok(Value::False); }
-    
+    let start = if offset < 0 {
+        (main_bytes.len() as i64 + offset).max(0) as usize
+    } else {
+        offset as usize
+    };
+
+    if start >= main_bytes.len() {
+        return Ok(Value::False);
+    }
+
     let sub = &main_bytes[start..];
-    let cmp_len = length.map(|l| l as usize).unwrap_or(sub.len().max(str2.len()));
-    
+    let cmp_len = length
+        .map(|l| l as usize)
+        .unwrap_or(sub.len().max(str2.len()));
+
     let a = &sub[..cmp_len.min(sub.len())];
     let b = &str2.as_bytes()[..cmp_len.min(str2.len())];
-    
+
     if case_insensitive {
         let a_lower: Vec<u8> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
         let b_lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
@@ -887,12 +1018,14 @@ fn similar_text(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn soundex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let input = s.to_string_lossy().to_uppercase();
-    if input.is_empty() { return Ok(Value::False); }
-    
+    if input.is_empty() {
+        return Ok(Value::False);
+    }
+
     let mut result = String::new();
     let bytes = input.as_bytes();
     result.push(bytes[0] as char);
-    
+
     let code = |c: u8| -> u8 {
         match c {
             b'B' | b'F' | b'P' | b'V' => b'1',
@@ -904,18 +1037,22 @@ fn soundex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             _ => b'0',
         }
     };
-    
+
     let mut last = code(bytes[0]);
     for &b in &bytes[1..] {
         let c = code(b);
         if c != b'0' && c != last {
             result.push(c as char);
-            if result.len() == 4 { break; }
+            if result.len() == 4 {
+                break;
+            }
         }
         last = c;
     }
-    while result.len() < 4 { result.push('0'); }
-    
+    while result.len() < 4 {
+        result.push('0');
+    }
+
     Ok(Value::String(PhpString::from_string(result)))
 }
 
@@ -924,52 +1061,74 @@ fn metaphone(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn levenshtein(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s1 = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
-    let s2 = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
-    
+    let s1 = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+    let s2 = args
+        .get(1)
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+
     let len1 = s1.len();
     let len2 = s2.len();
     let mut matrix = vec![vec![0usize; len2 + 1]; len1 + 1];
-    
-    for i in 0..=len1 { matrix[i][0] = i; }
-    for j in 0..=len2 { matrix[0][j] = j; }
-    
+
+    for i in 0..=len1 {
+        matrix[i][0] = i;
+    }
+    for j in 0..=len2 {
+        matrix[0][j] = j;
+    }
+
     for i in 1..=len1 {
         for j in 1..=len2 {
-            let cost = if s1.as_bytes()[i-1] == s2.as_bytes()[j-1] { 0 } else { 1 };
-            matrix[i][j] = (matrix[i-1][j] + 1)
-                .min(matrix[i][j-1] + 1)
-                .min(matrix[i-1][j-1] + cost);
+            let cost = if s1.as_bytes()[i - 1] == s2.as_bytes()[j - 1] {
+                0
+            } else {
+                1
+            };
+            matrix[i][j] = (matrix[i - 1][j] + 1)
+                .min(matrix[i][j - 1] + 1)
+                .min(matrix[i - 1][j - 1] + cost);
         }
     }
-    
+
     Ok(Value::Long(matrix[len1][len2] as i64))
 }
 
 fn count_chars(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    
+
     let mut counts = [0i64; 256];
     for &b in s.as_bytes() {
         counts[b as usize] += 1;
     }
-    
+
     use goro_core::array::PhpArray;
     use std::cell::RefCell;
     use std::rc::Rc;
-    
+
     let mut result = PhpArray::new();
     match mode {
         0 => {
             for i in 0..256 {
-                result.set(goro_core::array::ArrayKey::Int(i as i64), Value::Long(counts[i]));
+                result.set(
+                    goro_core::array::ArrayKey::Int(i as i64),
+                    Value::Long(counts[i]),
+                );
             }
         }
         1 => {
             for i in 0..256 {
                 if counts[i] > 0 {
-                    result.set(goro_core::array::ArrayKey::Int(i as i64), Value::Long(counts[i]));
+                    result.set(
+                        goro_core::array::ArrayKey::Int(i as i64),
+                        Value::Long(counts[i]),
+                    );
                 }
             }
         }
@@ -989,7 +1148,7 @@ fn str_split_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use goro_core::array::PhpArray;
     use std::cell::RefCell;
     use std::rc::Rc;
-    
+
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let len = args.get(1).map(|v| v.to_long()).unwrap_or(1).max(1) as usize;
     let bytes = s.as_bytes();

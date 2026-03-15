@@ -68,10 +68,7 @@ pub enum StmtKind {
     },
 
     /// switch (expr) { case ...: ... }
-    Switch {
-        expr: Expr,
-        cases: Vec<SwitchCase>,
-    },
+    Switch { expr: Expr, cases: Vec<SwitchCase> },
 
     /// break N;
     Break(Option<Expr>),
@@ -161,7 +158,7 @@ pub enum ExprKind {
     Array(Vec<ArrayElement>),
 
     // Variables
-    Variable(Vec<u8>),         // $foo
+    Variable(Vec<u8>),          // $foo
     DynamicVariable(Box<Expr>), // $$foo
 
     // Operations
@@ -224,7 +221,7 @@ pub enum ExprKind {
     // Ternary
     Ternary {
         condition: Box<Expr>,
-        if_true: Option<Box<Expr>>,  // None for short ternary ($a ?: $b)
+        if_true: Option<Box<Expr>>, // None for short ternary ($a ?: $b)
         if_false: Box<Expr>,
     },
 
@@ -296,7 +293,7 @@ pub enum ExprKind {
     },
 
     // Name resolution
-    ConstantAccess(Vec<Vec<u8>>),    // FOO, Namespace\FOO
+    ConstantAccess(Vec<Vec<u8>>), // FOO, Namespace\FOO
     ClassConstAccess {
         class: Box<Expr>,
         constant: Vec<u8>,
@@ -340,9 +337,9 @@ pub enum BinaryOp {
     ShiftRight,
     BooleanAnd,
     BooleanOr,
-    LogicalAnd,  // 'and' keyword
-    LogicalOr,   // 'or' keyword
-    LogicalXor,  // 'xor' keyword
+    LogicalAnd, // 'and' keyword
+    LogicalOr,  // 'or' keyword
+    LogicalXor, // 'xor' keyword
     Equal,
     Identical,
     NotEqual,
@@ -356,12 +353,12 @@ pub enum BinaryOp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
-    Negate,       // -
-    Plus,         // + (unary)
-    BitwiseNot,   // ~
-    BooleanNot,   // !
-    PreIncrement, // ++$x
-    PreDecrement, // --$x
+    Negate,        // -
+    Plus,          // + (unary)
+    BitwiseNot,    // ~
+    BooleanNot,    // !
+    PreIncrement,  // ++$x
+    PreDecrement,  // --$x
     PostIncrement, // $x++
     PostDecrement, // $x--
 }
@@ -405,9 +402,9 @@ pub struct Param {
 
 #[derive(Debug, Clone)]
 pub enum TypeHint {
-    Simple(Vec<u8>),          // int, string, ClassName
-    Nullable(Box<TypeHint>),  // ?Type
-    Union(Vec<TypeHint>),     // Type1|Type2
+    Simple(Vec<u8>),             // int, string, ClassName
+    Nullable(Box<TypeHint>),     // ?Type
+    Union(Vec<TypeHint>),        // Type1|Type2
     Intersection(Vec<TypeHint>), // Type1&Type2
 }
 

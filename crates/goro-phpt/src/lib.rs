@@ -158,10 +158,16 @@ fn matches_expectf(pattern: &str, actual: &str) -> bool {
         if p_trimmed.len() != a_trimmed.len() {
             return false;
         }
-        return p_trimmed.iter().zip(a_trimmed.iter()).all(|(p, a)| match_expectf_line(p, a));
+        return p_trimmed
+            .iter()
+            .zip(a_trimmed.iter())
+            .all(|(p, a)| match_expectf_line(p, a));
     }
 
-    pattern_lines.iter().zip(actual_lines.iter()).all(|(p, a)| match_expectf_line(p, a))
+    pattern_lines
+        .iter()
+        .zip(actual_lines.iter())
+        .all(|(p, a)| match_expectf_line(p, a))
 }
 
 /// Match a single line with EXPECTF patterns
@@ -177,21 +183,37 @@ fn match_expectf_line(pattern: &str, actual: &str) -> bool {
                 b'd' => {
                     pi += 2;
                     // Match optional - and digits
-                    if ai < ab.len() && ab[ai] == b'-' { ai += 1; }
-                    if ai >= ab.len() || !ab[ai].is_ascii_digit() { return false; }
-                    while ai < ab.len() && ab[ai].is_ascii_digit() { ai += 1; }
+                    if ai < ab.len() && ab[ai] == b'-' {
+                        ai += 1;
+                    }
+                    if ai >= ab.len() || !ab[ai].is_ascii_digit() {
+                        return false;
+                    }
+                    while ai < ab.len() && ab[ai].is_ascii_digit() {
+                        ai += 1;
+                    }
                 }
                 b'i' => {
                     pi += 2;
-                    if ai < ab.len() && (ab[ai] == b'+' || ab[ai] == b'-') { ai += 1; }
-                    if ai >= ab.len() || !ab[ai].is_ascii_digit() { return false; }
-                    while ai < ab.len() && ab[ai].is_ascii_digit() { ai += 1; }
+                    if ai < ab.len() && (ab[ai] == b'+' || ab[ai] == b'-') {
+                        ai += 1;
+                    }
+                    if ai >= ab.len() || !ab[ai].is_ascii_digit() {
+                        return false;
+                    }
+                    while ai < ab.len() && ab[ai].is_ascii_digit() {
+                        ai += 1;
+                    }
                 }
                 b's' => {
                     pi += 2;
                     // Match non-whitespace
-                    if ai >= ab.len() || ab[ai] == b' ' || ab[ai] == b'\t' { return false; }
-                    while ai < ab.len() && ab[ai] != b' ' && ab[ai] != b'\t' && ab[ai] != b'\n' { ai += 1; }
+                    if ai >= ab.len() || ab[ai] == b' ' || ab[ai] == b'\t' {
+                        return false;
+                    }
+                    while ai < ab.len() && ab[ai] != b' ' && ab[ai] != b'\t' && ab[ai] != b'\n' {
+                        ai += 1;
+                    }
                 }
                 b'S' | b'a' | b'A' => {
                     pi += 2;
@@ -204,7 +226,9 @@ fn match_expectf_line(pattern: &str, actual: &str) -> bool {
                         let next_literal = if pb[pi] == b'%' { None } else { Some(pb[pi]) };
                         if let Some(nc) = next_literal {
                             // Advance ai until we find nc
-                            while ai < ab.len() && ab[ai] != nc { ai += 1; }
+                            while ai < ab.len() && ab[ai] != nc {
+                                ai += 1;
+                            }
                         } else {
                             ai = ab.len();
                         }
@@ -212,38 +236,60 @@ fn match_expectf_line(pattern: &str, actual: &str) -> bool {
                 }
                 b'f' => {
                     pi += 2;
-                    if ai < ab.len() && ab[ai] == b'-' { ai += 1; }
-                    while ai < ab.len() && (ab[ai].is_ascii_digit() || ab[ai] == b'.') { ai += 1; }
+                    if ai < ab.len() && ab[ai] == b'-' {
+                        ai += 1;
+                    }
+                    while ai < ab.len() && (ab[ai].is_ascii_digit() || ab[ai] == b'.') {
+                        ai += 1;
+                    }
                 }
                 b'x' => {
                     pi += 2;
-                    while ai < ab.len() && ab[ai].is_ascii_hexdigit() { ai += 1; }
+                    while ai < ab.len() && ab[ai].is_ascii_hexdigit() {
+                        ai += 1;
+                    }
                 }
                 b'e' => {
                     pi += 2;
-                    if ai < ab.len() && (ab[ai] == b'/' || ab[ai] == b'\\') { ai += 1; }
+                    if ai < ab.len() && (ab[ai] == b'/' || ab[ai] == b'\\') {
+                        ai += 1;
+                    }
                 }
                 b'w' => {
                     pi += 2;
-                    while ai < ab.len() && (ab[ai] == b' ' || ab[ai] == b'\t') { ai += 1; }
+                    while ai < ab.len() && (ab[ai] == b' ' || ab[ai] == b'\t') {
+                        ai += 1;
+                    }
                 }
                 b'c' => {
                     pi += 2;
-                    if ai < ab.len() { ai += 1; }
+                    if ai < ab.len() {
+                        ai += 1;
+                    }
                 }
                 b'%' => {
                     pi += 2;
-                    if ai < ab.len() && ab[ai] == b'%' { ai += 1; } else { return false; }
+                    if ai < ab.len() && ab[ai] == b'%' {
+                        ai += 1;
+                    } else {
+                        return false;
+                    }
                 }
                 _ => {
                     // Unknown pattern, treat as literal
-                    if pb[pi] != ab[ai] { return false; }
-                    pi += 1; ai += 1;
+                    if pb[pi] != ab[ai] {
+                        return false;
+                    }
+                    pi += 1;
+                    ai += 1;
                 }
             }
         } else {
-            if pb[pi] != ab[ai] { return false; }
-            pi += 1; ai += 1;
+            if pb[pi] != ab[ai] {
+                return false;
+            }
+            pi += 1;
+            ai += 1;
         }
     }
 
@@ -319,6 +365,7 @@ fn _old_matches_expectf(pattern: &str, actual: &str) -> bool {
     expected == actual_trimmed
 }
 
+#[allow(dead_code)]
 fn escape_regex_char(c: char) -> char {
     c
 }
@@ -333,29 +380,28 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "phpt") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Some(test) = PhptTest::parse(&content) {
-                        match run_test(&test) {
-                            TestResult::Pass => {
-                                pass += 1;
-                                println!("PASS: {}", test.name);
-                            }
-                            TestResult::Fail { expected, actual } => {
-                                fail += 1;
-                                println!("FAIL: {}", test.name);
-                                println!("  Expected: {:?}", expected);
-                                println!("  Actual:   {:?}", actual);
-                            }
-                            TestResult::Skip(reason) => {
-                                skip += 1;
-                                println!("SKIP: {} ({})", test.name, reason);
-                            }
-                            TestResult::Error(msg) => {
-                                error += 1;
-                                println!("ERROR: {} ({})", test.name, msg);
-                            }
-                        }
+            if path.extension().is_some_and(|e| e == "phpt")
+                && let Ok(content) = std::fs::read_to_string(&path)
+                && let Some(test) = PhptTest::parse(&content)
+            {
+                match run_test(&test) {
+                    TestResult::Pass => {
+                        pass += 1;
+                        println!("PASS: {}", test.name);
+                    }
+                    TestResult::Fail { expected, actual } => {
+                        fail += 1;
+                        println!("FAIL: {}", test.name);
+                        println!("  Expected: {:?}", expected);
+                        println!("  Actual:   {:?}", actual);
+                    }
+                    TestResult::Skip(reason) => {
+                        skip += 1;
+                        println!("SKIP: {} ({})", test.name, reason);
+                    }
+                    TestResult::Error(msg) => {
+                        error += 1;
+                        println!("ERROR: {} ({})", test.name, msg);
                     }
                 }
             }

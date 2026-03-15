@@ -1,6 +1,5 @@
 use crate::opcode::OpArray;
-use crate::value::Value;
-use crate::vm::{BuiltinFn, VmError};
+use crate::vm::BuiltinFn;
 
 /// A PHP function - either user-defined (compiled) or built-in (native Rust)
 #[derive(Clone)]

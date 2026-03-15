@@ -10,7 +10,11 @@ pub struct ParseError {
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Parse error on line {}: {}", self.span.line, self.message)
+        write!(
+            f,
+            "Parse error on line {}: {}",
+            self.span.line, self.message
+        )
     }
 }
 
@@ -194,10 +198,12 @@ impl Parser {
                     span,
                 })
             }
-            TokenKind::Static if matches!(
-                self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                Some(TokenKind::Variable(_))
-            ) => {
+            TokenKind::Static
+                if matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Variable(_))
+                ) =>
+            {
                 // static $var = expr;
                 self.advance(); // consume 'static'
                 let mut vars = Vec::new();
@@ -242,16 +248,21 @@ impl Parser {
                 // const FOO = value;
                 self.advance();
                 let name = match self.peek().clone() {
-                    TokenKind::Identifier(name) => { self.advance(); name }
+                    TokenKind::Identifier(name) => {
+                        self.advance();
+                        name
+                    }
                     _ if self.is_semi_reserved_keyword() => {
                         let kw = self.keyword_to_identifier();
                         self.advance();
                         kw
                     }
-                    _ => return Err(ParseError {
-                        message: "expected constant name".into(),
-                        span: self.span(),
-                    }),
+                    _ => {
+                        return Err(ParseError {
+                            message: "expected constant name".into(),
+                            span: self.span(),
+                        });
+                    }
                 };
                 self.expect(&TokenKind::Assign)?;
                 let value = self.parse_expression()?;
@@ -292,7 +303,11 @@ impl Parser {
                 };
                 Ok(Statement {
                     kind: StmtKind::NamespaceDecl {
-                        name: if name_parts.is_empty() { None } else { Some(name_parts) },
+                        name: if name_parts.is_empty() {
+                            None
+                        } else {
+                            Some(name_parts)
+                        },
                         body,
                     },
                     span,
@@ -306,7 +321,10 @@ impl Parser {
                     self.advance();
                 }
                 self.expect_semicolon()?;
-                Ok(Statement { kind: StmtKind::Nop, span })
+                Ok(Statement {
+                    kind: StmtKind::Nop,
+                    span,
+                })
             }
             TokenKind::Try => self.parse_try_catch(),
             TokenKind::Throw => {
@@ -833,12 +851,16 @@ impl Parser {
                 match self.peek().clone() {
                     TokenKind::Identifier(part) => {
                         self.advance();
-                        if !name.is_empty() { name.push(b'\\'); }
+                        if !name.is_empty() {
+                            name.push(b'\\');
+                        }
                         name.extend_from_slice(&part);
                     }
                     _ => break,
                 }
-                if !self.eat(&TokenKind::Backslash) { break; }
+                if !self.eat(&TokenKind::Backslash) {
+                    break;
+                }
             }
             return Ok(TypeHint::Simple(name));
         }
@@ -1063,23 +1085,39 @@ impl Parser {
                         }
                         _ => break,
                     }
-                    if !self.eat(&TokenKind::Comma) { break; }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
                 }
                 // Handle trait conflict resolution block
                 if matches!(self.peek(), TokenKind::OpenBrace) {
                     let mut depth = 0;
                     loop {
                         match self.peek() {
-                            TokenKind::OpenBrace => { self.advance(); depth += 1; }
-                            TokenKind::CloseBrace => { self.advance(); depth -= 1; if depth == 0 { break; } }
+                            TokenKind::OpenBrace => {
+                                self.advance();
+                                depth += 1;
+                            }
+                            TokenKind::CloseBrace => {
+                                self.advance();
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
                             TokenKind::Eof => break,
-                            _ => { self.advance(); }
+                            _ => {
+                                self.advance();
+                            }
                         }
                     }
                 } else {
                     self.expect_semicolon()?;
                 }
-                return Ok(ClassMember::TraitUse { traits, adaptations: vec![] });
+                Ok(ClassMember::TraitUse {
+                    traits,
+                    adaptations: vec![],
+                })
             }
             TokenKind::Function => {
                 self.advance();
@@ -2076,7 +2114,10 @@ impl Parser {
                         // $obj->$var  (dynamic property access)
                         let prop_span = self.span();
                         let var_name = match self.peek().clone() {
-                            TokenKind::Variable(name) => { self.advance(); name }
+                            TokenKind::Variable(name) => {
+                                self.advance();
+                                name
+                            }
                             _ => unreachable!(),
                         };
                         let prop_expr = Expr {
@@ -2208,7 +2249,12 @@ impl Parser {
                     self.advance();
                     let member_span = self.span();
                     match self.peek().clone() {
-                        TokenKind::Identifier(name) if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::OpenParen)) => {
+                        TokenKind::Identifier(name)
+                            if matches!(
+                                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                                Some(TokenKind::OpenParen)
+                            ) =>
+                        {
                             self.advance(); // name
                             self.advance(); // (
                             let args = self.parse_arguments()?;
@@ -2343,17 +2389,29 @@ impl Parser {
                                 let index = match self.peek().clone() {
                                     TokenKind::LongNumber(n) => {
                                         self.advance();
-                                        Expr { kind: ExprKind::Int(n), span: var_span }
+                                        Expr {
+                                            kind: ExprKind::Int(n),
+                                            span: var_span,
+                                        }
                                     }
                                     TokenKind::Variable(idx_name) => {
                                         self.advance();
-                                        Expr { kind: ExprKind::Variable(idx_name), span: var_span }
+                                        Expr {
+                                            kind: ExprKind::Variable(idx_name),
+                                            span: var_span,
+                                        }
                                     }
                                     TokenKind::Identifier(key) => {
                                         self.advance();
-                                        Expr { kind: ExprKind::String(key), span: var_span }
+                                        Expr {
+                                            kind: ExprKind::String(key),
+                                            span: var_span,
+                                        }
                                     }
-                                    _ => Expr { kind: ExprKind::Int(0), span: var_span },
+                                    _ => Expr {
+                                        kind: ExprKind::Int(0),
+                                        span: var_span,
+                                    },
                                 };
                                 if matches!(self.peek(), TokenKind::CloseBracket) {
                                     self.advance(); // consume ]
@@ -2459,10 +2517,10 @@ impl Parser {
                         });
                     } else {
                         // Handle &$var (reference in array)
-                        let is_ref = self.eat(&TokenKind::Ampersand);
+                        let _is_ref = self.eat(&TokenKind::Ampersand);
                         let first = self.parse_expression()?;
                         if self.eat(&TokenKind::DoubleArrow) {
-                            let is_val_ref = self.eat(&TokenKind::Ampersand);
+                            let _is_val_ref = self.eat(&TokenKind::Ampersand);
                             let value = self.parse_expression()?;
                             elements.push(ArrayElement {
                                 key: Some(first),
@@ -2537,15 +2595,24 @@ impl Parser {
                                 full_name.extend_from_slice(&part);
                             }
                         }
-                        Expr { kind: ExprKind::Identifier(full_name), span: class_span }
+                        Expr {
+                            kind: ExprKind::Identifier(full_name),
+                            span: class_span,
+                        }
                     }
                     TokenKind::Static => {
                         self.advance();
-                        Expr { kind: ExprKind::Identifier(b"static".to_vec()), span: class_span }
+                        Expr {
+                            kind: ExprKind::Identifier(b"static".to_vec()),
+                            span: class_span,
+                        }
                     }
                     TokenKind::Variable(name) => {
                         self.advance();
-                        Expr { kind: ExprKind::Variable(name), span: class_span }
+                        Expr {
+                            kind: ExprKind::Variable(name),
+                            span: class_span,
+                        }
                     }
                     TokenKind::Class => {
                         // Anonymous class: new class { ... }
@@ -2556,20 +2623,30 @@ impl Parser {
                             let args = self.parse_arguments()?;
                             self.expect(&TokenKind::CloseParen)?;
                             args
-                        } else { Vec::new() };
+                        } else {
+                            Vec::new()
+                        };
                         // Parse optional extends/implements
                         if self.eat(&TokenKind::Extends) {
                             // Skip parent class name
-                            while matches!(self.peek(), TokenKind::Identifier(_) | TokenKind::Backslash) {
+                            while matches!(
+                                self.peek(),
+                                TokenKind::Identifier(_) | TokenKind::Backslash
+                            ) {
                                 self.advance();
                             }
                         }
                         if self.eat(&TokenKind::Implements) {
                             loop {
-                                while matches!(self.peek(), TokenKind::Identifier(_) | TokenKind::Backslash) {
+                                while matches!(
+                                    self.peek(),
+                                    TokenKind::Identifier(_) | TokenKind::Backslash
+                                ) {
                                     self.advance();
                                 }
-                                if !self.eat(&TokenKind::Comma) { break; }
+                                if !self.eat(&TokenKind::Comma) {
+                                    break;
+                                }
                             }
                         }
                         // Parse class body (skip it)
@@ -2577,17 +2654,34 @@ impl Parser {
                             let mut depth = 0;
                             loop {
                                 match self.peek() {
-                                    TokenKind::OpenBrace => { self.advance(); depth += 1; }
-                                    TokenKind::CloseBrace => { self.advance(); depth -= 1; if depth == 0 { break; } }
+                                    TokenKind::OpenBrace => {
+                                        self.advance();
+                                        depth += 1;
+                                    }
+                                    TokenKind::CloseBrace => {
+                                        self.advance();
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            break;
+                                        }
+                                    }
                                     TokenKind::Eof => break,
-                                    _ => { self.advance(); }
+                                    _ => {
+                                        self.advance();
+                                    }
                                 }
                             }
                         }
-                        Expr { kind: ExprKind::New {
-                            class: Box::new(Expr { kind: ExprKind::Identifier(b"anonymous".to_vec()), span: class_span }),
-                            args,
-                        }, span }
+                        Expr {
+                            kind: ExprKind::New {
+                                class: Box::new(Expr {
+                                    kind: ExprKind::Identifier(b"anonymous".to_vec()),
+                                    span: class_span,
+                                }),
+                                args,
+                            },
+                            span,
+                        }
                     }
                     TokenKind::Backslash => {
                         // Fully qualified: new \Foo\Bar()
@@ -2597,14 +2691,21 @@ impl Parser {
                             match self.peek().clone() {
                                 TokenKind::Identifier(part) => {
                                     self.advance();
-                                    if !full_name.is_empty() { full_name.push(b'\\'); }
+                                    if !full_name.is_empty() {
+                                        full_name.push(b'\\');
+                                    }
                                     full_name.extend_from_slice(&part);
                                 }
                                 _ => break,
                             }
-                            if !self.eat(&TokenKind::Backslash) { break; }
+                            if !self.eat(&TokenKind::Backslash) {
+                                break;
+                            }
                         }
-                        Expr { kind: ExprKind::Identifier(full_name), span: class_span }
+                        Expr {
+                            kind: ExprKind::Identifier(full_name),
+                            span: class_span,
+                        }
                     }
                     _ => self.parse_primary()?,
                 };
@@ -2756,10 +2857,12 @@ impl Parser {
                     },
                 })
             }
-            TokenKind::Static if matches!(
-                self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                Some(TokenKind::Function | TokenKind::Fn)
-            ) => {
+            TokenKind::Static
+                if matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Function | TokenKind::Fn)
+                ) =>
+            {
                 self.advance(); // static
                 if matches!(self.peek(), TokenKind::Fn) {
                     self.advance();
@@ -2937,11 +3040,15 @@ impl Parser {
                     match self.peek().clone() {
                         TokenKind::Identifier(part) => {
                             self.advance();
-                            if !name.is_empty() { name.push(b'\\'); }
+                            if !name.is_empty() {
+                                name.push(b'\\');
+                            }
                             name.extend_from_slice(&part);
                         }
                         _ if self.is_semi_reserved_keyword() => {
-                            if !name.is_empty() { name.push(b'\\'); }
+                            if !name.is_empty() {
+                                name.push(b'\\');
+                            }
                             name.extend_from_slice(&self.keyword_to_identifier());
                             self.advance();
                         }
@@ -3021,12 +3128,15 @@ impl Parser {
         }
 
         // First-class callable syntax: foo(...)
-        if matches!(self.peek(), TokenKind::Ellipsis) {
-            if self.tokens.get(self.pos + 1).is_some_and(|t| matches!(t.kind, TokenKind::CloseParen)) {
-                self.advance(); // consume ...
-                // Return empty args - the caller should interpret this as a callable reference
-                return Ok(args);
-            }
+        if matches!(self.peek(), TokenKind::Ellipsis)
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| matches!(t.kind, TokenKind::CloseParen))
+        {
+            self.advance(); // consume ...
+            // Return empty args - the caller should interpret this as a callable reference
+            return Ok(args);
         }
 
         loop {
@@ -3034,7 +3144,11 @@ impl Parser {
 
             // Check for named arguments: name: value
             let name = if let TokenKind::Identifier(ident) = self.peek().clone() {
-                if self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::Colon) {
+                if self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::Colon)
+                {
                     self.advance(); // identifier
                     self.advance(); // colon
                     Some(ident)
@@ -3068,20 +3182,60 @@ impl Parser {
     fn is_semi_reserved_keyword(&self) -> bool {
         matches!(
             self.peek(),
-            TokenKind::List | TokenKind::Array | TokenKind::Callable | TokenKind::Static
-            | TokenKind::Abstract | TokenKind::Final | TokenKind::Private | TokenKind::Protected
-            | TokenKind::Public | TokenKind::Readonly | TokenKind::Clone | TokenKind::New
-            | TokenKind::Throw | TokenKind::Yield | TokenKind::YieldFrom | TokenKind::Print
-            | TokenKind::Echo | TokenKind::Isset | TokenKind::Unset | TokenKind::Empty
-            | TokenKind::Match | TokenKind::Switch | TokenKind::Case | TokenKind::Default
-            | TokenKind::Break | TokenKind::Continue | TokenKind::Return | TokenKind::If
-            | TokenKind::Else | TokenKind::ElseIf | TokenKind::While | TokenKind::Do
-            | TokenKind::For | TokenKind::Foreach | TokenKind::As | TokenKind::Try
-            | TokenKind::Catch | TokenKind::Finally | TokenKind::Class | TokenKind::Interface
-            | TokenKind::Extends | TokenKind::Implements | TokenKind::Trait | TokenKind::Const
-            | TokenKind::Enum | TokenKind::Fn | TokenKind::Function | TokenKind::Namespace
-            | TokenKind::Use | TokenKind::Var | TokenKind::Global | TokenKind::Goto
-            | TokenKind::Instanceof | TokenKind::Insteadof
+            TokenKind::List
+                | TokenKind::Array
+                | TokenKind::Callable
+                | TokenKind::Static
+                | TokenKind::Abstract
+                | TokenKind::Final
+                | TokenKind::Private
+                | TokenKind::Protected
+                | TokenKind::Public
+                | TokenKind::Readonly
+                | TokenKind::Clone
+                | TokenKind::New
+                | TokenKind::Throw
+                | TokenKind::Yield
+                | TokenKind::YieldFrom
+                | TokenKind::Print
+                | TokenKind::Echo
+                | TokenKind::Isset
+                | TokenKind::Unset
+                | TokenKind::Empty
+                | TokenKind::Match
+                | TokenKind::Switch
+                | TokenKind::Case
+                | TokenKind::Default
+                | TokenKind::Break
+                | TokenKind::Continue
+                | TokenKind::Return
+                | TokenKind::If
+                | TokenKind::Else
+                | TokenKind::ElseIf
+                | TokenKind::While
+                | TokenKind::Do
+                | TokenKind::For
+                | TokenKind::Foreach
+                | TokenKind::As
+                | TokenKind::Try
+                | TokenKind::Catch
+                | TokenKind::Finally
+                | TokenKind::Class
+                | TokenKind::Interface
+                | TokenKind::Extends
+                | TokenKind::Implements
+                | TokenKind::Trait
+                | TokenKind::Const
+                | TokenKind::Enum
+                | TokenKind::Fn
+                | TokenKind::Function
+                | TokenKind::Namespace
+                | TokenKind::Use
+                | TokenKind::Var
+                | TokenKind::Global
+                | TokenKind::Goto
+                | TokenKind::Instanceof
+                | TokenKind::Insteadof
         )
     }
 
@@ -3232,7 +3386,9 @@ mod tests {
 
     #[test]
     fn test_if_else() {
-        let prog = parse(b"<?php if ($x > 0) { echo \"positive\"; } else { echo \"non-positive\"; }").unwrap();
+        let prog =
+            parse(b"<?php if ($x > 0) { echo \"positive\"; } else { echo \"non-positive\"; }")
+                .unwrap();
         match &prog.statements[0].kind {
             StmtKind::If {
                 condition,

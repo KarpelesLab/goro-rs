@@ -55,10 +55,10 @@ impl PhpArray {
     /// Get a value by integer key
     pub fn get_int(&self, key: i64) -> Option<&Value> {
         for (k, v) in &self.entries {
-            if let ArrayKey::Int(n) = k {
-                if *n == key {
-                    return Some(v);
-                }
+            if let ArrayKey::Int(n) = k
+                && *n == key
+            {
+                return Some(v);
             }
         }
         None
@@ -67,10 +67,10 @@ impl PhpArray {
     /// Get a value by string key
     pub fn get_str(&self, key: &[u8]) -> Option<&Value> {
         for (k, v) in &self.entries {
-            if let ArrayKey::String(s) = k {
-                if s.as_bytes() == key {
-                    return Some(v);
-                }
+            if let ArrayKey::String(s) = k
+                && s.as_bytes() == key
+            {
+                return Some(v);
             }
         }
         None
@@ -104,10 +104,10 @@ impl PhpArray {
             }
         }
         // Track next_int_key
-        if let ArrayKey::Int(n) = &key {
-            if *n >= self.next_int_key {
-                self.next_int_key = n + 1;
-            }
+        if let ArrayKey::Int(n) = &key
+            && *n >= self.next_int_key
+        {
+            self.next_int_key = n + 1;
         }
         self.entries.push((key, value));
     }

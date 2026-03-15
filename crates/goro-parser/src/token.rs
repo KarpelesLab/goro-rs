@@ -26,13 +26,13 @@ pub enum TokenKind {
     // Literals
     LongNumber(i64),
     DoubleNumber(f64),
-    ConstantString(Vec<u8>),          // Single-quoted or resolved string
-    InterpolatedStringPart(Vec<u8>),  // Part of a double-quoted string
-    InterpolatedStringEnd(Vec<u8>),   // Last part of a double-quoted string
+    ConstantString(Vec<u8>),         // Single-quoted or resolved string
+    InterpolatedStringPart(Vec<u8>), // Part of a double-quoted string
+    InterpolatedStringEnd(Vec<u8>),  // Last part of a double-quoted string
 
     // Identifiers and variables
-    Identifier(Vec<u8>),  // function names, class names, etc.
-    Variable(Vec<u8>),    // $foo (stored without the $)
+    Identifier(Vec<u8>), // function names, class names, etc.
+    Variable(Vec<u8>),   // $foo (stored without the $)
 
     // Inline HTML (outside <?php ... ?>)
     InlineHtml(Vec<u8>),
@@ -113,82 +113,82 @@ pub enum TokenKind {
     YieldFrom,
 
     // Operators
-    Plus,             // +
-    Minus,            // -
-    Star,             // *
-    Slash,            // /
-    Percent,          // %
-    Pow,              // **
-    Dot,              // .
-    Ampersand,        // &
-    Pipe,             // |
-    Caret,            // ^
-    Tilde,            // ~
-    ShiftLeft,        // <<
-    ShiftRight,       // >>
-    BooleanAnd,       // &&
-    BooleanOr,        // ||
-    BooleanNot,       // !
-    Assign,           // =
-    PlusAssign,       // +=
-    MinusAssign,      // -=
-    StarAssign,       // *=
-    SlashAssign,      // /=
-    PercentAssign,    // %=
-    PowAssign,        // **=
-    DotAssign,        // .=
-    AmpersandAssign,  // &=
-    PipeAssign,       // |=
-    CaretAssign,      // ^=
-    ShiftLeftAssign,  // <<=
-    ShiftRightAssign, // >>=
+    Plus,               // +
+    Minus,              // -
+    Star,               // *
+    Slash,              // /
+    Percent,            // %
+    Pow,                // **
+    Dot,                // .
+    Ampersand,          // &
+    Pipe,               // |
+    Caret,              // ^
+    Tilde,              // ~
+    ShiftLeft,          // <<
+    ShiftRight,         // >>
+    BooleanAnd,         // &&
+    BooleanOr,          // ||
+    BooleanNot,         // !
+    Assign,             // =
+    PlusAssign,         // +=
+    MinusAssign,        // -=
+    StarAssign,         // *=
+    SlashAssign,        // /=
+    PercentAssign,      // %=
+    PowAssign,          // **=
+    DotAssign,          // .=
+    AmpersandAssign,    // &=
+    PipeAssign,         // |=
+    CaretAssign,        // ^=
+    ShiftLeftAssign,    // <<=
+    ShiftRightAssign,   // >>=
     NullCoalesceAssign, // ??=
-    Equal,            // ==
-    Identical,        // ===
-    NotEqual,         // !=
-    NotIdentical,     // !==
-    Less,             // <
-    Greater,          // >
-    LessEqual,        // <=
-    GreaterEqual,     // >=
-    Spaceship,        // <=>
-    NullCoalesce,     // ??
-    Increment,        // ++
-    Decrement,        // --
-    Arrow,            // ->
-    NullsafeArrow,    // ?->
-    DoubleArrow,      // =>
-    DoubleColon,      // ::
-    Ellipsis,         // ...
-    At,               // @
-    PipeGreater,      // |> (pipe operator, PHP 8.5)
+    Equal,              // ==
+    Identical,          // ===
+    NotEqual,           // !=
+    NotIdentical,       // !==
+    Less,               // <
+    Greater,            // >
+    LessEqual,          // <=
+    GreaterEqual,       // >=
+    Spaceship,          // <=>
+    NullCoalesce,       // ??
+    Increment,          // ++
+    Decrement,          // --
+    Arrow,              // ->
+    NullsafeArrow,      // ?->
+    DoubleArrow,        // =>
+    DoubleColon,        // ::
+    Ellipsis,           // ...
+    At,                 // @
+    PipeGreater,        // |> (pipe operator, PHP 8.5)
 
     // Delimiters
-    OpenParen,        // (
-    CloseParen,       // )
-    OpenBracket,      // [
-    CloseBracket,     // ]
-    OpenBrace,        // {
-    CloseBrace,       // }
-    Semicolon,        // ;
-    Comma,            // ,
-    QuestionMark,     // ?
-    Colon,            // :
-    Backslash,        // \
+    OpenParen,    // (
+    CloseParen,   // )
+    OpenBracket,  // [
+    CloseBracket, // ]
+    OpenBrace,    // {
+    CloseBrace,   // }
+    Semicolon,    // ;
+    Comma,        // ,
+    QuestionMark, // ?
+    Colon,        // :
+    Backslash,    // \
 
     // Cast operators
-    IntCast,          // (int)
-    FloatCast,        // (float)
-    StringCast,       // (string)
-    BoolCast,         // (bool)
-    ArrayCast,        // (array)
-    ObjectCast,       // (object)
-    UnsetCast,        // (unset)
+    IntCast,    // (int)
+    FloatCast,  // (float)
+    StringCast, // (string)
+    BoolCast,   // (bool)
+    ArrayCast,  // (array)
+    ObjectCast, // (object)
+    UnsetCast,  // (unset)
 
     // Special
-    OpenTag,          // <?php
-    OpenTagShort,     // <?=
-    CloseTag,         // ?>
+    OpenTag,      // <?php
+    OpenTagShort, // <?=
+    CloseTag,     // ?>
 
     // End of file
     Eof,

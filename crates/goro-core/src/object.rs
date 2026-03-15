@@ -1,9 +1,6 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use crate::opcode::OpArray;
-use crate::string::PhpString;
 use crate::value::Value;
 
 /// A PHP class entry (class definition)
@@ -89,7 +86,8 @@ impl PhpObject {
     }
 
     pub fn get_property(&self, name: &[u8]) -> Value {
-        self.properties.iter()
+        self.properties
+            .iter()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Null)
