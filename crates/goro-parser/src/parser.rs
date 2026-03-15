@@ -2404,8 +2404,11 @@ impl Parser {
                             unpack: true,
                         });
                     } else {
+                        // Handle &$var (reference in array)
+                        let is_ref = self.eat(&TokenKind::Ampersand);
                         let first = self.parse_expression()?;
                         if self.eat(&TokenKind::DoubleArrow) {
+                            let is_val_ref = self.eat(&TokenKind::Ampersand);
                             let value = self.parse_expression()?;
                             elements.push(ArrayElement {
                                 key: Some(first),
@@ -2436,8 +2439,10 @@ impl Parser {
                 self.expect(&TokenKind::OpenParen)?;
                 let mut elements = Vec::new();
                 while !matches!(self.peek(), TokenKind::CloseParen | TokenKind::Eof) {
+                    self.eat(&TokenKind::Ampersand); // ignore reference in array literal
                     let first = self.parse_expression()?;
                     if self.eat(&TokenKind::DoubleArrow) {
+                        self.eat(&TokenKind::Ampersand); // ignore reference in value
                         let value = self.parse_expression()?;
                         elements.push(ArrayElement {
                             key: Some(first),
