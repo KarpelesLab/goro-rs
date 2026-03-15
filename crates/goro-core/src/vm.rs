@@ -760,6 +760,34 @@ impl Vm {
                                 args: Vec::new(),
                             });
                         }
+                    } else if let Value::Object(obj) = &name_val {
+                        // Callable object: check for __invoke method
+                        let class_lower: Vec<u8> = obj
+                            .borrow()
+                            .class_name
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        let class_name_orig = obj.borrow().class_name.clone();
+                        let has_invoke = self
+                            .classes
+                            .get(&class_lower)
+                            .map(|c| c.methods.contains_key(&b"__invoke".to_vec()))
+                            .unwrap_or(false);
+                        if has_invoke {
+                            let mut func_name = class_name_orig;
+                            func_name.extend_from_slice(b"::__invoke");
+                            self.pending_calls.push(PendingCall {
+                                name: PhpString::from_vec(func_name),
+                                args: vec![name_val.clone()], // $this
+                            });
+                        } else {
+                            let name = name_val.to_php_string();
+                            self.pending_calls.push(PendingCall {
+                                name,
+                                args: Vec::new(),
+                            });
+                        }
                     } else {
                         let name = name_val.to_php_string();
                         self.pending_calls.push(PendingCall {
