@@ -4,6 +4,21 @@
 
 **Test Suite**: 207/871 (23.8%) top-level, 852 total (Zend+ext dirs)
 
+### Recently Completed (this session)
+- [x] Named arguments (basic support)
+- [x] Parameter type checking with PHP coercion
+- [x] MD5 and SHA1 hash from scratch (no external deps)
+- [x] hash(), hash_algos(), hash_equals()
+- [x] parse_url() with full URL component parsing
+- [x] 20+ string functions (strrchr, stristr, strtok, strspn, etc.)
+- [x] mb_* function stubs
+- [x] Complete ctype extension (5 new functions)
+- [x] is_scalar, is_countable, is_iterable, get_debug_type
+- [x] get_declared_classes/traits/interfaces (proper implementation)
+- [x] Math: log1p, expm1, number_format, intval, floatval
+- [x] ??= operator fix
+- [x] Test runner timeout optimization
+
 ### Completed Features
 
 - Full execution pipeline: PHP source -> lexer -> parser -> AST -> bytecode -> VM
