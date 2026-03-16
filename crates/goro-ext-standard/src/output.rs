@@ -278,13 +278,28 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn var_export_value(val: &Value, buf: &mut Vec<u8>, _indent: usize) {
+fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
+    let prefix = " ".repeat(indent);
     match val {
         Value::Null | Value::Undef => buf.extend_from_slice(b"NULL"),
         Value::True => buf.extend_from_slice(b"true"),
         Value::False => buf.extend_from_slice(b"false"),
         Value::Long(n) => buf.extend_from_slice(n.to_string().as_bytes()),
-        Value::Double(f) => buf.extend_from_slice(format_float(*f).as_bytes()),
+        Value::Double(f) => {
+            // var_export uses a representation that can be parsed back
+            let s = format_float(*f);
+            buf.extend_from_slice(s.as_bytes());
+            // Ensure there's a decimal point
+            if !s.contains('.')
+                && !s.contains('E')
+                && !s.contains('e')
+                && s != "INF"
+                && s != "-INF"
+                && s != "NAN"
+            {
+                buf.extend_from_slice(b".0");
+            }
+        }
         Value::String(s) => {
             buf.push(b'\'');
             for &byte in s.as_bytes() {
@@ -296,14 +311,43 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, _indent: usize) {
             }
             buf.push(b'\'');
         }
-        Value::Array(_) => {
-            buf.extend_from_slice(b"array (...)"); // simplified
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            buf.extend_from_slice(b"array (\n");
+            for (key, value) in arr.iter() {
+                buf.extend_from_slice(format!("{}  ", prefix).as_bytes());
+                match key {
+                    goro_core::array::ArrayKey::Int(n) => {
+                        buf.extend_from_slice(format!("{} => ", n).as_bytes());
+                    }
+                    goro_core::array::ArrayKey::String(s) => {
+                        buf.extend_from_slice(b"'");
+                        buf.extend_from_slice(s.as_bytes());
+                        buf.extend_from_slice(b"' => ");
+                    }
+                }
+                var_export_value(value, buf, indent + 2);
+                buf.extend_from_slice(b",\n");
+            }
+            buf.extend_from_slice(format!("{})", prefix).as_bytes());
         }
-        Value::Object(_) | Value::Generator(_) => {
-            buf.extend_from_slice(b"(object) array(...)"); // TODO: implement object var_export
+        Value::Object(obj) => {
+            let obj_borrow = obj.borrow();
+            let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+            buf.extend_from_slice(format!("{}::__set_state(array(\n", class_name).as_bytes());
+            for (name, value) in &obj_borrow.properties {
+                let name_str = String::from_utf8_lossy(name);
+                buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
+                var_export_value(value, buf, indent + 2);
+                buf.extend_from_slice(b",\n");
+            }
+            buf.extend_from_slice(format!("{}))", prefix).as_bytes());
+        }
+        Value::Generator(_) => {
+            buf.extend_from_slice(b"NULL");
         }
         Value::Reference(r) => {
-            var_export_value(&r.borrow(), buf, _indent);
+            var_export_value(&r.borrow(), buf, indent);
         }
     }
 }
