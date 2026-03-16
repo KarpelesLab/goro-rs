@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Test Suite**: 208/871 (23.9%) top-level, 1064 total (all dirs with proper timeouts)
+**Test Suite**: 209/871 (24.0%) top-level, 1075 total (all dirs with proper timeouts)
 
 ### Recently Completed (this session)
 - [x] Named arguments (basic support)
