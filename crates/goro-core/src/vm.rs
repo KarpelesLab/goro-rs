@@ -1565,6 +1565,29 @@ impl Vm {
                             }
                         }
 
+                        // Special handling for __call/__callStatic:
+                        // Pack extra args into an array for the $args parameter
+                        if func_name_lower.ends_with(b"::__call")
+                            || func_name_lower.ends_with(b"::__callstatic")
+                        {
+                            // Args: [this, method_name, arg1, arg2, ...]
+                            // Need: [this, method_name, [arg1, arg2, ...]]
+                            if call.args.len() > 2 {
+                                let extra_args: Vec<Value> = call.args.drain(2..).collect();
+                                let mut args_arr = crate::array::PhpArray::new();
+                                for arg in extra_args {
+                                    args_arr.push(arg);
+                                }
+                                call.args
+                                    .push(Value::Array(Rc::new(RefCell::new(args_arr))));
+                            } else {
+                                // No extra args - push empty array
+                                call.args.push(Value::Array(Rc::new(RefCell::new(
+                                    crate::array::PhpArray::new(),
+                                ))));
+                            }
+                        }
+
                         // Check if this is a generator function
                         if user_fn.is_generator {
                             // Set up parameters as CVs
