@@ -1038,6 +1038,35 @@ impl Compiler {
                             is_abstract,
                             ..
                         } => {
+                            // Add promoted properties from constructor params
+                            {
+                                let mn_lower: Vec<u8> =
+                                    method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if mn_lower == b"__construct" {
+                                    for param in params {
+                                        if let Some(vis) = &param.visibility {
+                                            let prop_vis = match vis {
+                                                Visibility::Public => {
+                                                    crate::object::Visibility::Public
+                                                }
+                                                Visibility::Protected => {
+                                                    crate::object::Visibility::Protected
+                                                }
+                                                Visibility::Private => {
+                                                    crate::object::Visibility::Private
+                                                }
+                                            };
+                                            class.properties.push(PropertyDef {
+                                                name: param.name.clone(),
+                                                default: Value::Null,
+                                                is_static: false,
+                                                visibility: prop_vis,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+
                             if let Some(body_stmts) = method_body {
                                 // Check if method body contains yield
                                 let method_is_generator = stmts_contain_yield(body_stmts);
@@ -1085,6 +1114,34 @@ impl Compiler {
                                         });
                                         let after = method_compiler.op_array.current_offset();
                                         method_compiler.op_array.patch_jump(jmp_skip, after);
+                                    }
+                                }
+
+                                // Constructor promotion: for params with visibility,
+                                // emit $this->$name = $param at the start of the body
+                                let method_name_lower: Vec<u8> =
+                                    method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if method_name_lower == b"__construct" {
+                                    for param in params {
+                                        if param.visibility.is_some() {
+                                            // Promoted param: assign to $this->name
+                                            let this_cv = 0u32; // $this is always CV 0
+                                            let param_cv = method_compiler
+                                                .op_array
+                                                .get_or_create_cv(&param.name);
+                                            let prop_name_idx = method_compiler
+                                                .op_array
+                                                .add_literal(Value::String(PhpString::from_vec(
+                                                    param.name.clone(),
+                                                )));
+                                            method_compiler.op_array.emit(Op {
+                                                opcode: OpCode::PropertySet,
+                                                op1: OperandType::Cv(this_cv),
+                                                op2: OperandType::Cv(param_cv),
+                                                result: OperandType::Const(prop_name_idx),
+                                                line: 0,
+                                            });
+                                        }
                                     }
                                 }
 
