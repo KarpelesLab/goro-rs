@@ -298,12 +298,40 @@ impl Vm {
                 c.insert(b"INF".to_vec(), Value::Double(f64::INFINITY));
                 c.insert(b"NAN".to_vec(), Value::Double(f64::NAN));
                 // JSON constants
-                c.insert(b"JSON_PRETTY_PRINT".to_vec(), Value::Long(128));
-                c.insert(b"JSON_UNESCAPED_SLASHES".to_vec(), Value::Long(64));
-                c.insert(b"JSON_UNESCAPED_UNICODE".to_vec(), Value::Long(256));
-                c.insert(b"JSON_FORCE_OBJECT".to_vec(), Value::Long(16));
-                c.insert(b"JSON_THROW_ON_ERROR".to_vec(), Value::Long(4194304));
+                c.insert(b"JSON_HEX_TAG".to_vec(), Value::Long(1));
                 c.insert(b"JSON_BIGINT_AS_STRING".to_vec(), Value::Long(2));
+                c.insert(b"JSON_HEX_AMP".to_vec(), Value::Long(2));
+                c.insert(b"JSON_HEX_APOS".to_vec(), Value::Long(4));
+                c.insert(b"JSON_HEX_QUOT".to_vec(), Value::Long(8));
+                c.insert(b"JSON_FORCE_OBJECT".to_vec(), Value::Long(16));
+                c.insert(b"JSON_NUMERIC_CHECK".to_vec(), Value::Long(32));
+                c.insert(b"JSON_UNESCAPED_SLASHES".to_vec(), Value::Long(64));
+                c.insert(b"JSON_PRETTY_PRINT".to_vec(), Value::Long(128));
+                c.insert(b"JSON_UNESCAPED_UNICODE".to_vec(), Value::Long(256));
+                c.insert(b"JSON_PARTIAL_OUTPUT_ON_ERROR".to_vec(), Value::Long(512));
+                c.insert(b"JSON_PRESERVE_ZERO_FRACTION".to_vec(), Value::Long(1024));
+                c.insert(
+                    b"JSON_UNESCAPED_LINE_TERMINATORS".to_vec(),
+                    Value::Long(2048),
+                );
+                c.insert(b"JSON_INVALID_UTF8_IGNORE".to_vec(), Value::Long(1048576));
+                c.insert(
+                    b"JSON_INVALID_UTF8_SUBSTITUTE".to_vec(),
+                    Value::Long(2097152),
+                );
+                c.insert(b"JSON_THROW_ON_ERROR".to_vec(), Value::Long(4194304));
+                // JSON error constants
+                c.insert(b"JSON_ERROR_NONE".to_vec(), Value::Long(0));
+                c.insert(b"JSON_ERROR_DEPTH".to_vec(), Value::Long(1));
+                c.insert(b"JSON_ERROR_STATE_MISMATCH".to_vec(), Value::Long(2));
+                c.insert(b"JSON_ERROR_CTRL_CHAR".to_vec(), Value::Long(3));
+                c.insert(b"JSON_ERROR_SYNTAX".to_vec(), Value::Long(4));
+                c.insert(b"JSON_ERROR_UTF8".to_vec(), Value::Long(5));
+                c.insert(b"JSON_ERROR_RECURSION".to_vec(), Value::Long(6));
+                c.insert(b"JSON_ERROR_INF_OR_NAN".to_vec(), Value::Long(7));
+                c.insert(b"JSON_ERROR_UNSUPPORTED_TYPE".to_vec(), Value::Long(8));
+                c.insert(b"JSON_ERROR_INVALID_PROPERTY_NAME".to_vec(), Value::Long(9));
+                c.insert(b"JSON_ERROR_UTF16".to_vec(), Value::Long(10));
                 // URL constants
                 c.insert(b"PHP_URL_SCHEME".to_vec(), Value::Long(0));
                 c.insert(b"PHP_URL_HOST".to_vec(), Value::Long(1));
@@ -719,6 +747,13 @@ impl Vm {
     /// Write to the output buffer
     pub fn write_output(&mut self, data: &[u8]) {
         self.output.extend_from_slice(data);
+    }
+
+    /// Allocate a new object ID (for use by built-in functions that create objects)
+    pub fn next_object_id(&mut self) -> u64 {
+        let id = self.next_object_id;
+        self.next_object_id += 1;
+        id
     }
 
     /// Execute an op_array (main entry point)
@@ -2130,6 +2165,19 @@ impl Vm {
                 // Casts
                 OpCode::CastInt => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if let Value::Object(obj) = &val {
+                        let class_name = {
+                            let borrowed = obj.borrow();
+                            String::from_utf8_lossy(&borrowed.class_name).into_owned()
+                        };
+                        self.emit_warning_at(
+                            &format!(
+                                "Object of class {} could not be converted to int",
+                                class_name
+                            ),
+                            op.line,
+                        );
+                    }
                     self.write_operand(
                         &op.result,
                         Value::Long(val.to_long()),
@@ -2140,6 +2188,19 @@ impl Vm {
                 }
                 OpCode::CastFloat => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if let Value::Object(obj) = &val {
+                        let class_name = {
+                            let borrowed = obj.borrow();
+                            String::from_utf8_lossy(&borrowed.class_name).into_owned()
+                        };
+                        self.emit_warning_at(
+                            &format!(
+                                "Object of class {} could not be converted to float",
+                                class_name
+                            ),
+                            op.line,
+                        );
+                    }
                     self.write_operand(
                         &op.result,
                         Value::Double(val.to_double()),
