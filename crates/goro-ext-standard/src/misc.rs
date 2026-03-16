@@ -74,6 +74,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"ksort", ksort_fn);
     vm.register_function(b"krsort", krsort_fn);
     vm.register_function(b"shuffle", shuffle_fn);
+    vm.register_function(b"natsort", natsort_fn);
+    vm.register_function(b"natcasesort", natcasesort_fn);
     vm.register_function(b"range", range_fn);
     vm.register_function(b"compact", compact);
     vm.register_function(b"current", current);
@@ -4540,4 +4542,82 @@ fn filetype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         "unknown"
     };
     Ok(Value::String(PhpString::from_bytes(ft.as_bytes())))
+}
+
+fn natsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort_by(|a, b| {
+            let sa = a.1.to_php_string().to_string_lossy();
+            let sb = b.1.to_php_string().to_string_lossy();
+            natcmp(&sa, &sb)
+        });
+        *arr = goro_core::array::PhpArray::new();
+        for (k, v) in entries {
+            arr.set(k, v);
+        }
+    }
+    Ok(Value::True)
+}
+
+fn natcasesort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort_by(|a, b| {
+            let sa = a.1.to_php_string().to_string_lossy().to_ascii_lowercase();
+            let sb = b.1.to_php_string().to_string_lossy().to_ascii_lowercase();
+            natcmp(&sa, &sb)
+        });
+        *arr = goro_core::array::PhpArray::new();
+        for (k, v) in entries {
+            arr.set(k, v);
+        }
+    }
+    Ok(Value::True)
+}
+
+/// Natural order comparison
+fn natcmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let mut ai = 0;
+    let mut bi = 0;
+    while ai < ab.len() && bi < bb.len() {
+        if ab[ai].is_ascii_digit() && bb[bi].is_ascii_digit() {
+            // Compare number segments
+            while ai < ab.len() && ab[ai] == b'0' {
+                ai += 1;
+            }
+            while bi < bb.len() && bb[bi] == b'0' {
+                bi += 1;
+            }
+            let astart = ai;
+            let bstart = bi;
+            while ai < ab.len() && ab[ai].is_ascii_digit() {
+                ai += 1;
+            }
+            while bi < bb.len() && bb[bi].is_ascii_digit() {
+                bi += 1;
+            }
+            let alen = ai - astart;
+            let blen = bi - bstart;
+            if alen != blen {
+                return alen.cmp(&blen);
+            }
+            let acmp = &ab[astart..ai];
+            let bcmp = &bb[bstart..bi];
+            if acmp != bcmp {
+                return acmp.cmp(bcmp);
+            }
+        } else {
+            if ab[ai] != bb[bi] {
+                return ab[ai].cmp(&bb[bi]);
+            }
+            ai += 1;
+            bi += 1;
+        }
+    }
+    ab.len().cmp(&bb.len())
 }

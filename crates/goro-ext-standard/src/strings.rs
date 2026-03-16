@@ -760,7 +760,16 @@ fn addcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 b'\n' => result.extend_from_slice(b"\\n"),
                 b'\r' => result.extend_from_slice(b"\\r"),
                 b'\t' => result.extend_from_slice(b"\\t"),
+                0x07 => result.extend_from_slice(b"\\a"), // bell
+                0x08 => result.extend_from_slice(b"\\b"), // backspace
+                0x0B => result.extend_from_slice(b"\\v"), // vertical tab
+                0x0C => result.extend_from_slice(b"\\f"), // form feed
+                0x1B => result.extend_from_slice(b"\\e"), // escape
                 0 => result.extend_from_slice(b"\\000"),
+                _ if b < 0x20 || b == 0x7F => {
+                    // Other control chars: use octal
+                    result.extend_from_slice(format!("\\{:03o}", b).as_bytes());
+                }
                 _ => {
                     result.push(b'\\');
                     result.push(b);
