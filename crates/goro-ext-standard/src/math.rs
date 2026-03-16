@@ -17,6 +17,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_sum", array_sum);
     vm.register_function(b"php_uname", php_uname);
     vm.register_function(b"phpversion", phpversion);
+    vm.register_function(b"extension_loaded", extension_loaded_fn);
+    vm.register_function(b"version_compare", version_compare_fn);
     vm.register_function(b"php_sapi_name", php_sapi_name);
     vm.register_function(b"defined", defined);
     vm.register_function(b"function_exists", function_exists);
@@ -580,6 +582,76 @@ fn intval_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     Ok(Value::Long(val.to_long()))
+}
+
+fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::string::PhpString;
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name_lower = name.to_string_lossy().to_ascii_lowercase();
+    // Report our built-in extensions as loaded
+    let loaded = matches!(
+        name_lower.as_str(),
+        "standard"
+            | "core"
+            | "date"
+            | "pcre"
+            | "json"
+            | "ctype"
+            | "hash"
+            | "spl"
+            | "reflection"
+            | "mbstring"
+            | "tokenizer"
+    );
+    Ok(if loaded { Value::True } else { Value::False })
+}
+
+fn version_compare_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::string::PhpString;
+    let v1 = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+    let v2 = args
+        .get(1)
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+    let op = args.get(2).map(|v| v.to_php_string().to_string_lossy());
+
+    // Simple version comparison: split by dots and compare parts
+    let parts1: Vec<i64> = v1.split('.').map(|s| s.parse().unwrap_or(0)).collect();
+    let parts2: Vec<i64> = v2.split('.').map(|s| s.parse().unwrap_or(0)).collect();
+    let max_len = parts1.len().max(parts2.len());
+    let mut cmp = 0i64;
+    for i in 0..max_len {
+        let a = parts1.get(i).copied().unwrap_or(0);
+        let b = parts2.get(i).copied().unwrap_or(0);
+        if a < b {
+            cmp = -1;
+            break;
+        }
+        if a > b {
+            cmp = 1;
+            break;
+        }
+    }
+
+    if let Some(operator) = op {
+        let result = match operator.as_str() {
+            "<" | "lt" => cmp < 0,
+            "<=" | "le" => cmp <= 0,
+            ">" | "gt" => cmp > 0,
+            ">=" | "ge" => cmp >= 0,
+            "==" | "eq" => cmp == 0,
+            "!=" | "ne" => cmp != 0,
+            _ => false,
+        };
+        Ok(if result { Value::True } else { Value::False })
+    } else {
+        Ok(Value::Long(cmp))
+    }
 }
 
 fn floatval_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
