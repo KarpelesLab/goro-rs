@@ -479,10 +479,27 @@ impl Vm {
                             &static_cv_keys,
                         ),
                         Err(msg) => {
-                            return Err(VmError {
-                                message: msg.to_string(),
-                                line: op.line,
-                            });
+                            // Throw DivisionByZeroError
+                            let err_id = self.next_object_id;
+                            self.next_object_id += 1;
+                            let mut err_obj =
+                                PhpObject::new(b"DivisionByZeroError".to_vec(), err_id);
+                            err_obj.set_property(
+                                b"message".to_vec(),
+                                Value::String(PhpString::from_string(msg.to_string())),
+                            );
+                            err_obj.set_property(b"code".to_vec(), Value::Long(0));
+                            let exc_val = Value::Object(Rc::new(RefCell::new(err_obj)));
+                            self.current_exception = Some(exc_val);
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: format!("Uncaught DivisionByZeroError: {}", msg),
+                                    line: op.line,
+                                });
+                            }
                         }
                     }
                 }
@@ -511,10 +528,26 @@ impl Vm {
                             &static_cv_keys,
                         ),
                         Err(msg) => {
-                            return Err(VmError {
-                                message: msg.to_string(),
-                                line: op.line,
-                            });
+                            let err_id = self.next_object_id;
+                            self.next_object_id += 1;
+                            let mut err_obj =
+                                PhpObject::new(b"DivisionByZeroError".to_vec(), err_id);
+                            err_obj.set_property(
+                                b"message".to_vec(),
+                                Value::String(PhpString::from_string(msg.to_string())),
+                            );
+                            err_obj.set_property(b"code".to_vec(), Value::Long(0));
+                            let exc_val = Value::Object(Rc::new(RefCell::new(err_obj)));
+                            self.current_exception = Some(exc_val);
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: format!("Uncaught DivisionByZeroError: {}", msg),
+                                    line: op.line,
+                                });
+                            }
                         }
                     }
                 }
