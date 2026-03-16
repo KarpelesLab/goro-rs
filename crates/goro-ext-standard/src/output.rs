@@ -80,11 +80,35 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
                 )
                 .as_bytes(),
             );
+            // Look up class to get property visibility info
+            let class_lower: Vec<u8> = obj_borrow
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            let class_info = vm.classes.get(&class_lower).cloned();
+
             // Properties are in declaration order (Vec preserves insertion order)
             for (name, value) in &obj_borrow.properties {
                 let name_str = String::from_utf8_lossy(name);
-                vm.write_output(format!("{}  [\"{}\"]=>", prefix, name_str).as_bytes());
-                vm.write_output(b"\n");
+                // Determine visibility
+                let vis = class_info.as_ref().and_then(|c| {
+                    c.properties
+                        .iter()
+                        .find(|p| p.name == *name)
+                        .map(|p| p.visibility)
+                });
+                let display_name = match vis {
+                    Some(goro_core::object::Visibility::Protected) => {
+                        format!("\"{}\":protected", name_str)
+                    }
+                    Some(goro_core::object::Visibility::Private) => {
+                        let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+                        format!("\"{}\":\"{}\":private", name_str, class_name)
+                    }
+                    _ => format!("\"{}\"", name_str),
+                };
+                vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
                 var_dump_value(vm, value, indent + 2);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
