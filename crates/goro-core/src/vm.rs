@@ -62,6 +62,8 @@ pub struct Vm {
     pub error_reporting: i64,
     /// Recursion depth for magic methods (prevent infinite recursion)
     magic_depth: u32,
+    /// Objects with __destruct methods, tracked for shutdown-time destruction
+    destructible_objects: Vec<Value>,
 }
 
 impl Vm {
@@ -80,6 +82,7 @@ impl Vm {
             current_exception: None,
             error_reporting: 32767, // E_ALL
             magic_depth: 0,
+            destructible_objects: Vec::new(),
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -154,6 +157,32 @@ impl Vm {
         self.is_global_scope = true;
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
         let result = self.execute_op_array(op_array, cvs)?;
+
+        // Call __destruct on all tracked objects in reverse creation order
+        let destructibles = std::mem::take(&mut self.destructible_objects);
+        for obj_val in destructibles.iter().rev() {
+            if let Value::Object(obj_rc) = obj_val {
+                let class_lower: Vec<u8> = obj_rc
+                    .borrow()
+                    .class_name
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                if let Some(destruct_op) = self
+                    .classes
+                    .get(&class_lower)
+                    .and_then(|c| c.get_method(b"__destruct"))
+                    .map(|m| m.op_array.clone())
+                {
+                    let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
+                    if !fn_cvs.is_empty() {
+                        fn_cvs[0] = obj_val.clone(); // $this
+                    }
+                    let _ = self.execute_op_array(&destruct_op, fn_cvs);
+                }
+            }
+        }
+
         Ok(result)
     }
 
@@ -1487,11 +1516,29 @@ impl Vm {
                         if obj_class_lower == class_lower {
                             Value::True
                         } else {
-                            // Walk the class hierarchy
+                            // Walk the class hierarchy (parents + interfaces)
                             let mut current = obj_class_lower.clone();
                             let mut found = false;
+                            let mut visited = Vec::new();
                             loop {
+                                if visited.contains(&current) {
+                                    break;
+                                }
+                                visited.push(current.clone());
                                 if let Some(class_def) = self.classes.get(&current) {
+                                    // Check interfaces
+                                    for iface in &class_def.interfaces {
+                                        let iface_lower: Vec<u8> =
+                                            iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if iface_lower == class_lower {
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if found {
+                                        break;
+                                    }
+                                    // Check parent
                                     if let Some(ref parent) = class_def.parent {
                                         let parent_lower: Vec<u8> =
                                             parent.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -1766,6 +1813,82 @@ impl Vm {
                                 }
                             }
                         }
+                        // Resolve interfaces: copy interface methods into the class
+                        let iface_names = class.interfaces.clone();
+                        for iface_name in &iface_names {
+                            let iface_lower: Vec<u8> =
+                                iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(iface) = self.classes.get(&iface_lower).cloned() {
+                                for (method_name, method) in &iface.methods {
+                                    if !class.methods.contains_key(method_name) {
+                                        class.methods.insert(method_name.clone(), method.clone());
+                                    }
+                                }
+                                // Inherit interface constants
+                                for (const_name, const_val) in &iface.constants {
+                                    if !class.constants.contains_key(const_name) {
+                                        class
+                                            .constants
+                                            .insert(const_name.clone(), const_val.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check for unimplemented abstract methods (interface enforcement)
+                        if !class.is_abstract && !class.is_interface {
+                            let mut abstract_methods: Vec<String> = Vec::new();
+                            for (_, method) in &class.methods {
+                                if method.is_abstract {
+                                    // Find which interface this method belongs to
+                                    let mut iface_origin = String::new();
+                                    for iface_name in &iface_names {
+                                        let iface_lower: Vec<u8> = iface_name
+                                            .iter()
+                                            .map(|b| b.to_ascii_lowercase())
+                                            .collect();
+                                        if let Some(iface) = self.classes.get(&iface_lower) {
+                                            let method_lower: Vec<u8> = method
+                                                .name
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect();
+                                            if iface.methods.contains_key(&method_lower) {
+                                                iface_origin = String::from_utf8_lossy(&iface.name)
+                                                    .to_string();
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if iface_origin.is_empty() {
+                                        iface_origin = String::from_utf8_lossy(
+                                            &name_val.to_php_string().as_bytes(),
+                                        )
+                                        .to_string();
+                                    }
+                                    let method_name_str =
+                                        String::from_utf8_lossy(&method.name).to_string();
+                                    abstract_methods
+                                        .push(format!("{}::{}", iface_origin, method_name_str));
+                                }
+                            }
+                            if !abstract_methods.is_empty() {
+                                let class_name_str =
+                                    String::from_utf8_lossy(&name_val.to_php_string().as_bytes())
+                                        .to_string();
+                                let count = abstract_methods.len();
+                                abstract_methods.sort();
+                                let methods_list = abstract_methods.join(", ");
+                                return Err(VmError {
+                                    message: format!(
+                                        "Class {} contains {} abstract method(s) and must therefore be declared abstract or implement the remaining methods ({})",
+                                        class_name_str, count, methods_list
+                                    ),
+                                    line: op.line,
+                                });
+                            }
+                        }
+
                         let name_lower: Vec<u8> = name_val
                             .to_php_string()
                             .as_bytes()
@@ -1877,13 +2000,19 @@ impl Vm {
                         }
                     }
 
-                    self.write_operand(
-                        &op.result,
-                        Value::Object(Rc::new(RefCell::new(obj))),
-                        &mut cvs,
-                        &mut tmps,
-                        &static_cv_keys,
-                    );
+                    let obj_value = Value::Object(Rc::new(RefCell::new(obj)));
+
+                    // Track objects with __destruct for shutdown-time destruction
+                    let has_destruct = self
+                        .classes
+                        .get(&name_lower)
+                        .map(|c| c.methods.contains_key(&b"__destruct".to_vec()))
+                        .unwrap_or(false);
+                    if has_destruct {
+                        self.destructible_objects.push(obj_value.clone());
+                    }
+
+                    self.write_operand(&op.result, obj_value, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 OpCode::PropertyGet => {

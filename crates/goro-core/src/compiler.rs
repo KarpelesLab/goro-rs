@@ -889,6 +889,8 @@ impl Compiler {
                 class.interfaces = implements.clone();
                 class.is_abstract = modifiers.is_abstract;
                 class.is_final = modifiers.is_final;
+                class.is_interface = modifiers.is_interface;
+                class.is_trait = modifiers.is_trait;
 
                 for member in body {
                     match member {
@@ -1027,6 +1029,27 @@ impl Compiler {
                                         param_count,
                                         is_static: *is_static,
                                         is_abstract: *is_abstract,
+                                        visibility: vis,
+                                    },
+                                );
+                            } else {
+                                // Abstract method or interface method (no body)
+                                let vis = match visibility {
+                                    Visibility::Public => ObjVisibility::Public,
+                                    Visibility::Protected => ObjVisibility::Protected,
+                                    Visibility::Private => ObjVisibility::Private,
+                                };
+                                let param_count = params.len();
+                                let lower_name: Vec<u8> =
+                                    method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                class.methods.insert(
+                                    lower_name,
+                                    MethodDef {
+                                        name: method_name.clone(),
+                                        op_array: OpArray::new(),
+                                        param_count,
+                                        is_static: *is_static,
+                                        is_abstract: true,
                                         visibility: vis,
                                     },
                                 );

@@ -940,7 +940,15 @@ impl Parser {
 
         // Accept class, interface, trait, or enum
         match self.peek() {
-            TokenKind::Class | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => {
+            TokenKind::Interface => {
+                modifiers.is_interface = true;
+                self.advance();
+            }
+            TokenKind::Trait => {
+                modifiers.is_trait = true;
+                self.advance();
+            }
+            TokenKind::Class | TokenKind::Enum => {
                 self.advance();
             }
             _ => {

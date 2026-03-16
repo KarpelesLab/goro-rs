@@ -448,6 +448,8 @@ pub struct ClassModifiers {
     pub is_abstract: bool,
     pub is_final: bool,
     pub is_readonly: bool,
+    pub is_interface: bool,
+    pub is_trait: bool,
 }
 
 #[derive(Debug, Clone)]
