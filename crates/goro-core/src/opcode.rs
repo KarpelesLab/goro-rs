@@ -127,6 +127,8 @@ pub enum OpCode {
     InitFCall,
     /// Send argument: op1 = value, op2 = arg position
     SendVal,
+    /// Send named argument: op1 = value, op2 = argument name (const)
+    SendNamedVal,
     /// Unpack array argument: op1 = array value (each element becomes a separate arg)
     SendUnpack,
     /// Execute the function call, result = return value

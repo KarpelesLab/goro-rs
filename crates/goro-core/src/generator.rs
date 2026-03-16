@@ -535,6 +535,12 @@ impl PhpGenerator {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     vm.generator_send_val(val);
                 }
+                OpCode::SendNamedVal => {
+                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    let name_val = self.read_operand(&op.op2, &op_array.literals);
+                    let name = name_val.to_php_string().as_bytes().to_vec();
+                    vm.generator_send_named_val(name, val);
+                }
                 OpCode::DoFCall => {
                     let result = vm.generator_do_fcall(op.line)?;
                     self.write_operand(&op.result, result);

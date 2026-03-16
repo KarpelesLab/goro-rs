@@ -30,6 +30,57 @@ impl std::error::Error for VmError {}
 struct PendingCall {
     name: PhpString,
     args: Vec<Value>,
+    /// Named arguments: (param_name, value) pairs to be reordered at call time
+    named_args: Vec<(Vec<u8>, Value)>,
+}
+
+impl PendingCall {
+    /// Resolve named arguments by matching them to parameter positions.
+    /// Named args are placed at the correct index based on cv_names.
+    /// Positional args keep their order; named args fill in remaining slots.
+    fn resolve_named_args(&mut self, cv_names: &[Vec<u8>], implicit_args: usize) {
+        if self.named_args.is_empty() {
+            return;
+        }
+
+        // Build the final args list:
+        // Start with positional args, then overlay named args at their correct positions.
+        let total_params = cv_names.len();
+        let mut resolved = vec![None; total_params];
+
+        // Place positional args first (these come after any implicit args like $this)
+        for (i, arg) in self.args.iter().enumerate() {
+            let target = implicit_args + i;
+            if target < total_params {
+                resolved[target] = Some(arg.clone());
+            }
+        }
+
+        // Place named args by matching against cv_names
+        for (name, val) in self.named_args.drain(..) {
+            let mut found = false;
+            for (idx, cv_name) in cv_names.iter().enumerate() {
+                if *cv_name == name {
+                    resolved[idx] = Some(val.clone());
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // Unknown named arg - append as positional (PHP would error,
+                // but for now just add it to the end)
+                self.args.push(val);
+            }
+        }
+
+        // Rebuild self.args from resolved, stripping implicit args prefix
+        // We need to produce a flat args vec where index 0 maps to CV[0]
+        // (since the caller code maps args[i] -> func_cvs[i])
+        self.args.clear();
+        for slot in resolved {
+            self.args.push(slot.unwrap_or(Value::Undef));
+        }
+    }
 }
 
 /// The virtual machine / executor
@@ -452,6 +503,11 @@ impl Vm {
     ) -> Option<String> {
         for (i, arg) in args.iter().enumerate() {
             if i >= user_fn.param_types.len() {
+                continue;
+            }
+            // Skip Undef args - these are parameters not provided by the caller,
+            // which will get their default values when the function body executes
+            if matches!(arg, Value::Undef) {
                 continue;
             }
             if let Some(type_info) = &user_fn.param_types[i] {
@@ -1360,11 +1416,13 @@ impl Vm {
                             self.pending_calls.push(PendingCall {
                                 name,
                                 args: values, // use vars as initial args
+                                named_args: Vec::new(),
                             });
                         } else {
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::empty(),
                                 args: Vec::new(),
+                                named_args: Vec::new(),
                             });
                         }
                     } else if let Value::Object(obj) = &name_val {
@@ -1387,12 +1445,14 @@ impl Vm {
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::from_vec(func_name),
                                 args: vec![name_val.clone()], // $this
+                                named_args: Vec::new(),
                             });
                         } else {
                             let name = name_val.to_php_string();
                             self.pending_calls.push(PendingCall {
                                 name,
                                 args: Vec::new(),
+                                named_args: Vec::new(),
                             });
                         }
                     } else {
@@ -1400,6 +1460,7 @@ impl Vm {
                         self.pending_calls.push(PendingCall {
                             name,
                             args: Vec::new(),
+                            named_args: Vec::new(),
                         });
                     }
                 }
@@ -1407,6 +1468,14 @@ impl Vm {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.args.push(val);
+                    }
+                }
+                OpCode::SendNamedVal => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let name = name_val.to_php_string().as_bytes().to_vec();
+                    if let Some(call) = self.pending_calls.last_mut() {
+                        call.named_args.push((name, val));
                     }
                 }
                 OpCode::SendUnpack => {
@@ -1530,6 +1599,21 @@ impl Vm {
                         );
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
                     {
+                        // Resolve named arguments by reordering to match parameter positions
+                        if !call.named_args.is_empty() {
+                            let implicit_args_count = if user_fn
+                                .cv_names
+                                .first()
+                                .map(|n| n.as_slice())
+                                == Some(b"this")
+                            {
+                                1
+                            } else {
+                                0
+                            };
+                            call.resolve_named_args(&user_fn.cv_names, implicit_args_count);
+                        }
+
                         // Check parameter types before executing
                         if !user_fn.param_types.is_empty() {
                             // Determine if this is a method call ($this is first implicit arg)
@@ -3275,6 +3359,7 @@ impl Vm {
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::from_bytes(b"__builtin_return"),
                                 args: vec![result],
+                                named_args: Vec::new(),
                             });
                         } else
                         // Find the method in the class
@@ -3296,6 +3381,7 @@ impl Vm {
                                 self.pending_calls.push(PendingCall {
                                     name: call_name,
                                     args: vec![obj_val.clone()], // $this is first arg, mapped to CV 0
+                                    named_args: Vec::new(),
                                 });
                             } else if let Some(call_method) = class.get_method(b"__call") {
                                 // __call magic method fallback
@@ -3314,12 +3400,14 @@ impl Vm {
                                 self.pending_calls.push(PendingCall {
                                     name: call_name,
                                     args: vec![obj_val.clone(), method_name_val],
+                                    named_args: Vec::new(),
                                 });
                             } else {
                                 // Method not found - push call with $this
                                 self.pending_calls.push(PendingCall {
                                     name: method_name,
                                     args: vec![obj_val.clone()],
+                                    named_args: Vec::new(),
                                 });
                             }
                         } else {
@@ -3327,6 +3415,7 @@ impl Vm {
                             self.pending_calls.push(PendingCall {
                                 name: method_name,
                                 args: vec![obj_val.clone()],
+                                named_args: Vec::new(),
                             });
                         }
                     } else if let Value::Generator(gen_rc) = &obj_val {
@@ -3414,11 +3503,13 @@ impl Vm {
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::from_bytes(b"__generator_send"),
                                 args: vec![obj_val.clone()],
+                                named_args: Vec::new(),
                             });
                         } else {
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::from_bytes(b"__builtin_return"),
                                 args: vec![result],
+                                named_args: Vec::new(),
                             });
                         }
                     } else {
@@ -3426,6 +3517,7 @@ impl Vm {
                         self.pending_calls.push(PendingCall {
                             name: method_name,
                             args: vec![],
+                            named_args: Vec::new(),
                         });
                     }
                 }
@@ -3598,11 +3690,16 @@ impl Vm {
             let mut values: Vec<Value> = arr.values().cloned().collect();
             if !values.is_empty() {
                 let name = values.remove(0).to_php_string();
-                self.pending_calls.push(PendingCall { name, args: values });
+                self.pending_calls.push(PendingCall {
+                    name,
+                    args: values,
+                    named_args: Vec::new(),
+                });
             } else {
                 self.pending_calls.push(PendingCall {
                     name: PhpString::empty(),
                     args: Vec::new(),
+                    named_args: Vec::new(),
                 });
             }
         } else {
@@ -3610,6 +3707,7 @@ impl Vm {
             self.pending_calls.push(PendingCall {
                 name,
                 args: Vec::new(),
+                named_args: Vec::new(),
             });
         }
     }
@@ -3621,9 +3719,16 @@ impl Vm {
         }
     }
 
+    /// Send a named value to a pending function call from generator context
+    pub fn generator_send_named_val(&mut self, name: Vec<u8>, val: Value) {
+        if let Some(call) = self.pending_calls.last_mut() {
+            call.named_args.push((name, val));
+        }
+    }
+
     /// Execute a pending function call from generator context
     pub fn generator_do_fcall(&mut self, line: u32) -> Result<Value, VmError> {
-        let call = self.pending_calls.pop().ok_or_else(|| VmError {
+        let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
             message: "no pending function call".into(),
             line,
         })?;
@@ -3643,6 +3748,17 @@ impl Vm {
                 line,
             })
         } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned() {
+            // Resolve named arguments by reordering to match parameter positions
+            if !call.named_args.is_empty() {
+                let implicit_args_count =
+                    if user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                        1
+                    } else {
+                        0
+                    };
+                call.resolve_named_args(&user_fn.cv_names, implicit_args_count);
+            }
+
             // Check if this user function is a generator
             if user_fn.is_generator {
                 let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];

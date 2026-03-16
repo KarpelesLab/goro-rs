@@ -65,7 +65,7 @@ impl Compiler {
         }
     }
 
-    /// Compile and emit SendVal/SendUnpack opcodes for function call arguments.
+    /// Compile and emit SendVal/SendNamedVal/SendUnpack opcodes for function call arguments.
     fn compile_send_args(&mut self, args: &[Argument], line: u32) -> CompileResult<()> {
         for (i, arg) in args.iter().enumerate() {
             let val = self.compile_expr(&arg.value)?;
@@ -74,6 +74,18 @@ impl Compiler {
                     opcode: OpCode::SendUnpack,
                     op1: val,
                     op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                });
+            } else if let Some(name) = &arg.name {
+                // Named argument: emit SendNamedVal with the argument name as a constant
+                let name_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                self.op_array.emit(Op {
+                    opcode: OpCode::SendNamedVal,
+                    op1: val,
+                    op2: OperandType::Const(name_idx),
                     result: OperandType::Unused,
                     line,
                 });

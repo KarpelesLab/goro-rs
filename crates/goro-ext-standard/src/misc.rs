@@ -1589,8 +1589,19 @@ fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn date_default_timezone_set(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
-fn setlocale(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn setlocale(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Return the locale string (simplified - just return what was requested)
+    if args.len() >= 2 {
+        let locale = args.get(1).unwrap_or(&Value::Null).to_php_string();
+        if locale.is_empty() || locale.as_bytes() == b"0" {
+            // Query current locale
+            Ok(Value::String(PhpString::from_bytes(b"C")))
+        } else {
+            Ok(Value::String(locale))
+        }
+    } else {
+        Ok(Value::String(PhpString::from_bytes(b"C")))
+    }
 }
 fn debug_zval_refcount(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
@@ -2183,7 +2194,11 @@ fn ctype_lower(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn ctype_space(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let bytes = ctype_get_bytes(args);
     Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        if !bytes.is_empty()
+            && bytes
+                .iter()
+                .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C))
+        {
             Value::True
         } else {
             Value::False
