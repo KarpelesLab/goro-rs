@@ -2257,8 +2257,13 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::False)
 }
-fn get_called_class_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn get_called_class_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Return the current called class from late static binding stack
+    if let Some(class_name) = vm.called_class_stack.last() {
+        Ok(Value::String(PhpString::from_vec(class_name.clone())))
+    } else {
+        Ok(Value::False)
+    }
 }
 fn get_defined_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))

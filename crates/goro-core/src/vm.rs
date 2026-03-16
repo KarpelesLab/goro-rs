@@ -65,7 +65,7 @@ pub struct Vm {
     /// Objects with __destruct methods, tracked for shutdown-time destruction
     destructible_objects: Vec<Value>,
     /// Stack of "called class" names for late static binding (static::)
-    called_class_stack: Vec<Vec<u8>>,
+    pub called_class_stack: Vec<Vec<u8>>,
     /// Current call depth (to prevent stack overflow from infinite recursion)
     call_depth: u32,
     /// Stack of saved error_reporting levels (for @ operator)
