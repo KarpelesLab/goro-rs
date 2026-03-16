@@ -166,6 +166,162 @@ impl Vm {
                     b"default_charset".to_vec(),
                     Value::String(PhpString::from_bytes(b"UTF-8")),
                 );
+                // PHP constants
+                c.insert(
+                    b"PHP_EOL".to_vec(),
+                    Value::String(PhpString::from_bytes(b"\n")),
+                );
+                c.insert(b"PHP_INT_MAX".to_vec(), Value::Long(i64::MAX));
+                c.insert(b"PHP_INT_MIN".to_vec(), Value::Long(i64::MIN));
+                c.insert(b"PHP_INT_SIZE".to_vec(), Value::Long(8));
+                c.insert(b"PHP_FLOAT_MAX".to_vec(), Value::Double(f64::MAX));
+                c.insert(b"PHP_FLOAT_MIN".to_vec(), Value::Double(f64::MIN_POSITIVE));
+                c.insert(b"PHP_FLOAT_EPSILON".to_vec(), Value::Double(f64::EPSILON));
+                c.insert(b"PHP_FLOAT_DIG".to_vec(), Value::Long(15));
+                c.insert(b"PHP_FLOAT_INF".to_vec(), Value::Double(f64::INFINITY));
+                c.insert(b"PHP_FLOAT_NAN".to_vec(), Value::Double(f64::NAN));
+                c.insert(b"PHP_MAXPATHLEN".to_vec(), Value::Long(4096));
+                c.insert(
+                    b"PHP_OS".to_vec(),
+                    Value::String(PhpString::from_bytes(b"Linux")),
+                );
+                c.insert(
+                    b"PHP_OS_FAMILY".to_vec(),
+                    Value::String(PhpString::from_bytes(b"Linux")),
+                );
+                c.insert(
+                    b"PHP_SAPI".to_vec(),
+                    Value::String(PhpString::from_bytes(b"cli")),
+                );
+                c.insert(
+                    b"PHP_VERSION".to_vec(),
+                    Value::String(PhpString::from_bytes(b"8.5.4")),
+                );
+                c.insert(b"PHP_MAJOR_VERSION".to_vec(), Value::Long(8));
+                c.insert(b"PHP_MINOR_VERSION".to_vec(), Value::Long(5));
+                c.insert(b"PHP_RELEASE_VERSION".to_vec(), Value::Long(4));
+                c.insert(b"PHP_VERSION_ID".to_vec(), Value::Long(80504));
+                c.insert(
+                    b"PHP_EXTRA_VERSION".to_vec(),
+                    Value::String(PhpString::from_bytes(b"")),
+                );
+                c.insert(b"PHP_DEBUG".to_vec(), Value::Long(0));
+                c.insert(b"PHP_ZTS".to_vec(), Value::Long(0));
+                c.insert(
+                    b"PHP_PREFIX".to_vec(),
+                    Value::String(PhpString::from_bytes(b"/usr")),
+                );
+                c.insert(
+                    b"PHP_BINDIR".to_vec(),
+                    Value::String(PhpString::from_bytes(b"/usr/bin")),
+                );
+                c.insert(
+                    b"PHP_LIBDIR".to_vec(),
+                    Value::String(PhpString::from_bytes(b"/usr/lib")),
+                );
+                c.insert(
+                    b"PHP_DATADIR".to_vec(),
+                    Value::String(PhpString::from_bytes(b"/usr/share")),
+                );
+                c.insert(
+                    b"PHP_SYSCONFDIR".to_vec(),
+                    Value::String(PhpString::from_bytes(b"/etc")),
+                );
+                c.insert(
+                    b"PHP_EXTENSION_DIR".to_vec(),
+                    Value::String(PhpString::from_bytes(b"")),
+                );
+                c.insert(
+                    b"PHP_BINARY".to_vec(),
+                    Value::String(PhpString::from_bytes(b"goro")),
+                );
+                c.insert(b"STDIN".to_vec(), Value::Null);
+                c.insert(b"STDOUT".to_vec(), Value::Null);
+                c.insert(b"STDERR".to_vec(), Value::Null);
+                c.insert(
+                    b"DIRECTORY_SEPARATOR".to_vec(),
+                    Value::String(PhpString::from_bytes(b"/")),
+                );
+                c.insert(
+                    b"PATH_SEPARATOR".to_vec(),
+                    Value::String(PhpString::from_bytes(b":")),
+                );
+                // Error levels
+                c.insert(b"E_ERROR".to_vec(), Value::Long(1));
+                c.insert(b"E_WARNING".to_vec(), Value::Long(2));
+                c.insert(b"E_PARSE".to_vec(), Value::Long(4));
+                c.insert(b"E_NOTICE".to_vec(), Value::Long(8));
+                c.insert(b"E_CORE_ERROR".to_vec(), Value::Long(16));
+                c.insert(b"E_CORE_WARNING".to_vec(), Value::Long(32));
+                c.insert(b"E_COMPILE_ERROR".to_vec(), Value::Long(64));
+                c.insert(b"E_COMPILE_WARNING".to_vec(), Value::Long(128));
+                c.insert(b"E_USER_ERROR".to_vec(), Value::Long(256));
+                c.insert(b"E_USER_WARNING".to_vec(), Value::Long(512));
+                c.insert(b"E_USER_NOTICE".to_vec(), Value::Long(1024));
+                c.insert(b"E_STRICT".to_vec(), Value::Long(2048));
+                c.insert(b"E_RECOVERABLE_ERROR".to_vec(), Value::Long(4096));
+                c.insert(b"E_DEPRECATED".to_vec(), Value::Long(8192));
+                c.insert(b"E_USER_DEPRECATED".to_vec(), Value::Long(16384));
+                c.insert(b"E_ALL".to_vec(), Value::Long(32767));
+                // Array/sort constants
+                c.insert(b"CASE_LOWER".to_vec(), Value::Long(0));
+                c.insert(b"CASE_UPPER".to_vec(), Value::Long(1));
+                c.insert(b"SORT_REGULAR".to_vec(), Value::Long(0));
+                c.insert(b"SORT_NUMERIC".to_vec(), Value::Long(1));
+                c.insert(b"SORT_STRING".to_vec(), Value::Long(2));
+                c.insert(b"SORT_ASC".to_vec(), Value::Long(4));
+                c.insert(b"SORT_DESC".to_vec(), Value::Long(3));
+                c.insert(b"SORT_LOCALE_STRING".to_vec(), Value::Long(5));
+                c.insert(b"SORT_NATURAL".to_vec(), Value::Long(6));
+                c.insert(b"SORT_FLAG_CASE".to_vec(), Value::Long(8));
+                c.insert(b"ARRAY_FILTER_USE_BOTH".to_vec(), Value::Long(1));
+                c.insert(b"ARRAY_FILTER_USE_KEY".to_vec(), Value::Long(2));
+                c.insert(b"ARRAY_UNIQUE_REGULAR".to_vec(), Value::Long(0));
+                c.insert(b"COUNT_NORMAL".to_vec(), Value::Long(0));
+                c.insert(b"COUNT_RECURSIVE".to_vec(), Value::Long(1));
+                // String constants
+                c.insert(b"STR_PAD_RIGHT".to_vec(), Value::Long(1));
+                c.insert(b"STR_PAD_LEFT".to_vec(), Value::Long(0));
+                c.insert(b"STR_PAD_BOTH".to_vec(), Value::Long(2));
+                // Math constants
+                c.insert(b"M_PI".to_vec(), Value::Double(std::f64::consts::PI));
+                c.insert(b"M_E".to_vec(), Value::Double(std::f64::consts::E));
+                c.insert(b"M_LOG2E".to_vec(), Value::Double(std::f64::consts::LOG2_E));
+                c.insert(
+                    b"M_LOG10E".to_vec(),
+                    Value::Double(std::f64::consts::LOG10_E),
+                );
+                c.insert(b"M_LN2".to_vec(), Value::Double(std::f64::consts::LN_2));
+                c.insert(b"M_LN10".to_vec(), Value::Double(std::f64::consts::LN_10));
+                c.insert(b"M_SQRT2".to_vec(), Value::Double(std::f64::consts::SQRT_2));
+                c.insert(b"M_SQRT3".to_vec(), Value::Double(1.7320508075688772));
+                c.insert(b"INF".to_vec(), Value::Double(f64::INFINITY));
+                c.insert(b"NAN".to_vec(), Value::Double(f64::NAN));
+                // JSON constants
+                c.insert(b"JSON_PRETTY_PRINT".to_vec(), Value::Long(128));
+                c.insert(b"JSON_UNESCAPED_SLASHES".to_vec(), Value::Long(64));
+                c.insert(b"JSON_UNESCAPED_UNICODE".to_vec(), Value::Long(256));
+                c.insert(b"JSON_FORCE_OBJECT".to_vec(), Value::Long(16));
+                c.insert(b"JSON_THROW_ON_ERROR".to_vec(), Value::Long(4194304));
+                c.insert(b"JSON_BIGINT_AS_STRING".to_vec(), Value::Long(2));
+                // URL constants
+                c.insert(b"PHP_URL_SCHEME".to_vec(), Value::Long(0));
+                c.insert(b"PHP_URL_HOST".to_vec(), Value::Long(1));
+                c.insert(b"PHP_URL_PORT".to_vec(), Value::Long(2));
+                c.insert(b"PHP_URL_USER".to_vec(), Value::Long(3));
+                c.insert(b"PHP_URL_PASS".to_vec(), Value::Long(4));
+                c.insert(b"PHP_URL_PATH".to_vec(), Value::Long(5));
+                c.insert(b"PHP_URL_QUERY".to_vec(), Value::Long(6));
+                c.insert(b"PHP_URL_FRAGMENT".to_vec(), Value::Long(7));
+                // Other
+                c.insert(b"SEEK_SET".to_vec(), Value::Long(0));
+                c.insert(b"SEEK_CUR".to_vec(), Value::Long(1));
+                c.insert(b"SEEK_END".to_vec(), Value::Long(2));
+                c.insert(b"FILE_APPEND".to_vec(), Value::Long(8));
+                c.insert(b"LOCK_EX".to_vec(), Value::Long(2));
+                c.insert(b"PREG_SPLIT_NO_EMPTY".to_vec(), Value::Long(1));
+                c.insert(b"PREG_SPLIT_DELIM_CAPTURE".to_vec(), Value::Long(2));
+                c.insert(b"T_STRING".to_vec(), Value::Long(319));
                 c
             },
         }
