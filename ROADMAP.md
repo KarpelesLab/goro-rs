@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Test Suite**: 207/871 (23.8%) top-level, 848 total (Zend+ext dirs)
+**Test Suite**: 207/871 (23.8%) top-level, 852 total (Zend+ext dirs)
 
 ### Completed Features
 
