@@ -2194,6 +2194,32 @@ impl Vm {
                     }
                 }
 
+                OpCode::ArraySpread => {
+                    // Spread source array elements into target array
+                    let target_val = match &op.op1 {
+                        OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned(),
+                        OperandType::Cv(idx) => cvs.get(*idx as usize).cloned(),
+                        _ => None,
+                    };
+                    let source = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let (Some(Value::Array(target)), Value::Array(source_arr)) =
+                        (target_val, source)
+                    {
+                        let source_borrow = source_arr.borrow();
+                        let mut target_borrow = target.borrow_mut();
+                        for (key, val) in source_borrow.iter() {
+                            match key {
+                                ArrayKey::Int(_) => {
+                                    target_borrow.push(val.clone());
+                                }
+                                ArrayKey::String(s) => {
+                                    target_borrow.set(ArrayKey::String(s.clone()), val.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
                 OpCode::MatchError => {
                     // Throw UnhandledMatchError with the unmatched value
                     let subject = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);

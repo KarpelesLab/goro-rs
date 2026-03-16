@@ -206,6 +206,8 @@ pub enum OpCode {
     PropertyUnset,
     /// Throw UnhandledMatchError with the unmatched value: op1 = subject value
     MatchError,
+    /// Spread array into another array: op1 = target array, op2 = source array
+    ArraySpread,
 }
 
 /// A compiled function / script

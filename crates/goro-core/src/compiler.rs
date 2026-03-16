@@ -1950,7 +1950,16 @@ impl Compiler {
 
                 for elem in elements {
                     let val = self.compile_expr(&elem.value)?;
-                    if let Some(key_expr) = &elem.key {
+                    if elem.unpack {
+                        // ...$arr - spread array elements into this array
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArraySpread,
+                            op1: OperandType::Tmp(arr_tmp),
+                            op2: val,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                    } else if let Some(key_expr) = &elem.key {
                         let key = self.compile_expr(key_expr)?;
                         self.op_array.emit(Op {
                             opcode: OpCode::ArraySet,
