@@ -54,7 +54,17 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"count_chars", count_chars);
     vm.register_function(b"str_split", str_split_fn);
     vm.register_function(b"strrchr", strrchr);
+    vm.register_function(b"strstr", strstr_fn);
     vm.register_function(b"stristr", stristr);
+    vm.register_function(b"strpbrk", strpbrk_fn);
+    vm.register_function(b"strnatcmp", strnatcmp_fn);
+    vm.register_function(b"strnatcasecmp", strnatcasecmp_fn);
+    vm.register_function(b"strcmp", strcmp_fn);
+    vm.register_function(b"strncmp", strncmp_fn);
+    vm.register_function(b"strcasecmp", strcasecmp_fn);
+    vm.register_function(b"strncasecmp", strncasecmp_fn);
+    vm.register_function(b"vprintf", vprintf_fn);
+    vm.register_function(b"printf", printf_fn);
     vm.register_function(b"strtok", strtok_fn);
     vm.register_function(b"strspn", strspn);
     vm.register_function(b"strcspn", strcspn);
@@ -1205,6 +1215,161 @@ fn str_split_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn strstr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+    if needle.is_empty() {
+        return Ok(Value::False); // PHP 8 throws ValueError but let's be permissive
+    }
+    if let Some(pos) = haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|w| w == needle.as_bytes())
+    {
+        if before_needle {
+            Ok(Value::String(PhpString::from_vec(
+                haystack.as_bytes()[..pos].to_vec(),
+            )))
+        } else {
+            Ok(Value::String(PhpString::from_vec(
+                haystack.as_bytes()[pos..].to_vec(),
+            )))
+        }
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn strpbrk_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let char_list = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let h = haystack.as_bytes();
+    let chars = char_list.as_bytes();
+    for (i, &b) in h.iter().enumerate() {
+        if chars.contains(&b) {
+            return Ok(Value::String(PhpString::from_vec(h[i..].to_vec())));
+        }
+    }
+    Ok(Value::False)
+}
+
+fn strnatcmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = args.first().unwrap_or(&Value::Null).to_php_string();
+    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    // Natural order comparison (simplified - just do string compare for now)
+    Ok(Value::Long(match a.as_bytes().cmp(b.as_bytes()) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }))
+}
+
+fn strnatcasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = args.first().unwrap_or(&Value::Null).to_php_string();
+    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let a_lower: Vec<u8> = a
+        .as_bytes()
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let b_lower: Vec<u8> = b
+        .as_bytes()
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    Ok(Value::Long(match a_lower.cmp(&b_lower) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }))
+}
+
+fn strcmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = args.first().unwrap_or(&Value::Null).to_php_string();
+    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    Ok(Value::Long(match a.as_bytes().cmp(b.as_bytes()) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }))
+}
+
+fn strncmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = args.first().unwrap_or(&Value::Null).to_php_string();
+    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let len = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let a_sub = &a.as_bytes()[..len.min(a.len())];
+    let b_sub = &b.as_bytes()[..len.min(b.len())];
+    Ok(Value::Long(match a_sub.cmp(b_sub) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }))
+}
+
+fn strcasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = args.first().unwrap_or(&Value::Null).to_php_string();
+    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let a_lower: Vec<u8> = a
+        .as_bytes()
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let b_lower: Vec<u8> = b
+        .as_bytes()
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    Ok(Value::Long(match a_lower.cmp(&b_lower) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }))
+}
+
+fn strncasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = args.first().unwrap_or(&Value::Null).to_php_string();
+    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let len = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let a_sub: Vec<u8> = a.as_bytes()[..len.min(a.len())]
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let b_sub: Vec<u8> = b.as_bytes()[..len.min(b.len())]
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    Ok(Value::Long(match a_sub.cmp(&b_sub) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }))
+}
+
+fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let format = args.first().unwrap_or(&Value::Null).to_php_string();
+    let arr = args.get(1).unwrap_or(&Value::Null);
+    let fmt_args: Vec<Value> = if let Value::Array(a) = arr {
+        a.borrow().values().cloned().collect()
+    } else {
+        vec![]
+    };
+    let mut all_args = vec![Value::String(format)];
+    all_args.extend(fmt_args);
+    let result = sprintf(vm, &all_args)?;
+    let s = result.to_php_string();
+    vm.write_output(s.as_bytes());
+    Ok(Value::Long(s.len() as i64))
+}
+
+fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let result = sprintf(vm, args)?;
+    let s = result.to_php_string();
+    vm.write_output(s.as_bytes());
+    Ok(Value::Long(s.len() as i64))
 }
 
 fn strrchr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
