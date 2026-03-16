@@ -214,6 +214,10 @@ pub enum OpCode {
     MakeRef,
     /// Append to array without deref (preserves Reference wrapper): op1 = array, op2 = CV
     ArrayAppendRef,
+    /// Dynamic variable read: op1 = name expr, result = value
+    VarVarGet,
+    /// Dynamic variable write: op1 = name expr, op2 = value
+    VarVarSet,
     /// Save return value for deferred return (finally blocks): op1 = value
     SaveReturn,
     /// Check and execute deferred return after finally block

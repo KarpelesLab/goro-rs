@@ -1535,6 +1535,17 @@ impl Compiler {
                         });
                         Ok(val)
                     }
+                    ExprKind::DynamicVariable(inner) => {
+                        let name_op = self.compile_expr(inner)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::VarVarSet,
+                            op1: name_op,
+                            op2: val,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        Ok(val)
+                    }
                     _ => {
                         // Check for destructuring: list($a, $b) = $arr or [$a, $b] = $arr
                         let vars: Vec<Option<Vec<u8>>> = match &target.kind {
@@ -3211,10 +3222,17 @@ impl Compiler {
             }
 
             ExprKind::DynamicVariable(inner) => {
-                // $$var - not supported yet
-                let _ = self.compile_expr(inner)?;
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+                // $$var - dynamic variable access
+                let name_op = self.compile_expr(inner)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::VarVarGet,
+                    op1: name_op,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::AssignRef { target, value } => {

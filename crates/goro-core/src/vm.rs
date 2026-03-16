@@ -354,6 +354,7 @@ impl Vm {
                 OpCode::Nop => {}
 
                 OpCode::Echo => {
+                    self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let s = self.value_to_string(&val);
                     self.output.extend_from_slice(s.as_bytes());
@@ -2225,6 +2226,47 @@ impl Vm {
                     }
                 }
 
+                OpCode::VarVarGet => {
+                    let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let name = name_val.to_php_string();
+                    let name_bytes = name.as_bytes();
+                    let mut found = Value::Null;
+                    for (i, cv_name) in op_array.cv_names.iter().enumerate() {
+                        if cv_name == name_bytes {
+                            if let Some(val) = cvs.get(i) {
+                                found = val.deref();
+                            }
+                            break;
+                        }
+                    }
+                    if matches!(found, Value::Null | Value::Undef) {
+                        if let Some(val) = self.globals.get(name_bytes) {
+                            found = val.clone();
+                        }
+                    }
+                    self.write_operand(&op.result, found, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::VarVarSet => {
+                    let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let name = name_val.to_php_string();
+                    let name_bytes = name.as_bytes().to_vec();
+                    let mut wrote = false;
+                    for (i, cv_name) in op_array.cv_names.iter().enumerate() {
+                        if *cv_name == name_bytes {
+                            if let Some(slot) = cvs.get_mut(i) {
+                                *slot = value.clone();
+                                wrote = true;
+                            }
+                            break;
+                        }
+                    }
+                    if !wrote {
+                        self.globals.insert(name_bytes, value);
+                    }
+                }
+
                 OpCode::SaveReturn => {
                     // Save return value for deferred return (finally blocks)
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -3097,6 +3139,33 @@ impl Vm {
         match operand {
             OperandType::Cv(idx) => cvs.get(*idx as usize).cloned().unwrap_or(Value::Null),
             _ => Value::Null,
+        }
+    }
+
+    /// Check if a CV operand refers to an undefined variable and emit a warning if so.
+    /// This implements PHP's "Warning: Undefined variable $name" behavior.
+    fn check_undefined_cv(
+        &mut self,
+        operand: &OperandType,
+        cvs: &[Value],
+        op_array: &OpArray,
+        line: u32,
+    ) {
+        if let OperandType::Cv(idx) = operand {
+            let i = *idx as usize;
+            if let Some(val) = cvs.get(i) {
+                let is_undef = match val {
+                    Value::Undef => true,
+                    Value::Reference(r) => matches!(*r.borrow(), Value::Undef),
+                    _ => false,
+                };
+                if is_undef {
+                    if let Some(name) = op_array.cv_names.get(i) {
+                        let varname = String::from_utf8_lossy(name);
+                        self.emit_warning_at(&format!("Undefined variable ${}", varname), line);
+                    }
+                }
+            }
         }
     }
 

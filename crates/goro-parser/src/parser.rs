@@ -2507,6 +2507,17 @@ impl Parser {
                     span,
                 })
             }
+            TokenKind::VariableVariable(name) => {
+                self.advance();
+                // $$var is DynamicVariable with the inner variable
+                Ok(Expr {
+                    kind: ExprKind::DynamicVariable(Box::new(Expr {
+                        kind: ExprKind::Variable(name),
+                        span,
+                    })),
+                    span,
+                })
+            }
             TokenKind::Identifier(name) => {
                 self.advance();
                 // Check if this is a function call

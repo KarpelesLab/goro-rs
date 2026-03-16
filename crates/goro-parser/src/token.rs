@@ -31,8 +31,9 @@ pub enum TokenKind {
     InterpolatedStringEnd(Vec<u8>),  // Last part of a double-quoted string
 
     // Identifiers and variables
-    Identifier(Vec<u8>), // function names, class names, etc.
-    Variable(Vec<u8>),   // $foo (stored without the $)
+    Identifier(Vec<u8>),       // function names, class names, etc.
+    Variable(Vec<u8>),         // $foo (stored without the $)
+    VariableVariable(Vec<u8>), // $$foo (stored without the $$)
 
     // Inline HTML (outside <?php ... ?>)
     InlineHtml(Vec<u8>),

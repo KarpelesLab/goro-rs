@@ -634,6 +634,21 @@ impl<'a> Lexer<'a> {
         };
 
         let kind = match ch {
+            b'$' if self.peek_at(1) == Some(b'$') => {
+                // $$var - variable variable
+                self.advance(); // skip first $
+                self.advance(); // skip second $
+                if self
+                    .peek()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                {
+                    let name = self.scan_identifier();
+                    TokenKind::VariableVariable(name)
+                } else {
+                    // Just $$ without a valid identifier
+                    TokenKind::Variable(b"$".to_vec())
+                }
+            }
             b'$' if self
                 .peek_at(1)
                 .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') =>
