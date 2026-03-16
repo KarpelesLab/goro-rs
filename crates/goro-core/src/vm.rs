@@ -1180,8 +1180,31 @@ impl Vm {
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
 
-                    // Handle built-in return (for getter methods on objects)
-                    if func_name_lower == b"__builtin_return" {
+                    // Handle Closure static methods
+                    if func_name_lower == b"closure::fromcallable" {
+                        // Closure::fromCallable($callable) - return the callable as-is
+                        // For string callables and closures, this is basically identity
+                        let callable = call.args.first().cloned().unwrap_or(Value::Null);
+                        self.write_operand(
+                            &op.result,
+                            callable,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else if func_name_lower == b"closure::bind"
+                        || func_name_lower == b"closure::bindto"
+                    {
+                        // Closure::bind($closure, $newThis, $newScope) - return closure as-is for now
+                        let closure = call.args.first().cloned().unwrap_or(Value::Null);
+                        self.write_operand(
+                            &op.result,
+                            closure,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else if func_name_lower == b"__builtin_return" {
                         let result = call.args.first().cloned().unwrap_or(Value::Null);
                         self.write_operand(
                             &op.result,
