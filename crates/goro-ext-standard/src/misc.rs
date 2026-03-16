@@ -267,6 +267,15 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"is_link", is_link_fn);
     vm.register_function(b"stat", stat_fn);
     vm.register_function(b"is_numeric", is_numeric_fn);
+    vm.register_function(b"opendir", opendir_fn);
+    vm.register_function(b"closedir", closedir_fn);
+    vm.register_function(b"readdir", readdir_fn);
+    vm.register_function(b"chmod", chmod_fn);
+    vm.register_function(b"symlink", symlink_fn);
+    vm.register_function(b"readlink", readlink_fn);
+    vm.register_function(b"debug_backtrace", debug_backtrace_fn);
+    vm.register_function(b"debug_print_backtrace", debug_print_backtrace_fn);
+    vm.register_function(b"array_key_exists", array_key_exists_fn2);
     vm.register_function(b"file_get_contents", file_get_contents_fn);
     vm.register_function(b"file_put_contents", file_put_contents_fn);
     vm.register_function(b"realpath", realpath_fn);
@@ -4358,4 +4367,78 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn opendir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if std::path::Path::new(&*path.to_string_lossy()).is_dir() {
+        Ok(Value::String(PhpString::from_string(format!(
+            "dir:{}",
+            path.to_string_lossy()
+        ))))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn closedir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
+}
+
+fn readdir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn chmod_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn symlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let target = args.first().unwrap_or(&Value::Null).to_php_string();
+    let link = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    #[cfg(unix)]
+    {
+        match std::os::unix::fs::symlink(&*target.to_string_lossy(), &*link.to_string_lossy()) {
+            Ok(_) => Ok(Value::True),
+            Err(_) => Ok(Value::False),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, link);
+        Ok(Value::False)
+    }
+}
+
+fn readlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::read_link(&*path.to_string_lossy()) {
+        Ok(p) => Ok(Value::String(PhpString::from_string(
+            p.to_string_lossy().to_string(),
+        ))),
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn debug_backtrace_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+
+fn debug_print_backtrace_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
+}
+
+fn array_key_exists_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let key = args.first().unwrap_or(&Value::Null);
+    let arr = args.get(1).unwrap_or(&Value::Null);
+    if let Value::Array(a) = arr {
+        let arr_key = goro_core::vm::Vm::value_to_array_key(key.clone());
+        Ok(if a.borrow().contains_key(&arr_key) {
+            Value::True
+        } else {
+            Value::False
+        })
+    } else {
+        Ok(Value::False)
+    }
 }

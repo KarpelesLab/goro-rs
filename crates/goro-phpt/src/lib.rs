@@ -186,6 +186,9 @@ fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
     use goro_core::vm::Vm;
     use goro_parser::{Lexer, Parser};
 
+    // Change to temp directory to avoid polluting the project directory
+    let _ = std::env::set_current_dir(std::env::temp_dir());
+
     // Lex
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
