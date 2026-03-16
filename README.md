@@ -10,8 +10,8 @@ Active development. Core language features, OOP, generators, exceptions, closure
 
 | Test Directory | Pass | Total | Rate |
 |---|---|---|---|
-| Zend/tests (top-level) | 195 | 871 | 22.4% |
-| Zend/tests (all subdirs) | 720 | ~11950 | ~6.0% |
+| Zend/tests (top-level) | 197 | 871 | 22.6% |
+| Zend/tests (all subdirs) | 726 | ~11950 | ~6.1% |
 
 Best categories: match (54%), nullable_types (63%), temporary_cleaning (52%), switch (41%), inheritance (35%).
 

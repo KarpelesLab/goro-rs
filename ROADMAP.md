@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Test Suite**: 181/871 (20.8%) passing on PHP 8.5.4 Zend tests (top-level)
+**Test Suite**: 197/871 (22.6%) top-level, 726 total across all subdirectories
 
 ### Completed Features
 
@@ -31,9 +31,9 @@
 
 The single highest-impact improvement area. Many tests expect PHP's diagnostic output.
 
-- [ ] **Fatal error / Uncaught exception formatting** (~108 tests)
+- [x] **Fatal error / Uncaught exception formatting** (~108 tests)
   - Output `Fatal error: Uncaught ExceptionType: message in file:line\nStack trace:\n#0 {main}\n  thrown in file on line N`
-  - Currently exceptions are caught but error text not always written to output
+  - Test runner captures error output and includes it in test comparison
 - [ ] **Warning emission** (~30 tests)
   - `Undefined variable`, `Undefined array key`, `Attempt to read property on null`
   - `Division by zero` warning (not fatal), `array_key_exists` warnings
@@ -42,18 +42,16 @@ The single highest-impact improvement area. Many tests expect PHP's diagnostic o
   - `Deprecated: ... is deprecated` messages for deprecated features
   - Proper `E_NOTICE`, `E_WARNING`, `E_DEPRECATED` level handling
 - [ ] **set_error_handler()** / **set_exception_handler()**
-- [ ] **@ error suppression operator**
+- [x] **@ error suppression operator** - ErrorSuppress/ErrorRestore opcodes
 - [ ] **trigger_error()** / **user_error()**
 
 ### P1: Core Language Gaps (high impact - ~80 tests)
 
 - [ ] **Variable variables** (`$$var`, `${$expr}`) - parse + compile + VM support
-- [ ] **Argument unpacking** in calls (`func(...$args)`) - compiler support
-- [ ] **Array spread** in literals (`[...$a, ...$b]`) - compiler support
-- [ ] **Proper array copy-on-write semantics** - currently `Rc<RefCell>` creates shared references
-  - `$b = $a` should deep-clone the array, not share the `Rc`
-  - Critical for correct PHP semantics
-- [ ] **`::class` constant** on variables/expressions (`$obj::class`, `ClassName::class`)
+- [x] **Argument unpacking** in calls (`func(...$args)`) - SendUnpack opcode
+- [x] **Array spread** in literals (`[...$a, ...$b]`) - ArraySpread opcode
+- [x] **Proper array copy-on-write semantics** - clone array on CV assignment
+- [x] **`::class` constant** on variables/expressions (`$obj::class`, `ClassName::class`)
 - [ ] **Dynamic member access** (`$class::$prop`, `Class::{$expr}`)
 - [ ] **Heredoc / Nowdoc** strings
 - [ ] **`goto` / labels**
@@ -71,7 +69,7 @@ The single highest-impact improvement area. Many tests expect PHP's diagnostic o
 - [ ] **Trait conflict resolution** (`insteadof`, `as`)
 - [ ] **Enum enforcement** (backed values, methods, implements)
 - [ ] **Readonly properties**
-- [ ] **Constructor promotion** (`public function __construct(public $x)`)
+- [x] **Constructor promotion** (`public function __construct(public $x)`)
 - [ ] **Anonymous classes** (runtime)
 - [ ] **Property hooks** (PHP 8.4+ - `get {}` / `set {}` blocks)
 
