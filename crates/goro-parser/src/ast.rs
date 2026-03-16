@@ -277,7 +277,10 @@ pub enum ExprKind {
         kind: IncludeKind,
         path: Box<Expr>,
     },
-    Yield(Option<Box<Expr>>),
+    /// yield [key =>] [value]
+    /// First field: value (None for bare yield)
+    /// Second field: key (Some for yield $key => $value)
+    Yield(Option<Box<Expr>>, Option<Box<Expr>>),
     YieldFrom(Box<Expr>),
 
     // Clone

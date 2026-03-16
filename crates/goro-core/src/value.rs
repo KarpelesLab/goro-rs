@@ -3,6 +3,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::array::PhpArray;
+use crate::generator::PhpGenerator;
 use crate::object::PhpObject;
 use crate::string::PhpString;
 
@@ -21,6 +22,8 @@ pub enum Value {
     Object(Rc<RefCell<PhpObject>>),
     /// A PHP reference (&$var) - both variables share the same Rc<RefCell<Value>>
     Reference(Rc<RefCell<Value>>),
+    /// A PHP Generator object
+    Generator(Rc<RefCell<PhpGenerator>>),
 }
 
 impl Value {
@@ -51,7 +54,7 @@ impl Value {
                 !data.is_empty() && data != b"0"
             }
             Value::Array(arr) => !arr.borrow().is_empty(),
-            Value::Object(_) => true,
+            Value::Object(_) | Value::Generator(_) => true,
             Value::Reference(r) => r.borrow().is_truthy(),
         }
     }
@@ -67,7 +70,7 @@ impl Value {
             Value::Double(_) => "float",
             Value::String(_) => "string",
             Value::Array(_) => "array",
-            Value::Object(_) => "object",
+            Value::Object(_) | Value::Generator(_) => "object",
             Value::Reference(r) => r.borrow().type_name(),
         }
     }
@@ -116,7 +119,7 @@ impl Value {
                     1
                 }
             }
-            Value::Object(_) => 1,
+            Value::Object(_) | Value::Generator(_) => 1,
             Value::Reference(r) => r.borrow().to_long(),
         }
     }
@@ -139,7 +142,7 @@ impl Value {
                     1.0
                 }
             }
-            Value::Object(_) => 1.0,
+            Value::Object(_) | Value::Generator(_) => 1.0,
             Value::Reference(r) => r.borrow().to_double(),
         }
     }
@@ -158,6 +161,7 @@ impl Value {
                 // PHP tries __toString magic method; for now return class name
                 PhpString::from_vec(obj.class_name.clone())
             }
+            Value::Generator(_) => PhpString::from_bytes(b"Generator"),
             Value::Reference(r) => r.borrow().to_php_string(),
         }
     }
@@ -361,7 +365,9 @@ impl Value {
                 // Leading numeric portion
                 Value::Long(self.to_long())
             }
-            Value::Array(_) | Value::Object(_) => Value::Long(if self.is_truthy() { 1 } else { 0 }),
+            Value::Array(_) | Value::Object(_) | Value::Generator(_) => {
+                Value::Long(if self.is_truthy() { 1 } else { 0 })
+            }
             Value::Reference(r) => r.borrow().to_numeric(),
         }
     }
@@ -687,6 +693,7 @@ impl fmt::Debug for Value {
                 let obj = obj.borrow();
                 write!(f, "object({})", String::from_utf8_lossy(&obj.class_name))
             }
+            Value::Generator(_) => write!(f, "object(Generator)"),
             Value::Reference(r) => {
                 write!(f, "&{:?}", *r.borrow())
             }
@@ -705,7 +712,7 @@ impl fmt::Display for Value {
             }
             Value::String(s) => f.write_str(&s.to_string_lossy()),
             Value::Array(_) => write!(f, "Array"),
-            Value::Object(_) => write!(f, "Object"),
+            Value::Object(_) | Value::Generator(_) => write!(f, "Object"),
             Value::Reference(r) => {
                 write!(f, "{}", *r.borrow())
             }

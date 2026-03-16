@@ -1302,7 +1302,7 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(match args.first() {
-        Some(Value::Object(_)) => Value::True,
+        Some(Value::Object(_)) | Some(Value::Generator(_)) => Value::True,
         _ => Value::False,
     })
 }
@@ -1866,7 +1866,7 @@ fn json_encode_value(val: &Value) -> String {
                 format!("{{{}}}", parts.join(","))
             }
         }
-        Value::Object(_) => "null".to_string(), // TODO: implement object JSON encoding
+        Value::Object(_) | Value::Generator(_) => "null".to_string(), // TODO: implement object JSON encoding
         Value::Reference(r) => json_encode_value(&r.borrow()),
     }
 }
@@ -2041,6 +2041,8 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(obj)) = args.first() {
         let obj = obj.borrow();
         Ok(Value::String(PhpString::from_vec(obj.class_name.clone())))
+    } else if let Some(Value::Generator(_)) = args.first() {
+        Ok(Value::String(PhpString::from_bytes(b"Generator")))
     } else {
         Ok(Value::False)
     }
@@ -2073,7 +2075,7 @@ fn serialize_value(val: &Value) -> String {
             result.push('}');
             result
         }
-        Value::Object(_) => "N;".to_string(), // TODO: proper object serialization
+        Value::Object(_) | Value::Generator(_) => "N;".to_string(), // TODO: proper object serialization
         Value::Reference(r) => serialize_value(&r.borrow()),
     }
 }

@@ -3006,14 +3006,24 @@ impl Parser {
                 ) {
                     Ok(Expr {
                         span,
-                        kind: ExprKind::Yield(None),
+                        kind: ExprKind::Yield(None, None),
                     })
                 } else {
-                    let value = self.parse_expression()?;
-                    Ok(Expr {
-                        span,
-                        kind: ExprKind::Yield(Some(Box::new(value))),
-                    })
+                    let first = self.parse_expression()?;
+                    // Check for yield $key => $value
+                    if matches!(self.peek(), TokenKind::DoubleArrow) {
+                        self.advance(); // consume =>
+                        let value = self.parse_expression()?;
+                        Ok(Expr {
+                            span,
+                            kind: ExprKind::Yield(Some(Box::new(value)), Some(Box::new(first))),
+                        })
+                    } else {
+                        Ok(Expr {
+                            span,
+                            kind: ExprKind::Yield(Some(Box::new(first)), None),
+                        })
+                    }
                 }
             }
             TokenKind::YieldFrom => {

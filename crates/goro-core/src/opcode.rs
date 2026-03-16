@@ -190,6 +190,12 @@ pub enum OpCode {
     // ---- Print ----
     /// print expr (returns 1)
     Print,
+
+    // ---- Generator ----
+    /// Yield a value: op1 = value (or Unused), op2 = key (or Unused), result = where to store sent value
+    Yield,
+    /// Generator return (like Return but for generators)
+    GeneratorReturn,
 }
 
 /// A compiled function / script
@@ -211,6 +217,8 @@ pub struct OpArray {
     pub variadic_param: Option<u32>,
     /// Nested function OpArrays (for DeclareFunction)
     pub child_functions: Vec<OpArray>,
+    /// Whether this function is a generator (contains yield)
+    pub is_generator: bool,
 }
 
 impl OpArray {
@@ -224,6 +232,7 @@ impl OpArray {
             param_count: 0,
             variadic_param: None,
             child_functions: Vec::new(),
+            is_generator: false,
         }
     }
 

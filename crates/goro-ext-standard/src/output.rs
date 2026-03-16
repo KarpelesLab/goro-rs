@@ -85,6 +85,11 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
+        Value::Generator(_) => {
+            vm.write_output(
+                format!("{}object(Generator)#0 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
+            );
+        }
         Value::Reference(r) => {
             // Show the inner value with & prefix (PHP shows &int(42), &string(...), etc.)
             let inner = r.borrow().clone();
@@ -199,7 +204,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
         }
-        Value::Object(_) => {
+        Value::Object(_) | Value::Generator(_) => {
             buf.extend_from_slice(b"Object"); // TODO: implement object print_r
         }
         Value::Reference(r) => {
@@ -248,7 +253,7 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, _indent: usize) {
         Value::Array(_) => {
             buf.extend_from_slice(b"array (...)"); // simplified
         }
-        Value::Object(_) => {
+        Value::Object(_) | Value::Generator(_) => {
             buf.extend_from_slice(b"(object) array(...)"); // TODO: implement object var_export
         }
         Value::Reference(r) => {

@@ -1,6 +1,7 @@
 pub mod array;
 pub mod compiler;
 pub mod function;
+pub mod generator;
 pub mod object;
 pub mod opcode;
 pub mod string;

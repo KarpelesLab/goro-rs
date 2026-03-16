@@ -625,9 +625,13 @@ impl Compiler {
             StmtKind::FunctionDecl {
                 name, params, body, ..
             } => {
+                // Check if this function contains yield (making it a generator)
+                let is_generator = stmts_contain_yield(body);
+
                 // Compile the function body into a sub-OpArray
                 let mut func_compiler = Compiler::new();
                 func_compiler.op_array.name = name.clone();
+                func_compiler.op_array.is_generator = is_generator;
 
                 // Set up parameter CVs and default values
                 func_compiler.op_array.param_count = params.len() as u32;
@@ -943,8 +947,12 @@ impl Compiler {
                             ..
                         } => {
                             if let Some(body_stmts) = method_body {
+                                // Check if method body contains yield
+                                let method_is_generator = stmts_contain_yield(body_stmts);
+
                                 let mut method_compiler = Compiler::new();
                                 method_compiler.op_array.name = method_name.clone();
+                                method_compiler.op_array.is_generator = method_is_generator;
                                 method_compiler.current_class = Some(name.clone());
                                 method_compiler.current_parent_class = extends.clone();
 
@@ -2264,8 +2272,12 @@ impl Compiler {
                 let closure_id = self.op_array.child_functions.len();
                 let closure_name = format!("__closure_{}", closure_id).into_bytes();
 
+                // Check if closure body contains yield
+                let is_generator = stmts_contain_yield(body);
+
                 let mut closure_compiler = Compiler::new();
                 closure_compiler.op_array.name = closure_name.clone();
+                closure_compiler.op_array.is_generator = is_generator;
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
 
@@ -2400,7 +2412,35 @@ impl Compiler {
                 Ok(OperandType::Const(name_val_idx))
             }
 
-            ExprKind::Yield(_) | ExprKind::YieldFrom(_) => {
+            ExprKind::Yield(value, key) => {
+                // Compile the yielded value (if any)
+                let val_operand = if let Some(val_expr) = value {
+                    self.compile_expr(val_expr)?
+                } else {
+                    OperandType::Unused
+                };
+
+                // Compile the key (if any)
+                let key_operand = if let Some(key_expr) = key {
+                    self.compile_expr(key_expr)?
+                } else {
+                    OperandType::Unused
+                };
+
+                // The result of a yield expression is the value sent via send()
+                let result_tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::Yield,
+                    op1: val_operand,
+                    op2: key_operand,
+                    result: OperandType::Tmp(result_tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(result_tmp))
+            }
+
+            ExprKind::YieldFrom(_inner) => {
+                // TODO: yield from is more complex, stub for now
                 let idx = self.op_array.add_literal(Value::Null);
                 Ok(OperandType::Const(idx))
             }
@@ -2745,5 +2785,126 @@ impl Compiler {
                 line: expr.span.line,
             }),
         }
+    }
+}
+
+/// Check if a list of statements contains any yield expressions.
+/// This determines whether a function should be compiled as a generator.
+fn stmts_contain_yield(stmts: &[Statement]) -> bool {
+    for stmt in stmts {
+        if stmt_contains_yield(stmt) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_contains_yield(stmt: &Statement) -> bool {
+    match &stmt.kind {
+        StmtKind::Expression(expr) => expr_contains_yield(expr),
+        StmtKind::Echo(exprs) => exprs.iter().any(expr_contains_yield),
+        StmtKind::Return(Some(expr)) => expr_contains_yield(expr),
+        StmtKind::If {
+            condition,
+            body,
+            elseif_clauses,
+            else_body,
+        } => {
+            expr_contains_yield(condition)
+                || stmts_contain_yield(body)
+                || elseif_clauses
+                    .iter()
+                    .any(|(c, b)| expr_contains_yield(c) || stmts_contain_yield(b))
+                || else_body.as_ref().is_some_and(|b| stmts_contain_yield(b))
+        }
+        StmtKind::While { condition, body } => {
+            expr_contains_yield(condition) || stmts_contain_yield(body)
+        }
+        StmtKind::DoWhile { body, condition } => {
+            stmts_contain_yield(body) || expr_contains_yield(condition)
+        }
+        StmtKind::For {
+            init,
+            condition,
+            update,
+            body,
+        } => {
+            init.iter().any(expr_contains_yield)
+                || condition.iter().any(expr_contains_yield)
+                || update.iter().any(expr_contains_yield)
+                || stmts_contain_yield(body)
+        }
+        StmtKind::Foreach { expr, body, .. } => {
+            expr_contains_yield(expr) || stmts_contain_yield(body)
+        }
+        StmtKind::Switch { expr, cases } => {
+            expr_contains_yield(expr)
+                || cases.iter().any(|c| {
+                    c.value.as_ref().is_some_and(expr_contains_yield)
+                        || stmts_contain_yield(&c.body)
+                })
+        }
+        StmtKind::TryCatch {
+            try_body,
+            catches,
+            finally_body,
+            ..
+        } => {
+            stmts_contain_yield(try_body)
+                || catches.iter().any(|c| stmts_contain_yield(&c.body))
+                || finally_body
+                    .as_ref()
+                    .is_some_and(|b| stmts_contain_yield(b))
+        }
+        StmtKind::Throw(expr) => expr_contains_yield(expr),
+        StmtKind::Unset(exprs) => exprs.iter().any(expr_contains_yield),
+        // Don't recurse into nested function/class declarations
+        StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => false,
+        _ => false,
+    }
+}
+
+fn expr_contains_yield(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Yield(_, _) | ExprKind::YieldFrom(_) => true,
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_contains_yield(left) || expr_contains_yield(right)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_contains_yield(operand),
+        ExprKind::Assign { target, value, .. } => {
+            expr_contains_yield(target) || expr_contains_yield(value)
+        }
+        ExprKind::CompoundAssign { target, value, .. } => {
+            expr_contains_yield(target) || expr_contains_yield(value)
+        }
+        ExprKind::FunctionCall { name, args } => {
+            expr_contains_yield(name) || args.iter().any(|a| expr_contains_yield(&a.value))
+        }
+        ExprKind::MethodCall { object, args, .. } => {
+            expr_contains_yield(object) || args.iter().any(|a| expr_contains_yield(&a.value))
+        }
+        ExprKind::Array(elements) => elements.iter().any(|e| {
+            e.key.as_ref().is_some_and(expr_contains_yield) || expr_contains_yield(&e.value)
+        }),
+        ExprKind::ArrayAccess { array, index } => {
+            expr_contains_yield(array) || index.as_ref().is_some_and(|i| expr_contains_yield(i))
+        }
+        ExprKind::Ternary {
+            condition,
+            if_true,
+            if_false,
+        } => {
+            expr_contains_yield(condition)
+                || if_true.as_ref().is_some_and(|t| expr_contains_yield(t))
+                || expr_contains_yield(if_false)
+        }
+        ExprKind::NullCoalesce { left, right } => {
+            expr_contains_yield(left) || expr_contains_yield(right)
+        }
+        ExprKind::Cast(_, e) => expr_contains_yield(e),
+        ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) => expr_contains_yield(e),
+        ExprKind::PropertyAccess { object, .. } => expr_contains_yield(object),
+        ExprKind::Include { path, .. } => expr_contains_yield(path),
+        _ => false,
     }
 }

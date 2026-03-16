@@ -167,6 +167,8 @@ impl Vm {
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
         let mut foreach_positions: HashMap<u32, usize> = HashMap::new();
+        // Generator key storage for foreach (saved before advancing to next yield)
+        let mut foreach_gen_keys: HashMap<u32, Value> = HashMap::new();
         // Maps CV index -> static var key (for saving back on write)
         let mut static_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
         // Exception handler stack: (catch_target, finally_target, exception_tmp_idx)
@@ -825,6 +827,32 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
+                    } else if func_name_lower == b"__generator_send" {
+                        // Generator send() method: args[0] = generator, args[1] = sent value
+                        if let Some(Value::Generator(gen_rc)) = call.args.first() {
+                            let sent_value = call.args.get(1).cloned().unwrap_or(Value::Null);
+                            let mut gen_borrow = gen_rc.borrow_mut();
+                            gen_borrow.send_value = sent_value;
+                            gen_borrow.write_send_value();
+                            let _ = gen_borrow.resume(self);
+                            let result = gen_borrow.current_value.clone();
+                            drop(gen_borrow);
+                            self.write_operand(
+                                &op.result,
+                                result,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                        } else {
+                            self.write_operand(
+                                &op.result,
+                                Value::Null,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                        }
                     } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
                         // Built-in function
                         let result = func(self, &call.args).map_err(|e| VmError {
@@ -840,6 +868,57 @@ impl Vm {
                         );
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
                     {
+                        // Check if this is a generator function
+                        if user_fn.is_generator {
+                            // Set up parameters as CVs
+                            let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                            if let Some(variadic_idx) = user_fn.variadic_param {
+                                let vi = variadic_idx as usize;
+                                for (i, arg) in call.args.iter().enumerate() {
+                                    if i < vi && i < func_cvs.len() {
+                                        func_cvs[i] = arg.clone();
+                                    }
+                                }
+                                let mut variadic_arr = crate::array::PhpArray::new();
+                                for arg in call.args.iter().skip(vi) {
+                                    variadic_arr.push(arg.clone());
+                                }
+                                if vi < func_cvs.len() {
+                                    func_cvs[vi] =
+                                        Value::Array(Rc::new(RefCell::new(variadic_arr)));
+                                }
+                            } else {
+                                for (i, arg) in call.args.iter().enumerate() {
+                                    if i < func_cvs.len() {
+                                        func_cvs[i] = arg.clone();
+                                    }
+                                }
+                            }
+
+                            // Create a generator instead of executing
+                            let generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
+                            let gen_rc = Rc::new(RefCell::new(generator));
+                            self.write_operand(
+                                &op.result,
+                                Value::Generator(gen_rc),
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+
+                            // Reload globals
+                            if self.is_global_scope {
+                                for (i, name) in op_array.cv_names.iter().enumerate() {
+                                    if let Some(val) = self.globals.get(name)
+                                        && i < cvs.len()
+                                    {
+                                        cvs[i] = val.clone();
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
                         // User-defined function - execute its op_array
                         let was_global = self.is_global_scope;
                         self.is_global_scope = false;
@@ -1170,8 +1249,30 @@ impl Vm {
 
                 OpCode::ForeachInit => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    // Store array in the iterator tmp slot
-                    self.write_operand(&op.result, arr_val, &mut cvs, &mut tmps, &static_cv_keys);
+
+                    if let Value::Generator(gen_rc) = &arr_val {
+                        // For generators, advance to the first yield on init
+                        let mut gen_borrow = gen_rc.borrow_mut();
+                        let _ = gen_borrow.resume(self);
+                        drop(gen_borrow);
+                        // Store the generator in the iterator tmp slot
+                        self.write_operand(
+                            &op.result,
+                            arr_val,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else {
+                        // Store array in the iterator tmp slot
+                        self.write_operand(
+                            &op.result,
+                            arr_val,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    }
                     // Reset iteration position
                     let iter_idx = match op.result {
                         OperandType::Tmp(idx) => idx,
@@ -1188,7 +1289,42 @@ impl Vm {
                     let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
 
-                    if let Value::Array(arr) = &arr_val {
+                    if let Value::Generator(gen_rc) = &arr_val {
+                        // Generator iteration
+                        // On first call (pos==0), ForeachInit already advanced to first yield.
+                        // On subsequent calls (pos>0), advance to the next yield first.
+                        if pos > 0 {
+                            let mut gen_borrow = gen_rc.borrow_mut();
+                            gen_borrow.write_send_value();
+                            let _ = gen_borrow.resume(self);
+                        }
+
+                        let gen_borrow = gen_rc.borrow();
+                        if gen_borrow.state == crate::generator::GeneratorState::Completed {
+                            drop(gen_borrow);
+                            // Done - jump to end
+                            if let OperandType::JmpTarget(target) = op.op2 {
+                                ip = target as usize;
+                            }
+                        } else {
+                            // Get current value and key
+                            let value = gen_borrow.current_value.clone();
+                            let key = gen_borrow.current_key.clone();
+                            drop(gen_borrow);
+
+                            // Save the key for ForeachKey to read
+                            foreach_gen_keys.insert(iter_idx, key);
+
+                            self.write_operand(
+                                &op.result,
+                                value,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                            foreach_positions.insert(iter_idx, pos + 1);
+                        }
+                    } else if let Value::Array(arr) = &arr_val {
                         let arr_borrow = arr.borrow();
                         let entries: Vec<_> = arr_borrow.iter().collect();
                         if pos >= entries.len() {
@@ -1208,7 +1344,7 @@ impl Vm {
                             foreach_positions.insert(iter_idx, pos + 1);
                         }
                     } else {
-                        // Not an array - jump to end
+                        // Not an array or generator - jump to end
                         if let OperandType::JmpTarget(target) = op.op2 {
                             ip = target as usize;
                         }
@@ -1223,7 +1359,20 @@ impl Vm {
                     let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(1);
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
 
-                    if let Value::Array(arr) = &arr_val {
+                    if let Value::Generator(_) = &arr_val {
+                        // Use the key saved by ForeachNext before it advanced
+                        let key_val = foreach_gen_keys
+                            .get(&iter_idx)
+                            .cloned()
+                            .unwrap_or(Value::Long(0));
+                        self.write_operand(
+                            &op.result,
+                            key_val,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else if let Value::Array(arr) = &arr_val {
                         let arr_borrow = arr.borrow();
                         let entries: Vec<_> = arr_borrow.iter().collect();
                         // pos was already incremented by ForeachNext, so use pos - 1
@@ -1317,7 +1466,17 @@ impl Vm {
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
 
-                    let result = if let Value::Object(obj) = &val {
+                    let result = if let Value::Generator(_) = &val {
+                        // Generator instanceof check
+                        if class_lower == b"generator"
+                            || class_lower == b"iterator"
+                            || class_lower == b"traversable"
+                        {
+                            Value::True
+                        } else {
+                            Value::False
+                        }
+                    } else if let Value::Object(obj) = &val {
                         let obj_borrow = obj.borrow();
                         let obj_class_lower: Vec<u8> = obj_borrow
                             .class_name
@@ -1548,6 +1707,20 @@ impl Vm {
 
                 OpCode::LoadConst | OpCode::FastConcat => {
                     // TODO: implement
+                }
+
+                OpCode::Yield => {
+                    // Yield should only be executed inside generators, not in the main VM loop.
+                    // If we reach here, it means yield was used outside a generator context.
+                    // Just treat it as returning null.
+                    let idx = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, idx, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::GeneratorReturn => {
+                    // Generator return in main VM - treat as regular return
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    return Ok(val);
                 }
 
                 OpCode::DeclareClass => {
@@ -1914,6 +2087,98 @@ impl Vm {
                                 args: vec![obj_val.clone()],
                             });
                         }
+                    } else if let Value::Generator(gen_rc) = &obj_val {
+                        // Generator method calls: current(), next(), valid(), key(), rewind(), send()
+                        let method_lower: Vec<u8> = method_name
+                            .as_bytes()
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+
+                        let result = match method_lower.as_slice() {
+                            b"current" => {
+                                let gen_borrow = gen_rc.borrow();
+                                if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                    drop(gen_borrow);
+                                    // Need to advance to first yield
+                                    let mut gen_borrow = gen_rc.borrow_mut();
+                                    let _ = gen_borrow.resume(self);
+                                    gen_borrow.current_value.clone()
+                                } else {
+                                    gen_borrow.current_value.clone()
+                                }
+                            }
+                            b"key" => {
+                                let gen_borrow = gen_rc.borrow();
+                                if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                    drop(gen_borrow);
+                                    let mut gen_borrow = gen_rc.borrow_mut();
+                                    let _ = gen_borrow.resume(self);
+                                    gen_borrow.current_key.clone()
+                                } else {
+                                    gen_borrow.current_key.clone()
+                                }
+                            }
+                            b"next" => {
+                                let mut gen_borrow = gen_rc.borrow_mut();
+                                if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                    // First call to next(): advance to first yield
+                                    let _ = gen_borrow.resume(self);
+                                }
+                                // Then advance past current yield
+                                gen_borrow.write_send_value();
+                                let _ = gen_borrow.resume(self);
+                                Value::Null
+                            }
+                            b"valid" => {
+                                let gen_borrow = gen_rc.borrow();
+                                if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                    drop(gen_borrow);
+                                    let mut gen_borrow = gen_rc.borrow_mut();
+                                    let _ = gen_borrow.resume(self);
+                                    if gen_borrow.state
+                                        == crate::generator::GeneratorState::Completed
+                                    {
+                                        Value::False
+                                    } else {
+                                        Value::True
+                                    }
+                                } else if gen_borrow.state
+                                    == crate::generator::GeneratorState::Completed
+                                {
+                                    Value::False
+                                } else {
+                                    Value::True
+                                }
+                            }
+                            b"rewind" => {
+                                // In PHP, rewind on a started generator is a no-op / warning
+                                Value::Null
+                            }
+                            b"send" => {
+                                // send($value): resume the generator with a value
+                                // The sent value becomes the result of the yield expression
+                                Value::Null // Will be handled in DoFCall with args
+                            }
+                            b"getreturn" => {
+                                let gen_borrow = gen_rc.borrow();
+                                gen_borrow.return_value.clone()
+                            }
+                            _ => Value::Null,
+                        };
+
+                        // For send(), we need to pass through to DoFCall so args can be collected
+                        if method_lower == b"send" {
+                            self.pending_calls.push(PendingCall {
+                                name: PhpString::from_bytes(b"__generator_send"),
+                                args: vec![obj_val.clone()],
+                            });
+                        } else {
+                            self.pending_calls.push(PendingCall {
+                                name: PhpString::from_bytes(b"__builtin_return"),
+                                args: vec![result],
+                            });
+                        }
                     } else {
                         // Not an object - push call without $this
                         self.pending_calls.push(PendingCall {
@@ -1927,7 +2192,7 @@ impl Vm {
     }
 
     /// Convert a value to an array key (PHP coerces numeric strings to int keys)
-    fn value_to_array_key(val: Value) -> ArrayKey {
+    pub fn value_to_array_key(val: Value) -> ArrayKey {
         match val {
             Value::Long(n) => ArrayKey::Int(n),
             Value::String(s) => {
@@ -1948,13 +2213,13 @@ impl Vm {
             Value::Double(f) => ArrayKey::Int(f as i64),
             Value::True => ArrayKey::Int(1),
             Value::False | Value::Null | Value::Undef => ArrayKey::Int(0),
-            Value::Object(_) | Value::Array(_) => ArrayKey::Int(0),
+            Value::Object(_) | Value::Array(_) | Value::Generator(_) => ArrayKey::Int(0),
             Value::Reference(r) => Self::value_to_array_key(r.borrow().clone()),
         }
     }
 
     /// Convert a value to string, calling __toString for objects if available
-    fn value_to_string(&mut self, val: &Value) -> PhpString {
+    pub fn value_to_string(&mut self, val: &Value) -> PhpString {
         if let Value::Object(obj) = val {
             let class_lower: Vec<u8> = obj
                 .borrow()
@@ -2038,6 +2303,140 @@ impl Vm {
             }
             _ => {}
         }
+    }
+
+    // ---- Generator support methods ----
+    // These methods are called by the generator executor to interact with the VM
+
+    /// Initialize a function call from generator context
+    pub fn generator_init_fcall(&mut self, name_val: Value) {
+        if let Value::Array(arr) = &name_val {
+            let arr = arr.borrow();
+            let mut values: Vec<Value> = arr.values().cloned().collect();
+            if !values.is_empty() {
+                let name = values.remove(0).to_php_string();
+                self.pending_calls.push(PendingCall { name, args: values });
+            } else {
+                self.pending_calls.push(PendingCall {
+                    name: PhpString::empty(),
+                    args: Vec::new(),
+                });
+            }
+        } else {
+            let name = name_val.to_php_string();
+            self.pending_calls.push(PendingCall {
+                name,
+                args: Vec::new(),
+            });
+        }
+    }
+
+    /// Send a value to a pending function call from generator context
+    pub fn generator_send_val(&mut self, val: Value) {
+        if let Some(call) = self.pending_calls.last_mut() {
+            call.args.push(val);
+        }
+    }
+
+    /// Execute a pending function call from generator context
+    pub fn generator_do_fcall(&mut self, line: u32) -> Result<Value, VmError> {
+        let call = self.pending_calls.pop().ok_or_else(|| VmError {
+            message: "no pending function call".into(),
+            line,
+        })?;
+
+        let func_name_lower: Vec<u8> = call
+            .name
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+
+        if func_name_lower == b"__builtin_return" {
+            Ok(call.args.first().cloned().unwrap_or(Value::Null))
+        } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
+            func(self, &call.args).map_err(|e| VmError {
+                message: e.message,
+                line,
+            })
+        } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned() {
+            // Check if this user function is a generator
+            if user_fn.is_generator {
+                let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                for (i, arg) in call.args.iter().enumerate() {
+                    if i < func_cvs.len() {
+                        func_cvs[i] = arg.clone();
+                    }
+                }
+                let generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
+                let gen_rc = Rc::new(RefCell::new(generator));
+                Ok(Value::Generator(gen_rc))
+            } else {
+                let was_global = self.is_global_scope;
+                self.is_global_scope = false;
+                let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                if let Some(variadic_idx) = user_fn.variadic_param {
+                    let vi = variadic_idx as usize;
+                    for (i, arg) in call.args.iter().enumerate() {
+                        if i < vi && i < func_cvs.len() {
+                            func_cvs[i] = arg.clone();
+                        }
+                    }
+                    let mut variadic_arr = crate::array::PhpArray::new();
+                    for arg in call.args.iter().skip(vi) {
+                        variadic_arr.push(arg.clone());
+                    }
+                    if vi < func_cvs.len() {
+                        func_cvs[vi] = Value::Array(Rc::new(RefCell::new(variadic_arr)));
+                    }
+                } else {
+                    for (i, arg) in call.args.iter().enumerate() {
+                        if i < func_cvs.len() {
+                            func_cvs[i] = arg.clone();
+                        }
+                    }
+                }
+                let result = self.execute_op_array(&user_fn, func_cvs);
+                self.is_global_scope = was_global;
+                result
+            }
+        } else {
+            let name_bytes = call.name.as_bytes();
+            if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
+                Ok(Value::Null)
+            } else {
+                Err(VmError {
+                    message: format!(
+                        "Call to undefined function {}()",
+                        call.name.to_string_lossy()
+                    ),
+                    line,
+                })
+            }
+        }
+    }
+
+    /// Look up a constant value
+    pub fn lookup_constant(&self, name: &[u8]) -> Value {
+        self.constants
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Value::String(PhpString::from_vec(name.to_vec())))
+    }
+
+    /// Get a static variable value
+    pub fn get_static_var(&self, key: &[u8]) -> Option<Value> {
+        self.static_vars.get(key).cloned()
+    }
+
+    /// Set a static variable value
+    pub fn set_static_var(&mut self, key: Vec<u8>, value: Value) {
+        self.static_vars.insert(key, value);
+    }
+
+    /// Get a global variable value
+    pub fn get_global(&self, name: &[u8]) -> Option<Value> {
+        self.globals.get(name).cloned()
     }
 }
 
