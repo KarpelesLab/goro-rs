@@ -10,9 +10,10 @@ Active development. Core language features, OOP, generators, exceptions, closure
 
 | Test Directory | Pass | Total | Rate |
 |---|---|---|---|
-| Zend/tests (top-level) | 181 | 871 | 20.8% |
+| Zend/tests (top-level) | 190 | 871 | 21.8% |
+| Zend/tests (all subdirs) | 708 | ~11950 | ~5.9% |
 
-*Test runner now supports recursive directories, SKIPIF sections, and timeout protection.*
+*Test runner supports recursive directories, SKIPIF sections, EXPECTF pattern matching with backtracking, and timeout protection.*
 
 ## Features
 
