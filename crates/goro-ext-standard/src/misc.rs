@@ -202,6 +202,9 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"rawurldecode", rawurldecode);
     vm.register_function(b"parse_url", parse_url_fn);
     vm.register_function(b"http_build_query", http_build_query_fn);
+    vm.register_function(b"parse_str", parse_str_fn);
+    vm.register_function(b"escapeshellarg", escapeshellarg_fn);
+    vm.register_function(b"escapeshellcmd", escapeshellcmd_fn);
     vm.register_function(b"htmlspecialchars", htmlspecialchars);
     vm.register_function(b"htmlentities", htmlentities);
     vm.register_function(b"html_entity_decode", html_entity_decode);
@@ -2522,6 +2525,58 @@ fn ctype_xdigit(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::False
         },
     )
+}
+
+// === Shell ===
+
+fn escapeshellarg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let mut result = Vec::new();
+    result.push(b'\'');
+    for &byte in s.as_bytes() {
+        if byte == b'\'' {
+            result.extend_from_slice(b"'\\''");
+        } else {
+            result.push(byte);
+        }
+    }
+    result.push(b'\'');
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn escapeshellcmd_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let mut result = Vec::new();
+    for &byte in s.as_bytes() {
+        if b"#&;`|*?~<>^()[]{}$\\\x0A\xFF\"".contains(&byte) {
+            result.push(b'\\');
+        }
+        result.push(byte);
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn parse_str_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let s_str = s.to_string_lossy();
+    let mut result = PhpArray::new();
+    for pair in s_str.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, val) = if let Some(eq_pos) = pair.find('=') {
+            (&pair[..eq_pos], &pair[eq_pos + 1..])
+        } else {
+            (pair, "")
+        };
+        result.set(
+            goro_core::array::ArrayKey::String(PhpString::from_string(key.to_string())),
+            Value::String(PhpString::from_string(val.to_string())),
+        );
+    }
+    // PHP 8 requires the second parameter (result variable)
+    // For now, just return the parsed array
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 // === URL ===
