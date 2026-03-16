@@ -56,6 +56,14 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"atanh", atanh_fn);
     vm.register_function(b"fdiv", fdiv_fn);
     vm.register_function(b"array_sum", array_sum);
+    vm.register_function(b"log1p", log1p_fn);
+    vm.register_function(b"expm1", expm1_fn);
+    vm.register_function(b"getrandmax", getrandmax_fn);
+    vm.register_function(b"mt_getrandmax", mt_getrandmax_fn);
+    vm.register_function(b"number_format", number_format_math);
+    vm.register_function(b"intval", intval_fn);
+    vm.register_function(b"floatval", floatval_fn);
+    vm.register_function(b"doubleval", floatval_fn);
 }
 
 fn abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -491,4 +499,91 @@ fn fdiv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args.first().unwrap_or(&Value::Null).to_double();
     let b = args.get(1).unwrap_or(&Value::Null).to_double();
     Ok(Value::Double(a / b))
+}
+
+fn log1p_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(
+        args.first().unwrap_or(&Value::Null).to_double().ln_1p(),
+    ))
+}
+
+fn expm1_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(
+        args.first().unwrap_or(&Value::Null).to_double().exp_m1(),
+    ))
+}
+
+fn getrandmax_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(2147483647))
+}
+
+fn mt_getrandmax_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(2147483647))
+}
+
+fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let num = args.first().unwrap_or(&Value::Null).to_double();
+    let decimals = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let dec_point = args
+        .get(2)
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| ".".to_string());
+    let thousands_sep = args
+        .get(3)
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| ",".to_string());
+
+    let formatted = format!("{:.prec$}", num, prec = decimals);
+    let parts: Vec<&str> = formatted.split('.').collect();
+    let int_part = parts[0];
+    let dec_part = parts.get(1).unwrap_or(&"");
+
+    // Add thousands separator
+    let negative = int_part.starts_with('-');
+    let digits: &str = if negative { &int_part[1..] } else { int_part };
+    let mut with_sep = String::new();
+    for (i, c) in digits.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 && !thousands_sep.is_empty() {
+            with_sep = format!("{}{}{}", c, thousands_sep, with_sep);
+        } else {
+            with_sep.insert(0, c);
+        }
+    }
+    if negative {
+        with_sep.insert(0, '-');
+    }
+
+    let result = if decimals > 0 {
+        format!("{}{}{}", with_sep, dec_point, dec_part)
+    } else {
+        with_sep
+    };
+
+    Ok(Value::String(goro_core::string::PhpString::from_string(
+        result,
+    )))
+}
+
+fn intval_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    let base = args.get(1).map(|v| v.to_long()).unwrap_or(10);
+    if base != 10 {
+        if let Value::String(s) = val {
+            let s = s.to_string_lossy();
+            let s = s.trim();
+            let result = i64::from_str_radix(
+                s.trim_start_matches("0x").trim_start_matches("0X"),
+                base as u32,
+            )
+            .unwrap_or(0);
+            return Ok(Value::Long(result));
+        }
+    }
+    Ok(Value::Long(val.to_long()))
+}
+
+fn floatval_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Double(
+        args.first().unwrap_or(&Value::Null).to_double(),
+    ))
 }
