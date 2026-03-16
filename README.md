@@ -13,6 +13,8 @@ Active development. Core language features, OOP, generators, exceptions, closure
 | Zend/tests (top-level) | 209 | 871 | 24.0% |
 | All tests (Zend+ext+standard) | 1075 | ~18615 | ~5.8% |
 
+Key ext/standard pass rates: strings 115/730, math 21/171, file 22/840, general 30/318, ctype 24/49.
+
 Best categories: match (54%), nullable_types (63%), temporary_cleaning (52%), switch (41%), inheritance (35%).
 
 *Test runner supports recursive directories, SKIPIF sections, EXPECTF pattern matching with backtracking, and timeout protection.*

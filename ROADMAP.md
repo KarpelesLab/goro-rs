@@ -10,7 +10,7 @@
 - [x] MD5 and SHA1 hash from scratch (no external deps)
 - [x] hash(), hash_algos(), hash_equals()
 - [x] parse_url() with full URL component parsing
-- [x] 20+ string functions (strrchr, stristr, strtok, strspn, etc.)
+- [x] 40+ string functions (strrchr, stristr, strtok, strspn, strcmp, pack/unpack, etc.)
 - [x] mb_* function stubs
 - [x] Complete ctype extension (5 new functions)
 - [x] is_scalar, is_countable, is_iterable, get_debug_type
@@ -18,6 +18,12 @@
 - [x] Math: log1p, expm1, number_format, intval, floatval
 - [x] ??= operator fix
 - [x] Test runner timeout optimization
+- [x] 100+ PHP constants (PHP_*, E_*, SORT_*, CASE_*, M_*, JSON_*, etc.)
+- [x] Filesystem functions (file_get_contents, filesize, getcwd, realpath, etc.)
+- [x] extension_loaded(), version_compare()
+- [x] pack()/unpack() binary data functions
+- [x] printf/vprintf output functions
+- [x] parse_str, escapeshellarg, http_build_query
 
 ### Completed Features
 
