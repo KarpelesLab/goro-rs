@@ -60,7 +60,7 @@ The single highest-impact improvement area. Many tests expect PHP's diagnostic o
 
 ### P2: OOP Completions (~50 tests)
 
-- [ ] **`__callStatic`** magic method
+- [x] **`__callStatic`** magic method
 - [ ] **`__isset` / `__unset`** magic methods
 - [ ] **`__debugInfo`** magic method
 - [ ] **Proper visibility enforcement** (protected/private access checks)
@@ -100,7 +100,7 @@ Functions needed by tests (ordered by test count):
 ### P5: String Operations (~15 tests)
 
 - [ ] **Bitwise operations on strings** (`$str & $str` produces string, not int)
-- [ ] **String increment** (`$str++` follows PHP rules: "a" -> "b", "z" -> "aa")
+- [x] **String increment** (`$str++` follows PHP rules: "a" -> "b", "z" -> "aa")
 - [ ] **Proper string offset** read/write with bounds checking
 
 ### P6: Generators & Fibers (~10 tests)
