@@ -236,8 +236,22 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
         }
-        Value::Object(_) | Value::Generator(_) => {
-            buf.extend_from_slice(b"Object"); // TODO: implement object print_r
+        Value::Object(obj) => {
+            let obj_borrow = obj.borrow();
+            let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+            let prefix = " ".repeat(indent);
+            buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
+            buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
+            for (name, value) in &obj_borrow.properties {
+                let name_str = String::from_utf8_lossy(name);
+                buf.extend_from_slice(format!("{}    [{}] => ", prefix, name_str).as_bytes());
+                print_r_value(value, buf, indent + 8);
+                buf.push(b'\n');
+            }
+            buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+        }
+        Value::Generator(_) => {
+            buf.extend_from_slice(b"Generator Object\n(\n)\n");
         }
         Value::Reference(r) => {
             print_r_value(&r.borrow(), buf, indent);
