@@ -6,3 +6,7 @@ Cargo.lock
 .idea/
 .vscode/
 .claude/
+*.ini
+*.tmp.php
+test.php
+gh12366.inc
