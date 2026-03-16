@@ -16,7 +16,7 @@ fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
-    if indent > 40 {
+    if indent > 20 {
         vm.write_output(b"  *RECURSION*\n");
         return;
     }
@@ -204,7 +204,7 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
-    if indent > 40 {
+    if indent > 20 {
         buf.extend_from_slice(b" *RECURSION*");
         return;
     }
