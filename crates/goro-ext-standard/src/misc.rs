@@ -1302,21 +1302,101 @@ fn shuffle_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn range_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let start = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let end = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    let step = args.get(2).map(|v| v.to_long()).unwrap_or(1).max(1);
+    let start_val = args.first().unwrap_or(&Value::Null);
+    let end_val = args.get(1).unwrap_or(&Value::Null);
+    let step_val = args.get(2);
+
+    // Character range
+    if let (Value::String(s1), Value::String(s2)) = (start_val, end_val) {
+        if s1.len() == 1 && s2.len() == 1 {
+            let start_c = s1.as_bytes()[0];
+            let end_c = s2.as_bytes()[0];
+            let step = step_val
+                .map(|v| v.to_long().unsigned_abs().max(1) as u8)
+                .unwrap_or(1);
+            let mut result = PhpArray::new();
+            if start_c <= end_c {
+                let mut c = start_c;
+                while c <= end_c {
+                    result.push(Value::String(PhpString::from_vec(vec![c])));
+                    if c.checked_add(step).is_none() {
+                        break;
+                    }
+                    c += step;
+                }
+            } else {
+                let mut c = start_c;
+                while c >= end_c {
+                    result.push(Value::String(PhpString::from_vec(vec![c])));
+                    if c < step || c - step < end_c {
+                        break;
+                    }
+                    c -= step;
+                }
+            }
+            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+        }
+    }
+
+    // Float range (if any argument is float or step is float)
+    let use_float = matches!(start_val, Value::Double(_))
+        || matches!(end_val, Value::Double(_))
+        || step_val.is_some_and(|v| matches!(v, Value::Double(_)));
+
+    if use_float {
+        let start = start_val.to_double();
+        let end = end_val.to_double();
+        let step = step_val
+            .map(|v| v.to_double().abs())
+            .unwrap_or(1.0)
+            .max(f64::EPSILON);
+        let mut result = PhpArray::new();
+        if start <= end {
+            let mut v = start;
+            while v <= end + f64::EPSILON {
+                result.push(Value::Double(v));
+                v += step;
+                if result.len() > 10000 {
+                    break;
+                }
+            }
+        } else {
+            let mut v = start;
+            while v >= end - f64::EPSILON {
+                result.push(Value::Double(v));
+                v -= step;
+                if result.len() > 10000 {
+                    break;
+                }
+            }
+        }
+        return Ok(Value::Array(Rc::new(RefCell::new(result))));
+    }
+
+    // Integer range
+    let start = start_val.to_long();
+    let end = end_val.to_long();
+    let step = step_val
+        .map(|v| v.to_long().unsigned_abs().max(1) as i64)
+        .unwrap_or(1);
     let mut result = PhpArray::new();
     if start <= end {
         let mut i = start;
         while i <= end {
             result.push(Value::Long(i));
-            i += step;
+            i = match i.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
     } else {
         let mut i = start;
         while i >= end {
             result.push(Value::Long(i));
-            i -= step;
+            i = match i.checked_sub(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
