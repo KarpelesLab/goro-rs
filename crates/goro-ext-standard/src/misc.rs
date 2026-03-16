@@ -91,6 +91,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"class_exists", class_exists);
     vm.register_function(b"get_class", get_class);
     vm.register_function(b"get_declared_classes", get_declared_classes);
+    vm.register_function(b"get_declared_traits", get_declared_traits_fn);
+    vm.register_function(b"get_declared_interfaces", get_declared_interfaces_fn);
     vm.register_function(b"property_exists", property_exists);
     vm.register_function(b"method_exists", method_exists);
     vm.register_function(b"is_object", is_object);
@@ -1535,8 +1537,34 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn get_class(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
-fn get_declared_classes(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn get_declared_classes(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    for (_, class) in &vm.classes {
+        if !class.is_interface && !class.is_trait {
+            result.push(Value::String(PhpString::from_vec(class.name.clone())));
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn get_declared_traits_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    for (_, class) in &vm.classes {
+        if class.is_trait {
+            result.push(Value::String(PhpString::from_vec(class.name.clone())));
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn get_declared_interfaces_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    for (_, class) in &vm.classes {
+        if class.is_interface {
+            result.push(Value::String(PhpString::from_vec(class.name.clone())));
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 fn property_exists(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_or_obj = args.first().unwrap_or(&Value::Null);
