@@ -12,9 +12,9 @@ Active development. Core language features, OOP, generators, exceptions, closure
 |---|---|---|---|
 | tests/lang | 50 | 213 | 23.5% |
 | tests/basic | 11 | 110 | 10.0% |
-| Zend/tests | 170 | 871 | 19.5% |
+| Zend/tests | 174 | 871 | 20.0% |
 | ext/standard (sampled) | ~40 | 400 | ~10.0% |
-| **Core (lang+Zend)** | **220** | **1084** | **20.3%** |
+| **Core (lang+Zend)** | **224** | **1084** | **20.7%** |
 
 *Zend/tests count includes EXPECTF pattern matching.*
 
