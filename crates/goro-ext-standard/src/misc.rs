@@ -62,6 +62,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_chunk", array_chunk);
     vm.register_function(b"array_pad", array_pad);
     vm.register_function(b"array_fill", array_fill);
+    vm.register_function(b"array_fill_keys", array_fill_keys);
+    vm.register_function(b"array_merge_recursive", array_merge_recursive);
     vm.register_function(b"array_diff", array_diff);
     vm.register_function(b"array_intersect", array_intersect);
     vm.register_function(b"sort", sort_fn);
@@ -338,15 +340,56 @@ fn func_get_args(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn func_get_arg(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
-fn function_exists(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name_lower: Vec<u8> = name
+        .as_bytes()
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    // "Class::method" is not a function
+    if name_lower.contains(&b':') {
+        return Ok(Value::False);
+    }
+    if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
 }
-fn is_callable(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     match val {
         Value::String(s) => {
-            // Check if function name exists (simplified)
-            Ok(Value::True) // Most string callables are valid
+            let name_lower: Vec<u8> = s
+                .as_bytes()
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            // Check for "Class::method" syntax
+            if let Some(pos) = name_lower.iter().position(|&b| b == b':') {
+                if pos + 1 < name_lower.len() && name_lower[pos + 1] == b':' {
+                    let class_name = &name_lower[..pos];
+                    let method_name = &name_lower[pos + 2..];
+                    if let Some(class) = vm.classes.get(class_name) {
+                        Ok(if class.get_method(method_name).is_some() {
+                            Value::True
+                        } else {
+                            Value::False
+                        })
+                    } else {
+                        Ok(Value::False)
+                    }
+                } else {
+                    Ok(Value::False)
+                }
+            } else if vm.functions.contains_key(&name_lower)
+                || vm.user_functions.contains_key(&name_lower)
+            {
+                Ok(Value::True)
+            } else {
+                Ok(Value::False)
+            }
         }
         Value::Object(_) => Ok(Value::True), // Objects with __invoke
         Value::Array(arr) => {
@@ -991,6 +1034,67 @@ fn array_fill(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for i in 0..num {
         result.set(goro_core::array::ArrayKey::Int(start + i), val.clone());
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn array_fill_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let keys = args.first().unwrap_or(&Value::Null);
+    let fill_val = args.get(1).cloned().unwrap_or(Value::Null);
+    let mut result = PhpArray::new();
+    if let Value::Array(arr) = keys {
+        let arr = arr.borrow();
+        for (_key, val) in arr.iter() {
+            let k = val.to_php_string();
+            result.set(goro_core::array::ArrayKey::String(k), fill_val.clone());
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn array_merge_recursive(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    for arg in args {
+        if let Value::Array(arr) = arg {
+            let arr = arr.borrow();
+            for (key, val) in arr.iter() {
+                match key {
+                    goro_core::array::ArrayKey::Int(_) => {
+                        result.push(val.clone());
+                    }
+                    goro_core::array::ArrayKey::String(s) => {
+                        if let Some(existing) = result.get_str(s.as_bytes()) {
+                            // Merge recursively: if both are arrays, recurse; else create array
+                            let merged = match (existing, val) {
+                                (Value::Array(a), Value::Array(b)) => {
+                                    let mut merged_arr = a.borrow().clone();
+                                    for (k, v) in b.borrow().iter() {
+                                        match k {
+                                            goro_core::array::ArrayKey::Int(_) => {
+                                                merged_arr.push(v.clone());
+                                            }
+                                            _ => {
+                                                merged_arr.set(k.clone(), v.clone());
+                                            }
+                                        }
+                                    }
+                                    Value::Array(Rc::new(RefCell::new(merged_arr)))
+                                }
+                                (existing_val, new_val) => {
+                                    let mut arr = PhpArray::new();
+                                    arr.push(existing_val.clone());
+                                    arr.push(new_val.clone());
+                                    Value::Array(Rc::new(RefCell::new(arr)))
+                                }
+                            };
+                            result.set(key.clone(), merged);
+                        } else {
+                            result.set(key.clone(), val.clone());
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }

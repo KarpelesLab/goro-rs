@@ -209,7 +209,10 @@ fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
     let (op_array, compiled_classes) = match compiler.compile(&program) {
         Ok(r) => r,
         Err(e) => {
-            let msg = format!("\nFatal error: {} in Unknown on line 0\n", e);
+            let msg = format!(
+                "\nFatal error: {} in Unknown on line {}\n",
+                e.message, e.line
+            );
             return Ok(msg.into_bytes());
         }
     };

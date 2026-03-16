@@ -68,8 +68,8 @@ impl Compiler {
     fn extract_break_continue_level(level_expr: &Option<Expr>) -> usize {
         match level_expr {
             Some(expr) => match &expr.kind {
-                ExprKind::Int(n) if *n >= 1 => *n as usize,
-                _ => 1,
+                ExprKind::Int(n) => *n as usize,
+                _ => 0, // Non-integer operand, will trigger error
             },
             None => 1,
         }
@@ -590,6 +590,25 @@ impl Compiler {
 
             StmtKind::Break(level_expr) => {
                 let level = Self::extract_break_continue_level(level_expr);
+                if level == 0 {
+                    return Err(CompileError {
+                        message: "'break' operator accepts only positive integers".into(),
+                        line: stmt.span.line,
+                    });
+                }
+                if self.loop_stack.is_empty() {
+                    return Err(CompileError {
+                        message: "'break' not in the 'loop' or 'switch' context".into(),
+                        line: stmt.span.line,
+                    });
+                }
+                let stack_len = self.loop_stack.len();
+                if level > stack_len {
+                    return Err(CompileError {
+                        message: format!("Cannot 'break' {} levels", level),
+                        line: stmt.span.line,
+                    });
+                }
                 let jmp = self.op_array.emit(Op {
                     opcode: OpCode::Jmp,
                     op1: OperandType::JmpTarget(0),
@@ -597,16 +616,32 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
-                let stack_len = self.loop_stack.len();
-                if level <= stack_len {
-                    let target_index = stack_len - level;
-                    self.loop_stack[target_index].break_jumps.push(jmp);
-                }
+                let target_index = stack_len - level;
+                self.loop_stack[target_index].break_jumps.push(jmp);
                 Ok(())
             }
 
             StmtKind::Continue(level_expr) => {
                 let level = Self::extract_break_continue_level(level_expr);
+                if level == 0 {
+                    return Err(CompileError {
+                        message: "'continue' operator accepts only positive integers".into(),
+                        line: stmt.span.line,
+                    });
+                }
+                if self.loop_stack.is_empty() {
+                    return Err(CompileError {
+                        message: "'continue' not in the 'loop' or 'switch' context".into(),
+                        line: stmt.span.line,
+                    });
+                }
+                let stack_len = self.loop_stack.len();
+                if level > stack_len {
+                    return Err(CompileError {
+                        message: format!("Cannot 'continue' {} levels", level),
+                        line: stmt.span.line,
+                    });
+                }
                 let jmp = self.op_array.emit(Op {
                     opcode: OpCode::Jmp,
                     op1: OperandType::JmpTarget(0),
@@ -614,11 +649,8 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
-                let stack_len = self.loop_stack.len();
-                if level <= stack_len {
-                    let target_index = stack_len - level;
-                    self.loop_stack[target_index].continue_jumps.push(jmp);
-                }
+                let target_index = stack_len - level;
+                self.loop_stack[target_index].continue_jumps.push(jmp);
                 Ok(())
             }
 
