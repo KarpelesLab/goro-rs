@@ -171,6 +171,9 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"http_response_code", http_response_code_fn);
     vm.register_function(b"spl_object_hash", spl_object_hash_fn);
     vm.register_function(b"spl_object_id", spl_object_id_fn);
+    vm.register_function(b"iterator_to_array", iterator_to_array_fn);
+    vm.register_function(b"iterator_count", iterator_count_fn);
+    vm.register_function(b"array_map", array_map);
 
     // Date
     vm.register_function(b"time", time_fn);
@@ -2697,4 +2700,26 @@ fn get_parent_class_real(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         return Ok(Value::String(PhpString::from_vec(parent.clone())));
     }
     Ok(Value::False)
+}
+
+fn iterator_to_array_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // For arrays, just return them. For generators, collect values.
+    match args.first() {
+        Some(Value::Array(arr)) => Ok(Value::Array(arr.clone())),
+        Some(Value::Generator(_)) => {
+            // TODO: iterate generator
+            Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+        }
+        _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    }
+}
+
+fn iterator_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    match args.first() {
+        Some(Value::Array(arr)) => Ok(Value::Long(arr.borrow().len() as i64)),
+        Some(Value::Generator(_)) => {
+            Ok(Value::Long(0)) // TODO
+        }
+        _ => Ok(Value::Long(0)),
+    }
 }
