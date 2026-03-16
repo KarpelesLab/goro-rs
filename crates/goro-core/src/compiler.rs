@@ -2111,6 +2111,19 @@ impl Compiler {
                     }
                 }
 
+                // If no default arm was present, throw UnhandledMatchError
+                let has_default = arms.iter().any(|a| a.conditions.is_none());
+                if !has_default {
+                    // Use MatchError opcode to throw UnhandledMatchError with the subject value
+                    self.op_array.emit(Op {
+                        opcode: OpCode::MatchError,
+                        op1: OperandType::Tmp(subj_tmp),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                }
+
                 let end = self.op_array.current_offset();
                 for jmp in end_jumps {
                     self.op_array.patch_jump(jmp, end);

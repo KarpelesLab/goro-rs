@@ -202,6 +202,8 @@ pub enum OpCode {
     ArrayUnset,
     /// Remove object property: op1 = object, op2 = property name
     PropertyUnset,
+    /// Throw UnhandledMatchError with the unmatched value: op1 = subject value
+    MatchError,
 }
 
 /// A compiled function / script

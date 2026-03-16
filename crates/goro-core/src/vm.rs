@@ -2176,6 +2176,56 @@ impl Vm {
                     }
                 }
 
+                OpCode::MatchError => {
+                    // Throw UnhandledMatchError with the unmatched value
+                    let subject = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let subject_repr = match &subject {
+                        Value::True => "true".to_string(),
+                        Value::False => "false".to_string(),
+                        Value::Null | Value::Undef => "null".to_string(),
+                        Value::Long(n) => n.to_string(),
+                        Value::Double(f) => format!("{}", f),
+                        Value::String(s) => format!("'{}'", s.to_string_lossy()),
+                        _ => subject.to_php_string().to_string_lossy(),
+                    };
+                    let msg = format!("Unhandled match case {}", subject_repr);
+
+                    let err_id = self.next_object_id;
+                    self.next_object_id += 1;
+                    let mut err_obj = PhpObject::new(b"UnhandledMatchError".to_vec(), err_id);
+                    err_obj.set_property(
+                        b"message".to_vec(),
+                        Value::String(PhpString::from_string(msg)),
+                    );
+
+                    let exc_val = Value::Object(Rc::new(RefCell::new(err_obj)));
+
+                    if let Some((catch_target, _finally_target, _exc_tmp)) =
+                        exception_handlers.pop()
+                    {
+                        self.current_exception = Some(exc_val);
+                        ip = catch_target as usize;
+                    } else {
+                        self.current_exception = Some(exc_val.clone());
+                        let msg = if let Value::Object(obj) = &exc_val {
+                            let obj = obj.borrow();
+                            let class = String::from_utf8_lossy(&obj.class_name).to_string();
+                            let message = obj.get_property(b"message");
+                            format!(
+                                "Uncaught {}: {}",
+                                class,
+                                message.to_php_string().to_string_lossy()
+                            )
+                        } else {
+                            "Uncaught UnhandledMatchError".to_string()
+                        };
+                        return Err(VmError {
+                            message: msg,
+                            line: op.line,
+                        });
+                    }
+                }
+
                 OpCode::LoadConst | OpCode::FastConcat => {
                     // TODO: implement
                 }
