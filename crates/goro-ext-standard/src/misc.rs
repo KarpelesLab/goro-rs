@@ -1636,8 +1636,115 @@ fn microtime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn date_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"2026-03-15")))
+fn date_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let format = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+    let timestamp = args.get(1).map(|v| v.to_long());
+
+    // Get current time or use provided timestamp
+    let secs = timestamp.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    });
+
+    // Simple date formatting - compute components from unix timestamp
+    // This is a simplified version, not handling timezones properly
+    let days_since_epoch = secs / 86400;
+    let time_of_day = ((secs % 86400) + 86400) % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Compute year/month/day from days since epoch (1970-01-01)
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+
+    let mut result = String::new();
+    let fmt_bytes = format.as_bytes();
+    let mut i = 0;
+    while i < fmt_bytes.len() {
+        let c = fmt_bytes[i];
+        if c == b'\\' && i + 1 < fmt_bytes.len() {
+            result.push(fmt_bytes[i + 1] as char);
+            i += 2;
+            continue;
+        }
+        match c {
+            b'Y' => result.push_str(&format!("{:04}", year)),
+            b'y' => result.push_str(&format!("{:02}", year % 100)),
+            b'm' => result.push_str(&format!("{:02}", month)),
+            b'n' => result.push_str(&format!("{}", month)),
+            b'd' => result.push_str(&format!("{:02}", day)),
+            b'j' => result.push_str(&format!("{}", day)),
+            b'H' => result.push_str(&format!("{:02}", hours)),
+            b'G' => result.push_str(&format!("{}", hours)),
+            b'i' => result.push_str(&format!("{:02}", minutes)),
+            b's' => result.push_str(&format!("{:02}", seconds)),
+            b'U' => result.push_str(&format!("{}", secs)),
+            b'N' => {
+                let dow = ((days_since_epoch % 7) + 4) % 7; // Monday=1
+                result.push_str(&format!("{}", if dow == 0 { 7 } else { dow }));
+            }
+            b'w' => {
+                let dow = ((days_since_epoch % 7) + 4) % 7;
+                result.push_str(&format!("{}", dow));
+            }
+            b'g' => {
+                let h12 = if hours == 0 {
+                    12
+                } else if hours > 12 {
+                    hours - 12
+                } else {
+                    hours
+                };
+                result.push_str(&format!("{}", h12));
+            }
+            b'A' => result.push_str(if hours < 12 { "AM" } else { "PM" }),
+            b'a' => result.push_str(if hours < 12 { "am" } else { "pm" }),
+            b't' => {
+                let days_in_month = match month {
+                    2 => {
+                        if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                            29
+                        } else {
+                            28
+                        }
+                    }
+                    4 | 6 | 9 | 11 => 30,
+                    _ => 31,
+                };
+                result.push_str(&format!("{}", days_in_month));
+            }
+            b'L' => {
+                let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+                result.push(if leap { '1' } else { '0' });
+            }
+            _ => result.push(c as char),
+        }
+        i += 1;
+    }
+
+    Ok(Value::String(PhpString::from_string(result)))
+}
+
+/// Convert days since epoch (1970-01-01) to (year, month, day)
+fn days_to_ymd(days: i64) -> (i64, u32, u32) {
+    // Civil date from day count algorithm
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as u32, d as u32)
 }
 fn mktime(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
