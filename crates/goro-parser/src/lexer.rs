@@ -1087,7 +1087,237 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        TokenKind::ConstantString(content)
+        if is_nowdoc {
+            TokenKind::ConstantString(content)
+        } else {
+            self.process_heredoc_interpolation(content)
+        }
+    }
+
+    /// Process heredoc content for variable interpolation and escape sequences,
+    /// producing the same token pattern as double-quoted strings.
+    fn process_heredoc_interpolation(&mut self, content: Vec<u8>) -> TokenKind {
+        let len = content.len();
+        let mut i = 0;
+        let mut result = Vec::new();
+
+        // Helper closure-like inline processing
+        loop {
+            if i >= len {
+                break;
+            }
+            let ch = content[i];
+            match ch {
+                b'\\' => {
+                    // Escape sequences (same as double-quoted strings)
+                    i += 1;
+                    if i >= len {
+                        result.push(b'\\');
+                        break;
+                    }
+                    match content[i] {
+                        b'n' => {
+                            result.push(b'\n');
+                            i += 1;
+                        }
+                        b'r' => {
+                            result.push(b'\r');
+                            i += 1;
+                        }
+                        b't' => {
+                            result.push(b'\t');
+                            i += 1;
+                        }
+                        b'v' => {
+                            result.push(0x0B);
+                            i += 1;
+                        }
+                        b'e' => {
+                            result.push(0x1B);
+                            i += 1;
+                        }
+                        b'f' => {
+                            result.push(0x0C);
+                            i += 1;
+                        }
+                        b'\\' => {
+                            result.push(b'\\');
+                            i += 1;
+                        }
+                        b'$' => {
+                            result.push(b'$');
+                            i += 1;
+                        }
+                        b'x' | b'X' => {
+                            i += 1;
+                            let mut hex = Vec::new();
+                            for _ in 0..2 {
+                                if i < len && content[i].is_ascii_hexdigit() {
+                                    hex.push(content[i]);
+                                    i += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !hex.is_empty() {
+                                let s: String = hex.iter().map(|&b| b as char).collect();
+                                result.push(u8::from_str_radix(&s, 16).unwrap_or(0));
+                            }
+                        }
+                        c if c.is_ascii_digit() && c < b'8' => {
+                            let mut oct = vec![c];
+                            i += 1;
+                            for _ in 0..2 {
+                                if i < len && content[i].is_ascii_digit() && content[i] < b'8' {
+                                    oct.push(content[i]);
+                                    i += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            let s: String = oct.iter().map(|&b| b as char).collect();
+                            result.push(u8::from_str_radix(&s, 8).unwrap_or(0));
+                        }
+                        other => {
+                            result.push(b'\\');
+                            result.push(other);
+                            i += 1;
+                        }
+                    }
+                }
+                b'$' if i + 1 < len
+                    && (content[i + 1].is_ascii_alphabetic() || content[i + 1] == b'_') =>
+                {
+                    // Variable interpolation
+                    self.pending.push(Token::new(
+                        TokenKind::InterpolatedStringPart(result.clone()),
+                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                    ));
+                    result.clear();
+                    i += 1; // skip $
+
+                    // Scan variable name
+                    let var_start = i;
+                    while i < len
+                        && (content[i].is_ascii_alphanumeric()
+                            || content[i] == b'_'
+                            || content[i] >= 0x80)
+                    {
+                        i += 1;
+                    }
+                    let var_name = content[var_start..i].to_vec();
+                    self.pending.push(Token::new(
+                        TokenKind::Variable(var_name),
+                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                    ));
+
+                    // Check for ->property access
+                    if i + 1 < len && content[i] == b'-' && content[i + 1] == b'>' {
+                        i += 2; // skip ->
+                        self.pending.push(Token::new(
+                            TokenKind::Arrow,
+                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                        ));
+                        if i < len && (content[i].is_ascii_alphabetic() || content[i] == b'_') {
+                            let prop_start = i;
+                            while i < len
+                                && (content[i].is_ascii_alphanumeric()
+                                    || content[i] == b'_'
+                                    || content[i] >= 0x80)
+                            {
+                                i += 1;
+                            }
+                            let prop_name = content[prop_start..i].to_vec();
+                            self.pending.push(Token::new(
+                                TokenKind::Identifier(prop_name),
+                                Span::new(self.pos as u32, self.pos as u32, self.line),
+                            ));
+                        }
+                    }
+                    // Check for [index] access
+                    else if i < len && content[i] == b'[' {
+                        i += 1; // skip [
+                        self.pending.push(Token::new(
+                            TokenKind::OpenBracket,
+                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                        ));
+                        // Scan index: could be number, variable, or bare identifier
+                        if i < len {
+                            match content[i] {
+                                b'0'..=b'9' => {
+                                    let num_start = i;
+                                    while i < len && content[i].is_ascii_digit() {
+                                        i += 1;
+                                    }
+                                    let s: String =
+                                        content[num_start..i].iter().map(|&b| b as char).collect();
+                                    let n = s.parse::<i64>().unwrap_or(0);
+                                    self.pending.push(Token::new(
+                                        TokenKind::LongNumber(n),
+                                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                                    ));
+                                }
+                                b'$' => {
+                                    i += 1; // skip $
+                                    let idx_start = i;
+                                    while i < len
+                                        && (content[i].is_ascii_alphanumeric()
+                                            || content[i] == b'_'
+                                            || content[i] >= 0x80)
+                                    {
+                                        i += 1;
+                                    }
+                                    let idx_var = content[idx_start..i].to_vec();
+                                    self.pending.push(Token::new(
+                                        TokenKind::Variable(idx_var),
+                                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                                    ));
+                                }
+                                c if c.is_ascii_alphabetic() || c == b'_' => {
+                                    let key_start = i;
+                                    while i < len
+                                        && (content[i].is_ascii_alphanumeric()
+                                            || content[i] == b'_'
+                                            || content[i] >= 0x80)
+                                    {
+                                        i += 1;
+                                    }
+                                    let key = content[key_start..i].to_vec();
+                                    self.pending.push(Token::new(
+                                        TokenKind::Identifier(key),
+                                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                        if i < len && content[i] == b']' {
+                            i += 1;
+                            self.pending.push(Token::new(
+                                TokenKind::CloseBracket,
+                                Span::new(self.pos as u32, self.pos as u32, self.line),
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    result.push(ch);
+                    i += 1;
+                }
+            }
+        }
+
+        // If we emitted interpolation tokens, this is the end part
+        if !self.pending.is_empty() {
+            self.pending.push(Token::new(
+                TokenKind::InterpolatedStringEnd(result),
+                Span::new(self.pos as u32, self.pos as u32, self.line),
+            ));
+            let first = self.pending.remove(0);
+            return first.kind;
+        }
+
+        TokenKind::ConstantString(result)
     }
 
     /// Tokenize the entire source into a vector

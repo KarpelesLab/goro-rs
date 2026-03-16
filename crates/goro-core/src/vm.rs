@@ -1948,6 +1948,8 @@ impl Vm {
                                         break;
                                     }
                                 } else {
+                                    // Class not in table - check built-in hierarchy
+                                    found = is_builtin_subclass(&current, &class_lower);
                                     break;
                                 }
                             }
@@ -3252,4 +3254,69 @@ impl Default for Vm {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Check if a built-in class is a subclass of another built-in class
+/// PHP exception hierarchy:
+///   Throwable
+///   ├─ Error
+///   │  ├─ TypeError
+///   │  ├─ ValueError
+///   │  ├─ ArithmeticError
+///   │  │  └─ DivisionByZeroError
+///   │  ├─ ArgumentCountError
+///   │  ├─ RangeError
+///   │  └─ UnhandledMatchError
+///   └─ Exception
+///      ├─ RuntimeException
+///      │  ├─ OverflowException
+///      │  └─ UnderflowException
+///      ├─ LogicException
+///      │  ├─ InvalidArgumentException
+///      │  ├─ BadMethodCallException
+///      │  │  └─ BadFunctionCallException
+///      │  ├─ DomainException
+///      │  └─ UnexpectedValueException
+///      └─ ClosedGeneratorException
+fn is_builtin_subclass(child: &[u8], parent: &[u8]) -> bool {
+    // Get the parent chain for the child class
+    let parents = builtin_parent_chain(child);
+    parents.iter().any(|p| p == parent)
+}
+
+fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
+    let mut chain = Vec::new();
+    let mut current = class.to_vec();
+    loop {
+        let parent = match current.as_slice() {
+            // Error hierarchy
+            b"typeerror"
+            | b"valueerror"
+            | b"argumentcounterror"
+            | b"rangeerror"
+            | b"unhandledmatcherror" => Some(b"error".to_vec()),
+            b"arithmeticerror" => Some(b"error".to_vec()),
+            b"divisionbyzeroerror" => Some(b"arithmeticerror".to_vec()),
+            b"error" => Some(b"throwable".to_vec()),
+            // Exception hierarchy
+            b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" => {
+                Some(b"exception".to_vec())
+            }
+            b"overflowexception" | b"underflowexception" => Some(b"runtimeexception".to_vec()),
+            b"invalidargumentexception"
+            | b"badmethodcallexception"
+            | b"domainexception"
+            | b"unexpectedvalueexception" => Some(b"logicexception".to_vec()),
+            b"badfunctioncallexception" => Some(b"badmethodcallexception".to_vec()),
+            b"exception" => Some(b"throwable".to_vec()),
+            _ => None,
+        };
+        if let Some(p) = parent {
+            chain.push(p.clone());
+            current = p;
+        } else {
+            break;
+        }
+    }
+    chain
 }

@@ -940,14 +940,79 @@ impl Compiler {
                 let catch_start = self.op_array.current_offset();
                 let mut end_of_catch_jumps = Vec::new();
 
+                // Store exception in a temp for type checking
+                let exc_tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::CatchException,
+                    op1: OperandType::Tmp(exc_tmp),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+
                 for catch in catches.iter() {
+                    // Type check: skip this catch if exception doesn't match
+                    let mut next_catch_jumps = Vec::new();
+
+                    if !catch.types.is_empty()
+                        && !(catch.types.len() == 1
+                            && catch.types[0].len() == 1
+                            && catch.types[0][0].eq_ignore_ascii_case(b"Throwable"))
+                    {
+                        // Check if exception matches any of the catch types
+                        let mut match_jumps = Vec::new();
+                        for type_parts in &catch.types {
+                            // Join qualified name parts
+                            let type_name: Vec<u8> = if type_parts.len() == 1 {
+                                type_parts[0].clone()
+                            } else {
+                                type_parts.join(&b'\\')
+                            };
+                            let type_idx = self
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_vec(type_name)));
+                            let check_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::TypeCheck,
+                                op1: OperandType::Tmp(exc_tmp),
+                                op2: OperandType::Const(type_idx),
+                                result: OperandType::Tmp(check_tmp),
+                                line: stmt.span.line,
+                            });
+                            let match_jmp = self.op_array.emit(Op {
+                                opcode: OpCode::JmpNz,
+                                op1: OperandType::Tmp(check_tmp),
+                                op2: OperandType::JmpTarget(0),
+                                result: OperandType::Unused,
+                                line: stmt.span.line,
+                            });
+                            match_jumps.push(match_jmp);
+                        }
+
+                        // None matched - jump to next catch
+                        let skip_jmp = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                        next_catch_jumps.push(skip_jmp);
+
+                        // Patch match jumps to here (catch body start)
+                        let body_start = self.op_array.current_offset();
+                        for jmp in match_jumps {
+                            self.op_array.patch_jump(jmp, body_start);
+                        }
+                    }
+
                     // Assign exception to variable if specified
                     if let Some(var_name) = &catch.variable {
                         let cv = self.op_array.get_or_create_cv(var_name);
                         self.op_array.emit(Op {
-                            opcode: OpCode::CatchException,
+                            opcode: OpCode::Assign,
                             op1: OperandType::Cv(cv),
-                            op2: OperandType::Unused,
+                            op2: OperandType::Tmp(exc_tmp),
                             result: OperandType::Unused,
                             line: stmt.span.line,
                         });
@@ -966,7 +1031,22 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                     end_of_catch_jumps.push(jmp);
+
+                    // Patch next-catch jumps
+                    let next_catch_start = self.op_array.current_offset();
+                    for jmp in next_catch_jumps {
+                        self.op_array.patch_jump(jmp, next_catch_start);
+                    }
                 }
+
+                // If no catch matched, re-throw the exception
+                self.op_array.emit(Op {
+                    opcode: OpCode::Throw,
+                    op1: OperandType::Tmp(exc_tmp),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
 
                 // Patch TryBegin to point to catch start
                 self.op_array.ops[try_begin as usize].op1 = OperandType::JmpTarget(catch_start);
