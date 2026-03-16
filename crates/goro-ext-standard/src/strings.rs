@@ -76,6 +76,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"stripos", stripos);
     vm.register_function(b"strripos", strripos);
     vm.register_function(b"substr_replace", substr_replace);
+    vm.register_function(b"pack", pack_fn);
+    vm.register_function(b"unpack", unpack_fn);
     vm.register_function(b"mb_detect_encoding", mb_detect_encoding);
     vm.register_function(b"mb_internal_encoding", mb_internal_encoding);
     vm.register_function(b"mb_strlen", mb_strlen);
@@ -1786,4 +1788,367 @@ fn str_increment(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         result.insert(0, prefix);
     }
     Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let format = args.first().unwrap_or(&Value::Null).to_php_string();
+    let fmt = format.as_bytes();
+    let mut result = Vec::new();
+    let mut arg_idx = 1;
+    let mut i = 0;
+
+    while i < fmt.len() {
+        let code = fmt[i];
+        i += 1;
+
+        // Parse optional repeat count
+        let mut count = 0u32;
+        let mut has_count = false;
+        if code == b'a' || code == b'A' || code == b'H' || code == b'h' {
+            // For string codes, count means padding length
+            while i < fmt.len() && fmt[i].is_ascii_digit() {
+                count = count * 10 + (fmt[i] - b'0') as u32;
+                has_count = true;
+                i += 1;
+            }
+            if !has_count && code != b'*' as u8 {
+                count = 1;
+            }
+        } else if i < fmt.len() && fmt[i] == b'*' {
+            count = u32::MAX; // Repeat for all remaining args
+            i += 1;
+        } else {
+            while i < fmt.len() && fmt[i].is_ascii_digit() {
+                count = count * 10 + (fmt[i] - b'0') as u32;
+                has_count = true;
+                i += 1;
+            }
+            if !has_count {
+                count = 1;
+            }
+        }
+
+        let repeat = if count == u32::MAX {
+            args.len() - arg_idx
+        } else {
+            count as usize
+        };
+
+        match code {
+            b'C' | b'c' => {
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0);
+                    result.push(v as u8);
+                    arg_idx += 1;
+                }
+            }
+            b'S' | b'v' => {
+                // unsigned short (16-bit LE)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u16;
+                    result.extend_from_slice(&v.to_le_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'n' => {
+                // unsigned short (16-bit BE)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u16;
+                    result.extend_from_slice(&v.to_be_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'L' | b'V' => {
+                // unsigned long (32-bit LE)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u32;
+                    result.extend_from_slice(&v.to_le_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'N' => {
+                // unsigned long (32-bit BE)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u32;
+                    result.extend_from_slice(&v.to_be_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'Q' | b'P' => {
+                // unsigned long long (64-bit LE)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u64;
+                    result.extend_from_slice(&v.to_le_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'J' => {
+                // unsigned long long (64-bit BE)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u64;
+                    result.extend_from_slice(&v.to_be_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'f' | b'g' => {
+                // float (LE)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0) as f32;
+                    result.extend_from_slice(&v.to_le_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'd' | b'e' => {
+                // double (LE)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0);
+                    result.extend_from_slice(&v.to_le_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'a' | b'A' => {
+                // NUL-padded / space-padded string
+                let s = args
+                    .get(arg_idx)
+                    .map(|v| v.to_php_string())
+                    .unwrap_or_else(PhpString::empty);
+                arg_idx += 1;
+                let pad = if code == b'A' { b' ' } else { b'\0' };
+                let len = count as usize;
+                if s.len() >= len {
+                    result.extend_from_slice(&s.as_bytes()[..len]);
+                } else {
+                    result.extend_from_slice(s.as_bytes());
+                    for _ in 0..(len - s.len()) {
+                        result.push(pad);
+                    }
+                }
+            }
+            b'H' | b'h' => {
+                // Hex string
+                let s = args
+                    .get(arg_idx)
+                    .map(|v| v.to_php_string())
+                    .unwrap_or_else(PhpString::empty);
+                arg_idx += 1;
+                let hex = s.as_bytes();
+                let nibbles = (count as usize).min(hex.len());
+                if code == b'H' {
+                    // High nibble first
+                    for j in (0..nibbles).step_by(2) {
+                        let hi = hex_val(hex.get(j).copied().unwrap_or(b'0'));
+                        let lo = hex_val(hex.get(j + 1).copied().unwrap_or(b'0'));
+                        result.push(hi * 16 + lo);
+                    }
+                } else {
+                    // Low nibble first
+                    for j in (0..nibbles).step_by(2) {
+                        let lo = hex_val(hex.get(j).copied().unwrap_or(b'0'));
+                        let hi = hex_val(hex.get(j + 1).copied().unwrap_or(b'0'));
+                        result.push(hi * 16 + lo);
+                    }
+                }
+            }
+            b'x' => {
+                // NUL byte
+                for _ in 0..repeat {
+                    result.push(0);
+                }
+            }
+            b'Z' => {
+                // NUL-padded string
+                let s = args
+                    .get(arg_idx)
+                    .map(|v| v.to_php_string())
+                    .unwrap_or_else(PhpString::empty);
+                arg_idx += 1;
+                let len = count as usize;
+                if s.len() >= len {
+                    result.extend_from_slice(&s.as_bytes()[..len.saturating_sub(1)]);
+                    result.push(0);
+                } else {
+                    result.extend_from_slice(s.as_bytes());
+                    for _ in 0..(len - s.len()) {
+                        result.push(0);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn hex_val(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => 0,
+    }
+}
+
+fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::array::{ArrayKey, PhpArray};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let format = args.first().unwrap_or(&Value::Null).to_php_string();
+    let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let bytes = &data.as_bytes()[offset.min(data.len())..];
+    let fmt = format.as_bytes();
+    let mut result = PhpArray::new();
+    let mut pos = 0;
+    let mut i = 0;
+    let mut field_num = 1u32;
+
+    while i < fmt.len() {
+        let code = fmt[i];
+        i += 1;
+
+        // Parse count
+        let mut count = 1u32;
+        if i < fmt.len() && fmt[i] == b'*' {
+            count = u32::MAX;
+            i += 1;
+        } else {
+            let mut has_digits = false;
+            let mut n = 0u32;
+            while i < fmt.len() && fmt[i].is_ascii_digit() {
+                n = n * 10 + (fmt[i] - b'0') as u32;
+                has_digits = true;
+                i += 1;
+            }
+            if has_digits {
+                count = n;
+            }
+        }
+
+        // Parse optional name
+        let name = if i < fmt.len() && fmt[i] != b'/' {
+            let start = i;
+            while i < fmt.len() && fmt[i] != b'/' {
+                i += 1;
+            }
+            Some(String::from_utf8_lossy(&fmt[start..i]).to_string())
+        } else {
+            None
+        };
+        if i < fmt.len() && fmt[i] == b'/' {
+            i += 1;
+        }
+
+        match code {
+            b'C' | b'c' => {
+                let repeat = if count == u32::MAX {
+                    bytes.len() - pos
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos < bytes.len() {
+                        let v = if code == b'c' {
+                            bytes[pos] as i8 as i64
+                        } else {
+                            bytes[pos] as i64
+                        };
+                        let k = if let Some(ref n) = name {
+                            if count > 1 || count == u32::MAX {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 1;
+                    }
+                }
+            }
+            b'n' => {
+                for j in 0..count.min((bytes.len() - pos) as u32 / 2) {
+                    if pos + 2 <= bytes.len() {
+                        let v = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as i64;
+                        let k = name
+                            .as_ref()
+                            .map(|n| {
+                                ArrayKey::String(PhpString::from_string(if count > 1 {
+                                    format!("{}{}", n, j + 1)
+                                } else {
+                                    n.clone()
+                                }))
+                            })
+                            .unwrap_or(ArrayKey::Int(field_num as i64));
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 2;
+                    }
+                }
+            }
+            b'N' => {
+                for j in 0..count.min((bytes.len() - pos) as u32 / 4) {
+                    if pos + 4 <= bytes.len() {
+                        let v = u32::from_be_bytes([
+                            bytes[pos],
+                            bytes[pos + 1],
+                            bytes[pos + 2],
+                            bytes[pos + 3],
+                        ]) as i64;
+                        let k = name
+                            .as_ref()
+                            .map(|n| {
+                                ArrayKey::String(PhpString::from_string(if count > 1 {
+                                    format!("{}{}", n, j + 1)
+                                } else {
+                                    n.clone()
+                                }))
+                            })
+                            .unwrap_or(ArrayKey::Int(field_num as i64));
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 4;
+                    }
+                }
+            }
+            b'a' | b'A' => {
+                let len = if count == u32::MAX {
+                    bytes.len() - pos
+                } else {
+                    count as usize
+                };
+                let end = (pos + len).min(bytes.len());
+                let mut s = bytes[pos..end].to_vec();
+                if code == b'A' {
+                    while s.last() == Some(&b' ') || s.last() == Some(&0) {
+                        s.pop();
+                    }
+                }
+                let k = name
+                    .as_ref()
+                    .map(|n| ArrayKey::String(PhpString::from_string(n.clone())))
+                    .unwrap_or(ArrayKey::Int(field_num as i64));
+                result.set(k, Value::String(PhpString::from_vec(s)));
+                field_num += 1;
+                pos = end;
+            }
+            _ => {
+                // Skip unknown format codes
+                let size = match code {
+                    b'S' | b'v' => 2,
+                    b'L' | b'V' => 4,
+                    b'Q' | b'P' | b'J' => 8,
+                    b'f' | b'g' => 4,
+                    b'd' | b'e' => 8,
+                    _ => 1,
+                };
+                pos += size * count.min(1) as usize;
+            }
+        }
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
