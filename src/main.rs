@@ -124,10 +124,17 @@ fn run_code(source: &[u8]) {
                     let class = String::from_utf8_lossy(&obj.class_name);
                     let msg = obj.get_property(b"message");
                     let msg_str = msg.to_php_string().to_string_lossy();
-                    let fatal = format!(
-                        "\nFatal error: Uncaught {}: {} in Unknown:0\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line 0\n",
-                        class, msg_str
-                    );
+                    let fatal = if msg_str.is_empty() {
+                        format!(
+                            "\nFatal error: Uncaught {} in Unknown:0\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line 0\n",
+                            class
+                        )
+                    } else {
+                        format!(
+                            "\nFatal error: Uncaught {}: {} in Unknown:0\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line 0\n",
+                            class, msg_str
+                        )
+                    };
                     handle.write_all(fatal.as_bytes()).ok();
                 } else {
                     write!(handle, "\nFatal error: {}\n", e).ok();

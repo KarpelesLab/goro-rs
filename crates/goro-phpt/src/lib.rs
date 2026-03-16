@@ -237,10 +237,17 @@ fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
                     let class = String::from_utf8_lossy(&obj.class_name);
                     let msg = obj.get_property(b"message");
                     let msg_str = msg.to_php_string().to_string_lossy();
-                    let fatal = format!(
-                        "\nFatal error: Uncaught {}: {} in Unknown:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line {}",
-                        class, msg_str, e.line, e.line
-                    );
+                    let fatal = if msg_str.is_empty() {
+                        format!(
+                            "\nFatal error: Uncaught {} in Unknown:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line {}",
+                            class, e.line, e.line
+                        )
+                    } else {
+                        format!(
+                            "\nFatal error: Uncaught {}: {} in Unknown:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line {}",
+                            class, msg_str, e.line, e.line
+                        )
+                    };
                     output.extend_from_slice(fatal.as_bytes());
                 } else {
                     let fatal =
