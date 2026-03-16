@@ -133,6 +133,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"get_called_class", get_called_class_fn);
     vm.register_function(b"get_defined_vars", get_defined_vars_fn);
     vm.register_function(b"get_defined_functions", get_defined_functions_fn);
+    vm.register_function(b"get_defined_constants", get_defined_constants_fn);
+    vm.register_function(b"get_class_vars", get_class_vars_fn);
     vm.register_function(b"array_first", array_first_fn);
     vm.register_function(b"array_last", array_last_fn);
     vm.register_function(b"array_key_first", array_key_first_fn);
@@ -2826,4 +2828,52 @@ fn iterator_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         _ => Ok(Value::Long(0)),
     }
+}
+
+fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let categorize = args.first().map(|v| v.is_truthy()).unwrap_or(false);
+    let mut result = PhpArray::new();
+    if categorize {
+        // Return categorized array
+        let mut user = PhpArray::new();
+        for (name, val) in &vm.constants {
+            user.set(
+                goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
+                val.clone(),
+            );
+        }
+        result.set(
+            goro_core::array::ArrayKey::String(PhpString::from_bytes(b"user")),
+            Value::Array(Rc::new(RefCell::new(user))),
+        );
+    } else {
+        for (name, val) in &vm.constants {
+            result.set(
+                goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
+                val.clone(),
+            );
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let class_name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name_lower: Vec<u8> = class_name
+        .as_bytes()
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    let mut result = PhpArray::new();
+    if let Some(class) = vm.classes.get(&name_lower) {
+        for prop in &class.properties {
+            if !prop.is_static {
+                result.set(
+                    goro_core::array::ArrayKey::String(PhpString::from_vec(prop.name.clone())),
+                    prop.default.clone(),
+                );
+            }
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
