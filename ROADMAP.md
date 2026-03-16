@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Test Suite**: 197/871 (22.6%) top-level, 726 total across all subdirectories
+**Test Suite**: 197/871 (22.6%) top-level, 736 total across all subdirectories
 
 ### Completed Features
 
