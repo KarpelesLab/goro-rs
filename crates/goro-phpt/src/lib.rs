@@ -17,9 +17,52 @@ impl PhptTest {
         let mut current_section: Option<String> = None;
         let mut current_content = String::new();
 
+        let valid_sections = [
+            "TEST",
+            "FILE",
+            "EXPECT",
+            "EXPECTF",
+            "EXPECTREGEX",
+            "SKIPIF",
+            "INI",
+            "ARGS",
+            "ENV",
+            "STDIN",
+            "POST",
+            "POST_RAW",
+            "PUT",
+            "GET",
+            "COOKIE",
+            "HEADERS",
+            "CLEAN",
+            "CREDITS",
+            "DESCRIPTION",
+            "EXTENSIONS",
+            "CONFLICTS",
+            "XFAIL",
+            "XLEAK",
+            "CAPTURE_STDIO",
+            "FILE_EXTERNAL",
+            "EXPECT_EXTERNAL",
+            "EXPECTF_EXTERNAL",
+            "EXPECTHEADERS",
+            "CGI",
+            "PHPDBG",
+        ];
         for line in content.lines() {
             if line.starts_with("--") && line.ends_with("--") && line.len() > 4 {
                 let section_name = &line[2..line.len() - 2];
+                // Only recognize valid PHPT section names
+                if !valid_sections.contains(&section_name) {
+                    // Not a section header, treat as content
+                    if current_section.is_some() {
+                        if !current_content.is_empty() {
+                            current_content.push('\n');
+                        }
+                        current_content.push_str(line);
+                    }
+                    continue;
+                }
                 // Save the previous section
                 if let Some(ref sec) = current_section {
                     sections.insert(sec.clone(), current_content.clone());
