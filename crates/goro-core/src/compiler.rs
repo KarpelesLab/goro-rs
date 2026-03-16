@@ -789,16 +789,48 @@ impl Compiler {
 
             StmtKind::Unset(exprs) => {
                 for expr in exprs {
-                    let operand = self.compile_expr(expr)?;
-                    // Set variable to null
-                    let null_idx = self.op_array.add_literal(Value::Null);
-                    self.op_array.emit(Op {
-                        opcode: OpCode::Assign,
-                        op1: operand,
-                        op2: OperandType::Const(null_idx),
-                        result: OperandType::Unused,
-                        line: stmt.span.line,
-                    });
+                    match &expr.kind {
+                        ExprKind::ArrayAccess { array, index } => {
+                            // unset($arr[$key]) - remove element from array
+                            let arr_operand = self.compile_expr(array)?;
+                            if let Some(idx_expr) = index {
+                                let idx_operand = self.compile_expr(idx_expr)?;
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArrayUnset,
+                                    op1: arr_operand,
+                                    op2: idx_operand,
+                                    result: OperandType::Unused,
+                                    line: stmt.span.line,
+                                });
+                            }
+                        }
+                        ExprKind::PropertyAccess {
+                            object, property, ..
+                        } => {
+                            // unset($obj->prop) - remove property
+                            let obj_operand = self.compile_expr(object)?;
+                            let prop_operand = self.compile_expr(property)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::PropertyUnset,
+                                op1: obj_operand,
+                                op2: prop_operand,
+                                result: OperandType::Unused,
+                                line: stmt.span.line,
+                            });
+                        }
+                        _ => {
+                            // unset($var) - set variable to Undef
+                            let operand = self.compile_expr(expr)?;
+                            let undef_idx = self.op_array.add_literal(Value::Undef);
+                            self.op_array.emit(Op {
+                                opcode: OpCode::Assign,
+                                op1: operand,
+                                op2: OperandType::Const(undef_idx),
+                                result: OperandType::Unused,
+                                line: stmt.span.line,
+                            });
+                        }
+                    }
                 }
                 Ok(())
             }

@@ -325,6 +325,8 @@ impl Vm {
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
         let mut foreach_positions: HashMap<u32, usize> = HashMap::new();
+        // Snapshot of array keys at foreach init (for stable iteration)
+        let mut foreach_keys: HashMap<u32, Vec<ArrayKey>> = HashMap::new();
         // Generator key storage for foreach (saved before advancing to next yield)
         let mut foreach_gen_keys: HashMap<u32, Value> = HashMap::new();
         // Maps CV index -> static var key (for saving back on write)
@@ -1622,7 +1624,7 @@ impl Vm {
                             &static_cv_keys,
                         );
                     } else {
-                        // Store array in the iterator tmp slot
+                        // Store value in the iterator tmp slot
                         self.write_operand(
                             &op.result,
                             arr_val,
@@ -1631,12 +1633,22 @@ impl Vm {
                             &static_cv_keys,
                         );
                     }
-                    // Reset iteration position
+                    // Reset iteration position and snapshot keys
                     let iter_idx = match op.result {
                         OperandType::Tmp(idx) => idx,
                         _ => 0,
                     };
                     foreach_positions.insert(iter_idx, 0usize);
+                    // Snapshot array keys for stable iteration
+                    let stored = match &op.result {
+                        OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned(),
+                        OperandType::Cv(idx) => cvs.get(*idx as usize).cloned(),
+                        _ => None,
+                    };
+                    if let Some(Value::Array(arr)) = stored {
+                        let keys: Vec<ArrayKey> = arr.borrow().keys().cloned().collect();
+                        foreach_keys.insert(iter_idx, keys);
+                    }
                 }
 
                 OpCode::ForeachNext => {
@@ -1683,23 +1695,52 @@ impl Vm {
                             foreach_positions.insert(iter_idx, pos + 1);
                         }
                     } else if let Value::Array(arr) = &arr_val {
-                        let arr_borrow = arr.borrow();
-                        let entries: Vec<_> = arr_borrow.iter().collect();
-                        if pos >= entries.len() {
-                            // Done - jump to end
+                        // Use snapshotted keys for stable iteration
+                        let keys = foreach_keys.get(&iter_idx);
+                        let done = if let Some(keys) = keys {
+                            // Find next valid key
+                            let arr_borrow = arr.borrow();
+                            let mut found = false;
+                            let mut next_pos = pos;
+                            while next_pos < keys.len() {
+                                if let Some(value) = arr_borrow.get(&keys[next_pos]) {
+                                    self.write_operand(
+                                        &op.result,
+                                        value.clone(),
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    foreach_positions.insert(iter_idx, next_pos + 1);
+                                    found = true;
+                                    break;
+                                }
+                                next_pos += 1;
+                            }
+                            !found
+                        } else {
+                            // Fallback: direct position-based iteration
+                            let arr_borrow = arr.borrow();
+                            let entries: Vec<_> = arr_borrow.iter().collect();
+                            if pos >= entries.len() {
+                                true
+                            } else {
+                                let (_, value) = entries[pos];
+                                self.write_operand(
+                                    &op.result,
+                                    value.clone(),
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                foreach_positions.insert(iter_idx, pos + 1);
+                                false
+                            }
+                        };
+                        if done {
                             if let OperandType::JmpTarget(target) = op.op2 {
                                 ip = target as usize;
                             }
-                        } else {
-                            let (_, value) = entries[pos];
-                            self.write_operand(
-                                &op.result,
-                                value.clone(),
-                                &mut cvs,
-                                &mut tmps,
-                                &static_cv_keys,
-                            );
-                            foreach_positions.insert(iter_idx, pos + 1);
                         }
                     } else {
                         // Not an array or generator - jump to end
@@ -1730,25 +1771,28 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
-                    } else if let Value::Array(arr) = &arr_val {
-                        let arr_borrow = arr.borrow();
-                        let entries: Vec<_> = arr_borrow.iter().collect();
+                    } else if let Value::Array(_) = &arr_val {
                         // pos was already incremented by ForeachNext, so use pos - 1
                         let actual_pos = pos.saturating_sub(1);
-                        if actual_pos < entries.len() {
-                            let (key, _) = entries[actual_pos];
-                            let key_val = match key {
-                                ArrayKey::Int(n) => Value::Long(*n),
-                                ArrayKey::String(s) => Value::String(s.clone()),
-                            };
-                            self.write_operand(
-                                &op.result,
-                                key_val,
-                                &mut cvs,
-                                &mut tmps,
-                                &static_cv_keys,
-                            );
-                        }
+                        let key_val = if let Some(keys) = foreach_keys.get(&iter_idx) {
+                            if actual_pos < keys.len() {
+                                match &keys[actual_pos] {
+                                    ArrayKey::Int(n) => Value::Long(*n),
+                                    ArrayKey::String(s) => Value::String(s.clone()),
+                                }
+                            } else {
+                                Value::Null
+                            }
+                        } else {
+                            Value::Long(actual_pos as i64)
+                        };
+                        self.write_operand(
+                            &op.result,
+                            key_val,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
                     }
                 }
 
@@ -2096,6 +2140,40 @@ impl Vm {
                         other => other.clone(),
                     };
                     self.write_operand(&op.result, cloned, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::ArrayUnset => {
+                    // Remove element from array: op1 = array CV, op2 = key
+                    let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // Read the array reference directly
+                    let arr_val = match &op.op1 {
+                        OperandType::Cv(idx) => cvs.get(*idx as usize).cloned(),
+                        OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned(),
+                        _ => None,
+                    };
+                    if let Some(Value::Array(arr)) = arr_val {
+                        let key = Self::value_to_array_key(key_val.clone());
+                        arr.borrow_mut().remove(&key);
+                    } else if let Some(Value::Reference(r)) = arr_val {
+                        let inner = r.borrow().clone();
+                        if let Value::Array(arr) = inner {
+                            let key = Self::value_to_array_key(key_val.clone());
+                            arr.borrow_mut().remove(&key);
+                        }
+                    }
+                }
+
+                OpCode::PropertyUnset => {
+                    // Remove property from object: op1 = object, op2 = property name
+                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let prop_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    if let Value::Object(obj) = obj_val {
+                        let mut obj = obj.borrow_mut();
+                        obj.properties
+                            .retain(|(name, _)| name != prop_name.as_bytes());
+                    }
                 }
 
                 OpCode::LoadConst | OpCode::FastConcat => {

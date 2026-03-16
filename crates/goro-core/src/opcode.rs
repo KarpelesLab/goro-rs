@@ -196,6 +196,12 @@ pub enum OpCode {
     Yield,
     /// Generator return (like Return but for generators)
     GeneratorReturn,
+
+    // ---- Unset ----
+    /// Remove array element: op1 = array, op2 = key
+    ArrayUnset,
+    /// Remove object property: op1 = object, op2 = property name
+    PropertyUnset,
 }
 
 /// A compiled function / script
