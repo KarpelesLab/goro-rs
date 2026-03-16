@@ -1474,13 +1474,61 @@ impl Vm {
                                 &static_cv_keys,
                             );
                         } else {
-                            return Err(VmError {
-                                message: format!(
-                                    "Call to undefined function {}()",
-                                    call.name.to_string_lossy()
-                                ),
-                                line: op.line,
-                            });
+                            // Check for __callStatic on ClassName::method calls
+                            let name_bytes = call.name.as_bytes();
+                            let mut handled = false;
+                            if let Some(pos) = name_bytes.iter().position(|&b| b == b':') {
+                                if pos + 1 < name_bytes.len() && name_bytes[pos + 1] == b':' {
+                                    let class_part = &name_bytes[..pos];
+                                    let method_part = &name_bytes[pos + 2..];
+                                    let class_lower: Vec<u8> =
+                                        class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if let Some(class_def) = self.classes.get(&class_lower) {
+                                        if let Some(call_static) =
+                                            class_def.get_method(b"__callstatic")
+                                        {
+                                            let call_static_op = call_static.op_array.clone();
+                                            let mut fn_cvs =
+                                                vec![Value::Undef; call_static_op.cv_names.len()];
+                                            // __callStatic($name, $arguments)
+                                            if fn_cvs.len() > 0 {
+                                                fn_cvs[0] = Value::String(PhpString::from_vec(
+                                                    method_part.to_vec(),
+                                                ));
+                                            }
+                                            if fn_cvs.len() > 1 {
+                                                let mut args_arr = crate::array::PhpArray::new();
+                                                for arg in &call.args {
+                                                    args_arr.push(arg.clone());
+                                                }
+                                                fn_cvs[1] =
+                                                    Value::Array(Rc::new(RefCell::new(args_arr)));
+                                            }
+                                            self.called_class_stack.push(class_part.to_vec());
+                                            let result =
+                                                self.execute_op_array(&call_static_op, fn_cvs)?;
+                                            self.called_class_stack.pop();
+                                            self.write_operand(
+                                                &op.result,
+                                                result,
+                                                &mut cvs,
+                                                &mut tmps,
+                                                &static_cv_keys,
+                                            );
+                                            handled = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if !handled {
+                                return Err(VmError {
+                                    message: format!(
+                                        "Call to undefined function {}()",
+                                        call.name.to_string_lossy()
+                                    ),
+                                    line: op.line,
+                                });
+                            }
                         }
                     }
                 }
