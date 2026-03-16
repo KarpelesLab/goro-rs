@@ -231,6 +231,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"wordwrap", wordwrap);
     vm.register_function(b"printf", printf);
     vm.register_function(b"fprintf", fprintf_fn);
+    vm.register_function(b"vfprintf", vfprintf_fn);
     vm.register_function(b"sscanf", sscanf_fn);
     vm.register_function(b"ctype_alpha", ctype_alpha);
     vm.register_function(b"ctype_digit", ctype_digit);
@@ -2412,8 +2413,17 @@ fn printf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(len as i64))
 }
 fn fprintf_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // fprintf($handle, $format, ...$args) - write formatted to file handle
+    // Simplified: just return 0 (we don't support file handles properly)
     Ok(Value::Long(0))
 }
+
+fn vfprintf_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // vfprintf($handle, $format, $args_array)
+    // Simplified: just return 0
+    Ok(Value::Long(0))
+}
+
 fn sscanf_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
