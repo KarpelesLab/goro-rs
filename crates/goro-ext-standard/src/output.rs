@@ -310,7 +310,7 @@ fn format_php_float_serialize(f: f64) -> String {
     // PHP serialize_precision=-1: shortest exact representation
     // Use scientific notation for very large/small numbers
     let abs = f.abs();
-    if abs != 0.0 && !(1e-4..1e20).contains(&abs) {
+    if abs != 0.0 && !(1e-4..1e15).contains(&abs) {
         // Use scientific notation like PHP
         let s = format!("{:e}", f);
         if let Some(pos) = s.find('e') {
