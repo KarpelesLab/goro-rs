@@ -43,7 +43,7 @@ The single highest-impact improvement area. Many tests expect PHP's diagnostic o
   - Proper `E_NOTICE`, `E_WARNING`, `E_DEPRECATED` level handling
 - [ ] **set_error_handler()** / **set_exception_handler()**
 - [x] **@ error suppression operator** - ErrorSuppress/ErrorRestore opcodes
-- [ ] **trigger_error()** / **user_error()**
+- [x] **trigger_error()** / **user_error()** - E_USER_ERROR/WARNING/NOTICE/DEPRECATED
 
 ### P1: Core Language Gaps (high impact - ~80 tests)
 
