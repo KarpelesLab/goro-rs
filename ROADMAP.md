@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Test Suite**: 198/871 (22.7%) top-level, 746 total across all subdirectories
+**Test Suite**: 201/871 (23.1%) top-level, 752 total across all subdirectories
 
 ### Completed Features
 
@@ -47,13 +47,13 @@ The single highest-impact improvement area. Many tests expect PHP's diagnostic o
 
 ### P1: Core Language Gaps (high impact - ~80 tests)
 
-- [ ] **Variable variables** (`$$var`, `${$expr}`) - parse + compile + VM support
+- [x] **Variable variables** (`$$var`, `${$expr}`) - VarVarGet/VarVarSet opcodes
 - [x] **Argument unpacking** in calls (`func(...$args)`) - SendUnpack opcode
 - [x] **Array spread** in literals (`[...$a, ...$b]`) - ArraySpread opcode
 - [x] **Proper array copy-on-write semantics** - clone array on CV assignment
 - [x] **`::class` constant** on variables/expressions (`$obj::class`, `ClassName::class`)
 - [ ] **Dynamic member access** (`$class::$prop`, `Class::{$expr}`)
-- [ ] **Heredoc / Nowdoc** strings
+- [x] **Heredoc / Nowdoc** strings - variable interpolation and escape sequences
 - [ ] **`goto` / labels**
 - [ ] **`declare(strict_types=1)`**
 - [ ] **String offset access** (`$str[0]` read and write)
