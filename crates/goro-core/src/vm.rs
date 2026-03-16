@@ -1521,6 +1521,31 @@ impl Vm {
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::CloneObj => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let cloned = match &val {
+                        Value::Object(obj) => {
+                            let obj_borrow = obj.borrow();
+                            let clone_id = self.next_object_id;
+                            self.next_object_id += 1;
+                            let mut new_obj =
+                                PhpObject::new(obj_borrow.class_name.clone(), clone_id);
+                            // Copy all properties
+                            for (name, value) in &obj_borrow.properties {
+                                new_obj.set_property(name.clone(), value.clone());
+                            }
+                            Value::Object(Rc::new(RefCell::new(new_obj)))
+                        }
+                        Value::Array(arr) => {
+                            // Clone array
+                            let cloned_arr = arr.borrow().clone();
+                            Value::Array(Rc::new(RefCell::new(cloned_arr)))
+                        }
+                        other => other.clone(),
+                    };
+                    self.write_operand(&op.result, cloned, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
                 OpCode::LoadConst | OpCode::FastConcat => {
                     // TODO: implement
                 }

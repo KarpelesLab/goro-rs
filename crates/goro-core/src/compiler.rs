@@ -2406,8 +2406,16 @@ impl Compiler {
             }
 
             ExprKind::Clone(inner) => {
-                // For now, just return the value (no proper clone semantics)
-                self.compile_expr(inner)
+                let val = self.compile_expr(inner)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::CloneObj,
+                    op1: val,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::Spread(inner) => self.compile_expr(inner),

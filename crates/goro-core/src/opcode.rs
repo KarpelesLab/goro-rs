@@ -183,6 +183,10 @@ pub enum OpCode {
     /// Concatenate multiple values: fast concat of op1 and op2
     FastConcat,
 
+    // ---- Clone ----
+    /// Clone an object: op1 = source, result = cloned copy
+    CloneObj,
+
     // ---- Print ----
     /// print expr (returns 1)
     Print,
