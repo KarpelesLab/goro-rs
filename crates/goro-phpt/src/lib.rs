@@ -108,7 +108,7 @@ pub fn run_test(test: &PhptTest) -> TestResult {
     };
 
     // Execute the source with a 10-second timeout
-    let output = match execute_php_with_timeout(source.as_bytes(), 10) {
+    let output = match execute_php_with_timeout(source.as_bytes(), 5) {
         Ok(output) => output,
         Err(e) => return TestResult::Error(e),
     };
@@ -153,7 +153,7 @@ fn execute_php_with_timeout(source: &[u8], timeout_secs: u64) -> Result<Vec<u8>,
     let timed_out2 = timed_out.clone();
 
     let handle = std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024) // 64MB stack
+        .stack_size(8 * 1024 * 1024) // 8MB stack
         .spawn(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source)))
         })
