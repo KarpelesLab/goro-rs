@@ -294,7 +294,7 @@ impl Value {
         let a = self.to_long();
         let b = other.to_long();
         if b == 0 {
-            return Err("Division by zero");
+            return Err("Modulo by zero");
         }
         Ok(Value::Long(a % b))
     }

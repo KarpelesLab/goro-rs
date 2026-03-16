@@ -2510,8 +2510,31 @@ fn get_called_class_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn get_defined_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
 }
-fn get_defined_functions_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn get_defined_functions_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut internal = PhpArray::new();
+    for name in vm.functions.keys() {
+        internal.push(Value::String(PhpString::from_vec(name.clone())));
+    }
+    let mut user = PhpArray::new();
+    for name in vm.user_functions.keys() {
+        // Skip class methods (contain ::) and internal closures
+        if !name.contains(&b':')
+            && !name.starts_with(b"__closure_")
+            && !name.starts_with(b"__arrow_")
+        {
+            user.push(Value::String(PhpString::from_vec(name.clone())));
+        }
+    }
+    let mut result = PhpArray::new();
+    result.set(
+        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"internal")),
+        Value::Array(Rc::new(RefCell::new(internal))),
+    );
+    result.set(
+        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"user")),
+        Value::Array(Rc::new(RefCell::new(user))),
+    );
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 fn array_first_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
