@@ -8,6 +8,23 @@ pub enum ArrayKey {
     String(PhpString),
 }
 
+impl PartialOrd for ArrayKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ArrayKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (ArrayKey::Int(a), ArrayKey::Int(b)) => a.cmp(b),
+            (ArrayKey::String(a), ArrayKey::String(b)) => a.as_bytes().cmp(b.as_bytes()),
+            (ArrayKey::Int(_), ArrayKey::String(_)) => std::cmp::Ordering::Less,
+            (ArrayKey::String(_), ArrayKey::Int(_)) => std::cmp::Ordering::Greater,
+        }
+    }
+}
+
 impl std::fmt::Display for ArrayKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

@@ -1194,19 +1194,74 @@ fn rsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::True)
 }
-fn asort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn asort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort_by(|a, b| {
+            let cmp = a.1.compare(&b.1);
+            if cmp < 0 {
+                std::cmp::Ordering::Less
+            } else if cmp > 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        *arr = goro_core::array::PhpArray::new();
+        for (k, v) in entries {
+            arr.set(k, v);
+        }
+    }
     Ok(Value::True)
 }
-fn arsort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn arsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort_by(|a, b| {
+            let cmp = b.1.compare(&a.1);
+            if cmp < 0 {
+                std::cmp::Ordering::Less
+            } else if cmp > 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        *arr = goro_core::array::PhpArray::new();
+        for (k, v) in entries {
+            arr.set(k, v);
+        }
+    }
     Ok(Value::True)
 }
-fn ksort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn ksort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        *arr = goro_core::array::PhpArray::new();
+        for (k, v) in entries {
+            arr.set(k, v);
+        }
+    }
     Ok(Value::True)
 }
-fn krsort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn krsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        *arr = goro_core::array::PhpArray::new();
+        for (k, v) in entries {
+            arr.set(k, v);
+        }
+    }
     Ok(Value::True)
 }
 fn shuffle_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // TODO: implement actual shuffling (needs random number generator)
     Ok(Value::True)
 }
 
