@@ -255,6 +255,16 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"is_dir", is_dir_fn);
     vm.register_function(b"is_readable", is_readable_fn);
     vm.register_function(b"is_writable", is_writable_fn);
+    vm.register_function(b"getcwd", getcwd_fn);
+    vm.register_function(b"chdir", chdir_fn);
+    vm.register_function(b"filesize", filesize_fn);
+    vm.register_function(b"touch", touch_fn);
+    vm.register_function(b"file_get_contents", file_get_contents_fn);
+    vm.register_function(b"file_put_contents", file_put_contents_fn);
+    vm.register_function(b"realpath", realpath_fn);
+    vm.register_function(b"is_link", is_link_fn);
+    vm.register_function(b"stat", stat_fn);
+    vm.register_function(b"is_numeric", is_numeric_fn);
     vm.register_function(b"file_get_contents", file_get_contents_fn);
     vm.register_function(b"file_put_contents", file_put_contents_fn);
     vm.register_function(b"realpath", realpath_fn);
@@ -2869,29 +2879,157 @@ fn json_last_error_msg(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
 }
 
 // === File stubs ===
-fn file_exists_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn file_exists_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+        Value::True
+    } else {
+        Value::False
+    })
 }
-fn is_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn is_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(if std::path::Path::new(&path.to_string_lossy()).is_file() {
+        Value::True
+    } else {
+        Value::False
+    })
 }
-fn is_dir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn is_dir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(if std::path::Path::new(&path.to_string_lossy()).is_dir() {
+        Value::True
+    } else {
+        Value::False
+    })
 }
-fn is_readable_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn is_readable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+        Value::True
+    } else {
+        Value::False
+    })
 }
-fn is_writable_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+        Value::True
+    } else {
+        Value::False
+    })
 }
-fn file_get_contents_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn file_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::read(path.to_string_lossy().as_ref() as &str) {
+        Ok(data) => Ok(Value::String(PhpString::from_vec(data))),
+        Err(_) => Ok(Value::False),
+    }
 }
-fn file_put_contents_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn file_put_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let append = flags & 8 != 0; // FILE_APPEND
+    let result = if append {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path.to_string_lossy().as_ref() as &str)
+            .and_then(|mut f| f.write_all(data.as_bytes()).map(|_| data.len()))
+    } else {
+        std::fs::write(path.to_string_lossy().as_ref() as &str, data.as_bytes()).map(|_| data.len())
+    };
+    match result {
+        Ok(len) => Ok(Value::Long(len as i64)),
+        Err(_) => Ok(Value::False),
+    }
 }
-fn realpath_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn realpath_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::canonicalize(path.to_string_lossy().as_ref() as &str) {
+        Ok(p) => Ok(Value::String(PhpString::from_string(
+            p.to_string_lossy().to_string(),
+        ))),
+        Err(_) => Ok(Value::False),
+    }
+}
+fn getcwd_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    match std::env::current_dir() {
+        Ok(p) => Ok(Value::String(PhpString::from_string(
+            p.to_string_lossy().to_string(),
+        ))),
+        Err(_) => Ok(Value::False),
+    }
+}
+fn chdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::env::set_current_dir(path.to_string_lossy().as_ref() as &str) {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
+}
+fn filesize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::metadata(path.to_string_lossy().as_ref() as &str) {
+        Ok(m) => Ok(Value::Long(m.len() as i64)),
+        Err(_) => Ok(Value::False),
+    }
+}
+fn touch_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = path.to_string_lossy();
+    let p = std::path::Path::new(&*path_str);
+    if !p.exists() {
+        std::fs::write(p, b"").ok();
+    }
+    Ok(Value::True)
+}
+fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(
+        if std::path::Path::new(path.to_string_lossy().as_ref() as &str)
+            .read_link()
+            .is_ok()
+        {
+            Value::True
+        } else {
+            Value::False
+        },
+    )
+}
+fn stat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::metadata(path.to_string_lossy().as_ref() as &str) {
+        Ok(m) => {
+            let mut result = PhpArray::new();
+            result.set(
+                goro_core::array::ArrayKey::String(PhpString::from_bytes(b"size")),
+                Value::Long(m.len() as i64),
+            );
+            result.set(
+                goro_core::array::ArrayKey::Int(7),
+                Value::Long(m.len() as i64),
+            );
+            Ok(Value::Array(Rc::new(RefCell::new(result))))
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+fn is_numeric_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    Ok(match val {
+        Value::Long(_) | Value::Double(_) => Value::True,
+        Value::String(s) => {
+            if goro_core::value::parse_numeric_string(s.as_bytes()).is_some() {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
+        _ => Value::False,
+    })
 }
 fn dirname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
