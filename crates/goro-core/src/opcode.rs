@@ -214,6 +214,10 @@ pub enum OpCode {
     MakeRef,
     /// Append to array without deref (preserves Reference wrapper): op1 = array, op2 = CV
     ArrayAppendRef,
+    /// Save return value for deferred return (finally blocks): op1 = value
+    SaveReturn,
+    /// Check and execute deferred return after finally block
+    ReturnDeferred,
     /// Save and suppress error reporting (for @ operator)
     ErrorSuppress,
     /// Restore error reporting (for @ operator)

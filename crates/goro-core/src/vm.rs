@@ -70,6 +70,8 @@ pub struct Vm {
     call_depth: u32,
     /// Stack of saved error_reporting levels (for @ operator)
     error_reporting_stack: Vec<i64>,
+    /// Pending return value (for deferred return in finally blocks)
+    pending_return: Option<Value>,
 }
 
 impl Vm {
@@ -92,6 +94,7 @@ impl Vm {
             called_class_stack: Vec::new(),
             call_depth: 0,
             error_reporting_stack: Vec::new(),
+            pending_return: None,
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -2195,6 +2198,20 @@ impl Vm {
                         obj.properties
                             .retain(|(name, _)| name != prop_name.as_bytes());
                     }
+                }
+
+                OpCode::SaveReturn => {
+                    // Save return value for deferred return (finally blocks)
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.pending_return = Some(val);
+                }
+
+                OpCode::ReturnDeferred => {
+                    // If there's a pending return, execute it now
+                    if let Some(val) = self.pending_return.take() {
+                        return Ok(val);
+                    }
+                    // Otherwise continue (no pending return, came from normal flow)
                 }
 
                 OpCode::ArrayAppendRef => {

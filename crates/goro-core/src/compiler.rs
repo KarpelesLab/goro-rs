@@ -43,6 +43,8 @@ pub struct Compiler {
     current_class: Option<Vec<u8>>,
     /// Current parent class name (for parent::)
     current_parent_class: Option<Vec<u8>>,
+    /// Stack of finally block targets (for deferred return)
+    finally_targets: Vec<u32>,
 }
 
 impl Default for Compiler {
@@ -59,6 +61,7 @@ impl Compiler {
             compiled_classes: Vec::new(),
             current_class: None,
             current_parent_class: None,
+            finally_targets: Vec::new(),
         }
     }
 
@@ -181,13 +184,31 @@ impl Compiler {
                     let idx = self.op_array.add_literal(Value::Null);
                     OperandType::Const(idx)
                 };
-                self.op_array.emit(Op {
-                    opcode: OpCode::Return,
-                    op1: operand,
-                    op2: OperandType::Unused,
-                    result: OperandType::Unused,
-                    line: stmt.span.line,
-                });
+                if let Some(&finally_target) = self.finally_targets.last() {
+                    // Inside try-with-finally: save return value and jump to finally
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SaveReturn,
+                        op1: operand,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(finally_target),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                } else {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Return,
+                        op1: operand,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                }
                 Ok(())
             }
 
@@ -887,6 +908,13 @@ impl Compiler {
                     line: stmt.span.line,
                 });
 
+                // If there's a finally block, push a placeholder target
+                // so return statements inside try know to defer
+                let has_finally = finally_body.is_some();
+                if has_finally {
+                    self.finally_targets.push(0); // placeholder, patched below
+                }
+
                 // Compile try body
                 for s in try_body {
                     self.compile_stmt(s)?;
@@ -946,9 +974,43 @@ impl Compiler {
                 // Compile finally block
                 let finally_or_end = if let Some(finally_stmts) = finally_body {
                     let finally_start = self.op_array.current_offset();
+
+                    // Patch the finally target placeholder for return deferral
+                    if let Some(target) = self.finally_targets.last_mut() {
+                        *target = finally_start;
+                    }
+                    // Now go back and patch any SaveReturn+Jmp that used the placeholder
+                    // Actually, we pushed 0 and return statements jumped to 0.
+                    // We need to patch those jumps. Let's find them:
+                    let ops_len = self.op_array.ops.len();
+                    for i in (try_begin as usize)..ops_len {
+                        if self.op_array.ops[i].opcode == OpCode::Jmp {
+                            if let OperandType::JmpTarget(0) = self.op_array.ops[i].op1 {
+                                // Check if preceded by SaveReturn
+                                if i > 0 && self.op_array.ops[i - 1].opcode == OpCode::SaveReturn {
+                                    self.op_array.ops[i].op1 =
+                                        OperandType::JmpTarget(finally_start);
+                                }
+                            }
+                        }
+                    }
+
                     for s in finally_stmts {
                         self.compile_stmt(s)?;
                     }
+
+                    // After finally, check for deferred return
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ReturnDeferred,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+
+                    // Pop the finally target
+                    self.finally_targets.pop();
+
                     // Patch TryBegin's finally target
                     self.op_array.ops[try_begin as usize].op2 =
                         OperandType::JmpTarget(finally_start);
