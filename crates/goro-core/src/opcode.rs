@@ -1,5 +1,27 @@
 use crate::value::Value;
 
+/// Represents a parameter type constraint parsed from a type hint
+#[derive(Debug, Clone)]
+pub enum ParamType {
+    /// A simple type: int, float, string, bool, array, object, callable, mixed, null, void, iterable, self, parent, static, false, true, never
+    Simple(Vec<u8>),
+    /// ?Type — allows null in addition to the inner type
+    Nullable(Box<ParamType>),
+    /// Type1|Type2 — union type
+    Union(Vec<ParamType>),
+    /// Type1&Type2 — intersection type
+    Intersection(Vec<ParamType>),
+}
+
+/// Information about a parameter's declared type
+#[derive(Debug, Clone)]
+pub struct ParamTypeInfo {
+    /// The declared type constraint
+    pub param_type: ParamType,
+    /// The parameter name (for error messages)
+    pub param_name: Vec<u8>,
+}
+
 /// Operand type (how to interpret the operand index)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperandType {
@@ -249,6 +271,8 @@ pub struct OpArray {
     pub child_functions: Vec<OpArray>,
     /// Whether this function is a generator (contains yield)
     pub is_generator: bool,
+    /// Parameter type information (indexed by CV index, None if no type hint)
+    pub param_types: Vec<Option<ParamTypeInfo>>,
 }
 
 impl OpArray {
@@ -263,6 +287,7 @@ impl OpArray {
             variadic_param: None,
             child_functions: Vec::new(),
             is_generator: false,
+            param_types: Vec::new(),
         }
     }
 

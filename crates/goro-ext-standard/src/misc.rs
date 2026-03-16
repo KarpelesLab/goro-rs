@@ -281,7 +281,38 @@ fn restore_exception_handler(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
     Ok(Value::True)
 }
 
-fn trigger_error(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let message = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+    let error_type = args.get(1).map(|v| v.to_long()).unwrap_or(256); // E_USER_ERROR = 256
+
+    match error_type {
+        256 => {
+            // E_USER_ERROR - fatal error
+            return Err(VmError {
+                message: message.to_string(),
+                line: 0,
+            });
+        }
+        512 => {
+            // E_USER_WARNING
+            vm.emit_warning(&message);
+        }
+        1024 => {
+            // E_USER_NOTICE
+            vm.emit_notice_at(&message, 0);
+        }
+        16384 => {
+            // E_USER_DEPRECATED
+            vm.emit_deprecated_at(&message, 0);
+        }
+        _ => {
+            vm.emit_warning(&message);
+        }
+    }
     Ok(Value::True)
 }
 

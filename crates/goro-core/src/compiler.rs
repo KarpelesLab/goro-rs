@@ -1,7 +1,7 @@
 use goro_parser::ast::*;
 
 use crate::object::{ClassEntry, MethodDef, PropertyDef, Visibility as ObjVisibility};
-use crate::opcode::{Op, OpArray, OpCode, OperandType};
+use crate::opcode::{Op, OpArray, OpCode, OperandType, ParamType, ParamTypeInfo};
 use crate::string::PhpString;
 use crate::value::Value;
 
@@ -719,6 +719,18 @@ impl Compiler {
                     if param.variadic {
                         func_compiler.op_array.variadic_param = Some(cv);
                     }
+
+                    // Store parameter type info
+                    let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
+                        param_type: type_hint_to_param_type(hint),
+                        param_name: param.name.clone(),
+                    });
+                    // Ensure param_types vec is large enough
+                    while func_compiler.op_array.param_types.len() <= cv as usize {
+                        func_compiler.op_array.param_types.push(None);
+                    }
+                    func_compiler.op_array.param_types[cv as usize] = type_info;
+
                     if let Some(default_expr) = &param.default {
                         // Emit: if param is Undef, set to default
                         let default_val = func_compiler.compile_expr(default_expr)?;
@@ -1227,6 +1239,19 @@ impl Compiler {
                                 // Set up parameter CVs with default values
                                 for param in params {
                                     let cv = method_compiler.op_array.get_or_create_cv(&param.name);
+
+                                    // Store parameter type info
+                                    let type_info =
+                                        param.type_hint.as_ref().map(|hint| ParamTypeInfo {
+                                            param_type: type_hint_to_param_type(hint),
+                                            param_name: param.name.clone(),
+                                        });
+                                    while method_compiler.op_array.param_types.len() <= cv as usize
+                                    {
+                                        method_compiler.op_array.param_types.push(None);
+                                    }
+                                    method_compiler.op_array.param_types[cv as usize] = type_info;
+
                                     if let Some(default_expr) = &param.default {
                                         let default_val =
                                             method_compiler.compile_expr(default_expr)?;
@@ -2679,7 +2704,17 @@ impl Compiler {
                 }
                 // Set up parameter CVs
                 for param in params {
-                    closure_compiler.op_array.get_or_create_cv(&param.name);
+                    let cv = closure_compiler.op_array.get_or_create_cv(&param.name);
+
+                    // Store parameter type info
+                    let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
+                        param_type: type_hint_to_param_type(hint),
+                        param_name: param.name.clone(),
+                    });
+                    while closure_compiler.op_array.param_types.len() <= cv as usize {
+                        closure_compiler.op_array.param_types.push(None);
+                    }
+                    closure_compiler.op_array.param_types[cv as usize] = type_info;
                 }
 
                 for s in body {
@@ -2805,7 +2840,17 @@ impl Compiler {
                 }
                 // Set up parameter CVs
                 for param in params {
-                    closure_compiler.op_array.get_or_create_cv(&param.name);
+                    let cv = closure_compiler.op_array.get_or_create_cv(&param.name);
+
+                    // Store parameter type info
+                    let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
+                        param_type: type_hint_to_param_type(hint),
+                        param_name: param.name.clone(),
+                    });
+                    while closure_compiler.op_array.param_types.len() <= cv as usize {
+                        closure_compiler.op_array.param_types.push(None);
+                    }
+                    closure_compiler.op_array.param_types[cv as usize] = type_info;
                 }
 
                 let body_val = closure_compiler.compile_expr(body)?;
@@ -3318,6 +3363,36 @@ impl Compiler {
                 ),
                 line: expr.span.line,
             }),
+        }
+    }
+}
+
+/// Convert an AST TypeHint into a runtime ParamType.
+/// For built-in types (int, string, etc.), the name is stored lowercase.
+/// For class names, the original case is preserved for error messages.
+fn type_hint_to_param_type(hint: &TypeHint) -> ParamType {
+    match hint {
+        TypeHint::Simple(name) => {
+            let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Check if it's a built-in type; if so, store lowercase
+            match lower.as_slice() {
+                b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
+                | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
+                | b"void" | b"self" | b"parent" | b"static" | b"false" | b"true" | b"never" => {
+                    ParamType::Simple(lower)
+                }
+                _ => {
+                    // Class name: preserve original case
+                    ParamType::Simple(name.clone())
+                }
+            }
+        }
+        TypeHint::Nullable(inner) => ParamType::Nullable(Box::new(type_hint_to_param_type(inner))),
+        TypeHint::Union(types) => {
+            ParamType::Union(types.iter().map(type_hint_to_param_type).collect())
+        }
+        TypeHint::Intersection(types) => {
+            ParamType::Intersection(types.iter().map(type_hint_to_param_type).collect())
         }
     }
 }

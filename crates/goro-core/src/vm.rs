@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
 use crate::object::{ClassEntry, PhpObject};
-use crate::opcode::{OpArray, OpCode, OperandType};
+use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
 use crate::string::PhpString;
 use crate::value::Value;
 
@@ -231,6 +231,246 @@ impl Vm {
         err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
         err_obj.set_property(b"line".to_vec(), Value::Long(0));
         Value::Object(Rc::new(RefCell::new(err_obj)))
+    }
+
+    /// Check if a value matches a single ParamType constraint.
+    /// Returns true if the value is acceptable for the given type.
+    fn value_matches_type(&self, value: &Value, param_type: &ParamType) -> bool {
+        match param_type {
+            ParamType::Simple(type_name) => {
+                match type_name.as_slice() {
+                    b"int" | b"integer" => {
+                        // Non-strict: accept int, float (truncatable), bool, numeric strings
+                        matches!(
+                            value,
+                            Value::Long(_) | Value::Double(_) | Value::True | Value::False
+                        ) || matches!(value, Value::String(s) if crate::value::parse_numeric_string(s.as_bytes()).is_some())
+                    }
+                    b"float" | b"double" => {
+                        matches!(
+                            value,
+                            Value::Double(_) | Value::Long(_) | Value::True | Value::False
+                        ) || matches!(value, Value::String(s) if crate::value::parse_numeric_string(s.as_bytes()).is_some())
+                    }
+                    b"string" => {
+                        // Non-strict: accept string, int, float, bool (all coercible)
+                        matches!(
+                            value,
+                            Value::String(_)
+                                | Value::Long(_)
+                                | Value::Double(_)
+                                | Value::True
+                                | Value::False
+                        )
+                    }
+                    b"bool" | b"boolean" => {
+                        // Non-strict: accept any scalar
+                        matches!(
+                            value,
+                            Value::True
+                                | Value::False
+                                | Value::Long(_)
+                                | Value::Double(_)
+                                | Value::String(_)
+                                | Value::Null
+                        )
+                    }
+                    b"array" => matches!(value, Value::Array(_)),
+                    b"object" => matches!(value, Value::Object(_)),
+                    b"callable" => {
+                        // Callable: string (function name), array [obj/class, method], or closure
+                        match value {
+                            Value::String(_) => true,
+                            Value::Array(_) => true,
+                            Value::Object(obj) => {
+                                let obj_borrow = obj.borrow();
+                                let class_lower: Vec<u8> = obj_borrow
+                                    .class_name
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
+                                class_lower == b"closure"
+                            }
+                            _ => false,
+                        }
+                    }
+                    b"iterable" => matches!(value, Value::Array(_) | Value::Generator(_)),
+                    b"mixed" => true,
+                    b"null" => matches!(value, Value::Null),
+                    b"void" => true, // void is for return types, skip checking
+                    b"self" | b"parent" | b"static" => {
+                        // These need class context, skip for now
+                        true
+                    }
+                    b"false" => matches!(value, Value::False),
+                    b"true" => matches!(value, Value::True),
+                    b"never" => false, // never matches nothing
+                    class_name => {
+                        // Class/interface name check: value must be an object whose class matches
+                        // class_name may have original case, so compare case-insensitively
+                        let class_name_lower: Vec<u8> =
+                            class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                        // Special case: Closure type - in goro-rs closures are strings/arrays, not objects
+                        if class_name_lower == b"closure" {
+                            return match value {
+                                Value::String(s) => {
+                                    let bytes = s.as_bytes();
+                                    bytes.starts_with(b"__closure_")
+                                        || bytes.starts_with(b"__arrow_")
+                                        || self.user_functions.contains_key(bytes)
+                                }
+                                Value::Array(arr) => {
+                                    // Closure with captured vars: [name, val1, val2, ...]
+                                    let arr_borrow = arr.borrow();
+                                    if let Some(first) = arr_borrow.values().next() {
+                                        if let Value::String(s) = first {
+                                            let bytes = s.as_bytes();
+                                            bytes.starts_with(b"__closure_")
+                                                || bytes.starts_with(b"__arrow_")
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                }
+                                Value::Object(obj) => {
+                                    let obj_borrow = obj.borrow();
+                                    obj_borrow.class_name.eq_ignore_ascii_case(b"closure")
+                                }
+                                _ => false,
+                            };
+                        }
+
+                        if let Value::Object(obj) = value {
+                            let obj_borrow = obj.borrow();
+                            let obj_class_lower: Vec<u8> = obj_borrow
+                                .class_name
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
+                            if obj_class_lower == class_name_lower {
+                                return true;
+                            }
+                            // Check parent chain and interfaces
+                            if let Some(class_entry) = self.classes.get(&obj_class_lower) {
+                                return self.class_is_a(class_entry, &class_name_lower);
+                            }
+                            // Check built-in class hierarchy
+                            if is_builtin_subclass(&obj_class_lower, &class_name_lower) {
+                                return true;
+                            }
+                            // If target is a common interface/abstract class we don't track,
+                            // be permissive and accept any object
+                            let common_interfaces = [
+                                &b"iterator"[..],
+                                b"traversable",
+                                b"countable",
+                                b"arrayaccess",
+                                b"serializable",
+                                b"stringable",
+                                b"iteratoraggregate",
+                                b"throwable",
+                                b"jsonserializable",
+                            ];
+                            if common_interfaces.contains(&class_name_lower.as_slice()) {
+                                return true; // Accept any object for unresolvable interfaces
+                            }
+                            false
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+            ParamType::Nullable(inner) => {
+                matches!(value, Value::Null) || self.value_matches_type(value, inner)
+            }
+            ParamType::Union(types) => types.iter().any(|t| self.value_matches_type(value, t)),
+            ParamType::Intersection(types) => {
+                types.iter().all(|t| self.value_matches_type(value, t))
+            }
+        }
+    }
+
+    /// Check if a class is (or inherits from / implements) a given type name
+    fn class_is_a(&self, class_entry: &ClassEntry, target_lower: &[u8]) -> bool {
+        // Check parent
+        if let Some(parent_name) = &class_entry.parent {
+            let parent_lower: Vec<u8> =
+                parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if parent_lower == target_lower {
+                return true;
+            }
+            if let Some(parent_entry) = self.classes.get(&parent_lower) {
+                if self.class_is_a(parent_entry, target_lower) {
+                    return true;
+                }
+            }
+        }
+        // Check interfaces
+        for iface in &class_entry.interfaces {
+            let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if iface_lower == target_lower {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the display name for a ParamType (for error messages)
+    fn param_type_display(param_type: &ParamType) -> String {
+        match param_type {
+            ParamType::Simple(name) => String::from_utf8_lossy(name).to_string(),
+            ParamType::Nullable(inner) => format!("?{}", Self::param_type_display(inner)),
+            ParamType::Union(types) => types
+                .iter()
+                .map(Self::param_type_display)
+                .collect::<Vec<_>>()
+                .join("|"),
+            ParamType::Intersection(types) => types
+                .iter()
+                .map(Self::param_type_display)
+                .collect::<Vec<_>>()
+                .join("&"),
+        }
+    }
+
+    /// Check parameter types for a user function call. Returns an error message string if
+    /// there is a type mismatch, or None if all checks pass.
+    ///
+    /// `implicit_args` is the number of leading arguments that are implicit (e.g., $this for
+    /// methods) and should not be counted in the user-visible argument number.
+    fn check_param_types(
+        &self,
+        user_fn: &OpArray,
+        args: &[Value],
+        func_display_name: &str,
+        implicit_args: usize,
+        line: u32,
+    ) -> Option<String> {
+        for (i, arg) in args.iter().enumerate() {
+            if i >= user_fn.param_types.len() {
+                continue;
+            }
+            if let Some(type_info) = &user_fn.param_types[i] {
+                let val = arg.deref();
+                if !self.value_matches_type(&val, &type_info.param_type) {
+                    let expected = Self::param_type_display(&type_info.param_type);
+                    let given = val.type_name();
+                    let param_name = String::from_utf8_lossy(&type_info.param_name);
+                    // Argument number is 1-based, excluding implicit args like $this
+                    let arg_num = i + 1 - implicit_args;
+                    return Some(format!(
+                        "{}(): Argument #{} (${}) \
+                         must be of type {}, {} given, called in Unknown on line {}",
+                        func_display_name, arg_num, param_name, expected, given, line
+                    ));
+                }
+            }
+        }
+        None
     }
 
     /// Execute a function OpArray with given CVs (public interface for ext crates)
@@ -1290,6 +1530,41 @@ impl Vm {
                         );
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
                     {
+                        // Check parameter types before executing
+                        if !user_fn.param_types.is_empty() {
+                            // Determine if this is a method call ($this is first implicit arg)
+                            let implicit_args = if user_fn.cv_names.first().map(|n| n.as_slice())
+                                == Some(b"this")
+                            {
+                                1
+                            } else {
+                                0
+                            };
+                            // Build display name from call.name
+                            let display_name = call.name.to_string_lossy();
+                            // For method calls like ClassName::method, format as ClassName::method
+                            // For regular functions, just the function name
+                            if let Some(err_msg) = self.check_param_types(
+                                &user_fn,
+                                &call.args,
+                                &display_name,
+                                implicit_args,
+                                op.line,
+                            ) {
+                                let exc_val = self.throw_type_error(err_msg.clone());
+                                self.current_exception = Some(exc_val);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                } else {
+                                    return Err(VmError {
+                                        message: format!("Uncaught TypeError: {}", err_msg),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                        }
+
                         // Check if this is a generator function
                         if user_fn.is_generator {
                             // Set up parameters as CVs
