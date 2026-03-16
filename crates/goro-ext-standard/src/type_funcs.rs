@@ -24,6 +24,11 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"empty", php_empty);
     vm.register_function(b"count", count);
     vm.register_function(b"sizeof", count);
+    vm.register_function(b"is_scalar", is_scalar);
+    vm.register_function(b"is_resource", is_resource);
+    vm.register_function(b"is_countable", is_countable);
+    vm.register_function(b"is_iterable", is_iterable);
+    vm.register_function(b"get_debug_type", get_debug_type);
 }
 
 fn gettype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -169,4 +174,71 @@ fn count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::Null | Value::Undef => Ok(Value::Long(0)),
         _ => Ok(Value::Long(1)),
     }
+}
+
+fn is_scalar(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    Ok(match val {
+        Value::Long(_) | Value::Double(_) | Value::String(_) | Value::True | Value::False => {
+            Value::True
+        }
+        Value::Reference(r) => {
+            let inner = r.borrow();
+            match &*inner {
+                Value::Long(_)
+                | Value::Double(_)
+                | Value::String(_)
+                | Value::True
+                | Value::False => Value::True,
+                _ => Value::False,
+            }
+        }
+        _ => Value::False,
+    })
+}
+
+fn is_resource(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // We don't have resource type, always false
+    Ok(Value::False)
+}
+
+fn is_countable(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    Ok(match val {
+        Value::Array(_) => Value::True,
+        _ => Value::False,
+    })
+}
+
+fn is_iterable(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    Ok(match val {
+        Value::Array(_) | Value::Generator(_) => Value::True,
+        _ => Value::False,
+    })
+}
+
+fn get_debug_type(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::string::PhpString;
+    let val = args.first().unwrap_or(&Value::Null);
+    let type_name = match val {
+        Value::Null | Value::Undef => "null",
+        Value::True | Value::False => "bool",
+        Value::Long(_) => "int",
+        Value::Double(_) => "float",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(obj) => {
+            let name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+            return Ok(Value::String(PhpString::from_string(name)));
+        }
+        Value::Generator(_) => "Generator",
+        Value::Reference(r) => {
+            let args = [r.borrow().clone()];
+            return get_debug_type(_vm, &args);
+        }
+    };
+    Ok(Value::String(goro_core::string::PhpString::from_bytes(
+        type_name.as_bytes(),
+    )))
 }
