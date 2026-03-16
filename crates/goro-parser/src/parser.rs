@@ -1633,12 +1633,19 @@ impl Parser {
             TokenKind::NullCoalesceAssign => {
                 self.advance();
                 let right = self.parse_assignment()?;
+                let span = left.span.merge(right.span);
+                // $x ??= val  →  $x = $x ?? val
                 Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::Spaceship, // placeholder, needs proper NullCoalesce assign
-                        target: Box::new(left),
-                        value: Box::new(right),
+                    span,
+                    kind: ExprKind::Assign {
+                        target: Box::new(left.clone()),
+                        value: Box::new(Expr {
+                            span,
+                            kind: ExprKind::NullCoalesce {
+                                left: Box::new(left),
+                                right: Box::new(right),
+                            },
+                        }),
                     },
                 })
             }
