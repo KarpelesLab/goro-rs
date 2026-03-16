@@ -68,6 +68,8 @@ pub struct Vm {
     called_class_stack: Vec<Vec<u8>>,
     /// Current call depth (to prevent stack overflow from infinite recursion)
     call_depth: u32,
+    /// Stack of saved error_reporting levels (for @ operator)
+    error_reporting_stack: Vec<i64>,
 }
 
 impl Vm {
@@ -89,6 +91,7 @@ impl Vm {
             destructible_objects: Vec::new(),
             called_class_stack: Vec::new(),
             call_depth: 0,
+            error_reporting_stack: Vec::new(),
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -2191,6 +2194,27 @@ impl Vm {
                         let mut obj = obj.borrow_mut();
                         obj.properties
                             .retain(|(name, _)| name != prop_name.as_bytes());
+                    }
+                }
+
+                OpCode::IssetCheck => {
+                    // isset() check: True if value is not Null and not Undef
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let result = match val {
+                        Value::Null | Value::Undef => Value::False,
+                        _ => Value::True,
+                    };
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::ErrorSuppress => {
+                    self.error_reporting_stack.push(self.error_reporting);
+                    self.error_reporting = 0;
+                }
+
+                OpCode::ErrorRestore => {
+                    if let Some(saved) = self.error_reporting_stack.pop() {
+                        self.error_reporting = saved;
                     }
                 }
 

@@ -2037,8 +2037,32 @@ impl Compiler {
             }
 
             ExprKind::Suppress(inner) => {
-                // @ operator: for now, just evaluate the inner expression
-                self.compile_expr(inner)
+                // @ operator: suppress error reporting during expression evaluation
+                self.op_array.emit(Op {
+                    opcode: OpCode::ErrorSuppress,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
+                let result = self.compile_expr(inner)?;
+                // Store result in a temp so we can restore error reporting before returning
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::Assign,
+                    op1: OperandType::Tmp(tmp),
+                    op2: result,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
+                self.op_array.emit(Op {
+                    opcode: OpCode::ErrorRestore,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::Match { subject, arms } => {
@@ -2355,23 +2379,53 @@ impl Compiler {
             }
 
             ExprKind::Isset(exprs) => {
-                // Check if all variables are set (not null/undef)
+                // isset() returns true if all vars are set and not null
+                // Uses IssetCheck opcode that checks for both Undef and Null
                 if exprs.len() == 1 {
                     let val = self.compile_expr(&exprs[0])?;
                     let tmp = self.op_array.alloc_temp();
-                    // Check if != null
-                    let null_idx = self.op_array.add_literal(Value::Null);
                     self.op_array.emit(Op {
-                        opcode: OpCode::NotIdentical,
+                        opcode: OpCode::IssetCheck,
                         op1: val,
-                        op2: OperandType::Const(null_idx),
+                        op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
                         line: expr.span.line,
                     });
                     Ok(OperandType::Tmp(tmp))
                 } else {
-                    let idx = self.op_array.add_literal(Value::True);
-                    Ok(OperandType::Const(idx))
+                    // Multiple args: AND all together
+                    let mut result_tmp = self.op_array.alloc_temp();
+                    for (i, e) in exprs.iter().enumerate() {
+                        let val = self.compile_expr(e)?;
+                        let check_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::IssetCheck,
+                            op1: val,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(check_tmp),
+                            line: expr.span.line,
+                        });
+                        if i == 0 {
+                            self.op_array.emit(Op {
+                                opcode: OpCode::Assign,
+                                op1: OperandType::Tmp(result_tmp),
+                                op2: OperandType::Tmp(check_tmp),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                        } else {
+                            let and_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::BitwiseAnd,
+                                op1: OperandType::Tmp(result_tmp),
+                                op2: OperandType::Tmp(check_tmp),
+                                result: OperandType::Tmp(and_tmp),
+                                line: expr.span.line,
+                            });
+                            result_tmp = and_tmp;
+                        }
+                    }
+                    Ok(OperandType::Tmp(result_tmp))
                 }
             }
 

@@ -208,6 +208,12 @@ pub enum OpCode {
     MatchError,
     /// Spread array into another array: op1 = target array, op2 = source array
     ArraySpread,
+    /// isset() check: result = True if op1 is not Null and not Undef
+    IssetCheck,
+    /// Save and suppress error reporting (for @ operator)
+    ErrorSuppress,
+    /// Restore error reporting (for @ operator)
+    ErrorRestore,
 }
 
 /// A compiled function / script
