@@ -2402,13 +2402,32 @@ impl Compiler {
 
             ExprKind::ArrowFunction { params, body, .. } => {
                 // Arrow function: fn($x) => $x * 2
-                // Compile as a closure with a single return statement
+                // Arrow functions implicitly capture outer variables by value
+
+                // Collect all variables referenced in the body
+                let mut body_vars = Vec::new();
+                collect_expr_variables(body, &mut body_vars);
+
+                // Remove parameters from the captured list
+                let param_names: Vec<Vec<u8>> = params.iter().map(|p| p.name.clone()).collect();
+                let use_vars: Vec<Vec<u8>> = body_vars
+                    .into_iter()
+                    .filter(|v| !param_names.contains(v))
+                    .collect();
+
                 let closure_id = self.op_array.child_functions.len();
                 let closure_name = format!("__arrow_{}", closure_id).into_bytes();
 
                 let mut closure_compiler = Compiler::new();
                 closure_compiler.op_array.name = closure_name.clone();
+                closure_compiler.current_class = self.current_class.clone();
+                closure_compiler.current_parent_class = self.current_parent_class.clone();
 
+                // Set up use vars as the first CVs (before params)
+                for uv in &use_vars {
+                    closure_compiler.op_array.get_or_create_cv(uv);
+                }
+                // Set up parameter CVs
                 for param in params {
                     closure_compiler.op_array.get_or_create_cv(&param.name);
                 }
@@ -2440,10 +2459,43 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                let name_val_idx = self
-                    .op_array
-                    .add_literal(Value::String(PhpString::from_vec(closure_name)));
-                Ok(OperandType::Const(name_val_idx))
+                // If there are use vars, create array [closure_name, use_val_1, ...]
+                if !use_vars.is_empty() {
+                    let arr_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ArrayNew,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(arr_tmp),
+                        line: expr.span.line,
+                    });
+                    let name_val = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(closure_name)));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ArrayAppend,
+                        op1: OperandType::Tmp(arr_tmp),
+                        op2: OperandType::Const(name_val),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    for uv in &use_vars {
+                        let cv = self.op_array.get_or_create_cv(uv);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayAppend,
+                            op1: OperandType::Tmp(arr_tmp),
+                            op2: OperandType::Cv(cv),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                    }
+                    Ok(OperandType::Tmp(arr_tmp))
+                } else {
+                    let name_val_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(closure_name)));
+                    Ok(OperandType::Const(name_val_idx))
+                }
             }
 
             ExprKind::Yield(value, key) => {
@@ -2915,6 +2967,97 @@ fn stmt_contains_yield(stmt: &Statement) -> bool {
         // Don't recurse into nested function/class declarations
         StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => false,
         _ => false,
+    }
+}
+
+/// Collect all variable names referenced in an expression (for arrow function capture)
+fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
+    match &expr.kind {
+        ExprKind::Variable(name) => {
+            if !vars.contains(name) && name != b"this" {
+                vars.push(name.clone());
+            }
+        }
+        ExprKind::BinaryOp { left, right, .. } => {
+            collect_expr_variables(left, vars);
+            collect_expr_variables(right, vars);
+        }
+        ExprKind::UnaryOp { operand, .. } => collect_expr_variables(operand, vars),
+        ExprKind::Assign { target, value, .. } => {
+            collect_expr_variables(target, vars);
+            collect_expr_variables(value, vars);
+        }
+        ExprKind::CompoundAssign { target, value, .. } => {
+            collect_expr_variables(target, vars);
+            collect_expr_variables(value, vars);
+        }
+        ExprKind::FunctionCall { name, args } => {
+            collect_expr_variables(name, vars);
+            for a in args {
+                collect_expr_variables(&a.value, vars);
+            }
+        }
+        ExprKind::MethodCall { object, args, .. } => {
+            collect_expr_variables(object, vars);
+            for a in args {
+                collect_expr_variables(&a.value, vars);
+            }
+        }
+        ExprKind::StaticMethodCall { args, .. } => {
+            for a in args {
+                collect_expr_variables(&a.value, vars);
+            }
+        }
+        ExprKind::Array(elements) => {
+            for e in elements {
+                if let Some(key) = &e.key {
+                    collect_expr_variables(key, vars);
+                }
+                collect_expr_variables(&e.value, vars);
+            }
+        }
+        ExprKind::ArrayAccess { array, index } => {
+            collect_expr_variables(array, vars);
+            if let Some(i) = index {
+                collect_expr_variables(i, vars);
+            }
+        }
+        ExprKind::Ternary {
+            condition,
+            if_true,
+            if_false,
+        } => {
+            collect_expr_variables(condition, vars);
+            if let Some(t) = if_true {
+                collect_expr_variables(t, vars);
+            }
+            collect_expr_variables(if_false, vars);
+        }
+        ExprKind::NullCoalesce { left, right } => {
+            collect_expr_variables(left, vars);
+            collect_expr_variables(right, vars);
+        }
+        ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) => {
+            collect_expr_variables(e, vars);
+        }
+        ExprKind::PropertyAccess { object, .. } => {
+            collect_expr_variables(object, vars);
+        }
+        ExprKind::Instanceof { expr, .. } => collect_expr_variables(expr, vars),
+        ExprKind::ArrowFunction { body, .. } => collect_expr_variables(body, vars),
+        ExprKind::Closure { .. } => {} // Don't recurse into closures
+        ExprKind::Match { subject, arms } => {
+            collect_expr_variables(subject, vars);
+            for arm in arms {
+                for cond_list in &arm.conditions {
+                    for cond in cond_list {
+                        collect_expr_variables(cond, vars);
+                    }
+                }
+                collect_expr_variables(&arm.body, vars);
+            }
+        }
+        _ => {}
     }
 }
 

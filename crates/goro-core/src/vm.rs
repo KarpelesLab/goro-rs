@@ -130,9 +130,48 @@ impl Vm {
 
     /// Emit a PHP warning message to output
     pub fn emit_warning(&mut self, msg: &str) {
-        if self.error_reporting > 0 {
+        if self.error_reporting & 2 != 0 {
+            // E_WARNING = 2
             let warning = format!("\nWarning: {} in Unknown on line 0\n", msg);
             self.output.extend_from_slice(warning.as_bytes());
+        }
+    }
+
+    /// Emit a PHP warning with line number
+    pub fn emit_warning_at(&mut self, msg: &str, line: u32) {
+        if self.error_reporting & 2 != 0 {
+            let warning = format!("\nWarning: {} in Unknown on line {}\n", msg, line);
+            self.output.extend_from_slice(warning.as_bytes());
+        }
+    }
+
+    /// Emit a PHP notice
+    pub fn emit_notice_at(&mut self, msg: &str, line: u32) {
+        if self.error_reporting & 8 != 0 {
+            // E_NOTICE = 8
+            let notice = format!("\nNotice: {} in Unknown on line {}\n", msg, line);
+            self.output.extend_from_slice(notice.as_bytes());
+        }
+    }
+
+    /// Emit a PHP deprecated warning
+    pub fn emit_deprecated_at(&mut self, msg: &str, line: u32) {
+        if self.error_reporting & 8192 != 0 {
+            // E_DEPRECATED = 8192
+            let deprec = format!("\nDeprecated: {} in Unknown on line {}\n", msg, line);
+            self.output.extend_from_slice(deprec.as_bytes());
+        }
+    }
+
+    /// Return a type name string for error messages.
+    /// For objects, this returns the class name (e.g. "stdClass") instead of just "object".
+    /// For generators, this returns "Generator".
+    fn value_type_name(val: &Value) -> String {
+        match val {
+            Value::Object(obj) => String::from_utf8_lossy(&obj.borrow().class_name).into_owned(),
+            Value::Generator(_) => "Generator".to_string(),
+            Value::Reference(r) => Self::value_type_name(&r.borrow()),
+            other => other.type_name().to_string(),
         }
     }
 
@@ -154,8 +193,8 @@ impl Vm {
             if a_is_array || b_is_array {
                 return Some(format!(
                     "Unsupported operand types: {} + {}",
-                    a_deref.type_name(),
-                    b_deref.type_name()
+                    Self::value_type_name(&a_deref),
+                    Self::value_type_name(&b_deref)
                 ));
             }
         } else {
@@ -163,9 +202,9 @@ impl Vm {
             if a_is_array || b_is_array {
                 return Some(format!(
                     "Unsupported operand types: {} {} {}",
-                    a_deref.type_name(),
+                    Self::value_type_name(&a_deref),
                     op_symbol,
-                    b_deref.type_name()
+                    Self::value_type_name(&b_deref)
                 ));
             }
         }

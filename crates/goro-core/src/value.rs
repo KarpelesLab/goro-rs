@@ -131,9 +131,10 @@ impl Value {
             Value::Long(n) => *n as f64,
             Value::Double(f) => *f,
             Value::String(s) => {
-                let s = s.to_string_lossy();
-                let s = s.trim();
-                s.parse::<f64>().unwrap_or(0.0)
+                let str = s.to_string_lossy();
+                let str = str.trim();
+                // PHP parses leading numeric portion
+                parse_leading_float(str)
             }
             Value::Array(arr) => {
                 if arr.borrow().is_empty() {
@@ -529,13 +530,115 @@ impl Value {
                 0
             }
             (Value::Null | Value::Undef, Value::Null | Value::Undef) => 0,
+            (Value::Null | Value::Undef, Value::False) => 0,
+            (Value::False, Value::Null | Value::Undef) => 0,
+            (Value::Null | Value::Undef, Value::True) => -1,
+            (Value::True, Value::Null | Value::Undef) => 1,
+            (Value::Null | Value::Undef, Value::Long(n)) => {
+                if 0 < *n {
+                    -1
+                } else if 0 > *n {
+                    1
+                } else {
+                    0
+                }
+            }
+            (Value::Long(n), Value::Null | Value::Undef) => {
+                if *n < 0 {
+                    -1
+                } else if *n > 0 {
+                    1
+                } else {
+                    0
+                }
+            }
+            (Value::Null | Value::Undef, Value::Double(f)) => {
+                if 0.0 < *f {
+                    -1
+                } else if 0.0 > *f {
+                    1
+                } else {
+                    0
+                }
+            }
+            (Value::Double(f), Value::Null | Value::Undef) => {
+                if *f < 0.0 {
+                    -1
+                } else if *f > 0.0 {
+                    1
+                } else {
+                    0
+                }
+            }
+            (Value::Null | Value::Undef, Value::String(s)) => {
+                if s.is_empty() {
+                    0
+                } else {
+                    -1
+                }
+            }
+            (Value::String(s), Value::Null | Value::Undef) => {
+                if s.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
             (Value::Null | Value::Undef, _) => -1,
             (_, Value::Null | Value::Undef) => 1,
-            (Value::String(a), Value::String(b)) => match a.as_bytes().cmp(b.as_bytes()) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            },
+            // Bool comparisons: convert other side to bool
+            (Value::True, Value::True) | (Value::False, Value::False) => 0,
+            (Value::True, Value::False) => 1,
+            (Value::False, Value::True) => -1,
+            (Value::True, other) => {
+                if other.is_truthy() {
+                    0
+                } else {
+                    1
+                }
+            }
+            (Value::False, other) => {
+                if other.is_truthy() {
+                    -1
+                } else {
+                    0
+                }
+            }
+            (other, Value::True) => {
+                if other.is_truthy() {
+                    0
+                } else {
+                    -1
+                }
+            }
+            (other, Value::False) => {
+                if other.is_truthy() {
+                    1
+                } else {
+                    0
+                }
+            }
+            (Value::String(a), Value::String(b)) => {
+                // PHP 8: if both strings are numeric, compare as numbers
+                if let (Some(na), Some(nb)) = (
+                    parse_numeric_string(a.as_bytes()),
+                    parse_numeric_string(b.as_bytes()),
+                ) {
+                    if na < nb {
+                        -1
+                    } else if na > nb {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    match a.as_bytes().cmp(b.as_bytes()) {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Equal => 0,
+                        std::cmp::Ordering::Greater => 1,
+                    }
+                }
+            }
             _ => {
                 let a = self.to_double();
                 let b = other.to_double();
@@ -718,4 +821,116 @@ impl fmt::Display for Value {
             }
         }
     }
+}
+
+/// Parse a PHP numeric string, returning its value as f64 if it's numeric.
+/// Handles integers, floats, and scientific notation with optional leading whitespace and sign.
+/// Returns None for non-numeric strings.
+/// Parse the leading numeric portion of a string as a float.
+/// If the string doesn't start with a number, returns 0.0.
+fn parse_leading_float(s: &str) -> f64 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    // Find the longest valid prefix that's a number
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    // Optional sign
+    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        i += 1;
+    }
+    let start = i;
+    // Digits
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    // Optional decimal
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if i == start {
+        return 0.0;
+    }
+    // Optional exponent
+    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        let save = i;
+        i += 1;
+        if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i].is_ascii_digit() {
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        } else {
+            i = save; // Not a valid exponent, backtrack
+        }
+    }
+    s[..i].parse::<f64>().unwrap_or(0.0)
+}
+
+/// Parse a PHP numeric string, returning its value as f64 if it's numeric.
+pub fn parse_numeric_string(s: &[u8]) -> Option<f64> {
+    let s = std::str::from_utf8(s).ok()?;
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Try parsing as a number (handles int, float, scientific notation)
+    let mut chars = s.chars().peekable();
+
+    // Optional sign
+    if matches!(chars.peek(), Some('+') | Some('-')) {
+        chars.next();
+    }
+
+    // Must start with digit or '.'
+    let has_leading_digit = matches!(chars.peek(), Some('0'..='9'));
+    let mut has_dot = false;
+    let mut has_digits = false;
+
+    // Integer/decimal part
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            has_digits = true;
+            chars.next();
+        } else if c == '.' && !has_dot {
+            has_dot = true;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    if !has_digits && !has_leading_digit {
+        return None;
+    }
+
+    // Optional exponent
+    if matches!(chars.peek(), Some('e') | Some('E')) {
+        chars.next();
+        if matches!(chars.peek(), Some('+') | Some('-')) {
+            chars.next();
+        }
+        if !matches!(chars.peek(), Some('0'..='9')) {
+            return None;
+        }
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Must have consumed everything (trailing whitespace was already trimmed)
+    if chars.peek().is_some() {
+        return None;
+    }
+
+    s.parse::<f64>().ok()
 }

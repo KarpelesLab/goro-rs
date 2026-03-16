@@ -117,8 +117,8 @@ pub fn run_test(test: &PhptTest) -> TestResult {
 
     // Compare with expected output
     if let Some(expected) = test.expect_section() {
-        let expected_trimmed = expected.trim_end_matches('\n');
-        let actual_trimmed = actual.trim_end_matches('\n');
+        let expected_trimmed = expected.trim();
+        let actual_trimmed = actual.trim();
         if actual_trimmed == expected_trimmed {
             TestResult::Pass
         } else {
@@ -129,12 +129,14 @@ pub fn run_test(test: &PhptTest) -> TestResult {
         }
     } else if let Some(pattern) = test.expectf_section() {
         // EXPECTF: convert printf-style patterns to regex
-        if matches_expectf(pattern, &actual) {
+        let pattern_trimmed = pattern.trim();
+        let actual_trimmed = actual.trim();
+        if matches_expectf(pattern_trimmed, actual_trimmed) {
             TestResult::Pass
         } else {
             TestResult::Fail {
-                expected: pattern.to_string(),
-                actual,
+                expected: pattern_trimmed.to_string(),
+                actual: actual_trimmed.to_string(),
             }
         }
     } else if test.expect_regex_section().is_some() {
@@ -190,13 +192,27 @@ fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
 
     // Parse
     let mut parser = Parser::new(tokens);
-    let program = parser.parse().map_err(|e| format!("Parse error: {}", e))?;
+    let program = match parser.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            // PHP outputs parse errors to stdout
+            let msg = format!(
+                "\nParse error: syntax error in Unknown on line {}\n",
+                e.span.line
+            );
+            return Ok(msg.into_bytes());
+        }
+    };
 
     // Compile
     let compiler = Compiler::new();
-    let (op_array, compiled_classes) = compiler
-        .compile(&program)
-        .map_err(|e| format!("Compile error: {}", e))?;
+    let (op_array, compiled_classes) = match compiler.compile(&program) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("\nFatal error: {} in Unknown on line 0\n", e);
+            return Ok(msg.into_bytes());
+        }
+    };
 
     // Execute
     let mut vm = Vm::new();
@@ -204,10 +220,41 @@ fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
     for class in compiled_classes {
         vm.register_class(class);
     }
-    vm.execute(&op_array)
-        .map_err(|e| format!("Runtime error: {}", e))?;
 
-    Ok(vm.take_output())
+    match vm.execute(&op_array) {
+        Ok(_) => Ok(vm.take_output()),
+        Err(e) => {
+            // Capture any output produced before the error, plus the error message
+            let mut output = vm.take_output();
+
+            // Format the error like PHP does
+            if let Some(exc) = vm.current_exception.take() {
+                if let goro_core::value::Value::Object(obj) = &exc {
+                    let obj = obj.borrow();
+                    let class = String::from_utf8_lossy(&obj.class_name);
+                    let msg = obj.get_property(b"message");
+                    let msg_str = msg.to_php_string().to_string_lossy();
+                    let fatal = format!(
+                        "\nFatal error: Uncaught {}: {} in Unknown:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line {}",
+                        class, msg_str, e.line, e.line
+                    );
+                    output.extend_from_slice(fatal.as_bytes());
+                } else {
+                    let fatal =
+                        format!("\nFatal error: {} in Unknown on line {}", e.message, e.line);
+                    output.extend_from_slice(fatal.as_bytes());
+                }
+            } else {
+                let fatal = format!(
+                    "\nFatal error: {} in Unknown on line {}\n",
+                    e.message, e.line
+                );
+                output.extend_from_slice(fatal.as_bytes());
+            }
+
+            Ok(output)
+        }
+    }
 }
 
 fn matches_expectf(pattern: &str, actual: &str) -> bool {
@@ -234,19 +281,17 @@ fn matches_expectf(pattern: &str, actual: &str) -> bool {
         .all(|(p, a)| match_expectf_line(p, a))
 }
 
-/// Match a single line with EXPECTF patterns
+/// Match a single line with EXPECTF patterns using recursive backtracking
 fn match_expectf_line(pattern: &str, actual: &str) -> bool {
-    let pb = pattern.as_bytes();
-    let ab = actual.as_bytes();
-    let mut pi = 0;
-    let mut ai = 0;
+    match_expectf_at(pattern.as_bytes(), 0, actual.as_bytes(), 0)
+}
 
-    while pi < pb.len() && ai < ab.len() {
+fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool {
+    while pi < pb.len() {
         if pb[pi] == b'%' && pi + 1 < pb.len() {
             match pb[pi + 1] {
                 b'd' => {
                     pi += 2;
-                    // Match optional - and digits
                     if ai < ab.len() && ab[ai] == b'-' {
                         ai += 1;
                     }
@@ -271,44 +316,63 @@ fn match_expectf_line(pattern: &str, actual: &str) -> bool {
                 }
                 b's' => {
                     pi += 2;
-                    // Match non-whitespace
-                    if ai >= ab.len() || ab[ai] == b' ' || ab[ai] == b'\t' {
+                    // %s: one or more non-whitespace chars, with backtracking
+                    if ai >= ab.len() || ab[ai] == b' ' || ab[ai] == b'\t' || ab[ai] == b'\n' {
                         return false;
                     }
+                    // Find the extent of non-whitespace
+                    let start = ai;
                     while ai < ab.len() && ab[ai] != b' ' && ab[ai] != b'\t' && ab[ai] != b'\n' {
                         ai += 1;
                     }
+                    // Try backtracking from longest match
+                    let end = ai;
+                    for try_ai in (start + 1..=end).rev() {
+                        if match_expectf_at(pb, pi, ab, try_ai) {
+                            return true;
+                        }
+                    }
+                    return false;
                 }
                 b'S' | b'a' | b'A' => {
                     pi += 2;
-                    // Match anything - greedy
-                    // Look ahead for next literal char in pattern
-                    if pi >= pb.len() {
-                        ai = ab.len(); // consume rest
-                    } else {
-                        // Find next literal char
-                        let next_literal = if pb[pi] == b'%' { None } else { Some(pb[pi]) };
-                        if let Some(nc) = next_literal {
-                            // Advance ai until we find nc
-                            while ai < ab.len() && ab[ai] != nc {
-                                ai += 1;
-                            }
-                        } else {
-                            ai = ab.len();
+                    // %a/%A/%S: match any string (including empty for %a)
+                    // Try from longest match (greedy with backtracking)
+                    for try_ai in (ai..=ab.len()).rev() {
+                        if match_expectf_at(pb, pi, ab, try_ai) {
+                            return true;
                         }
                     }
+                    return false;
                 }
                 b'f' => {
                     pi += 2;
+                    let start = ai;
                     if ai < ab.len() && ab[ai] == b'-' {
                         ai += 1;
                     }
                     while ai < ab.len() && (ab[ai].is_ascii_digit() || ab[ai] == b'.') {
                         ai += 1;
                     }
+                    // Allow E notation
+                    if ai < ab.len() && (ab[ai] == b'E' || ab[ai] == b'e') {
+                        ai += 1;
+                        if ai < ab.len() && (ab[ai] == b'+' || ab[ai] == b'-') {
+                            ai += 1;
+                        }
+                        while ai < ab.len() && ab[ai].is_ascii_digit() {
+                            ai += 1;
+                        }
+                    }
+                    if ai == start {
+                        return false;
+                    }
                 }
                 b'x' => {
                     pi += 2;
+                    if ai >= ab.len() || !ab[ai].is_ascii_hexdigit() {
+                        return false;
+                    }
                     while ai < ab.len() && ab[ai].is_ascii_hexdigit() {
                         ai += 1;
                     }
@@ -329,6 +393,8 @@ fn match_expectf_line(pattern: &str, actual: &str) -> bool {
                     pi += 2;
                     if ai < ab.len() {
                         ai += 1;
+                    } else {
+                        return false;
                     }
                 }
                 b'%' => {
@@ -340,8 +406,7 @@ fn match_expectf_line(pattern: &str, actual: &str) -> bool {
                     }
                 }
                 _ => {
-                    // Unknown pattern, treat as literal
-                    if pb[pi] != ab[ai] {
+                    if ai >= ab.len() || pb[pi] != ab[ai] {
                         return false;
                     }
                     pi += 1;
@@ -349,7 +414,7 @@ fn match_expectf_line(pattern: &str, actual: &str) -> bool {
                 }
             }
         } else {
-            if pb[pi] != ab[ai] {
+            if ai >= ab.len() || pb[pi] != ab[ai] {
                 return false;
             }
             pi += 1;
@@ -358,7 +423,7 @@ fn match_expectf_line(pattern: &str, actual: &str) -> bool {
     }
 
     // Both should be consumed
-    pi >= pb.len() && ai >= ab.len()
+    ai >= ab.len()
 }
 
 /// Run all .phpt files in a directory (recursively)
