@@ -210,6 +210,10 @@ pub enum OpCode {
     ArraySpread,
     /// isset() check: result = True if op1 is not Null and not Undef
     IssetCheck,
+    /// Make a CV into a reference (wrap in Rc<RefCell>): op1 = CV to make ref
+    MakeRef,
+    /// Append to array without deref (preserves Reference wrapper): op1 = array, op2 = CV
+    ArrayAppendRef,
     /// Save and suppress error reporting (for @ operator)
     ErrorSuppress,
     /// Restore error reporting (for @ operator)

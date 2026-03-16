@@ -2197,6 +2197,27 @@ impl Vm {
                     }
                 }
 
+                OpCode::ArrayAppendRef => {
+                    // Append to array keeping Reference wrapper (for closure by-ref capture)
+                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let raw_val = Self::read_operand_raw(&cvs, &op.op2);
+                    if let Value::Array(arr) = arr_val {
+                        arr.borrow_mut().push(raw_val);
+                    }
+                }
+
+                OpCode::MakeRef => {
+                    // Convert a CV's value to a Reference if not already one
+                    if let OperandType::Cv(idx) = &op.op1 {
+                        if let Some(slot) = cvs.get_mut(*idx as usize) {
+                            if !matches!(slot, Value::Reference(_)) {
+                                let current = std::mem::replace(slot, Value::Null);
+                                *slot = Value::Reference(Rc::new(RefCell::new(current)));
+                            }
+                        }
+                    }
+                }
+
                 OpCode::IssetCheck => {
                     // isset() check: True if value is not Null and not Undef
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -3026,6 +3047,14 @@ impl Vm {
             OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned().unwrap_or(Value::Null),
             OperandType::Unused => Value::Null,
             OperandType::JmpTarget(_) => Value::Null,
+        }
+    }
+
+    /// Read a CV value without dereferencing (keeps Reference wrapper)
+    fn read_operand_raw(cvs: &[Value], operand: &OperandType) -> Value {
+        match operand {
+            OperandType::Cv(idx) => cvs.get(*idx as usize).cloned().unwrap_or(Value::Null),
+            _ => Value::Null,
         }
     }
 

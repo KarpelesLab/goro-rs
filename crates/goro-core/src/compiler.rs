@@ -2585,13 +2585,33 @@ impl Compiler {
                     // Subsequent elements: captured use var values
                     for use_var in use_vars {
                         let cv = self.op_array.get_or_create_cv(&use_var.variable);
-                        self.op_array.emit(Op {
-                            opcode: OpCode::ArrayAppend,
-                            op1: OperandType::Tmp(arr_tmp),
-                            op2: OperandType::Cv(cv),
-                            result: OperandType::Unused,
-                            line: expr.span.line,
-                        });
+                        if use_var.by_ref {
+                            // By-reference capture: make the CV a reference first,
+                            // then append the raw Reference value (not dereffed)
+                            self.op_array.emit(Op {
+                                opcode: OpCode::MakeRef,
+                                op1: OperandType::Cv(cv),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                            // Use ArrayAppendRef to preserve the Reference wrapper
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppendRef,
+                                op1: OperandType::Tmp(arr_tmp),
+                                op2: OperandType::Cv(cv),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                        } else {
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppend,
+                                op1: OperandType::Tmp(arr_tmp),
+                                op2: OperandType::Cv(cv),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                        }
                     }
                     Ok(OperandType::Tmp(arr_tmp))
                 } else {
