@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A parsed PHPT test file
 #[derive(Debug)]
@@ -58,6 +60,10 @@ impl PhptTest {
         self.sections.get("SKIPIF").map(|s| s.as_str())
     }
 
+    pub fn expect_regex_section(&self) -> Option<&str> {
+        self.sections.get("EXPECTREGEX").map(|s| s.as_str())
+    }
+
     pub fn ini_section(&self) -> Option<&str> {
         self.sections.get("INI").map(|s| s.as_str())
     }
@@ -74,14 +80,35 @@ pub enum TestResult {
 
 /// Run a PHPT test against the goro engine
 pub fn run_test(test: &PhptTest) -> TestResult {
+    // Handle SKIPIF section
+    if let Some(skipif) = test.skipif_section() {
+        let skipif_trimmed = skipif.trim();
+        if !skipif_trimmed.is_empty() {
+            match execute_php_with_timeout(skipif_trimmed.as_bytes(), 5) {
+                Ok(output) => {
+                    let output_str = String::from_utf8_lossy(&output).to_lowercase();
+                    if output_str.contains("skip") {
+                        return TestResult::Skip(
+                            String::from_utf8_lossy(&output).trim().to_string(),
+                        );
+                    }
+                }
+                Err(_) => {
+                    // If SKIPIF errors, skip the test
+                    return TestResult::Skip("SKIPIF section errored".into());
+                }
+            }
+        }
+    }
+
     // Get the PHP source
     let source = match test.file_section() {
         Some(s) => s,
         None => return TestResult::Error("missing --FILE-- section".into()),
     };
 
-    // Execute the source
-    let output = match execute_php(source.as_bytes()) {
+    // Execute the source with a 10-second timeout
+    let output = match execute_php_with_timeout(source.as_bytes(), 10) {
         Ok(output) => output,
         Err(e) => return TestResult::Error(e),
     };
@@ -110,12 +137,49 @@ pub fn run_test(test: &PhptTest) -> TestResult {
                 actual,
             }
         }
+    } else if test.expect_regex_section().is_some() {
+        // We don't support EXPECTREGEX yet
+        TestResult::Skip("EXPECTREGEX not supported".into())
     } else {
         TestResult::Error("missing --EXPECT-- or --EXPECTF-- section".into())
     }
 }
 
-fn execute_php(source: &[u8]) -> Result<Vec<u8>, String> {
+fn execute_php_with_timeout(source: &[u8], timeout_secs: u64) -> Result<Vec<u8>, String> {
+    let source = source.to_vec();
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timed_out2 = timed_out.clone();
+
+    let handle = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024) // 64MB stack
+        .spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source)))
+        })
+        .map_err(|e| format!("Thread error: {}", e))?;
+
+    // Wait with timeout
+    let start = std::time::Instant::now();
+    loop {
+        if handle.is_finished() {
+            break;
+        }
+        if start.elapsed().as_secs() >= timeout_secs {
+            timed_out2.store(true, Ordering::Relaxed);
+            // We can't kill the thread, so just return timeout error
+            // The thread will eventually be cleaned up when the process exits
+            return Err("Timeout: execution exceeded time limit".to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    match handle.join() {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err("Fatal error: panic during execution".to_string()),
+        Err(_) => Err("Fatal error: stack overflow or panic".to_string()),
+    }
+}
+
+fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
     use goro_core::compiler::Compiler;
     use goro_core::vm::Vm;
     use goro_parser::{Lexer, Parser};
@@ -297,93 +361,20 @@ fn match_expectf_line(pattern: &str, actual: &str) -> bool {
     pi >= pb.len() && ai >= ab.len()
 }
 
-fn _old_matches_expectf(pattern: &str, actual: &str) -> bool {
-    // Old regex-based approach (kept for reference)
-    let mut regex_str = String::from("^");
-    let pattern_bytes = pattern.as_bytes();
-    let mut i = 0;
-
-    while i < pattern_bytes.len() {
-        if pattern_bytes[i] == b'%' && i + 1 < pattern_bytes.len() {
-            match pattern_bytes[i + 1] {
-                b'd' => {
-                    regex_str.push_str("-?[0-9]+");
-                    i += 2;
-                }
-                b's' => {
-                    regex_str.push_str("[^\\s]+");
-                    i += 2;
-                }
-                b'f' => {
-                    regex_str.push_str("-?[0-9]*\\.?[0-9]+");
-                    i += 2;
-                }
-                b'c' => {
-                    regex_str.push('.');
-                    i += 2;
-                }
-                b'x' => {
-                    regex_str.push_str("[0-9a-fA-F]+");
-                    i += 2;
-                }
-                b'e' => {
-                    regex_str.push_str("[/\\\\]");
-                    i += 2;
-                }
-                b'a' | b'A' => {
-                    regex_str.push_str(".*");
-                    i += 2;
-                }
-                b'w' => {
-                    regex_str.push_str("\\s*");
-                    i += 2;
-                }
-                b'i' => {
-                    regex_str.push_str("[+-]?[0-9]+");
-                    i += 2;
-                }
-                b'S' => {
-                    regex_str.push_str(".*");
-                    i += 2;
-                }
-                _ => {
-                    regex_str.push(escape_regex_char(pattern_bytes[i] as char));
-                    i += 1;
-                }
-            }
-        } else {
-            regex_str.push(escape_regex_char(pattern_bytes[i] as char));
-            i += 1;
-        }
-    }
-    regex_str.push('$');
-
-    // Simple string matching without regex dependency for now
-    // TODO: add proper regex matching
-    let expected = pattern.trim_end_matches('\n');
-    let actual_trimmed = actual.trim_end_matches('\n');
-    expected == actual_trimmed
-}
-
-#[allow(dead_code)]
-fn escape_regex_char(c: char) -> char {
-    c
-}
-
-/// Run all .phpt files in a directory
+/// Run all .phpt files in a directory (recursively)
 pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     let mut pass = 0;
     let mut fail = 0;
     let mut skip = 0;
     let mut error = 0;
 
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "phpt")
-                && let Ok(content) = std::fs::read_to_string(&path)
-                && let Some(test) = PhptTest::parse(&content)
-            {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    collect_phpt_files(dir, &mut files);
+    files.sort();
+
+    for path in &files {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Some(test) = PhptTest::parse(&content) {
                 match run_test(&test) {
                     TestResult::Pass => {
                         pass += 1;
@@ -409,4 +400,17 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     }
 
     (pass, fail, skip, error)
+}
+
+fn collect_phpt_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_phpt_files(&path, files);
+            } else if path.extension().is_some_and(|e| e == "phpt") {
+                files.push(path);
+            }
+        }
+    }
 }

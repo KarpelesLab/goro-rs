@@ -66,6 +66,8 @@ pub struct Vm {
     destructible_objects: Vec<Value>,
     /// Stack of "called class" names for late static binding (static::)
     called_class_stack: Vec<Vec<u8>>,
+    /// Current call depth (to prevent stack overflow from infinite recursion)
+    call_depth: u32,
 }
 
 impl Vm {
@@ -86,6 +88,7 @@ impl Vm {
             magic_depth: 0,
             destructible_objects: Vec::new(),
             called_class_stack: Vec::new(),
+            call_depth: 0,
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -257,6 +260,24 @@ impl Vm {
 
     /// Execute an op_array with pre-initialized CVs
     fn execute_op_array(
+        &mut self,
+        op_array: &OpArray,
+        mut cvs: Vec<Value>,
+    ) -> Result<Value, VmError> {
+        self.call_depth += 1;
+        if self.call_depth > 256 {
+            self.call_depth -= 1;
+            return Err(VmError {
+                message: "Maximum call depth exceeded (possible infinite recursion)".into(),
+                line: 0,
+            });
+        }
+        let result = self.execute_op_array_inner(op_array, cvs);
+        self.call_depth -= 1;
+        result
+    }
+
+    fn execute_op_array_inner(
         &mut self,
         op_array: &OpArray,
         mut cvs: Vec<Value>,

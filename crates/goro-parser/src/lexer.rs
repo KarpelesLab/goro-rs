@@ -133,7 +133,19 @@ impl<'a> Lexer<'a> {
                 b'#' => {
                     // # comment (but not #[)
                     if self.peek_at(1) == Some(b'[') {
-                        break; // attribute, not a comment
+                        // PHP 8 attribute - skip #[...] entirely
+                        self.advance(); // #
+                        self.advance(); // [
+                        let mut depth = 1;
+                        while depth > 0 {
+                            match self.advance() {
+                                Some(b'[') => depth += 1,
+                                Some(b']') => depth -= 1,
+                                None => break,
+                                _ => {}
+                            }
+                        }
+                        continue;
                     }
                     self.advance();
                     while let Some(ch) = self.peek() {

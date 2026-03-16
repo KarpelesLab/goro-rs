@@ -1,221 +1,148 @@
 # goro-rs Roadmap
 
-## Phase 1: Minimum Viable Engine (Target: "Hello World")
+## Current Status
 
-Get `<?php echo "Hello, World!\n";` working end-to-end.
+**Test Suite**: 181/871 (20.8%) passing on PHP 8.5.4 Zend tests (top-level)
 
-- [x] Project structure (Cargo workspace)
-- [x] **Lexer**: Tokenize basic PHP (`<?php`, strings, integers, identifiers, operators, `;`)
-- [x] **Parser**: Parse `echo` statement, string/integer literals, basic expressions
-- [x] **AST**: Define initial node types (Echo, Literal, BinaryOp)
-- [x] **Compiler**: Compile echo + literals to bytecodes
-- [x] **Opcodes**: ECHO, RETURN, NOP, basic arithmetic (ADD, SUB, MUL, DIV, MOD, CONCAT)
-- [x] **VM**: Execute opcodes, manage a single call frame
-- [x] **Value**: Null, Bool, Long, Double, String (basic)
-- [x] **CLI SAPI**: Read file or `-r` string, run it, print output
-- [x] **PHPT runner**: Parse .phpt files, run --FILE--, compare with --EXPECT--
+### Completed Features
 
-## Phase 2: Variables & Expressions
+- Full execution pipeline: PHP source -> lexer -> parser -> AST -> bytecode -> VM
+- Types: null, bool, int, float, string (binary-safe), array (ordered hash map), object, reference
+- All arithmetic, comparison, bitwise, logical operators with type juggling
+- String interpolation, concatenation, cast operators
+- Control flow: if/elseif/else, while, do-while, for, foreach, switch, match, break N/continue N
+- Functions: declarations, calls, default params, variadic (`...$args`), closures, arrow functions
+- OOP: classes, inheritance, static props/methods, constants, instanceof, abstract classes
+- Magic methods: `__construct`, `__toString`, `__get`, `__set`, `__call`, `__invoke`, `clone`, `__destruct`
+- Generators: `yield`, `yield $key => $value`, foreach over generators
+- References: `$b = &$a`, shared value mutation through `Rc<RefCell<Value>>`
+- Exceptions: try/catch/finally with cross-function propagation
+- Late static binding (`static::`)
+- Interface/trait declarations (parsed, basic enforcement)
+- 450+ built-in functions (array, string, math, type, output, JSON, OOP introspection)
+- include/require, define/defined/constant, static/global variables
+- PHPT test runner with EXPECTF pattern matching, SKIPIF support, timeout protection
 
-- [x] Variable assignment (`$x = ...`)
-- [x] All arithmetic operators (`+`, `-`, `*`, `/`, `%`, `**`)
-- [x] String concatenation (`.`)
-- [x] Comparison operators (`==`, `===`, `!=`, `!==`, `<`, `>`, `<=`, `>=`, `<=>`)
-- [x] Logical operators (`&&`, `||`, `!`, `and`, `or`, `xor`)
-- [x] Bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`)
-- [x] Assignment operators (`+=`, `-=`, `.=`, etc.)
-- [x] Increment/decrement (`++`, `--`)
-- [x] Type juggling / coercion (string↔int, int↔float, truthy/falsy)
-- [x] String interpolation (`"Hello $name"`, `"Hello {$name}"`)
-- [ ] Heredoc / Nowdoc
-- [ ] Constants (`define()`, `const`)
-- [x] Ternary (`?:`), null coalescing (`??`), null coalescing assignment (`??=`)
+---
 
-## Phase 3: Control Flow
+## Next Steps (Priority Order)
 
-- [x] `if` / `elseif` / `else`
-- [x] `while` / `do-while`
-- [x] `for`
-- [x] `foreach` (arrays)
-- [x] `switch` / `case` / `default`
-- [x] `match` expression
-- [x] `break` / `continue` (with levels)
-- [x] `return`
-- [ ] `goto` / labels
-- [ ] `declare(strict_types=1)`
+### P0: Error/Warning Output (highest impact - ~163 tests)
 
-## Phase 4: Functions
+The single highest-impact improvement area. Many tests expect PHP's diagnostic output.
 
-- [x] Function declarations
-- [x] Function calls (user-defined and built-in)
-- [ ] Default parameter values
-- [ ] Variadic parameters (`...$args`)
-- [ ] Argument unpacking (`func(...$args)`)
-- [ ] Pass by reference (`&$param`)
-- [ ] Return types
-- [ ] Named arguments
-- [ ] `global` and `static` variables
-- [ ] Closures / anonymous functions
-- [ ] Arrow functions (`fn($x) => $x * 2`)
-- [ ] First-class callable syntax (`strlen(...)`)
-- [ ] Recursion
-- [ ] Variable functions (`$func()`)
+- [ ] **Fatal error / Uncaught exception formatting** (~108 tests)
+  - Output `Fatal error: Uncaught ExceptionType: message in file:line\nStack trace:\n#0 {main}\n  thrown in file on line N`
+  - Currently exceptions are caught but error text not always written to output
+- [ ] **Warning emission** (~30 tests)
+  - `Undefined variable`, `Undefined array key`, `Attempt to read property on null`
+  - `Division by zero` warning (not fatal), `array_key_exists` warnings
+  - `Illegal string offset` warnings
+- [ ] **Notice/Deprecated emission** (~25 tests)
+  - `Deprecated: ... is deprecated` messages for deprecated features
+  - Proper `E_NOTICE`, `E_WARNING`, `E_DEPRECATED` level handling
+- [ ] **set_error_handler()** / **set_exception_handler()**
+- [ ] **@ error suppression operator**
+- [ ] **trigger_error()** / **user_error()**
 
-## Phase 5: Arrays
+### P1: Core Language Gaps (high impact - ~80 tests)
 
-- [ ] Array literals (`[1, 2, 3]`, `['a' => 1]`)
-- [ ] Packed arrays (sequential int keys, optimized storage)
-- [ ] Hash arrays (mixed string/int keys)
-- [ ] Array access (`$arr[$key]`, `$arr[]`)
-- [ ] Nested arrays
-- [ ] `foreach` with keys and values
-- [ ] Array unpacking (`[...$a, ...$b]`)
-- [ ] `list()` / `[]` destructuring
-- [ ] Array functions from ext-standard (`count`, `array_push`, `array_map`, etc.)
+- [ ] **Variable variables** (`$$var`, `${$expr}`) - parse + compile + VM support
+- [ ] **Argument unpacking** in calls (`func(...$args)`) - compiler support
+- [ ] **Array spread** in literals (`[...$a, ...$b]`) - compiler support
+- [ ] **Proper array copy-on-write semantics** - currently `Rc<RefCell>` creates shared references
+  - `$b = $a` should deep-clone the array, not share the `Rc`
+  - Critical for correct PHP semantics
+- [ ] **`::class` constant** on variables/expressions (`$obj::class`, `ClassName::class`)
+- [ ] **Dynamic member access** (`$class::$prop`, `Class::{$expr}`)
+- [ ] **Heredoc / Nowdoc** strings
+- [ ] **`goto` / labels**
+- [ ] **`declare(strict_types=1)`**
+- [ ] **String offset access** (`$str[0]` read and write)
 
-## Phase 6: Strings
+### P2: OOP Completions (~50 tests)
 
-- [ ] Single-quoted strings
-- [ ] Double-quoted strings with interpolation
-- [ ] Heredoc / Nowdoc
-- [ ] String access by offset (`$str[0]`)
-- [ ] Binary-safe string operations
-- [ ] String functions from ext-standard (`strlen`, `strpos`, `substr`, `str_replace`, etc.)
-- [ ] `printf` / `sprintf` family
+- [ ] **`__callStatic`** magic method
+- [ ] **`__isset` / `__unset`** magic methods
+- [ ] **`__debugInfo`** magic method
+- [ ] **Proper visibility enforcement** (protected/private access checks)
+- [ ] **Abstract method enforcement** in child classes
+- [ ] **Interface method signature enforcement**
+- [ ] **Trait conflict resolution** (`insteadof`, `as`)
+- [ ] **Enum enforcement** (backed values, methods, implements)
+- [ ] **Readonly properties**
+- [ ] **Constructor promotion** (`public function __construct(public $x)`)
+- [ ] **Anonymous classes** (runtime)
+- [ ] **Property hooks** (PHP 8.4+ - `get {}` / `set {}` blocks)
 
-## Phase 7: Object-Oriented Programming
+### P3: Type System (~40 tests)
 
-- [ ] Class declarations
-- [ ] Properties (typed, untyped, default values)
-- [ ] Methods
-- [ ] Constructors / destructors
-- [ ] `$this` and `self`
-- [ ] Visibility (`public`, `protected`, `private`)
-- [ ] Inheritance (`extends`)
-- [ ] `parent::` calls
-- [ ] `static` properties and methods
-- [ ] Abstract classes and methods
-- [ ] Interfaces
-- [ ] Traits (use, conflict resolution)
-- [ ] Class constants
-- [ ] `instanceof`
-- [ ] Enums (basic, backed, methods)
-- [ ] Readonly properties
-- [ ] Constructor promotion
-- [ ] Named arguments in constructors
-- [ ] `::class` constant
-- [ ] Anonymous classes
-- [ ] Magic methods (`__construct`, `__destruct`, `__get`, `__set`, `__call`,
-  `__callStatic`, `__toString`, `__invoke`, `__clone`, `__debugInfo`, etc.)
-- [ ] Object cloning (`clone`, `clone with` in 8.5)
-- [ ] Late static binding (`static::`)
-- [ ] Property hooks (PHP 8.4+)
-- [ ] Asymmetric visibility (PHP 8.4+)
+- [ ] **Type declarations** on parameters and return types (parse + enforce)
+- [ ] **Union types** (`int|string`)
+- [ ] **Intersection types** (`Foo&Bar`)
+- [ ] **Nullable types** (`?int`)
+- [ ] **`strict_types` enforcement**
+- [ ] **TypeError** for type mismatches
+- [ ] **`void`, `never`, `null`, `false`, `true`** return types
 
-## Phase 8: Error Handling
+### P4: Missing Built-in Functions (~30 tests)
 
-- [ ] `try` / `catch` / `finally`
-- [ ] `throw` expression
-- [ ] Exception hierarchy (`Throwable`, `Exception`, `Error`)
-- [ ] Custom exception classes
-- [ ] `set_error_handler()`, `set_exception_handler()`
-- [ ] Error levels (E_ERROR, E_WARNING, E_NOTICE, etc.)
-- [ ] `@` error suppression operator
-- [ ] Error → Exception conversion
+Functions needed by tests (ordered by test count):
 
-## Phase 9: Type System
+- [ ] `stream_wrapper_register` (11 tests) - needs stream wrapper infrastructure
+- [ ] `parse_ini_file` / `parse_ini_string` (7 tests)
+- [ ] `Closure::fromCallable` / `Closure::bind` / `Closure::bindTo` (4 tests)
+- [ ] `array_merge_recursive`, `array_fill_keys`, `array_multisort` (3 tests)
+- [ ] `strtok`, `stristr`, `getcwd`, `set_include_path` (1 each)
+- [ ] `register_shutdown_function` (needs shutdown hook infrastructure)
+- [ ] `class_alias`
+- [ ] `compact` / `extract`
+- [ ] `range`
 
-- [ ] Scalar type declarations (`int`, `float`, `string`, `bool`)
-- [ ] `array`, `callable`, `iterable`, `object`, `mixed`
-- [ ] `void`, `never`, `null`, `false`, `true`
-- [ ] Union types (`int|string`)
-- [ ] Intersection types (`Foo&Bar`)
-- [ ] DNF types (`(Foo&Bar)|null`)
-- [ ] Nullable types (`?int`)
-- [ ] `strict_types` enforcement
-- [ ] Return type checking
-- [ ] Property type enforcement
+### P5: String Operations (~15 tests)
 
-## Phase 10: Standard Extension (ext-standard)
+- [ ] **Bitwise operations on strings** (`$str & $str` produces string, not int)
+- [ ] **String increment** (`$str++` follows PHP rules: "a" -> "b", "z" -> "aa")
+- [ ] **Proper string offset** read/write with bounds checking
 
-- [ ] Output: `echo`, `print`, `var_dump`, `print_r`, `var_export`
-- [ ] Type functions: `gettype`, `settype`, `is_*`, `intval`, `floatval`, `strval`, `boolval`
-- [ ] String functions: `strlen`, `strpos`, `substr`, `str_replace`, `strtolower`, `strtoupper`,
-  `trim`, `ltrim`, `rtrim`, `explode`, `implode`, `sprintf`, `printf`, `number_format`,
-  `str_pad`, `str_repeat`, `str_word_count`, `str_contains`, `str_starts_with`, `str_ends_with`,
-  `nl2br`, `wordwrap`, `chunk_split`, `quoted_printable_encode/decode`, `base64_encode/decode`,
-  `urlencode/decode`, `rawurlencode/decode`, `html_entity_decode`, `htmlspecialchars`,
-  `htmlspecialchars_decode`, `htmlentities`, `crc32`, `md5`, `sha1`, `hex2bin`, `bin2hex`,
-  `ord`, `chr`, `pack`, `unpack`, etc.
-- [ ] Array functions: `count`, `array_push`, `array_pop`, `array_shift`, `array_unshift`,
-  `array_merge`, `array_keys`, `array_values`, `array_map`, `array_filter`, `array_reduce`,
-  `array_walk`, `array_slice`, `array_splice`, `array_search`, `in_array`, `array_unique`,
-  `array_flip`, `array_reverse`, `array_combine`, `array_chunk`, `array_column`,
-  `array_diff`, `array_intersect`, `sort`, `rsort`, `asort`, `arsort`, `ksort`, `krsort`,
-  `usort`, `uasort`, `uksort`, `array_multisort`, `array_rand`, `shuffle`,
-  `array_first`, `array_last` (8.5), `compact`, `extract`, `range`, etc.
-- [ ] Math functions: `abs`, `ceil`, `floor`, `round`, `max`, `min`, `pow`, `sqrt`,
-  `fmod`, `intdiv`, `rand`, `mt_rand`, `random_int`, `random_bytes`, etc.
-- [ ] File functions (via VFS): `fopen`, `fclose`, `fread`, `fwrite`, `fgets`, `feof`,
-  `file_get_contents`, `file_put_contents`, `file_exists`, `is_file`, `is_dir`,
-  `mkdir`, `rmdir`, `unlink`, `rename`, `copy`, `realpath`, `dirname`, `basename`,
-  `pathinfo`, `glob`, `scandir`, `tempnam`, `sys_get_temp_dir`, etc.
-- [ ] Date/time: `time`, `microtime`, `date`, `mktime`, `strtotime`, `gmdate`, etc.
-- [ ] Misc: `sleep`, `usleep`, `exit`/`die`, `phpversion`, `phpinfo`, `php_uname`,
-  `memory_get_usage`, `memory_get_peak_usage`, `gc_collect_cycles`, etc.
+### P6: Generators & Fibers (~10 tests)
 
-## Phase 11: Core Extensions
+- [ ] **`yield from`** delegation
+- [ ] **Generator::throw()**
+- [ ] **Generator::getReturn()**
+- [ ] **Fibers** (`Fiber` class, `Fiber::suspend()`, etc.)
 
-- [ ] **ext-json**: `json_encode`, `json_decode`, `json_last_error`
-- [ ] **ext-pcre**: `preg_match`, `preg_match_all`, `preg_replace`, `preg_split`
+### P7: Advanced Features
+
+- [ ] **Named arguments** (`func(name: value)`)
+- [ ] **First-class callable syntax** (`strlen(...)`)
+- [ ] **Attributes** (`#[Attribute]` - currently skipped in lexer)
+- [ ] **`eval()`**
+- [ ] **Pipe operator** (`|>`, PHP 8.5)
+- [ ] **Namespaces** (runtime resolution, autoloading)
+- [ ] **Output buffering** (`ob_start`, `ob_get_contents`, etc.)
+
+### P8: Extensions
+
+- [ ] **ext-pcre**: `preg_match`, `preg_replace`, `preg_split` (hand-written regex engine)
+- [ ] **ext-json**: Full `json_decode` (currently stub)
+- [ ] **ext-spl**: Iterators, `ArrayAccess`, `Countable`, `Iterator`
 - [ ] **ext-ctype**: `ctype_alpha`, `ctype_digit`, etc.
 - [ ] **ext-mbstring**: Multi-byte string support
-- [ ] **ext-tokenizer**: `token_get_all`, `token_name`
-- [ ] **ext-filter**: `filter_var`, `filter_input`
-- [ ] **ext-hash**: `hash`, `hash_hmac`, various algorithms
-- [ ] **ext-spl**: Iterators, data structures, autoloading, exceptions
-- [ ] **ext-reflection**: `ReflectionClass`, `ReflectionFunction`, etc.
 
-## Phase 12: Advanced Language Features
-
-- [ ] Generators (`yield`, `yield from`)
-- [ ] Fibers (`Fiber` class)
-- [ ] References (`&`)
-- [ ] `include` / `require` / `include_once` / `require_once`
-- [ ] Namespaces
-- [ ] Autoloading (`spl_autoload_register`)
-- [ ] Attributes (`#[...]`)
-- [ ] `eval()`
-- [ ] Pipe operator (`|>`, PHP 8.5)
-- [ ] Output buffering (`ob_start`, `ob_get_contents`, etc.)
-
-## Phase 13: Additional SAPIs
-
-- [ ] **CLI Server** (`php -S`): Built-in development web server
-- [ ] **Embed**: Library mode for embedding in other Rust applications
-- [ ] **FPM-like**: FastCGI process manager (async I/O)
-- [ ] **CGI**: Traditional CGI interface
-
-## Phase 14: Remaining Extensions
-
-- [ ] **ext-pdo** + drivers
-- [ ] **ext-mysqli** / **ext-mysqlnd**
-- [ ] **ext-curl**
-- [ ] **ext-openssl**
-- [ ] **ext-zlib**
-- [ ] **ext-xml** / **ext-dom** / **ext-simplexml** / **ext-libxml**
-- [ ] **ext-session**
-- [ ] **ext-socket**
-- [ ] **ext-fileinfo**
-- [ ] **ext-intl**
-- [ ] **ext-gd**
-- [ ] And all remaining extensions...
+---
 
 ## Test Strategy
 
-Use PHP 8.5.4's official `.phpt` test suite:
-1. Build a PHPT runner (`goro-phpt`) that parses test files and executes them
-2. Start with `Zend/tests/` (core language tests)
-3. Expand to `ext/standard/tests/` and other extension test directories
+1. Run PHP 8.5.4 official `.phpt` test suite (11,950 tests total)
+2. Focus on Zend/tests (871 top-level + subdirectories) for core language
+3. Prioritize fixes by test count impact
 4. Track pass rate continuously, target 100%
-5. Prioritize fixing failures in order of the phases above
+5. Use SKIPIF sections to skip tests requiring unimplemented extensions
+
+## Architecture Constraints
+
+- **No external crates** - everything hand-written
+- **Binary-safe strings** throughout
+- **Virtual filesystem** for security sandboxing
+- **Modular SAPIs and extensions** - opt-in at compile time

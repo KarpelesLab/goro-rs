@@ -16,6 +16,10 @@ fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
+    if indent > 40 {
+        vm.write_output(b"  *RECURSION*\n");
+        return;
+    }
     let prefix = " ".repeat(indent);
     match val {
         Value::Null | Value::Undef => {
@@ -176,6 +180,10 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
+    if indent > 40 {
+        buf.extend_from_slice(b" *RECURSION*");
+        return;
+    }
     match val {
         Value::Null | Value::Undef => buf.extend_from_slice(b""),
         Value::True => buf.extend_from_slice(b"1"),

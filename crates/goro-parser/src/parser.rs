@@ -25,11 +25,34 @@ pub type ParseResult<T> = Result<T, ParseError>;
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: u32,
 }
+
+const MAX_PARSE_DEPTH: u32 = 512;
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    fn enter_depth(&mut self) -> ParseResult<()> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            Err(ParseError {
+                message: "Maximum nesting depth exceeded".into(),
+                span: self.current().span,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn leave_depth(&mut self) {
+        self.depth -= 1;
     }
 
     fn current(&self) -> &Token {
@@ -1377,7 +1400,10 @@ impl Parser {
     // ---- Expression parsing (Pratt parser) ----
 
     pub fn parse_expression(&mut self) -> ParseResult<Expr> {
-        self.parse_logical_or_low()
+        self.enter_depth()?;
+        let result = self.parse_logical_or_low();
+        self.leave_depth();
+        result
     }
 
     /// Low-precedence 'or' (lower than assignment)
