@@ -1014,7 +1014,7 @@ impl Vm {
                 // Increment / Decrement
                 OpCode::PreIncrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let new_val = val.add(&Value::Long(1));
+                    let new_val = php_increment(&val);
                     self.write_operand(
                         &op.op1,
                         new_val.clone(),
@@ -1026,7 +1026,7 @@ impl Vm {
                 }
                 OpCode::PreDecrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let new_val = val.sub(&Value::Long(1));
+                    let new_val = php_decrement(&val);
                     self.write_operand(
                         &op.op1,
                         new_val.clone(),
@@ -1038,13 +1038,13 @@ impl Vm {
                 }
                 OpCode::PostIncrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let new_val = val.add(&Value::Long(1));
+                    let new_val = php_increment(&val);
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::PostDecrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let new_val = val.sub(&Value::Long(1));
+                    let new_val = php_decrement(&val);
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
@@ -3459,4 +3459,88 @@ fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     chain
+}
+
+/// PHP increment: for strings, follows alphabetic increment rules
+fn php_increment(val: &Value) -> Value {
+    match val {
+        Value::Long(n) => match n.checked_add(1) {
+            Some(r) => Value::Long(r),
+            None => Value::Double(*n as f64 + 1.0),
+        },
+        Value::Double(f) => Value::Double(f + 1.0),
+        Value::String(s) => {
+            let bytes = s.as_bytes();
+            // Only increment alphanumeric strings
+            if bytes.is_empty() || !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
+                // Non-alphanumeric: convert to number and increment
+                return Value::Long(val.to_long() + 1);
+            }
+            // Check if it's a numeric string
+            if let Some(n) = crate::value::parse_numeric_string(bytes) {
+                if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+                    return Value::Long(n as i64 + 1);
+                }
+                return Value::Double(n + 1.0);
+            }
+            // Alphabetic increment: "a" -> "b", "z" -> "aa", "Az" -> "Ba"
+            let mut result: Vec<u8> = bytes.to_vec();
+            let mut carry = true;
+            for i in (0..result.len()).rev() {
+                if !carry {
+                    break;
+                }
+                carry = false;
+                match result[i] {
+                    b'z' => {
+                        result[i] = b'a';
+                        carry = true;
+                    }
+                    b'Z' => {
+                        result[i] = b'A';
+                        carry = true;
+                    }
+                    b'9' => {
+                        result[i] = b'0';
+                        carry = true;
+                    }
+                    b'a'..=b'y' | b'A'..=b'Y' | b'0'..=b'8' => {
+                        result[i] += 1;
+                    }
+                    _ => {
+                        result[i] += 1;
+                    }
+                }
+            }
+            if carry {
+                // Need to prepend: "z" -> "aa", "Z" -> "AA", "9" -> "10"
+                let prefix = match result[0] {
+                    b'a'..=b'z' => b'a',
+                    b'A'..=b'Z' => b'A',
+                    _ => b'1',
+                };
+                result.insert(0, prefix);
+            }
+            Value::String(PhpString::from_vec(result))
+        }
+        Value::Null | Value::Undef => Value::Long(1),
+        Value::False => Value::Long(1), // false++ = 1
+        Value::True => Value::True,     // true++ stays true
+        _ => val.add(&Value::Long(1)),
+    }
+}
+
+/// PHP decrement: strings are NOT decremented (only numeric types)
+fn php_decrement(val: &Value) -> Value {
+    match val {
+        Value::Long(n) => match n.checked_sub(1) {
+            Some(r) => Value::Long(r),
+            None => Value::Double(*n as f64 - 1.0),
+        },
+        Value::Double(f) => Value::Double(f - 1.0),
+        // PHP: string decrement is not supported, stays the same
+        Value::String(_) => val.clone(),
+        Value::Null | Value::Undef => Value::Null, // null-- stays null
+        _ => val.sub(&Value::Long(1)),
+    }
 }
