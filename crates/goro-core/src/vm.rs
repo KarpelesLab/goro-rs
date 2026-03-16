@@ -2490,7 +2490,36 @@ impl Vm {
                     let obj_id = self.next_object_id;
                     self.next_object_id += 1;
 
-                    let mut obj = PhpObject::new(class_name.as_bytes().to_vec(), obj_id);
+                    // Use canonical class name from class table if available,
+                    // or normalize well-known class names
+                    let canonical_name = if let Some(class) = self.classes.get(&name_lower) {
+                        class.name.clone()
+                    } else {
+                        // Normalize well-known class names
+                        match name_lower.as_slice() {
+                            b"stdclass" => b"stdClass".to_vec(),
+                            b"exception" => b"Exception".to_vec(),
+                            b"error" => b"Error".to_vec(),
+                            b"typeerror" => b"TypeError".to_vec(),
+                            b"valueerror" => b"ValueError".to_vec(),
+                            b"runtimeexception" => b"RuntimeException".to_vec(),
+                            b"logicexception" => b"LogicException".to_vec(),
+                            b"invalidargumentexception" => b"InvalidArgumentException".to_vec(),
+                            b"badmethodcallexception" => b"BadMethodCallException".to_vec(),
+                            b"badfunctioncallexception" => b"BadFunctionCallException".to_vec(),
+                            b"overflowexception" => b"OverflowException".to_vec(),
+                            b"underflowexception" => b"UnderflowException".to_vec(),
+                            b"rangeerror" => b"RangeError".to_vec(),
+                            b"arithmeticerror" => b"ArithmeticError".to_vec(),
+                            b"divisionbyzeroerror" => b"DivisionByZeroError".to_vec(),
+                            b"argumentcounterror" => b"ArgumentCountError".to_vec(),
+                            b"closedgeneratorexception" => b"ClosedGeneratorException".to_vec(),
+                            b"unexpectedvalueexception" => b"UnexpectedValueException".to_vec(),
+                            b"domainexception" => b"DomainException".to_vec(),
+                            _ => class_name.as_bytes().to_vec(),
+                        }
+                    };
+                    let mut obj = PhpObject::new(canonical_name, obj_id);
 
                     // Built-in Exception/Error classes get default properties
                     if name_lower == b"exception"
