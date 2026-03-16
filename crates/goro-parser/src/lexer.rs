@@ -234,7 +234,41 @@ impl<'a> Lexer<'a> {
                         .collect();
                     return TokenKind::LongNumber(i64::from_str_radix(&s[2..], 8).unwrap_or(0));
                 }
-                _ => {}
+                _ => {
+                    // Check for traditional octal: 0NNN (digits 0-7 only)
+                    if self.peek_at(1).is_some_and(|c| (b'0'..=b'7').contains(&c)) {
+                        // Could be octal - scan digits
+                        let oct_start = self.pos;
+                        self.advance(); // skip leading 0
+                        let mut is_octal = true;
+                        while let Some(ch) = self.peek() {
+                            if (b'0'..=b'7').contains(&ch) || ch == b'_' {
+                                self.advance();
+                            } else if ch.is_ascii_digit() {
+                                // 08, 09 etc. - not valid octal, treat as decimal
+                                is_octal = false;
+                                break;
+                            } else {
+                                break;
+                            }
+                        }
+                        if is_octal && self.pos > oct_start + 1 {
+                            // Check it's not followed by decimal point or 'e'
+                            if !matches!(self.peek(), Some(b'.') | Some(b'e') | Some(b'E')) {
+                                let s: String = self.source[oct_start..self.pos]
+                                    .iter()
+                                    .filter(|b| **b != b'_')
+                                    .map(|&b| b as char)
+                                    .collect();
+                                return TokenKind::LongNumber(
+                                    i64::from_str_radix(&s[1..], 8).unwrap_or(0),
+                                );
+                            }
+                        }
+                        // Reset and fall through to decimal parsing
+                        self.pos = oct_start;
+                    }
+                }
             }
         }
 
