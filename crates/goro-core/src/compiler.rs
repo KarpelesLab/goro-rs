@@ -1073,8 +1073,10 @@ impl Compiler {
                             };
                             class.constants.insert(const_name.clone(), val);
                         }
-                        ClassMember::TraitUse { .. } => {
-                            // TODO: trait support
+                        ClassMember::TraitUse { traits, .. } => {
+                            for trait_name in traits {
+                                class.traits.push(trait_name.clone());
+                            }
                         }
                     }
                 }
@@ -1216,10 +1218,11 @@ impl Compiler {
                     ExprKind::StaticPropertyAccess { class, property } => {
                         let class_name = match &class.kind {
                             ExprKind::Identifier(name) => {
-                                if name.eq_ignore_ascii_case(b"self")
-                                    || name.eq_ignore_ascii_case(b"static")
-                                {
+                                if name.eq_ignore_ascii_case(b"self") {
                                     self.current_class.clone().unwrap_or(name.clone())
+                                } else if name.eq_ignore_ascii_case(b"static") {
+                                    // Late static binding: resolve at runtime
+                                    b"static".to_vec()
                                 } else if name.eq_ignore_ascii_case(b"parent") {
                                     self.current_parent_class.clone().unwrap_or(name.clone())
                                 } else {
@@ -2149,7 +2152,15 @@ impl Compiler {
             ExprKind::New { class, args } => {
                 // Get class name
                 let class_name = match &class.kind {
-                    ExprKind::Identifier(name) => name.clone(),
+                    ExprKind::Identifier(name) => {
+                        if name.eq_ignore_ascii_case(b"self") {
+                            // Resolve self at compile time
+                            self.current_class.clone().unwrap_or(name.clone())
+                        } else {
+                            // "static" is kept as-is for late static binding (resolved at runtime)
+                            name.clone()
+                        }
+                    }
                     _ => {
                         let _ = self.compile_expr(class)?;
                         let idx = self.op_array.add_literal(Value::Null);
@@ -2496,9 +2507,25 @@ impl Compiler {
 
                 // ClassName::class returns the class name as a string
                 if constant == b"class" {
-                    let resolved = if class_name.eq_ignore_ascii_case(b"self")
-                        || class_name.eq_ignore_ascii_case(b"static")
-                    {
+                    if class_name.eq_ignore_ascii_case(b"static") {
+                        // static::class must be resolved at runtime via StaticPropGet
+                        let class_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_bytes(b"static")));
+                        let const_name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_bytes(b"class")));
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropGet,
+                            op1: OperandType::Const(class_idx),
+                            op2: OperandType::Const(const_name_idx),
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(tmp));
+                    }
+                    let resolved = if class_name.eq_ignore_ascii_case(b"self") {
                         self.current_class.clone().unwrap_or_default()
                     } else {
                         class_name.clone()
@@ -2510,10 +2537,11 @@ impl Compiler {
                 }
 
                 // Try to find the constant at compile time in already-compiled classes
-                let resolved_class = if class_name.eq_ignore_ascii_case(b"self")
-                    || class_name.eq_ignore_ascii_case(b"static")
-                {
+                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
                     self.current_class.clone().unwrap_or(class_name.clone())
+                } else if class_name.eq_ignore_ascii_case(b"static") {
+                    // Late static binding: resolve at runtime
+                    b"static".to_vec()
                 } else if class_name.eq_ignore_ascii_case(b"parent") {
                     self.current_parent_class
                         .clone()
@@ -2557,10 +2585,12 @@ impl Compiler {
                 };
 
                 // Resolve self:: and parent:: to actual class names
-                let resolved_class = if class_name.eq_ignore_ascii_case(b"self")
-                    || class_name.eq_ignore_ascii_case(b"static")
-                {
+                // static:: is kept as literal "static" for late static binding
+                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
                     self.current_class.clone().unwrap_or(class_name.clone())
+                } else if class_name.eq_ignore_ascii_case(b"static") {
+                    // Late static binding: resolve at runtime
+                    b"static".to_vec()
                 } else if class_name.eq_ignore_ascii_case(b"parent") {
                     self.current_parent_class
                         .clone()
@@ -2612,11 +2642,12 @@ impl Compiler {
             ExprKind::StaticPropertyAccess { class, property } => {
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => {
-                        // Resolve self/static/parent
-                        if name.eq_ignore_ascii_case(b"self")
-                            || name.eq_ignore_ascii_case(b"static")
-                        {
+                        // Resolve self/parent, keep static as literal for LSB
+                        if name.eq_ignore_ascii_case(b"self") {
                             self.current_class.clone().unwrap_or(name.clone())
+                        } else if name.eq_ignore_ascii_case(b"static") {
+                            // Late static binding: resolve at runtime
+                            b"static".to_vec()
                         } else if name.eq_ignore_ascii_case(b"parent") {
                             self.current_parent_class.clone().unwrap_or(name.clone())
                         } else {

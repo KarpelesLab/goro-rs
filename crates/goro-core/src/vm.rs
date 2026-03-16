@@ -64,6 +64,8 @@ pub struct Vm {
     magic_depth: u32,
     /// Objects with __destruct methods, tracked for shutdown-time destruction
     destructible_objects: Vec<Value>,
+    /// Stack of "called class" names for late static binding (static::)
+    called_class_stack: Vec<Vec<u8>>,
 }
 
 impl Vm {
@@ -83,6 +85,7 @@ impl Vm {
             error_reporting: 32767, // E_ALL
             magic_depth: 0,
             destructible_objects: Vec::new(),
+            called_class_stack: Vec::new(),
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -105,6 +108,20 @@ impl Vm {
                 );
                 c
             },
+        }
+    }
+
+    /// Resolve "static" to the actual called class name (for late static binding).
+    /// Returns the class name from the called_class_stack, or the original name if not "static".
+    fn resolve_static_class<'a>(&'a self, class_name: &'a [u8]) -> &'a [u8] {
+        if class_name.eq_ignore_ascii_case(b"static") {
+            if let Some(called) = self.called_class_stack.last() {
+                called.as_slice()
+            } else {
+                class_name
+            }
+        } else {
+            class_name
         }
     }
 
@@ -834,10 +851,26 @@ impl Vm {
                     }
                 }
                 OpCode::DoFCall => {
-                    let call = self.pending_calls.pop().ok_or_else(|| VmError {
+                    let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
                         message: "no pending function call".into(),
                         line: op.line,
                     })?;
+
+                    // Resolve "static::" in function names for late static binding
+                    let call_name_bytes = call.name.as_bytes().to_vec();
+                    if call_name_bytes.len() >= 8 {
+                        let prefix: Vec<u8> = call_name_bytes[..8]
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        if prefix == b"static::" {
+                            if let Some(called_class) = self.called_class_stack.last() {
+                                let mut resolved_name = called_class.clone();
+                                resolved_name.extend_from_slice(&call_name_bytes[6..]); // keep "::" and rest
+                                call.name = PhpString::from_vec(resolved_name);
+                            }
+                        }
+                    }
 
                     let func_name_lower: Vec<u8> = call
                         .name
@@ -952,6 +985,22 @@ impl Vm {
                         let was_global = self.is_global_scope;
                         self.is_global_scope = false;
 
+                        // Push called class for late static binding
+                        let pushed_called_class =
+                            if let Some(pos) = func_name_lower.iter().position(|&b| b == b':') {
+                                if func_name_lower.get(pos + 1) == Some(&b':') {
+                                    // Extract original-case class name from call.name
+                                    let orig_bytes = call.name.as_bytes();
+                                    let class_part = orig_bytes[..pos].to_vec();
+                                    self.called_class_stack.push(class_part);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
                         // Save caller's globals before the call
                         if was_global {
                             for (i, cv) in cvs.iter().enumerate() {
@@ -991,6 +1040,11 @@ impl Vm {
 
                         // Execute the function's op_array
                         let call_result = self.execute_op_array(&user_fn, func_cvs);
+
+                        // Pop the called class stack
+                        if pushed_called_class {
+                            self.called_class_stack.pop();
+                        }
 
                         self.is_global_scope = was_global;
 
@@ -1627,42 +1681,59 @@ impl Vm {
                 }
 
                 OpCode::StaticPropGet => {
-                    let class_name = self
+                    let class_name_raw = self
                         .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
-                    let class_lower: Vec<u8> = class_name
-                        .as_bytes()
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
 
-                    let val = if let Some(class) = self.classes.get(&class_lower) {
-                        // Check static properties first, then constants
-                        class
-                            .static_properties
-                            .get(prop_name.as_bytes())
-                            .cloned()
-                            .or_else(|| class.constants.get(prop_name.as_bytes()).cloned())
-                            .unwrap_or(Value::Null)
+                    // Resolve "static" for late static binding
+                    let resolved_class = self
+                        .resolve_static_class(class_name_raw.as_bytes())
+                        .to_vec();
+
+                    // Handle static::class - return the resolved class name
+                    if prop_name.as_bytes() == b"class"
+                        && class_name_raw.as_bytes().eq_ignore_ascii_case(b"static")
+                    {
+                        let val = Value::String(PhpString::from_vec(resolved_class));
+                        self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
-                        Value::Null
-                    };
-                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                        let class_lower: Vec<u8> = resolved_class
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+
+                        let val = if let Some(class) = self.classes.get(&class_lower) {
+                            // Check static properties first, then constants
+                            class
+                                .static_properties
+                                .get(prop_name.as_bytes())
+                                .cloned()
+                                .or_else(|| class.constants.get(prop_name.as_bytes()).cloned())
+                                .unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        };
+                        self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                    }
                 }
 
                 OpCode::StaticPropSet => {
-                    let class_name = self
+                    let class_name_raw = self
                         .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
                     let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
-                    let class_lower: Vec<u8> = class_name
-                        .as_bytes()
+
+                    // Resolve "static" for late static binding
+                    let resolved_class = self
+                        .resolve_static_class(class_name_raw.as_bytes())
+                        .to_vec();
+                    let class_lower: Vec<u8> = resolved_class
                         .iter()
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
@@ -1835,6 +1906,45 @@ impl Vm {
                             }
                         }
 
+                        // Resolve traits: copy trait methods/properties/constants into the class
+                        let trait_names = class.traits.clone();
+                        for trait_name in &trait_names {
+                            let trait_lower: Vec<u8> =
+                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
+                                // Copy trait methods (class's own methods take precedence)
+                                for (method_name, method) in &trait_def.methods {
+                                    if !class.methods.contains_key(method_name) {
+                                        class.methods.insert(method_name.clone(), method.clone());
+                                    }
+                                }
+                                // Copy trait properties (class's own properties take precedence)
+                                let child_prop_names: Vec<Vec<u8>> =
+                                    class.properties.iter().map(|p| p.name.clone()).collect();
+                                for prop in &trait_def.properties {
+                                    if !child_prop_names.contains(&prop.name) {
+                                        class.properties.push(prop.clone());
+                                    }
+                                }
+                                // Copy trait constants (class's own constants take precedence)
+                                for (const_name, const_val) in &trait_def.constants {
+                                    if !class.constants.contains_key(const_name) {
+                                        class
+                                            .constants
+                                            .insert(const_name.clone(), const_val.clone());
+                                    }
+                                }
+                                // Copy trait static properties (class's own take precedence)
+                                for (prop_name, prop_val) in &trait_def.static_properties {
+                                    if !class.static_properties.contains_key(prop_name) {
+                                        class
+                                            .static_properties
+                                            .insert(prop_name.clone(), prop_val.clone());
+                                    }
+                                }
+                            }
+                        }
+
                         // Check for unimplemented abstract methods (interface enforcement)
                         if !class.is_abstract && !class.is_interface {
                             let mut abstract_methods: Vec<String> = Vec::new();
@@ -1911,9 +2021,26 @@ impl Vm {
                 }
 
                 OpCode::NewObject => {
-                    let class_name = self
+                    let class_name_raw = self
                         .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+
+                    // Resolve "static" and "self" for late static binding / new self()
+                    let resolved_bytes =
+                        if class_name_raw.as_bytes().eq_ignore_ascii_case(b"static") {
+                            self.resolve_static_class(class_name_raw.as_bytes())
+                                .to_vec()
+                        } else if class_name_raw.as_bytes().eq_ignore_ascii_case(b"self") {
+                            // self:: in new context - use called class stack
+                            if let Some(called) = self.called_class_stack.last() {
+                                called.clone()
+                            } else {
+                                class_name_raw.as_bytes().to_vec()
+                            }
+                        } else {
+                            class_name_raw.as_bytes().to_vec()
+                        };
+                    let class_name = PhpString::from_vec(resolved_bytes);
                     let name_lower: Vec<u8> = class_name
                         .as_bytes()
                         .iter()
