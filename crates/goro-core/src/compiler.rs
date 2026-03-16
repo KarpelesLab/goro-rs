@@ -62,6 +62,32 @@ impl Compiler {
         }
     }
 
+    /// Compile and emit SendVal/SendUnpack opcodes for function call arguments.
+    fn compile_send_args(&mut self, args: &[Argument], line: u32) -> CompileResult<()> {
+        for (i, arg) in args.iter().enumerate() {
+            let val = self.compile_expr(&arg.value)?;
+            if arg.unpack {
+                self.op_array.emit(Op {
+                    opcode: OpCode::SendUnpack,
+                    op1: val,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                });
+            } else {
+                let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
+                self.op_array.emit(Op {
+                    opcode: OpCode::SendVal,
+                    op1: val,
+                    op2: OperandType::Const(pos_idx),
+                    result: OperandType::Unused,
+                    line,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Extract the numeric level from a break/continue expression.
     /// `break` and `break 1` both return 1 (innermost loop).
     /// `break 2` returns 2 (two levels out), etc.
@@ -1728,17 +1754,7 @@ impl Compiler {
                 });
 
                 // Send arguments
-                for (i, arg) in args.iter().enumerate() {
-                    let val = self.compile_expr(&arg.value)?;
-                    let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
-                    self.op_array.emit(Op {
-                        opcode: OpCode::SendVal,
-                        op1: val,
-                        op2: OperandType::Const(pos_idx),
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
-                }
+                self.compile_send_args(args, expr.span.line)?;
 
                 // Do the call
                 let tmp = self.op_array.alloc_temp();
@@ -2271,17 +2287,7 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: expr.span.line,
                     });
-                    for (i, arg) in args.iter().enumerate() {
-                        let val = self.compile_expr(&arg.value)?;
-                        let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
-                        self.op_array.emit(Op {
-                            opcode: OpCode::SendVal,
-                            op1: val,
-                            op2: OperandType::Const(pos_idx),
-                            result: OperandType::Unused,
-                            line: expr.span.line,
-                        });
-                    }
+                    self.compile_send_args(args, expr.span.line)?;
                     let discard_tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
                         opcode: OpCode::DoFCall,
@@ -2744,17 +2750,7 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                for (i, arg) in args.iter().enumerate() {
-                    let val = self.compile_expr(&arg.value)?;
-                    let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
-                    self.op_array.emit(Op {
-                        opcode: OpCode::SendVal,
-                        op1: val,
-                        op2: OperandType::Const(pos_idx),
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
-                }
+                self.compile_send_args(args, expr.span.line)?;
 
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
@@ -2854,17 +2850,7 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                for (i, arg) in args.iter().enumerate() {
-                    let val = self.compile_expr(&arg.value)?;
-                    let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
-                    self.op_array.emit(Op {
-                        opcode: OpCode::SendVal,
-                        op1: val,
-                        op2: OperandType::Const(pos_idx),
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
-                }
+                self.compile_send_args(args, expr.span.line)?;
 
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {

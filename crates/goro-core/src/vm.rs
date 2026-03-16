@@ -1127,6 +1127,24 @@ impl Vm {
                         call.args.push(val);
                     }
                 }
+                OpCode::SendUnpack => {
+                    // Unpack an array into individual arguments
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if let Some(call) = self.pending_calls.last_mut() {
+                        match val {
+                            Value::Array(arr) => {
+                                let arr = arr.borrow();
+                                for (_, v) in arr.iter() {
+                                    call.args.push(v.clone());
+                                }
+                            }
+                            _ => {
+                                // Non-array, just push as single arg
+                                call.args.push(val);
+                            }
+                        }
+                    }
+                }
                 OpCode::DoFCall => {
                     let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
                         message: "no pending function call".into(),
@@ -2971,6 +2989,12 @@ impl Vm {
     ) {
         match operand {
             OperandType::Cv(idx) => {
+                // PHP copy-on-write: when assigning an array to a CV,
+                // clone the inner PhpArray so each variable has its own copy.
+                let value = match &value {
+                    Value::Array(arr) => Value::Array(Rc::new(RefCell::new(arr.borrow().clone()))),
+                    _ => value,
+                };
                 if let Some(slot) = cvs.get_mut(*idx as usize) {
                     // If the CV holds a reference, write through the reference
                     if let Value::Reference(r) = slot {

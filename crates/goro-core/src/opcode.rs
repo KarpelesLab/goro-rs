@@ -105,6 +105,8 @@ pub enum OpCode {
     InitFCall,
     /// Send argument: op1 = value, op2 = arg position
     SendVal,
+    /// Unpack array argument: op1 = array value (each element becomes a separate arg)
+    SendUnpack,
     /// Execute the function call, result = return value
     DoFCall,
     /// Return op1 from current function
