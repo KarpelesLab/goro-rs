@@ -267,6 +267,11 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"is_link", is_link_fn);
     vm.register_function(b"stat", stat_fn);
     vm.register_function(b"is_numeric", is_numeric_fn);
+    vm.register_function(b"clearstatcache", clearstatcache_fn);
+    vm.register_function(b"array_walk_recursive", array_walk_recursive_fn);
+    vm.register_function(b"fgetcsv", fgetcsv_fn);
+    vm.register_function(b"fileperms", fileperms_fn);
+    vm.register_function(b"filetype", filetype_fn);
     vm.register_function(b"opendir", opendir_fn);
     vm.register_function(b"closedir", closedir_fn);
     vm.register_function(b"readdir", readdir_fn);
@@ -4441,4 +4446,88 @@ fn array_key_exists_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     } else {
         Ok(Value::False)
     }
+}
+
+fn clearstatcache_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null) // No-op - we don't cache stat results
+}
+
+fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arr = args.first().unwrap_or(&Value::Null);
+    let callback = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    if let Value::Array(a) = arr {
+        let entries: Vec<_> = a
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (key, val) in entries {
+            if let Value::Array(_) = &val {
+                // Recurse
+                let sub_args = vec![val, Value::String(callback.clone())];
+                array_walk_recursive_fn(vm, &sub_args)?;
+            } else {
+                // Call callback(value, key)
+                let key_val = match &key {
+                    goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
+                    goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),
+                };
+                let cb_args = vec![val, key_val];
+                let cb_lower: Vec<u8> = callback
+                    .as_bytes()
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                if let Some(func) = vm.functions.get(&cb_lower).copied() {
+                    func(vm, &cb_args)?;
+                } else if let Some(user_fn) = vm.user_functions.get(&cb_lower).cloned() {
+                    let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                    for (i, arg) in cb_args.iter().enumerate() {
+                        if i < fn_cvs.len() {
+                            fn_cvs[i] = arg.clone();
+                        }
+                    }
+                    vm.execute_fn(&user_fn, fn_cvs)?;
+                }
+            }
+        }
+    }
+    Ok(Value::True)
+}
+
+fn fgetcsv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False) // Stub - needs file handle support
+}
+
+fn fileperms_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&*path.to_string_lossy()) {
+            Ok(m) => Ok(Value::Long(m.mode() as i64)),
+            Err(_) => Ok(Value::False),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(Value::Long(0o100644))
+    }
+}
+
+fn filetype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = path.to_string_lossy();
+    let p = std::path::Path::new(&*path_str);
+    let ft = if p.is_file() {
+        "file"
+    } else if p.is_dir() {
+        "dir"
+    } else if p.read_link().is_ok() {
+        "link"
+    } else {
+        "unknown"
+    };
+    Ok(Value::String(PhpString::from_bytes(ft.as_bytes())))
 }
