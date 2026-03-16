@@ -2943,7 +2943,9 @@ impl Compiler {
             }
 
             ExprKind::PropertyAccess {
-                object, property, ..
+                object,
+                property,
+                nullsafe,
             } => {
                 let obj = self.compile_expr(object)?;
                 let prop_name = match &property.kind {
@@ -2953,10 +2955,35 @@ impl Compiler {
                         return Ok(obj); // fallback
                     }
                 };
+
+                let tmp = self.op_array.alloc_temp();
+
+                // Nullsafe: check if object is null, skip if so
+                let jmp_null = if *nullsafe {
+                    let null_idx = self.op_array.add_literal(Value::Null);
+                    let is_null_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Identical,
+                        op1: obj,
+                        op2: OperandType::Const(null_idx),
+                        result: OperandType::Tmp(is_null_tmp),
+                        line: expr.span.line,
+                    });
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::JmpNz,
+                        op1: OperandType::Tmp(is_null_tmp),
+                        op2: OperandType::JmpTarget(0), // patched below
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    Some(jmp)
+                } else {
+                    None
+                };
+
                 let name_idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(prop_name)));
-                let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::PropertyGet,
                     op1: obj,
@@ -2964,6 +2991,13 @@ impl Compiler {
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
                 });
+
+                if let Some(jmp) = jmp_null {
+                    // Skip to here if null, result will be Undef (which reads as Null)
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp, end);
+                }
+
                 Ok(OperandType::Tmp(tmp))
             }
 
@@ -2971,9 +3005,35 @@ impl Compiler {
                 object,
                 method,
                 args,
+                nullsafe,
                 ..
             } => {
                 let obj = self.compile_expr(object)?;
+                let tmp = self.op_array.alloc_temp();
+
+                // Nullsafe: check if object is null, skip if so
+                let jmp_null = if *nullsafe {
+                    let null_idx = self.op_array.add_literal(Value::Null);
+                    let is_null_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Identical,
+                        op1: obj,
+                        op2: OperandType::Const(null_idx),
+                        result: OperandType::Tmp(is_null_tmp),
+                        line: expr.span.line,
+                    });
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::JmpNz,
+                        op1: OperandType::Tmp(is_null_tmp),
+                        op2: OperandType::JmpTarget(0),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    Some(jmp)
+                } else {
+                    None
+                };
+
                 let method_name = match &method.kind {
                     ExprKind::Identifier(name) => name.clone(),
                     _ => b"__invoke".to_vec(),
@@ -2992,7 +3052,6 @@ impl Compiler {
 
                 self.compile_send_args(args, expr.span.line)?;
 
-                let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::DoFCall,
                     op1: OperandType::Unused,
@@ -3000,6 +3059,12 @@ impl Compiler {
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
                 });
+
+                if let Some(jmp) = jmp_null {
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp, end);
+                }
+
                 Ok(OperandType::Tmp(tmp))
             }
 
