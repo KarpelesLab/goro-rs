@@ -133,6 +133,58 @@ impl Vm {
         }
     }
 
+    /// Check if an arithmetic operation has unsupported operand types (array vs non-array).
+    /// Returns Some(error_message) if the types are incompatible, None if OK.
+    /// For "add" (`op_symbol` = "+"), array + array is allowed (union).
+    /// For all other arithmetic ops, arrays are never valid operands.
+    fn check_unsupported_operand_types(a: &Value, b: &Value, op_symbol: &str) -> Option<String> {
+        let a_deref = a.deref();
+        let b_deref = b.deref();
+        let a_is_array = matches!(a_deref, Value::Array(_));
+        let b_is_array = matches!(b_deref, Value::Array(_));
+
+        if op_symbol == "+" {
+            // array + array is valid (union), but array + non-array or non-array + array is not
+            if a_is_array && b_is_array {
+                return None;
+            }
+            if a_is_array || b_is_array {
+                return Some(format!(
+                    "Unsupported operand types: {} + {}",
+                    a_deref.type_name(),
+                    b_deref.type_name()
+                ));
+            }
+        } else {
+            // For sub, mul, div, mod, pow, **: arrays are never valid
+            if a_is_array || b_is_array {
+                return Some(format!(
+                    "Unsupported operand types: {} {} {}",
+                    a_deref.type_name(),
+                    op_symbol,
+                    b_deref.type_name()
+                ));
+            }
+        }
+        None
+    }
+
+    /// Create a TypeError exception object and set it as current_exception.
+    /// Returns the error message for use in VmError if no exception handler is available.
+    fn throw_type_error(&mut self, message: String) -> Value {
+        let err_id = self.next_object_id;
+        self.next_object_id += 1;
+        let mut err_obj = PhpObject::new(b"TypeError".to_vec(), err_id);
+        err_obj.set_property(
+            b"message".to_vec(),
+            Value::String(PhpString::from_string(message)),
+        );
+        err_obj.set_property(b"code".to_vec(), Value::Long(0));
+        err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
+        err_obj.set_property(b"line".to_vec(), Value::Long(0));
+        Value::Object(Rc::new(RefCell::new(err_obj)))
+    }
+
     /// Execute a function OpArray with given CVs (public interface for ext crates)
     pub fn execute_fn(&mut self, op_array: &OpArray, cvs: Vec<Value>) -> Result<Value, VmError> {
         self.execute_op_array(op_array, cvs)
@@ -282,21 +334,73 @@ impl Vm {
                 OpCode::Add => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "+") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     self.write_operand(&op.result, a.add(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Sub => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "-") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     self.write_operand(&op.result, a.sub(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Mul => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "*") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     self.write_operand(&op.result, a.mul(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Div => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "/") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     match a.div(&b) {
                         Ok(result) => self.write_operand(
                             &op.result,
@@ -316,6 +420,19 @@ impl Vm {
                 OpCode::Mod => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "%") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     match a.modulo(&b) {
                         Ok(result) => self.write_operand(
                             &op.result,
@@ -335,6 +452,19 @@ impl Vm {
                 OpCode::Pow => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "**") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     self.write_operand(&op.result, a.pow(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Concat => {
@@ -581,6 +711,20 @@ impl Vm {
                 OpCode::AssignAdd => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "+")
+                    {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     self.write_operand(
                         &op.op1,
                         cv_val.add(&rhs),
@@ -592,6 +736,20 @@ impl Vm {
                 OpCode::AssignSub => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "-")
+                    {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     self.write_operand(
                         &op.op1,
                         cv_val.sub(&rhs),
@@ -603,6 +761,20 @@ impl Vm {
                 OpCode::AssignMul => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "*")
+                    {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     self.write_operand(
                         &op.op1,
                         cv_val.mul(&rhs),
@@ -614,6 +786,20 @@ impl Vm {
                 OpCode::AssignDiv => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "/")
+                    {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     match cv_val.div(&rhs) {
                         Ok(result) => self.write_operand(
                             &op.op1,
@@ -633,6 +819,20 @@ impl Vm {
                 OpCode::AssignMod => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "%")
+                    {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     match cv_val.modulo(&rhs) {
                         Ok(result) => self.write_operand(
                             &op.op1,
@@ -652,6 +852,21 @@ impl Vm {
                 OpCode::AssignPow => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) =
+                        Self::check_unsupported_operand_types(&cv_val, &rhs, "**")
+                    {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     self.write_operand(
                         &op.op1,
                         cv_val.pow(&rhs),
