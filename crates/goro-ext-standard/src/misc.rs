@@ -198,6 +198,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"urldecode", urldecode);
     vm.register_function(b"rawurlencode", rawurlencode);
     vm.register_function(b"rawurldecode", rawurldecode);
+    vm.register_function(b"parse_url", parse_url_fn);
+    vm.register_function(b"http_build_query", http_build_query_fn);
     vm.register_function(b"htmlspecialchars", htmlspecialchars);
     vm.register_function(b"htmlentities", htmlentities);
     vm.register_function(b"html_entity_decode", html_entity_decode);
@@ -2275,6 +2277,218 @@ fn ctype_xdigit(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::False
         },
     )
+}
+
+// === URL ===
+
+fn parse_url_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::array::ArrayKey;
+    let url = args.first().unwrap_or(&Value::Null).to_php_string();
+    let component = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+    let url_str = url.to_string_lossy();
+
+    // Simple URL parser
+    let mut scheme = "";
+    let mut host = "";
+    let mut port: Option<i64> = None;
+    let mut user = "";
+    let mut pass = "";
+    let mut path = "";
+    let mut query = "";
+    let mut fragment = "";
+
+    let mut rest = url_str.as_str();
+
+    // Extract fragment
+    if let Some(pos) = rest.find('#') {
+        fragment = &rest[pos + 1..];
+        rest = &rest[..pos];
+    }
+
+    // Extract query
+    if let Some(pos) = rest.find('?') {
+        query = &rest[pos + 1..];
+        rest = &rest[..pos];
+    }
+
+    // Extract scheme
+    if let Some(pos) = rest.find("://") {
+        scheme = &rest[..pos];
+        rest = &rest[pos + 3..];
+    }
+
+    // Extract user:pass@host:port
+    if !scheme.is_empty() || rest.starts_with("//") {
+        if rest.starts_with("//") {
+            rest = &rest[2..];
+        }
+        // Find path start
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        rest = &rest[authority_end..];
+
+        // user:pass@host:port
+        let (userinfo, hostport) = if let Some(at) = authority.find('@') {
+            (&authority[..at], &authority[at + 1..])
+        } else {
+            ("", authority)
+        };
+
+        if !userinfo.is_empty() {
+            if let Some(colon) = userinfo.find(':') {
+                user = &userinfo[..colon];
+                pass = &userinfo[colon + 1..];
+            } else {
+                user = userinfo;
+            }
+        }
+
+        // host:port
+        if let Some(colon) = hostport.rfind(':') {
+            host = &hostport[..colon];
+            port = hostport[colon + 1..].parse().ok();
+        } else {
+            host = hostport;
+        }
+    }
+
+    if rest.is_empty() && scheme.is_empty() {
+        path = &url_str;
+    } else {
+        path = rest;
+    }
+
+    // Return specific component or full array
+    if component >= 0 {
+        // PHP_URL_SCHEME=0, PHP_URL_HOST=1, PHP_URL_PORT=2, PHP_URL_USER=3,
+        // PHP_URL_PASS=4, PHP_URL_PATH=5, PHP_URL_QUERY=6, PHP_URL_FRAGMENT=7
+        return Ok(match component {
+            0 => {
+                if scheme.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(PhpString::from_string(scheme.to_string()))
+                }
+            }
+            1 => {
+                if host.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(PhpString::from_string(host.to_string()))
+                }
+            }
+            2 => port.map(Value::Long).unwrap_or(Value::Null),
+            3 => {
+                if user.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(PhpString::from_string(user.to_string()))
+                }
+            }
+            4 => {
+                if pass.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(PhpString::from_string(pass.to_string()))
+                }
+            }
+            5 => {
+                if path.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(PhpString::from_string(path.to_string()))
+                }
+            }
+            6 => {
+                if query.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(PhpString::from_string(query.to_string()))
+                }
+            }
+            7 => {
+                if fragment.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(PhpString::from_string(fragment.to_string()))
+                }
+            }
+            _ => Value::Null,
+        });
+    }
+
+    let mut result = PhpArray::new();
+    if !scheme.is_empty() {
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"scheme")),
+            Value::String(PhpString::from_string(scheme.to_string())),
+        );
+    }
+    if !host.is_empty() {
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"host")),
+            Value::String(PhpString::from_string(host.to_string())),
+        );
+    }
+    if let Some(p) = port {
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"port")),
+            Value::Long(p),
+        );
+    }
+    if !user.is_empty() {
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"user")),
+            Value::String(PhpString::from_string(user.to_string())),
+        );
+    }
+    if !pass.is_empty() {
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"pass")),
+            Value::String(PhpString::from_string(pass.to_string())),
+        );
+    }
+    if !path.is_empty() {
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"path")),
+            Value::String(PhpString::from_string(path.to_string())),
+        );
+    }
+    if !query.is_empty() {
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"query")),
+            Value::String(PhpString::from_string(query.to_string())),
+        );
+    }
+    if !fragment.is_empty() {
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"fragment")),
+            Value::String(PhpString::from_string(fragment.to_string())),
+        );
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn http_build_query_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let data = args.first().unwrap_or(&Value::Null);
+    let separator = args
+        .get(2)
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| "&".to_string());
+    let mut parts = Vec::new();
+    if let Value::Array(arr) = data {
+        for (key, val) in arr.borrow().iter() {
+            let k = match key {
+                goro_core::array::ArrayKey::Int(n) => n.to_string(),
+                goro_core::array::ArrayKey::String(s) => s.to_string_lossy(),
+            };
+            let v = val.to_php_string().to_string_lossy();
+            parts.push(format!("{}={}", k, v));
+        }
+    }
+    Ok(Value::String(PhpString::from_string(
+        parts.join(&separator),
+    )))
 }
 
 // === JSON ===
