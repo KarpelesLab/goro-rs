@@ -3268,7 +3268,7 @@ impl Vm {
                         }
 
                         // Check for unimplemented abstract methods (interface enforcement)
-                        if !class.is_abstract && !class.is_interface {
+                        if !class.is_abstract && !class.is_interface && !class.is_trait {
                             let mut abstract_methods: Vec<String> = Vec::new();
                             for (_, method) in &class.methods {
                                 if method.is_abstract {
