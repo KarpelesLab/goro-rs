@@ -2861,6 +2861,8 @@ impl Parser {
             TokenKind::Function => {
                 // Anonymous function
                 self.advance();
+                // Optional & for reference return
+                let _by_ref_return = self.eat(&TokenKind::Ampersand);
                 self.expect(&TokenKind::OpenParen)?;
                 let params = self.parse_params()?;
                 self.expect(&TokenKind::CloseParen)?;
@@ -2918,6 +2920,8 @@ impl Parser {
             }
             TokenKind::Fn => {
                 self.advance();
+                // Optional & for reference return
+                let _by_ref_return = self.eat(&TokenKind::Ampersand);
                 self.expect(&TokenKind::OpenParen)?;
                 let params = self.parse_params()?;
                 self.expect(&TokenKind::CloseParen)?;
@@ -2947,6 +2951,7 @@ impl Parser {
                 self.advance(); // static
                 if matches!(self.peek(), TokenKind::Fn) {
                     self.advance();
+                    let _by_ref_return = self.eat(&TokenKind::Ampersand);
                     self.expect(&TokenKind::OpenParen)?;
                     let params = self.parse_params()?;
                     self.expect(&TokenKind::CloseParen)?;
@@ -2968,10 +2973,38 @@ impl Parser {
                     })
                 } else {
                     self.advance(); // function
+                    let _by_ref_return = self.eat(&TokenKind::Ampersand);
                     self.expect(&TokenKind::OpenParen)?;
                     let params = self.parse_params()?;
                     self.expect(&TokenKind::CloseParen)?;
-                    let use_vars = Vec::new(); // TODO: parse use clause
+
+                    // Parse use clause for static closures
+                    let use_vars = if matches!(self.peek(), TokenKind::Use) {
+                        self.advance();
+                        self.expect(&TokenKind::OpenParen)?;
+                        let mut vars = Vec::new();
+                        loop {
+                            let by_ref = self.eat(&TokenKind::Ampersand);
+                            let name = match self.peek().clone() {
+                                TokenKind::Variable(name) => {
+                                    self.advance();
+                                    name
+                                }
+                                _ => break,
+                            };
+                            vars.push(ClosureUse {
+                                variable: name,
+                                by_ref,
+                            });
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&TokenKind::CloseParen)?;
+                        vars
+                    } else {
+                        Vec::new()
+                    };
                     let return_type = if self.eat(&TokenKind::Colon) {
                         Some(self.parse_type_hint()?)
                     } else {
