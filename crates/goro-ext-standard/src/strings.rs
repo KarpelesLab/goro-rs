@@ -691,9 +691,9 @@ fn str_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = Vec::with_capacity(length);
     match pad_type {
         0 => {
-            // STR_PAD_RIGHT (actually RIGHT is 1 in PHP, but let's handle both)
-            result.extend_from_slice(bytes);
+            // STR_PAD_LEFT
             result.extend_from_slice(&padding);
+            result.extend_from_slice(bytes);
         }
         2 => {
             // STR_PAD_BOTH
@@ -703,7 +703,7 @@ fn str_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             result.extend_from_slice(&padding[..pad_needed - left]);
         }
         _ => {
-            // STR_PAD_RIGHT (default)
+            // STR_PAD_RIGHT (default, 1)
             result.extend_from_slice(bytes);
             result.extend_from_slice(&padding);
         }

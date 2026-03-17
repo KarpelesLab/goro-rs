@@ -4931,8 +4931,21 @@ fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let mut result = PhpArray::new();
     if let Some(class) = vm.classes.get(&class_lower) {
-        for name in class.methods.keys() {
-            result.push(Value::String(PhpString::from_vec(name.clone())));
+        // Collect methods with original names, filter by visibility from current scope
+        let mut methods: Vec<_> = class
+            .methods
+            .values()
+            .filter(|m| {
+                matches!(
+                    m.visibility,
+                    goro_core::object::Visibility::Public
+                )
+            })
+            .collect();
+        // Sort by name for consistent output
+        methods.sort_by(|a, b| a.name.cmp(&b.name));
+        for m in methods {
+            result.push(Value::String(PhpString::from_vec(m.name.clone())));
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
