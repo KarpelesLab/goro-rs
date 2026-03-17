@@ -115,13 +115,46 @@ fn strtoupper(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(upper)))
 }
 
+/// Expand PHP charlist ranges like "A..Z" → all chars A-Z
+fn expand_charlist(charlist: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < charlist.len() {
+        if i + 2 < charlist.len()
+            && charlist[i + 1] == b'.'
+            && i + 3 < charlist.len()
+            && charlist[i + 2] == b'.'
+        {
+            // Range: X..Y
+            let from = charlist[i];
+            let to = charlist[i + 3];
+            if from <= to {
+                for c in from..=to {
+                    result.push(c);
+                }
+            } else {
+                for c in (to..=from).rev() {
+                    result.push(c);
+                }
+            }
+            i += 4;
+        } else {
+            result.push(charlist[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
 fn trim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
     let chars = args
         .get(1)
-        .map(|v| v.to_php_string())
-        .map(|s| s.as_bytes().to_vec())
+        .map(|v| {
+            let s = v.to_php_string();
+            expand_charlist(s.as_bytes())
+        })
         .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
 
     let start = bytes
@@ -143,8 +176,10 @@ fn ltrim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let bytes = s.as_bytes();
     let chars = args
         .get(1)
-        .map(|v| v.to_php_string())
-        .map(|s| s.as_bytes().to_vec())
+        .map(|v| {
+            let s = v.to_php_string();
+            expand_charlist(s.as_bytes())
+        })
         .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
     let start = bytes
         .iter()
@@ -158,8 +193,10 @@ fn rtrim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let bytes = s.as_bytes();
     let chars = args
         .get(1)
-        .map(|v| v.to_php_string())
-        .map(|s| s.as_bytes().to_vec())
+        .map(|v| {
+            let s = v.to_php_string();
+            expand_charlist(s.as_bytes())
+        })
         .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
     let end = bytes
         .iter()
