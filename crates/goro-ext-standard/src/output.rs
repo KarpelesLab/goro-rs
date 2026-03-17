@@ -304,8 +304,10 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             // var_export uses a representation that can be parsed back
             let s = format_float(*f);
             buf.extend_from_slice(s.as_bytes());
-            // Ensure there's a decimal point
-            if !s.contains('.')
+            // Ensure there's a digit after the decimal point
+            if s.ends_with('.') {
+                buf.push(b'0');
+            } else if !s.contains('.')
                 && !s.contains('E')
                 && !s.contains('e')
                 && s != "INF"

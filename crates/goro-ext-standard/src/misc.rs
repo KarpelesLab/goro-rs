@@ -3837,12 +3837,327 @@ fn serialize_value(val: &Value) -> String {
             result.push('}');
             result
         }
-        Value::Object(_) | Value::Generator(_) => "N;".to_string(), // TODO: proper object serialization
+        Value::Object(obj) => {
+            let obj = obj.borrow();
+            let class_name = String::from_utf8_lossy(&obj.class_name);
+            let prop_count = obj.properties.len();
+            let mut result = format!("O:{}:\"{}\":{}:{{", class_name.len(), class_name, prop_count);
+            for (name, val) in &obj.properties {
+                let name_str = String::from_utf8_lossy(name);
+                result.push_str(&format!("s:{}:\"{}\";", name.len(), name_str));
+                result.push_str(&serialize_value(val));
+            }
+            result.push('}');
+            result
+        }
+        Value::Generator(_) => "N;".to_string(),
         Value::Reference(r) => serialize_value(&r.borrow()),
     }
 }
-fn unserialize_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False) // stub
+fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let data = match args.first() {
+        Some(Value::String(s)) => s.as_bytes().to_vec(),
+        Some(v) => v.to_php_string().as_bytes().to_vec(),
+        None => return Ok(Value::False),
+    };
+    match unserialize_value(&data, &mut 0, vm) {
+        Some(val) => Ok(val),
+        None => {
+            vm.emit_notice_at("unserialize(): Error at offset 0 of bytes", 0);
+            Ok(Value::False)
+        }
+    }
+}
+
+fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value> {
+    if *pos >= data.len() {
+        return None;
+    }
+    match data[*pos] {
+        b'N' => {
+            // N;
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b';' {
+                *pos += 1;
+            }
+            Some(Value::Null)
+        }
+        b'b' => {
+            // b:0; or b:1;
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            let val = if *pos < data.len() && data[*pos] == b'1' {
+                Value::True
+            } else {
+                Value::False
+            };
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b';' {
+                *pos += 1;
+            }
+            Some(val)
+        }
+        b'i' => {
+            // i:123;
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b';' {
+                *pos += 1;
+            }
+            let num_str = String::from_utf8_lossy(&data[start..*pos]).to_string();
+            if *pos < data.len() {
+                *pos += 1;
+            }
+            Some(Value::Long(num_str.parse::<i64>().unwrap_or(0)))
+        }
+        b'd' => {
+            // d:1.5;
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b';' {
+                *pos += 1;
+            }
+            let num_str = String::from_utf8_lossy(&data[start..*pos]).to_string();
+            if *pos < data.len() {
+                *pos += 1;
+            }
+            let f = match num_str.as_str() {
+                "INF" => f64::INFINITY,
+                "-INF" => f64::NEG_INFINITY,
+                "NAN" => f64::NAN,
+                _ => num_str.parse::<f64>().unwrap_or(0.0),
+            };
+            Some(Value::Double(f))
+        }
+        b's' => {
+            // s:5:"hello";
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b':' {
+                *pos += 1;
+            }
+            let len_str = String::from_utf8_lossy(&data[start..*pos]).to_string();
+            let len = len_str.parse::<usize>().unwrap_or(0);
+            if *pos < data.len() {
+                *pos += 1; // skip ':'
+            }
+            if *pos < data.len() && data[*pos] == b'"' {
+                *pos += 1; // skip opening '"'
+            }
+            let str_start = *pos;
+            let str_end = (*pos + len).min(data.len());
+            *pos = str_end;
+            let val = Value::String(PhpString::from_vec(data[str_start..str_end].to_vec()));
+            if *pos < data.len() && data[*pos] == b'"' {
+                *pos += 1; // skip closing '"'
+            }
+            if *pos < data.len() && data[*pos] == b';' {
+                *pos += 1;
+            }
+            Some(val)
+        }
+        b'a' => {
+            // a:2:{...}
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b':' {
+                *pos += 1;
+            }
+            let count_str = String::from_utf8_lossy(&data[start..*pos]).to_string();
+            let count = count_str.parse::<usize>().unwrap_or(0);
+            if *pos < data.len() {
+                *pos += 1; // skip ':'
+            }
+            if *pos < data.len() && data[*pos] == b'{' {
+                *pos += 1;
+            }
+            let mut arr = PhpArray::new();
+            for _ in 0..count {
+                let key = unserialize_value(data, pos, vm)?;
+                let value = unserialize_value(data, pos, vm)?;
+                match &key {
+                    Value::Long(n) => arr.set(ArrayKey::Int(*n), value),
+                    Value::String(s) => arr.set(ArrayKey::String(s.clone()), value),
+                    _ => {}
+                }
+            }
+            if *pos < data.len() && data[*pos] == b'}' {
+                *pos += 1;
+            }
+            Some(Value::Array(Rc::new(RefCell::new(arr))))
+        }
+        b'O' => {
+            // O:8:"ClassName":2:{...}
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            // Read class name length
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b':' {
+                *pos += 1;
+            }
+            let name_len_str = String::from_utf8_lossy(&data[start..*pos]).to_string();
+            let name_len = name_len_str.parse::<usize>().unwrap_or(0);
+            if *pos < data.len() {
+                *pos += 1; // skip ':'
+            }
+            if *pos < data.len() && data[*pos] == b'"' {
+                *pos += 1;
+            }
+            let name_start = *pos;
+            let name_end = (*pos + name_len).min(data.len());
+            let class_name = data[name_start..name_end].to_vec();
+            *pos = name_end;
+            if *pos < data.len() && data[*pos] == b'"' {
+                *pos += 1;
+            }
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            // Read property count
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b':' {
+                *pos += 1;
+            }
+            let prop_count_str = String::from_utf8_lossy(&data[start..*pos]).to_string();
+            let prop_count = prop_count_str.parse::<usize>().unwrap_or(0);
+            if *pos < data.len() {
+                *pos += 1; // skip ':'
+            }
+            if *pos < data.len() && data[*pos] == b'{' {
+                *pos += 1;
+            }
+
+            let obj_id = vm.next_object_id();
+            // Use canonical class name
+            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let canonical = if let Some(ce) = vm.classes.get(&class_lower) {
+                ce.name.clone()
+            } else {
+                // Check known built-in names
+                match class_lower.as_slice() {
+                    b"stdclass" => b"stdClass".to_vec(),
+                    _ => class_name.clone(),
+                }
+            };
+            let mut obj = PhpObject::new(canonical, obj_id);
+            // Initialize from class definition
+            if let Some(ce) = vm.classes.get(&class_lower).cloned() {
+                for prop in &ce.properties {
+                    if !prop.is_static {
+                        obj.set_property(prop.name.clone(), prop.default.clone());
+                    }
+                }
+            }
+
+            for _ in 0..prop_count {
+                let key = unserialize_value(data, pos, vm)?;
+                let value = unserialize_value(data, pos, vm)?;
+                if let Value::String(s) = &key {
+                    // Handle private/protected property names
+                    // Private: \0ClassName\0propName
+                    // Protected: \0*\0propName
+                    let name_bytes = s.as_bytes();
+                    let prop_name = if !name_bytes.is_empty() && name_bytes[0] == 0 {
+                        // Find the second \0
+                        if let Some(end) = name_bytes[1..].iter().position(|&b| b == 0) {
+                            name_bytes[end + 2..].to_vec()
+                        } else {
+                            name_bytes.to_vec()
+                        }
+                    } else {
+                        name_bytes.to_vec()
+                    };
+                    obj.set_property(prop_name, value);
+                }
+            }
+            if *pos < data.len() && data[*pos] == b'}' {
+                *pos += 1;
+            }
+
+            // Call __unserialize or __wakeup if they exist
+            let obj_val = Value::Object(Rc::new(RefCell::new(obj)));
+            Some(obj_val)
+        }
+        b'R' | b'r' => {
+            // R:n; or r:n; (references - simplified: treat as null)
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            while *pos < data.len() && data[*pos] != b';' {
+                *pos += 1;
+            }
+            if *pos < data.len() {
+                *pos += 1;
+            }
+            Some(Value::Null)
+        }
+        b'C' => {
+            // C:n:"ClassName":n:{...} (custom serializable)
+            // Skip for now - parse but return stdClass
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            // Skip class name length
+            while *pos < data.len() && data[*pos] != b':' {
+                *pos += 1;
+            }
+            if *pos < data.len() {
+                *pos += 1;
+            }
+            // Skip class name
+            if *pos < data.len() && data[*pos] == b'"' {
+                *pos += 1;
+                while *pos < data.len() && data[*pos] != b'"' {
+                    *pos += 1;
+                }
+                if *pos < data.len() {
+                    *pos += 1;
+                }
+            }
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            // Skip data length
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b':' {
+                *pos += 1;
+            }
+            let data_len_str = String::from_utf8_lossy(&data[start..*pos]).to_string();
+            let data_len = data_len_str.parse::<usize>().unwrap_or(0);
+            if *pos < data.len() {
+                *pos += 1;
+            }
+            if *pos < data.len() && data[*pos] == b'{' {
+                *pos += 1;
+            }
+            *pos = (*pos + data_len).min(data.len());
+            if *pos < data.len() && data[*pos] == b'}' {
+                *pos += 1;
+            }
+            let obj_id = vm.next_object_id();
+            let obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
+            Some(Value::Object(Rc::new(RefCell::new(obj))))
+        }
+        _ => None,
+    }
 }
 fn memory_get_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(1024 * 1024)) // stub: 1MB
