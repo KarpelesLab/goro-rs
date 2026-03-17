@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
@@ -90,6 +93,18 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"str_increment", str_increment);
     vm.register_function(b"str_decrement", str_decrement);
     vm.register_function(b"quotemeta", quotemeta_fn);
+    vm.register_function(b"utf8_decode", utf8_decode_fn);
+    vm.register_function(b"utf8_encode", utf8_encode_fn);
+    vm.register_function(b"get_html_translation_table", get_html_translation_table_fn);
+    vm.register_function(b"html_entity_decode", html_entity_decode_fn);
+    vm.register_function(b"strip_tags", strip_tags_fn);
+    vm.register_function(b"nl2br", nl2br_fn);
+    vm.register_function(b"str_getcsv", str_getcsv_fn);
+    vm.register_function(b"str_word_count", str_word_count_fn);
+    vm.register_function(b"convert_uuencode", convert_uuencode_fn);
+    vm.register_function(b"convert_uudecode", convert_uudecode_fn);
+    vm.register_function(b"quoted_printable_encode", quoted_printable_encode_fn);
+    vm.register_function(b"quoted_printable_decode", quoted_printable_decode_fn);
 }
 
 fn strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2291,4 +2306,268 @@ fn quotemeta_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn utf8_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Convert UTF-8 to ISO-8859-1 (simplified: just keep bytes < 256)
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let utf8 = s.to_string_lossy();
+    let mut result = Vec::new();
+    for ch in utf8.chars() {
+        if ch as u32 <= 255 {
+            result.push(ch as u8);
+        } else {
+            result.push(b'?');
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn utf8_encode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Convert ISO-8859-1 to UTF-8
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = String::new();
+    for &b in bytes {
+        result.push(b as char);
+    }
+    Ok(Value::String(PhpString::from_string(result)))
+}
+
+fn get_html_translation_table_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let table_type = args.first().map(|v| v.to_long()).unwrap_or(0); // HTML_SPECIALCHARS=0, HTML_ENTITIES=1
+    let _flags = args.get(1).map(|v| v.to_long()).unwrap_or(11); // ENT_QUOTES|ENT_SUBSTITUTE
+    
+    let mut result = PhpArray::new();
+    
+    if table_type == 0 {
+        // HTML_SPECIALCHARS
+        result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+    } else {
+        // HTML_ENTITIES - include common entities
+        result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+        // Add more HTML entities for characters 160-255
+        let entities = [
+            (160, "&nbsp;"), (161, "&iexcl;"), (162, "&cent;"), (163, "&pound;"),
+            (164, "&curren;"), (165, "&yen;"), (166, "&brvbar;"), (167, "&sect;"),
+            (168, "&uml;"), (169, "&copy;"), (170, "&ordf;"), (171, "&laquo;"),
+            (172, "&not;"), (173, "&shy;"), (174, "&reg;"), (175, "&macr;"),
+            (176, "&deg;"), (177, "&plusmn;"), (178, "&sup2;"), (179, "&sup3;"),
+            (180, "&acute;"), (181, "&micro;"), (182, "&para;"), (183, "&middot;"),
+            (184, "&cedil;"), (185, "&sup1;"), (186, "&ordm;"), (187, "&raquo;"),
+            (188, "&frac14;"), (189, "&frac12;"), (190, "&frac34;"), (191, "&iquest;"),
+        ];
+        for (code, entity) in &entities {
+            let ch = [*code as u8];
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(&ch)),
+                Value::String(PhpString::from_string(entity.to_string())),
+            );
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn html_entity_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let input = s.to_string_lossy();
+    let result = input
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#039;", "'")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", "\u{00A0}");
+    Ok(Value::String(PhpString::from_string(result)))
+}
+
+fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut in_tag = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            in_tag = true;
+            i += 1;
+        } else if bytes[i] == b'>' && in_tag {
+            in_tag = false;
+            i += 1;
+        } else if !in_tag {
+            result.push(bytes[i]);
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn nl2br_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let is_xhtml = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
+    let br = if is_xhtml { "<br />" } else { "<br>" };
+    let input = s.to_string_lossy();
+    let result = input.replace("\r\n", &format!("{}\r\n", br))
+        .replace("\n", &format!("{}\n", br))
+        .replace("\r", &format!("{}\r", br));
+    Ok(Value::String(PhpString::from_string(result)))
+}
+
+fn str_getcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let separator = args.get(1).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b',')).unwrap_or(b',');
+    let enclosure = args.get(2).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b'"')).unwrap_or(b'"');
+    
+    let mut result = PhpArray::new();
+    let bytes = s.as_bytes();
+    let mut field = Vec::new();
+    let mut in_enclosure = false;
+    let mut i = 0;
+    
+    while i < bytes.len() {
+        if bytes[i] == enclosure {
+            if in_enclosure && i + 1 < bytes.len() && bytes[i + 1] == enclosure {
+                field.push(enclosure);
+                i += 2;
+            } else {
+                in_enclosure = !in_enclosure;
+                i += 1;
+            }
+        } else if bytes[i] == separator && !in_enclosure {
+            result.push(Value::String(PhpString::from_vec(field.clone())));
+            field.clear();
+            i += 1;
+        } else {
+            field.push(bytes[i]);
+            i += 1;
+        }
+    }
+    result.push(Value::String(PhpString::from_vec(field)));
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn str_word_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let format = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let input = s.to_string_lossy();
+    
+    let words: Vec<&str> = input.split(|c: char| !c.is_alphabetic() && c != '-' && c != '\'')
+        .filter(|w| !w.is_empty())
+        .collect();
+    
+    match format {
+        0 => Ok(Value::Long(words.len() as i64)),
+        1 => {
+            let mut arr = PhpArray::new();
+            for word in &words {
+                arr.push(Value::String(PhpString::from_string(word.to_string())));
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(arr))))
+        }
+        2 => {
+            let mut arr = PhpArray::new();
+            let mut pos = 0;
+            let input_bytes = input.as_bytes();
+            for word in &words {
+                if let Some(idx) = input[pos..].find(word) {
+                    arr.set(
+                        ArrayKey::Int((pos + idx) as i64),
+                        Value::String(PhpString::from_string(word.to_string())),
+                    );
+                    pos = pos + idx + word.len();
+                }
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(arr))))
+        }
+        _ => Ok(Value::False),
+    }
+}
+
+fn convert_uuencode_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False) // stub
+}
+
+fn convert_uudecode_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False) // stub
+}
+
+fn quoted_printable_encode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut line_len = 0;
+    for &b in bytes {
+        if b == b'\r' || b == b'\n' {
+            result.push(b);
+            line_len = 0;
+        } else if b == b'\t' || (b >= 32 && b <= 126 && b != b'=') {
+            if line_len >= 75 {
+                result.extend_from_slice(b"=\r\n");
+                line_len = 0;
+            }
+            result.push(b);
+            line_len += 1;
+        } else {
+            if line_len >= 73 {
+                result.extend_from_slice(b"=\r\n");
+                line_len = 0;
+            }
+            result.push(b'=');
+            result.push(b"0123456789ABCDEF"[(b >> 4) as usize]);
+            result.push(b"0123456789ABCDEF"[(b & 0x0f) as usize]);
+            line_len += 3;
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn quoted_printable_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'=' && i + 2 < bytes.len() {
+            if bytes[i + 1] == b'\r' && i + 2 < bytes.len() && bytes[i + 2] == b'\n' {
+                i += 3; // soft line break
+            } else if bytes[i + 1] == b'\n' {
+                i += 2; // soft line break
+            } else {
+                let hi = hex_nibble(bytes[i + 1]);
+                let lo = hex_nibble(bytes[i + 2]);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    result.push((h << 4) | l);
+                } else {
+                    result.push(b'=');
+                    result.push(bytes[i + 1]);
+                    result.push(bytes[i + 2]);
+                }
+                i += 3;
+            }
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
 }
