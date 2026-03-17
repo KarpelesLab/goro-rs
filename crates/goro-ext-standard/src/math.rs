@@ -103,7 +103,7 @@ fn round(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double((f * factor).round() / factor))
 }
 
-fn max(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         return Err(VmError {
             message: "max() expects at least 1 argument".into(),
@@ -111,20 +111,31 @@ fn max(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
 
-    // If single array argument, find max in array
-    if args.len() == 1
-        && let Value::Array(arr) = &args[0]
-    {
-        let arr = arr.borrow();
-        let mut max_val = Value::Null;
-        let mut first = true;
-        for (_, v) in arr.iter() {
-            if first || v.compare(&max_val) > 0 {
-                max_val = v.clone();
-                first = false;
+    if args.len() == 1 {
+        // Single argument must be an array
+        if let Value::Array(arr) = &args[0] {
+            let arr = arr.borrow();
+            if arr.len() == 0 {
+                // Empty array - throw ValueError
+                let msg = "max(): Argument #1 ($value) must contain at least one element".to_string();
+                vm.emit_warning_at(&msg, 0);
+                return Err(VmError { message: msg, line: 0 });
             }
+            let mut max_val = Value::Null;
+            let mut first = true;
+            for (_, v) in arr.iter() {
+                if first || v.compare(&max_val) > 0 {
+                    max_val = v.clone();
+                    first = false;
+                }
+            }
+            return Ok(max_val);
+        } else {
+            // Single non-array - throw TypeError
+            let msg = "max(): Argument #1 ($value) must be of type array, int given".to_string();
+            vm.emit_warning_at(&msg, 0);
+            return Err(VmError { message: msg, line: 0 });
         }
-        return Ok(max_val);
     }
 
     let mut max_val = args[0].clone();
@@ -136,7 +147,7 @@ fn max(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(max_val)
 }
 
-fn min(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         return Err(VmError {
             message: "min() expects at least 1 argument".into(),
@@ -144,19 +155,28 @@ fn min(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
 
-    if args.len() == 1
-        && let Value::Array(arr) = &args[0]
-    {
-        let arr = arr.borrow();
-        let mut min_val = Value::Null;
-        let mut first = true;
-        for (_, v) in arr.iter() {
-            if first || v.compare(&min_val) < 0 {
-                min_val = v.clone();
-                first = false;
+    if args.len() == 1 {
+        if let Value::Array(arr) = &args[0] {
+            let arr = arr.borrow();
+            if arr.len() == 0 {
+                let msg = "min(): Argument #1 ($value) must contain at least one element".to_string();
+                vm.emit_warning_at(&msg, 0);
+                return Err(VmError { message: msg, line: 0 });
             }
+            let mut min_val = Value::Null;
+            let mut first = true;
+            for (_, v) in arr.iter() {
+                if first || v.compare(&min_val) < 0 {
+                    min_val = v.clone();
+                    first = false;
+                }
+            }
+            return Ok(min_val);
+        } else {
+            let msg = "min(): Argument #1 ($value) must be of type array, int given".to_string();
+            vm.emit_warning_at(&msg, 0);
+            return Err(VmError { message: msg, line: 0 });
         }
-        return Ok(min_val);
     }
 
     let mut min_val = args[0].clone();
