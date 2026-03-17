@@ -2463,6 +2463,65 @@ impl Vm {
                     if let Value::Array(arr) = arr_val {
                         let key = Self::value_to_array_key(key_val);
                         arr.borrow_mut().set(key, val);
+                    } else if matches!(arr_val, Value::String(_)) {
+                        // String offset write: $str[n] = 'x'
+                        let idx = key_val.to_long();
+                        let replacement = val.to_php_string();
+                        let replace_byte = replacement.as_bytes().first().copied().unwrap_or(b'\0');
+
+                        // Read the CV directly to modify the string
+                        if let OperandType::Cv(cv_idx) = &op.op1 {
+                            let i = *cv_idx as usize;
+                            if let Some(cv_val) = cvs.get_mut(i) {
+                                let actual_val = match cv_val {
+                                    Value::Reference(r) => {
+                                        let mut inner = r.borrow_mut();
+                                        if let Value::String(s) = &*inner {
+                                            let mut bytes = s.as_bytes().to_vec();
+                                            let actual_idx = if idx < 0 {
+                                                let p = (-idx) as usize;
+                                                if p <= bytes.len() { bytes.len() - p } else { continue; }
+                                            } else {
+                                                idx as usize
+                                            };
+                                            if actual_idx < bytes.len() {
+                                                bytes[actual_idx] = replace_byte;
+                                            } else {
+                                                // Extend with spaces
+                                                while bytes.len() < actual_idx {
+                                                    bytes.push(b' ');
+                                                }
+                                                bytes.push(replace_byte);
+                                            }
+                                            *inner = Value::String(PhpString::from_vec(bytes));
+                                        }
+                                        continue;
+                                    }
+                                    Value::String(s) => {
+                                        let mut bytes = s.as_bytes().to_vec();
+                                        let actual_idx = if idx < 0 {
+                                            let p = (-idx) as usize;
+                                            if p <= bytes.len() { bytes.len() - p } else { continue; }
+                                        } else {
+                                            idx as usize
+                                        };
+                                        if actual_idx < bytes.len() {
+                                            bytes[actual_idx] = replace_byte;
+                                        } else {
+                                            while bytes.len() < actual_idx {
+                                                bytes.push(b' ');
+                                            }
+                                            bytes.push(replace_byte);
+                                        }
+                                        Some(Value::String(PhpString::from_vec(bytes)))
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(new_val) = actual_val {
+                                    *cv_val = new_val;
+                                }
+                            }
+                        }
                     }
                 }
                 OpCode::ArrayGet => {
