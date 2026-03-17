@@ -1269,16 +1269,32 @@ fn array_combine(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_chunk(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
-        let size = args.get(1).map(|v| v.to_long()).unwrap_or(1).max(1) as usize;
+        let size = args.get(1).map(|v| v.to_long()).unwrap_or(1);
+        if size < 1 {
+            let msg = "array_chunk(): Argument #2 ($length) must be greater than 0".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            // Change to ValueError
+            if let Value::Object(obj) = &exc {
+                obj.borrow_mut().class_name = b"ValueError".to_vec();
+            }
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+        let size = size as usize;
+        let preserve_keys = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
         let arr = arr.borrow();
-        let entries: Vec<_> = arr.values().cloned().collect();
+        let entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut result = PhpArray::new();
         for chunk in entries.chunks(size) {
             let mut sub = PhpArray::new();
-            for val in chunk {
-                sub.push(val.clone());
+            for (k, v) in chunk {
+                if preserve_keys {
+                    sub.set(k.clone(), v.clone());
+                } else {
+                    sub.push(v.clone());
+                }
             }
             result.push(Value::Array(Rc::new(RefCell::new(sub))));
         }
@@ -1657,6 +1673,53 @@ fn compact(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn current(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
+        let pos = arr.pointer;
+        Ok(arr
+            .iter()
+            .nth(pos)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::False))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn next_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        arr.pointer += 1;
+        let pos = arr.pointer;
+        Ok(arr
+            .iter()
+            .nth(pos)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::False))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn prev_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        if arr.pointer > 0 {
+            arr.pointer -= 1;
+        }
+        let pos = arr.pointer;
+        Ok(arr
+            .iter()
+            .nth(pos)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::False))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn reset_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut arr = arr.borrow_mut();
+        arr.pointer = 0;
         Ok(arr
             .iter()
             .next()
@@ -1667,27 +1730,11 @@ fn current(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn next_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn prev_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn reset_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Array(arr)) = args.first() {
-        let arr = arr.borrow();
-        Ok(arr
-            .iter()
-            .next()
-            .map(|(_, v)| v.clone())
-            .unwrap_or(Value::False))
-    } else {
-        Ok(Value::False)
-    }
-}
 fn end_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
-        let arr = arr.borrow();
+        let mut arr = arr.borrow_mut();
+        let len = arr.len();
+        arr.pointer = if len > 0 { len - 1 } else { 0 };
         Ok(arr
             .iter()
             .last()
@@ -1697,12 +1744,14 @@ fn end_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::False)
     }
 }
+
 fn key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
+        let pos = arr.pointer;
         Ok(arr
             .iter()
-            .next()
+            .nth(pos)
             .map(|(k, _)| match k {
                 goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
                 goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),

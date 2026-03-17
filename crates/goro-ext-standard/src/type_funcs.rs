@@ -168,8 +168,16 @@ fn php_empty(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     match val {
-        Value::Array(arr) => Ok(Value::Long(arr.borrow().len() as i64)),
+        Value::Array(arr) => {
+            if mode == 1 {
+                // COUNT_RECURSIVE
+                Ok(Value::Long(count_recursive(&Value::Array(arr.clone()))))
+            } else {
+                Ok(Value::Long(arr.borrow().len() as i64))
+            }
+        }
         Value::Object(obj) => {
             // Check for Countable interface / __spl_array property
             let ob = obj.borrow();
@@ -183,10 +191,24 @@ fn count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Value::Null | Value::Undef => Ok(Value::Long(0)),
         _ => {
-            // PHP 8: count() on non-array/Countable emits warning and returns 0
-            // but for simplicity return 1 for scalars (matches common PHP behavior pre-8)
             Ok(Value::Long(1))
         }
+    }
+}
+
+fn count_recursive(val: &Value) -> i64 {
+    match val {
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            let mut total = arr.len() as i64;
+            for (_, v) in arr.iter() {
+                if let Value::Array(_) = v {
+                    total += count_recursive(v);
+                }
+            }
+            total
+        }
+        _ => 1,
     }
 }
 

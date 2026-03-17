@@ -44,6 +44,8 @@ pub struct PhpArray {
     entries: Vec<(ArrayKey, Value)>,
     /// Next integer key to use for append ($arr[] = val)
     next_int_key: i64,
+    /// Internal array pointer position (for current/next/prev/reset/end)
+    pub pointer: usize,
 }
 
 impl PhpArray {
@@ -51,6 +53,7 @@ impl PhpArray {
         Self {
             entries: Vec::new(),
             next_int_key: 0,
+            pointer: 0,
         }
     }
 
@@ -58,6 +61,7 @@ impl PhpArray {
         Self {
             entries: Vec::with_capacity(cap),
             next_int_key: 0,
+            pointer: 0,
         }
     }
 

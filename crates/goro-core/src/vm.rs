@@ -1509,6 +1509,40 @@ impl Vm {
         }
     }
 
+    /// Call a method on an object by looking up the class method and executing it
+    fn call_object_method(
+        &mut self,
+        obj_val: &Value,
+        method_name: &[u8],
+        args: &[Value],
+    ) -> Option<Value> {
+        if let Value::Object(obj) = obj_val {
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(class_def) = self.classes.get(&class_lower) {
+                if let Some(method) = class_def.get_method(method_name) {
+                    let method_op = method.op_array.clone();
+                    let mut fn_cvs = vec![Value::Undef; method_op.cv_names.len()];
+                    // CV[0] = $this
+                    if !fn_cvs.is_empty() {
+                        fn_cvs[0] = obj_val.clone();
+                    }
+                    // Fill in method arguments
+                    for (i, arg) in args.iter().enumerate() {
+                        let cv_idx = i + 1; // offset by 1 for $this
+                        if cv_idx < fn_cvs.len() {
+                            fn_cvs[cv_idx] = arg.clone();
+                        }
+                    }
+                    self.called_class_stack.push(class_lower.clone());
+                    let result = self.execute_op_array(&method_op, fn_cvs).ok();
+                    self.called_class_stack.pop();
+                    return result;
+                }
+            }
+        }
+        None
+    }
+
     /// Allocate a new object ID (for use by built-in functions that create objects)
     pub fn next_object_id(&mut self) -> u64 {
         let id = self.next_object_id;
@@ -3191,8 +3225,10 @@ impl Vm {
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[] = $val -> offsetSet(null, $val)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let args = vec![arr_val.clone(), Value::Null, val];
-                        self.handle_spl_docall(&class_lower, b"offsetset", &args);
+                        let spl_args = vec![arr_val.clone(), Value::Null, val.clone()];
+                        if self.handle_spl_docall(&class_lower, b"offsetset", &spl_args).is_none() {
+                            self.call_object_method(&arr_val, b"offsetset", &[Value::Null, val]);
+                        }
                     }
                 }
                 OpCode::ArraySet => {
@@ -3205,8 +3241,10 @@ impl Vm {
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[$key] = $val -> offsetSet($key, $val)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let args = vec![arr_val.clone(), key_val, val];
-                        self.handle_spl_docall(&class_lower, b"offsetset", &args);
+                        let spl_args = vec![arr_val.clone(), key_val.clone(), val.clone()];
+                        if self.handle_spl_docall(&class_lower, b"offsetset", &spl_args).is_none() {
+                            self.call_object_method(&arr_val, b"offsetset", &[key_val, val]);
+                        }
                     } else if matches!(arr_val, Value::String(_)) {
                         // String offset write: $str[n] = 'x'
                         let idx = key_val.to_long();
@@ -3299,8 +3337,9 @@ impl Vm {
                         let args = vec![arr_val.clone(), key_val.clone()];
                         self.handle_spl_docall(&class_lower, b"offsetget", &args)
                             .unwrap_or_else(|| {
-                                // Try user-defined offsetGet
-                                Value::Null
+                                // Try user-defined offsetGet method
+                                self.call_object_method(&arr_val, b"offsetget", &[key_val.clone()])
+                                    .unwrap_or(Value::Null)
                             })
                     } else {
                         Value::Null
@@ -3924,8 +3963,11 @@ impl Vm {
                     } else if let Some(Value::Object(obj)) = arr_val {
                         // ArrayAccess: unset($obj[$key]) -> offsetUnset($key)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let args = vec![Value::Object(obj), key_val];
-                        self.handle_spl_docall(&class_lower, b"offsetunset", &args);
+                        let obj_val = Value::Object(obj);
+                        let spl_args = vec![obj_val.clone(), key_val.clone()];
+                        if self.handle_spl_docall(&class_lower, b"offsetunset", &spl_args).is_none() {
+                            self.call_object_method(&obj_val, b"offsetunset", &[key_val]);
+                        }
                     }
                 }
 
