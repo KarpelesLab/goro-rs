@@ -113,7 +113,14 @@ impl PhpGenerator {
                         self.key_counter += 1;
                         key
                     } else {
-                        self.read_operand(&op.op2, &op_array.literals)
+                        let key = self.read_operand(&op.op2, &op_array.literals);
+                        // Update key_counter to be after the explicit key
+                        if let Value::Long(n) = &key {
+                            if *n >= self.key_counter {
+                                self.key_counter = *n + 1;
+                            }
+                        }
+                        key
                     };
 
                     self.current_value = yielded_value;
