@@ -171,6 +171,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"unlink", unlink_fn);
     vm.register_function(b"rename", rename_fn);
     vm.register_function(b"copy", copy_fn);
+    vm.register_function(b"readfile", readfile_fn);
+    vm.register_function(b"file", file_fn);
+    vm.register_function(b"lstat", lstat_fn);
+    vm.register_function(b"is_executable", is_executable_fn);
+    vm.register_function(b"tempnam", tempnam_fn3);
+    vm.register_function(b"sys_get_temp_dir", sys_get_temp_dir_fn3);
     vm.register_function(b"mkdir", mkdir_fn);
     vm.register_function(b"rmdir", rmdir_fn);
     vm.register_function(b"glob", glob_fn);
@@ -5211,4 +5217,94 @@ fn idate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     Ok(Value::Long(val))
+}
+
+fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::read(&*path.to_string_lossy()) {
+        Ok(data) => {
+            let len = data.len();
+            vm.write_output(&data);
+            Ok(Value::Long(len as i64))
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    match std::fs::read_to_string(&*path.to_string_lossy()) {
+        Ok(content) => {
+            let mut result = PhpArray::new();
+            for line in content.split('\n') {
+                let mut l = line.to_string();
+                if flags & 2 == 0 {
+                    // FILE_IGNORE_NEW_LINES not set - include newline
+                    l.push('\n');
+                }
+                if flags & 4 != 0 && l.trim().is_empty() {
+                    // FILE_SKIP_EMPTY_LINES
+                    continue;
+                }
+                result.push(Value::String(PhpString::from_string(l)));
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(result))))
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn lstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Same as stat for now
+    stat_fn(_vm, args)
+}
+
+fn is_executable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&*path.to_string_lossy()) {
+            Ok(m) => Ok(if m.mode() & 0o111 != 0 {
+                Value::True
+            } else {
+                Value::False
+            }),
+            Err(_) => Ok(Value::False),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(Value::False)
+    }
+}
+
+fn tempnam_fn3(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let dir = args.first().unwrap_or(&Value::Null).to_php_string();
+    let prefix = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let dir_str = if dir.is_empty() {
+        std::env::temp_dir().to_string_lossy().to_string()
+    } else {
+        dir.to_string_lossy()
+    };
+    let name = format!(
+        "{}/{}{}",
+        dir_str,
+        prefix.to_string_lossy(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    // Create the file
+    std::fs::write(&name, b"").ok();
+    Ok(Value::String(PhpString::from_string(name)))
+}
+
+fn sys_get_temp_dir_fn3(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_string(
+        std::env::temp_dir().to_string_lossy().to_string(),
+    )))
 }
