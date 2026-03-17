@@ -123,11 +123,15 @@ pub enum TestResult {
 
 /// Run a PHPT test against the goro engine
 pub fn run_test(test: &PhptTest) -> TestResult {
+    run_test_with_dir(test, None)
+}
+
+pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult {
     // Handle SKIPIF section
     if let Some(skipif) = test.skipif_section() {
         let skipif_trimmed = skipif.trim();
         if !skipif_trimmed.is_empty() {
-            match execute_php_with_timeout(skipif_trimmed.as_bytes(), 5) {
+            match execute_php_with_timeout(skipif_trimmed.as_bytes(), 5, test_dir) {
                 Ok(output) => {
                     let output_str = String::from_utf8_lossy(&output).to_lowercase();
                     if output_str.contains("skip") {
@@ -150,8 +154,8 @@ pub fn run_test(test: &PhptTest) -> TestResult {
         None => return TestResult::Error("missing --FILE-- section".into()),
     };
 
-    // Execute the source with a 10-second timeout
-    let output = match execute_php_with_timeout(source.as_bytes(), 5) {
+    // Execute the source with a 5-second timeout
+    let output = match execute_php_with_timeout(source.as_bytes(), 5, test_dir) {
         Ok(output) => output,
         Err(e) => return TestResult::Error(e),
     };
@@ -190,14 +194,25 @@ pub fn run_test(test: &PhptTest) -> TestResult {
     }
 }
 
-fn execute_php_with_timeout(source: &[u8], timeout_secs: u64) -> Result<Vec<u8>, String> {
+fn execute_php_with_timeout(
+    source: &[u8],
+    timeout_secs: u64,
+    test_dir: Option<&Path>,
+) -> Result<Vec<u8>, String> {
     let source = source.to_vec();
+    let dir_path = test_dir.map(|p| p.to_path_buf());
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out2 = timed_out.clone();
 
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024) // 8MB stack
         .spawn(move || {
+            // Change to test directory if provided, otherwise use temp dir
+            if let Some(ref dir) = dir_path {
+                let _ = std::env::set_current_dir(dir);
+            } else {
+                let _ = std::env::set_current_dir(std::env::temp_dir());
+            }
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source)))
         })
         .map_err(|e| format!("Thread error: {}", e))?;
@@ -228,9 +243,6 @@ fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
     use goro_core::compiler::Compiler;
     use goro_core::vm::Vm;
     use goro_parser::{Lexer, Parser};
-
-    // Change to temp directory to avoid polluting the project directory
-    let _ = std::env::set_current_dir(std::env::temp_dir());
 
     // Lex
     let mut lexer = Lexer::new(source);
@@ -496,7 +508,8 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     for path in &files {
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Some(test) = PhptTest::parse(&content) {
-                match run_test(&test) {
+                let test_dir = path.parent();
+                match run_test_with_dir(&test, test_dir) {
                     TestResult::Pass => {
                         pass += 1;
                         println!("PASS: {}", test.name);
