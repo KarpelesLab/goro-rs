@@ -1040,7 +1040,7 @@ impl Parser {
         self.expect(&TokenKind::OpenBrace)?;
         let mut body = Vec::new();
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
-            body.push(self.parse_class_member()?);
+            body.extend(self.parse_class_members()?);
         }
         self.expect(&TokenKind::CloseBrace)?;
 
@@ -1054,6 +1054,11 @@ impl Parser {
             },
             span,
         })
+    }
+
+    fn parse_class_members(&mut self) -> ParseResult<Vec<ClassMember>> {
+        let member = self.parse_class_member()?;
+        Ok(vec![member])
     }
 
     fn parse_class_member(&mut self) -> ParseResult<ClassMember> {
@@ -1238,6 +1243,17 @@ impl Parser {
                 } else {
                     None
                 };
+                // Skip comma-separated additional properties
+                while self.eat(&TokenKind::Comma) {
+                    if let TokenKind::Variable(_) = self.peek().clone() {
+                        self.advance();
+                        if self.eat(&TokenKind::Assign) {
+                            let _ = self.parse_expression()?;
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 self.expect_semicolon()?;
                 Ok(ClassMember::Property {
                     name,
@@ -1268,6 +1284,19 @@ impl Parser {
                 } else {
                     None
                 };
+                // Check for comma-separated additional properties
+                // For now, just skip the comma and additional names
+                while self.eat(&TokenKind::Comma) {
+                    // Parse and discard additional property names (they share the same type)
+                    if let TokenKind::Variable(_) = self.peek().clone() {
+                        self.advance(); // skip variable name
+                        if self.eat(&TokenKind::Assign) {
+                            let _ = self.parse_expression()?; // skip default value
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 self.expect_semicolon()?;
                 Ok(ClassMember::Property {
                     name,
