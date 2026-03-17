@@ -205,6 +205,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_uintersect_uassoc", array_uintersect_uassoc_fn);
     vm.register_function(b"array_product", array_product_fn);
     vm.register_function(b"array_sum", array_sum_fn);
+    vm.register_function(b"parse_ini_string", parse_ini_string_fn);
     // sizeof is an alias for count (registered in type_funcs.rs)
 
     // Date
@@ -426,26 +427,55 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // === Output buffering ===
 
-fn ob_start(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn ob_start(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.ob_stack.push(Vec::new());
     Ok(Value::True)
 }
-fn ob_end_clean(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+fn ob_end_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    if vm.ob_stack.pop().is_some() {
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
 }
-fn ob_end_flush(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+fn ob_end_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    if let Some(buf) = vm.ob_stack.pop() {
+        // Flush to parent buffer or output
+        vm.write_output(&buf);
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
 }
-fn ob_get_contents(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
+fn ob_get_contents(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    if let Some(buf) = vm.ob_stack.last() {
+        Ok(Value::String(PhpString::from_vec(buf.clone())))
+    } else {
+        Ok(Value::False)
+    }
 }
-fn ob_get_clean(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
+fn ob_get_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    if let Some(buf) = vm.ob_stack.pop() {
+        Ok(Value::String(PhpString::from_vec(buf)))
+    } else {
+        Ok(Value::False)
+    }
 }
-fn ob_get_level(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+fn ob_get_level(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(vm.ob_stack.len() as i64))
 }
-fn ob_flush(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+fn ob_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    if let Some(buf) = vm.ob_stack.last_mut() {
+        let data = std::mem::take(buf);
+        drop(buf);
+        // Pop this level, write to parent, push empty back
+        vm.ob_stack.pop();
+        vm.write_output(&data);
+        vm.ob_stack.push(Vec::new());
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
 }
 fn ob_implicit_flush(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
@@ -6266,6 +6296,107 @@ fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
         }
         if found_in_all {
             result.set(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+
+fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ini_str = match args.first() {
+        Some(Value::String(s)) => s.to_string_lossy(),
+        Some(v) => v.to_php_string().to_string_lossy(),
+        None => return Ok(Value::False),
+    };
+    let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0); // INI_SCANNER_NORMAL=0
+
+    let mut result = PhpArray::new();
+    let mut current_section: Option<String> = None;
+
+    for line in ini_str.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+            continue;
+        }
+        // Section header
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if process_sections {
+                current_section = Some(trimmed[1..trimmed.len()-1].to_string());
+            }
+            continue;
+        }
+        // Key=value
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = trimmed[..eq_pos].trim().to_string();
+            let val_str = trimmed[eq_pos+1..].trim();
+            // Remove surrounding quotes
+            let val_str = if (val_str.starts_with('"') && val_str.ends_with('"'))
+                || (val_str.starts_with('\'') && val_str.ends_with('\''))
+            {
+                &val_str[1..val_str.len()-1]
+            } else {
+                val_str
+            };
+            // Strip inline comments
+            let val_str = if scanner_mode == 0 {
+                if let Some(comment_pos) = val_str.find(';') {
+                    // Only strip if preceded by whitespace
+                    if comment_pos > 0 && val_str.as_bytes()[comment_pos - 1] == b' ' {
+                        val_str[..comment_pos].trim_end()
+                    } else {
+                        val_str
+                    }
+                } else {
+                    val_str
+                }
+            } else {
+                val_str
+            };
+            // Convert special values
+            let value = match val_str.to_lowercase().as_str() {
+                "true" | "on" | "yes" => Value::String(PhpString::from_bytes(b"1")),
+                "false" | "off" | "no" | "none" | "" => Value::String(PhpString::empty()),
+                "null" => Value::String(PhpString::empty()),
+                _ => {
+                    if scanner_mode == 1 {
+                        // INI_SCANNER_RAW - return raw string
+                        Value::String(PhpString::from_string(val_str.to_string()))
+                    } else {
+                        // Try to parse as number
+                        if let Ok(n) = val_str.parse::<i64>() {
+                            Value::String(PhpString::from_string(n.to_string()))
+                        } else if let Ok(f) = val_str.parse::<f64>() {
+                            Value::String(PhpString::from_string(f.to_string()))
+                        } else {
+                            Value::String(PhpString::from_string(val_str.to_string()))
+                        }
+                    }
+                }
+            };
+
+            let arr_key = ArrayKey::String(PhpString::from_string(key));
+            if process_sections {
+                if let Some(ref section) = current_section {
+                    let section_key = ArrayKey::String(PhpString::from_string(section.clone()));
+                    // Get or create section array
+                    let section_arr = if let Some(existing) = result.get(&section_key) {
+                        if let Value::Array(arr) = existing {
+                            arr.clone()
+                        } else {
+                            Rc::new(RefCell::new(PhpArray::new()))
+                        }
+                    } else {
+                        Rc::new(RefCell::new(PhpArray::new()))
+                    };
+                    section_arr.borrow_mut().set(arr_key, value);
+                    result.set(section_key, Value::Array(section_arr));
+                } else {
+                    result.set(arr_key, value);
+                }
+            } else {
+                result.set(arr_key, value);
+            }
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))

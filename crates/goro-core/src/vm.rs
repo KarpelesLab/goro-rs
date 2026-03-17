@@ -87,6 +87,8 @@ impl PendingCall {
 pub struct Vm {
     /// Output buffer
     output: Vec<u8>,
+    /// Output buffer stack for ob_start/ob_end_clean/ob_get_contents
+    pub ob_stack: Vec<Vec<u8>>,
     /// Registered built-in functions
     pub functions: HashMap<Vec<u8>, BuiltinFn>,
     /// User-defined functions (compiled op arrays)
@@ -131,6 +133,7 @@ impl Vm {
     pub fn new() -> Self {
         Self {
             output: Vec::new(),
+                ob_stack: Vec::new(),
             functions: HashMap::new(),
             user_functions: HashMap::new(),
             pending_calls: Vec::new(),
@@ -846,7 +849,11 @@ impl Vm {
     }
 
     pub fn write_output(&mut self, data: &[u8]) {
-        self.output.extend_from_slice(data);
+        if let Some(buf) = self.ob_stack.last_mut() {
+            buf.extend_from_slice(data);
+        } else {
+            self.output.extend_from_slice(data);
+        }
     }
 
     /// Allocate a new object ID (for use by built-in functions that create objects)
@@ -965,13 +972,13 @@ impl Vm {
                 OpCode::Echo => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let s = self.value_to_string(&val);
-                    self.output.extend_from_slice(s.as_bytes());
+                    self.write_output(s.as_bytes());
                 }
 
                 OpCode::Print => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let s = val.to_php_string();
-                    self.output.extend_from_slice(s.as_bytes());
+                    self.write_output(s.as_bytes());
                     self.write_operand(
                         &op.result,
                         Value::Long(1),
