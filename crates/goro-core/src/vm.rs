@@ -748,6 +748,26 @@ impl Vm {
     }
 
     /// Write to the output buffer
+    /// Check if class_name extends target_name through the parent chain
+    pub fn class_extends(&self, class_name: &[u8], target_name: &[u8]) -> bool {
+        let mut current: Vec<u8> = class_name.to_vec();
+        for _ in 0..50 {
+            // prevent infinite loops
+            let parent = match self.classes.get(&current) {
+                Some(ce) => match &ce.parent {
+                    Some(p) => p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(),
+                    None => return false,
+                },
+                None => return false,
+            };
+            if parent == target_name {
+                return true;
+            }
+            current = parent;
+        }
+        false
+    }
+
     pub fn write_output(&mut self, data: &[u8]) {
         self.output.extend_from_slice(data);
     }
@@ -844,13 +864,13 @@ impl Vm {
                 OpCode::Nop => {}
 
                 OpCode::Echo => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let s = self.value_to_string(&val);
                     self.output.extend_from_slice(s.as_bytes());
                 }
 
                 OpCode::Print => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let s = val.to_php_string();
                     self.output.extend_from_slice(s.as_bytes());
                     self.write_operand(
@@ -1059,9 +1079,8 @@ impl Vm {
                     self.write_operand(&op.result, a.pow(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Concat => {
-                    self.check_undefined_cv(&op.op2, &cvs, op_array, op.line);
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let a_str = self.value_to_string(&a);
                     let b_str = self.value_to_string(&b);
                     let mut result = a_str.as_bytes().to_vec();
@@ -2073,6 +2092,12 @@ impl Vm {
                                         obj_mut
                                             .set_property(b"code".to_vec(), call.args[2].clone());
                                     }
+                                    if call.args.len() > 3 {
+                                        obj_mut.set_property(
+                                            b"previous".to_vec(),
+                                            call.args[3].clone(),
+                                        );
+                                    }
                                 }
                             }
                             self.write_operand(
@@ -2324,11 +2349,21 @@ impl Vm {
                         let key = Self::value_to_array_key(key_val.clone());
                         arr.borrow().get(&key).cloned().unwrap_or(Value::Null)
                     } else if let Value::String(s) = &arr_val {
-                        // String offset access
+                        // String offset access (supports negative indices)
                         let idx = key_val.to_long();
                         let bytes = s.as_bytes();
-                        if idx >= 0 && (idx as usize) < bytes.len() {
-                            Value::String(PhpString::from_bytes(&[bytes[idx as usize]]))
+                        let actual_idx = if idx < 0 {
+                            let positive = (-idx) as usize;
+                            if positive <= bytes.len() {
+                                bytes.len() - positive
+                            } else {
+                                usize::MAX // will fail bounds check
+                            }
+                        } else {
+                            idx as usize
+                        };
+                        if actual_idx < bytes.len() {
+                            Value::String(PhpString::from_bytes(&[bytes[actual_idx]]))
                         } else {
                             Value::String(PhpString::empty())
                         }
@@ -2347,6 +2382,25 @@ impl Vm {
                         let _ = gen_borrow.resume(self);
                         drop(gen_borrow);
                         // Store the generator in the iterator tmp slot
+                        self.write_operand(
+                            &op.result,
+                            arr_val,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else if let Value::Object(obj) = &arr_val {
+                        // Convert object properties to an array for iteration
+                        let obj_borrow = obj.borrow();
+                        let mut arr = PhpArray::new();
+                        for (name, value) in &obj_borrow.properties {
+                            arr.set(
+                                ArrayKey::String(PhpString::from_vec(name.clone())),
+                                value.clone(),
+                            );
+                        }
+                        drop(obj_borrow);
+                        let arr_val = Value::Array(Rc::new(RefCell::new(arr)));
                         self.write_operand(
                             &op.result,
                             arr_val,
@@ -3441,32 +3495,32 @@ impl Vm {
                     let mut obj = PhpObject::new(canonical_name, obj_id);
 
                     // Built-in Exception/Error classes get default properties
-                    if name_lower == b"exception"
+                    // Check if this is a Throwable subclass (built-in or user-defined)
+                    let is_throwable = name_lower == b"exception"
                         || name_lower == b"error"
-                        || name_lower == b"runtimeexception"
-                        || name_lower == b"logicexception"
-                        || name_lower == b"invalidargumentexception"
-                        || name_lower == b"typeerror"
-                        || name_lower == b"valueerror"
-                        || name_lower == b"overflowexception"
-                        || name_lower == b"underflowexception"
-                        || name_lower == b"rangeerror"
-                        || name_lower == b"badmethodcallexception"
-                        || name_lower == b"badfunctioncallexception"
-                        || name_lower == b"lengthexception"
-                        || name_lower == b"outofrangeexception"
-                        || name_lower == b"unexpectedvalueexception"
-                        || name_lower == b"domainexception"
-                        || name_lower == b"arithmeticerror"
-                        || name_lower == b"divisionbyzeroerror"
-                    {
+                        || is_builtin_subclass(&name_lower, b"exception")
+                        || is_builtin_subclass(&name_lower, b"error")
+                        || self.class_extends(
+                            &name_lower,
+                            b"exception",
+                        )
+                        || self.class_extends(
+                            &name_lower,
+                            b"error",
+                        );
+                    if is_throwable {
                         obj.set_property(b"message".to_vec(), Value::String(PhpString::empty()));
                         obj.set_property(b"code".to_vec(), Value::Long(0));
                         obj.set_property(
                             b"file".to_vec(),
-                            Value::String(PhpString::from_bytes(b"")),
+                            Value::String(PhpString::from_bytes(b"Unknown")),
                         );
-                        obj.set_property(b"line".to_vec(), Value::Long(0));
+                        obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
+                        obj.set_property(b"previous".to_vec(), Value::Null);
+                        obj.set_property(
+                            b"trace".to_vec(),
+                            Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                        );
                     }
 
                     // Initialize properties from class definition
@@ -3629,8 +3683,11 @@ impl Vm {
                                 b"getcode" => Some(obj_borrow.get_property(b"code")),
                                 b"getfile" => Some(obj_borrow.get_property(b"file")),
                                 b"getline" => Some(obj_borrow.get_property(b"line")),
-                                b"gettrace" | b"gettracestring" | b"gettracerasstring"
-                                | b"getprevious" => Some(Value::Null),
+                                b"gettrace" => Some(obj_borrow.get_property(b"trace")),
+                                b"gettraceasstring" => {
+                                    Some(Value::String(PhpString::from_bytes(b"")))
+                                }
+                                b"getprevious" => Some(obj_borrow.get_property(b"previous")),
                                 b"__tostring" => Some(obj_borrow.get_property(b"message")),
                                 _ => None,
                             };
@@ -3916,6 +3973,42 @@ impl Vm {
         }
     }
 
+    /// Read an operand, emitting "Undefined variable" warning for undef CVs
+    fn read_operand_warn(
+        &mut self,
+        operand: &OperandType,
+        cvs: &[Value],
+        tmps: &[Value],
+        literals: &[Value],
+        op_array: &OpArray,
+        line: u32,
+    ) -> Value {
+        if let OperandType::Cv(idx) = operand {
+            let i = *idx as usize;
+            if let Some(val) = cvs.get(i) {
+                let is_undef = match val {
+                    Value::Undef => true,
+                    Value::Reference(r) => matches!(*r.borrow(), Value::Undef),
+                    _ => false,
+                };
+                if is_undef {
+                    if let Some(name) = op_array.cv_names.get(i) {
+                        // Don't warn for superglobals
+                        if name != b"GLOBALS" && name != b"_SERVER" && name != b"_GET"
+                            && name != b"_POST" && name != b"_COOKIE" && name != b"_FILES"
+                            && name != b"_REQUEST" && name != b"_SESSION" && name != b"_ENV"
+                        {
+                            let varname = String::from_utf8_lossy(name);
+                            self.emit_warning_at(&format!("Undefined variable ${}", varname), line);
+                        }
+                    }
+                    return Value::Null;
+                }
+            }
+        }
+        self.read_operand(operand, cvs, tmps, literals)
+    }
+
     /// Read a CV value without dereferencing (keeps Reference wrapper)
     fn read_operand_raw(cvs: &[Value], operand: &OperandType) -> Value {
         match operand {
@@ -4176,7 +4269,7 @@ impl Default for Vm {
 ///      │  ├─ DomainException
 ///      │  └─ UnexpectedValueException
 ///      └─ ClosedGeneratorException
-fn is_builtin_subclass(child: &[u8], parent: &[u8]) -> bool {
+pub fn is_builtin_subclass(child: &[u8], parent: &[u8]) -> bool {
     // Get the parent chain for the child class
     let parents = builtin_parent_chain(child);
     parents.iter().any(|p| p == parent)

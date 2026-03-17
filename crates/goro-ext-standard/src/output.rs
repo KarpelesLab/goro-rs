@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
@@ -9,15 +10,15 @@ pub fn register(vm: &mut Vm) {
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let mut seen = HashSet::new();
     for arg in args {
-        var_dump_value(vm, arg, 0);
+        var_dump_value(vm, arg, 0, &mut seen);
     }
     Ok(Value::Null)
 }
 
-fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
-    if indent > 20 {
-        vm.write_output(b"  *RECURSION*\n");
+fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
+    if indent > 40 {
         return;
     }
     let prefix = " ".repeat(indent);
@@ -65,7 +66,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
                         );
                     }
                 }
-                var_dump_value(vm, value, indent + 2);
+                var_dump_value(vm, value, indent + 2, seen);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
@@ -73,13 +74,23 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             let obj_borrow = obj.borrow();
             let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
             let prop_count = obj_borrow.properties.len();
+            let oid = obj_borrow.object_id;
             vm.write_output(
                 format!(
                     "{}object({})#{} ({}) {{\n",
-                    prefix, class_name, obj_borrow.object_id, prop_count
+                    prefix, class_name, oid, prop_count
                 )
                 .as_bytes(),
             );
+
+            // Check for recursion (self-referencing objects)
+            if !seen.insert(oid) {
+                // Already seen this object — print *RECURSION*
+                vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                return;
+            }
+
             // Look up class to get property visibility info
             let class_lower: Vec<u8> = obj_borrow
                 .class_name
@@ -89,7 +100,10 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             let class_info = vm.classes.get(&class_lower).cloned();
 
             // Properties are in declaration order (Vec preserves insertion order)
-            for (name, value) in &obj_borrow.properties {
+            let props: Vec<_> = obj_borrow.properties.clone();
+            let obj_class_name = obj_borrow.class_name.clone();
+            drop(obj_borrow);
+            for (name, value) in &props {
                 let name_str = String::from_utf8_lossy(name);
                 // Determine visibility
                 let vis = class_info.as_ref().and_then(|c| {
@@ -103,15 +117,16 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
                         format!("\"{}\":protected", name_str)
                     }
                     Some(goro_core::object::Visibility::Private) => {
-                        let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+                        let class_name = String::from_utf8_lossy(&obj_class_name);
                         format!("\"{}\":\"{}\":private", name_str, class_name)
                     }
                     _ => format!("\"{}\"", name_str),
                 };
                 vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
-                var_dump_value(vm, value, indent + 2);
+                var_dump_value(vm, value, indent + 2, seen);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
+            seen.remove(&oid);
         }
         Value::Generator(_) => {
             vm.write_output(
@@ -121,12 +136,12 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
         Value::Reference(r) => {
             // Show the inner value with & prefix (PHP shows &int(42), &string(...), etc.)
             let inner = r.borrow().clone();
-            var_dump_value_ref(vm, &inner, indent, &prefix);
+            var_dump_value_ref(vm, &inner, indent, &prefix, seen);
         }
     }
 }
 
-fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str) {
+fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, seen: &mut HashSet<u64>) {
     match val {
         Value::Null | Value::Undef => {
             vm.write_output(format!("{}&NULL\n", prefix).as_bytes());
@@ -170,13 +185,13 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str) {
                         );
                     }
                 }
-                var_dump_value(vm, value, indent + 2);
+                var_dump_value(vm, value, indent + 2, seen);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
         _ => {
             // For other types (Object, nested Reference), just dump normally
-            var_dump_value(vm, val, indent);
+            var_dump_value(vm, val, indent, seen);
         }
     }
 }

@@ -780,7 +780,9 @@ fn array_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
 
         let mut result = PhpArray::new();
-        for val in &entries[start..end.min(entries.len())] {
+        let end = end.min(entries.len());
+        let start = start.min(end);
+        for val in &entries[start..end] {
             result.push(val.clone());
         }
         Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -3871,11 +3873,117 @@ fn spl_autoload_register_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
 fn class_alias_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
-fn is_a_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn is_a_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let (class_name, check_name) = match (args.first(), args.get(1)) {
+        (Some(Value::Object(obj)), Some(Value::String(s))) => {
+            (obj.borrow().class_name.clone(), s.as_bytes().to_vec())
+        }
+        (Some(Value::String(obj_class)), Some(Value::String(s))) => {
+            // is_a with string class name + allow_string=true (3rd arg)
+            let allow = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+            if allow {
+                (obj_class.as_bytes().to_vec(), s.as_bytes().to_vec())
+            } else {
+                return Ok(Value::False);
+            }
+        }
+        _ => return Ok(Value::False),
+    };
+    let result = class_is_a(vm, &class_name, &check_name);
+    Ok(if result { Value::True } else { Value::False })
 }
-fn is_subclass_of_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+
+fn is_subclass_of_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let (class_name, check_name) = match (args.first(), args.get(1)) {
+        (Some(Value::Object(obj)), Some(Value::String(s))) => {
+            (obj.borrow().class_name.clone(), s.as_bytes().to_vec())
+        }
+        (Some(Value::String(obj_class)), Some(Value::String(s))) => {
+            // is_subclass_of with string class name + allow_string=true (3rd arg, default true)
+            let allow = args.get(2).map(|v| v.is_truthy()).unwrap_or(true);
+            if allow {
+                (obj_class.as_bytes().to_vec(), s.as_bytes().to_vec())
+            } else {
+                return Ok(Value::False);
+            }
+        }
+        _ => return Ok(Value::False),
+    };
+    // is_subclass_of returns false if class_name == check_name (unlike is_a)
+    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let check_lower: Vec<u8> = check_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    if class_lower == check_lower {
+        return Ok(Value::False);
+    }
+    let result = class_is_a(vm, &class_name, &check_name);
+    Ok(if result { Value::True } else { Value::False })
+}
+
+/// Check if class_name is the same as or inherits from check_name
+fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
+    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let check_lower: Vec<u8> = check_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    // Direct match
+    if class_lower == check_lower {
+        return true;
+    }
+
+    // Check built-in exception hierarchy
+    if goro_core::vm::is_builtin_subclass(&class_lower, &check_lower) {
+        return true;
+    }
+
+    // Walk the parent chain
+    let mut current = class_lower;
+    loop {
+        let class_entry = match vm.classes.get(&current) {
+            Some(ce) => ce.clone(),
+            None => break,
+        };
+
+        // Check interfaces
+        for iface in &class_entry.interfaces {
+            let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if iface_lower == check_lower {
+                return true;
+            }
+            // Check parent interfaces too
+            if class_is_a_interface(vm, &iface_lower, &check_lower) {
+                return true;
+            }
+        }
+
+        // Move to parent
+        match &class_entry.parent {
+            Some(parent) => {
+                let parent_lower: Vec<u8> =
+                    parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if parent_lower == check_lower {
+                    return true;
+                }
+                current = parent_lower;
+            }
+            None => break,
+        }
+    }
+
+    false
+}
+
+fn class_is_a_interface(vm: &Vm, iface_name: &[u8], check_name: &[u8]) -> bool {
+    if let Some(ce) = vm.classes.get(iface_name) {
+        for parent_iface in &ce.interfaces {
+            let pi_lower: Vec<u8> = parent_iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if pi_lower == check_name {
+                return true;
+            }
+            if class_is_a_interface(vm, &pi_lower, check_name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_name = match args.first() {

@@ -1159,9 +1159,25 @@ impl Compiler {
                 };
 
                 // Patch all jump-to-end targets
-                self.op_array.patch_jump(jmp_after_try, finally_or_end);
-                for jmp in end_of_catch_jumps {
-                    self.op_array.patch_jump(jmp, finally_or_end);
+                // When there's a finally block, normal flow must go through it
+                if has_finally {
+                    // Find the finally_start from TryBegin's op2
+                    if let OperandType::JmpTarget(fs) = self.op_array.ops[try_begin as usize].op2 {
+                        self.op_array.patch_jump(jmp_after_try, fs);
+                        for jmp in end_of_catch_jumps {
+                            self.op_array.patch_jump(jmp, fs);
+                        }
+                    } else {
+                        self.op_array.patch_jump(jmp_after_try, finally_or_end);
+                        for jmp in end_of_catch_jumps {
+                            self.op_array.patch_jump(jmp, finally_or_end);
+                        }
+                    }
+                } else {
+                    self.op_array.patch_jump(jmp_after_try, finally_or_end);
+                    for jmp in end_of_catch_jumps {
+                        self.op_array.patch_jump(jmp, finally_or_end);
+                    }
                 }
                 Ok(())
             }
@@ -1618,25 +1634,17 @@ impl Compiler {
                     }
                     _ => {
                         // Check for destructuring: list($a, $b) = $arr or [$a, $b] = $arr
-                        let vars: Vec<Option<Vec<u8>>> = match &target.kind {
-                            ExprKind::Array(elems) => elems
-                                .iter()
-                                .map(|e| {
-                                    if let ExprKind::Variable(name) = &e.value.kind {
-                                        Some(name.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect(),
-                            ExprKind::FunctionCall { name, args } if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) => {
+                        // Also supports keyed: ["a" => $x, "b" => $y] = $arr
+                        let elems: Vec<_> = match &target.kind {
+                            ExprKind::Array(elems) => elems.clone(),
+                            ExprKind::FunctionCall { name, args }
+                                if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) =>
+                            {
                                 args.iter()
-                                    .map(|a| {
-                                        if let ExprKind::Variable(name) = &a.value.kind {
-                                            Some(name.clone())
-                                        } else {
-                                            None
-                                        }
+                                    .map(|a| ArrayElement {
+                                        key: None,
+                                        value: a.value.clone(),
+                                        unpack: false,
                                     })
                                     .collect()
                             }
@@ -1649,15 +1657,24 @@ impl Compiler {
                         };
 
                         let arr_op = val;
-                        for (i, var_name) in vars.iter().enumerate() {
-                            if let Some(name) = var_name {
+                        for (i, elem) in elems.iter().enumerate() {
+                            // Determine the key to use
+                            let idx_op = if let Some(key_expr) = &elem.key {
+                                self.compile_expr(key_expr)?
+                            } else {
+                                let idx_const =
+                                    self.op_array.add_literal(Value::Long(i as i64));
+                                OperandType::Const(idx_const)
+                            };
+
+                            // Determine the target variable
+                            if let ExprKind::Variable(name) = &elem.value.kind {
                                 let cv = self.op_array.get_or_create_cv(name);
-                                let idx_const = self.op_array.add_literal(Value::Long(i as i64));
                                 let tmp = self.op_array.alloc_temp();
                                 self.op_array.emit(Op {
                                     opcode: OpCode::ArrayGet,
                                     op1: arr_op,
-                                    op2: OperandType::Const(idx_const),
+                                    op2: idx_op,
                                     result: OperandType::Tmp(tmp),
                                     line: expr.span.line,
                                 });
@@ -1668,6 +1685,8 @@ impl Compiler {
                                     result: OperandType::Unused,
                                     line: expr.span.line,
                                 });
+                            } else {
+                                // Skip non-variable targets (empty slots in list)
                             }
                         }
                         Ok(arr_op)
