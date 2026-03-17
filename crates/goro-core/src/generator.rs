@@ -53,6 +53,10 @@ pub struct PhpGenerator {
     pub send_value: Value,
     /// The return value of the generator (set when it returns)
     pub return_value: Value,
+    /// Yield from: inner iterable being delegated to
+    pub yield_from_source: Option<Value>,
+    /// Yield from: position within array iteration
+    pub yield_from_pos: usize,
 }
 
 impl PhpGenerator {
@@ -74,6 +78,8 @@ impl PhpGenerator {
             key_counter: 0,
             send_value: Value::Null,
             return_value: Value::Null,
+            yield_from_source: None,
+            yield_from_pos: 0,
         }
     }
 
@@ -130,6 +136,91 @@ impl PhpGenerator {
 
                     // The send value will be written to the result operand when we resume
                     return Ok(true);
+                }
+
+                OpCode::YieldFrom => {
+                    // Check if we're resuming a yield-from iteration
+                    if let Some(ref source) = self.yield_from_source.clone() {
+                        match source {
+                            Value::Array(arr) => {
+                                let arr_borrow = arr.borrow();
+                                let entries: Vec<_> = arr_borrow.iter().collect();
+                                if self.yield_from_pos < entries.len() {
+                                    let (key, val) = entries[self.yield_from_pos];
+                                    let k = match key {
+                                        crate::array::ArrayKey::Int(n) => Value::Long(*n),
+                                        crate::array::ArrayKey::String(s) => {
+                                            Value::String(s.clone())
+                                        }
+                                    };
+                                    self.current_value = val.clone();
+                                    self.current_key = k;
+                                    self.yield_from_pos += 1;
+                                    self.state = GeneratorState::Suspended;
+                                    self.ip = ip - 1; // Re-execute YieldFrom on next resume
+                                    return Ok(true);
+                                }
+                                // Array exhausted
+                                self.yield_from_source = None;
+                                self.yield_from_pos = 0;
+                                self.write_operand(&op.result, Value::Null);
+                            }
+                            Value::Generator(inner_gen) => {
+                                // Read inner state without holding borrow
+                                let (is_suspended, val, key, ret) = {
+                                    let inner = inner_gen.borrow();
+                                    (
+                                        inner.state == GeneratorState::Suspended,
+                                        inner.current_value.clone(),
+                                        inner.current_key.clone(),
+                                        inner.return_value.clone(),
+                                    )
+                                };
+                                if is_suspended {
+                                    self.current_value = val;
+                                    self.current_key = key;
+                                    self.state = GeneratorState::Suspended;
+                                    self.ip = ip - 1; // Re-execute YieldFrom on resume
+                                    // Advance inner generator for next resume
+                                    let mut inner = inner_gen.borrow_mut();
+                                    inner.write_send_value();
+                                    let _ = inner.resume(vm);
+                                    return Ok(true);
+                                }
+                                // Inner completed
+                                self.yield_from_source = None;
+                                self.write_operand(&op.result, ret);
+                            }
+                            _ => {
+                                self.yield_from_source = None;
+                                self.write_operand(&op.result, Value::Null);
+                            }
+                        }
+                    } else {
+                        // First time: set up the yield-from source
+                        let iterable = self.read_operand(&op.op1, &op_array.literals);
+                        match &iterable {
+                            Value::Array(_) => {
+                                self.yield_from_source = Some(iterable);
+                                self.yield_from_pos = 0;
+                                // Re-execute to start yielding
+                                ip -= 1; // Will re-execute this opcode
+                            }
+                            Value::Generator(inner_gen) => {
+                                // Initialize inner generator if needed
+                                let mut inner = inner_gen.borrow_mut();
+                                if inner.state == GeneratorState::Created {
+                                    let _ = inner.resume(vm);
+                                }
+                                drop(inner);
+                                self.yield_from_source = Some(iterable);
+                                ip -= 1; // Re-execute to start yielding
+                            }
+                            _ => {
+                                self.write_operand(&op.result, Value::Null);
+                            }
+                        }
+                    }
                 }
 
                 OpCode::GeneratorReturn => {

@@ -2991,10 +2991,17 @@ impl Compiler {
                 Ok(OperandType::Tmp(result_tmp))
             }
 
-            ExprKind::YieldFrom(_inner) => {
-                // TODO: yield from is more complex, stub for now
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+            ExprKind::YieldFrom(inner) => {
+                let val = self.compile_expr(inner)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::YieldFrom,
+                    op1: val,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
             }
 
             ExprKind::Clone(inner) => {

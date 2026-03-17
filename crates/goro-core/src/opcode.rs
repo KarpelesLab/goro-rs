@@ -222,6 +222,8 @@ pub enum OpCode {
     Yield,
     /// Generator return (like Return but for generators)
     GeneratorReturn,
+    /// Yield from: op1 = iterable, result = return value of inner generator
+    YieldFrom,
 
     // ---- Unset ----
     /// Remove array element: op1 = array, op2 = key

@@ -3133,6 +3133,19 @@ impl Vm {
                     // TODO: implement
                 }
 
+                OpCode::YieldFrom => {
+                    // YieldFrom in non-generator context - shouldn't happen normally
+                    // Just evaluate the inner expression
+                    let _val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(
+                        &op.result,
+                        Value::Null,
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
+                }
+
                 OpCode::Yield => {
                     // Yield should only be executed inside generators, not in the main VM loop.
                     // If we reach here, it means yield was used outside a generator context.
