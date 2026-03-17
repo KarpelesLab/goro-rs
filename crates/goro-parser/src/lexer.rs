@@ -668,6 +668,51 @@ impl<'a> Lexer<'a> {
         };
 
         let kind = match ch {
+            b'$' if self.peek_at(1) == Some(b'{') => {
+                // ${expr} - variable variable with expression
+                self.advance(); // skip $
+                self.advance(); // skip {
+                // Scan expression until matching }
+                let mut depth = 1;
+                let start = self.pos;
+                while depth > 0 {
+                    match self.peek() {
+                        Some(b'{') => {
+                            depth += 1;
+                            self.advance();
+                        }
+                        Some(b'}') => {
+                            depth -= 1;
+                            if depth > 0 {
+                                self.advance();
+                            }
+                        }
+                        None => break,
+                        _ => {
+                            self.advance();
+                        }
+                    }
+                }
+                let expr_bytes = self.source[start..self.pos].to_vec();
+                if self.peek() == Some(b'}') {
+                    self.advance(); // skip }
+                }
+                // If the expression is a simple variable name, treat as VariableVariable
+                let expr_str: Vec<u8> = expr_bytes.iter().copied().filter(|b| *b != b'$').collect();
+                if !expr_str.is_empty() && expr_str[0] != b'{' {
+                    // Simple case: ${varname} or ${$varname}
+                    if expr_bytes.starts_with(b"$") {
+                        // ${$var} - variable variable
+                        let name: Vec<u8> = expr_bytes[1..].to_vec();
+                        TokenKind::VariableVariable(name)
+                    } else {
+                        // ${name} - simple variable access
+                        TokenKind::Variable(expr_bytes)
+                    }
+                } else {
+                    TokenKind::Variable(expr_bytes)
+                }
+            }
             b'$' if self.peek_at(1) == Some(b'$') => {
                 // $$var - variable variable
                 self.advance(); // skip first $
