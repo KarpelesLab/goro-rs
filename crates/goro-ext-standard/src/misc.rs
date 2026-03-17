@@ -180,6 +180,26 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"rmdir", rmdir_fn);
     vm.register_function(b"glob", glob_fn);
     vm.register_function(b"scandir", scandir_fn);
+    vm.register_function(b"is_writable", is_writable_fn);
+    vm.register_function(b"is_writeable", is_writable_fn);
+    vm.register_function(b"is_readable", is_readable_fn);
+    vm.register_function(b"filemtime", filemtime_fn);
+    vm.register_function(b"fileatime", fileatime_fn);
+    vm.register_function(b"filectime", filectime_fn);
+    vm.register_function(b"fileinode", fileinode_fn);
+    vm.register_function(b"fileperms", fileperms_fn);
+    vm.register_function(b"fileowner", fileowner_fn);
+    vm.register_function(b"filegroup", filegroup_fn);
+    vm.register_function(b"filetype", filetype_fn);
+    vm.register_function(b"is_link", is_link_fn);
+    vm.register_function(b"chmod", chmod_fn);
+    vm.register_function(b"chown", chown_fn);
+    vm.register_function(b"clearstatcache", clearstatcache_fn);
+    vm.register_function(b"fputcsv", fputcsv_fn);
+    vm.register_function(b"fgetcsv", fgetcsv_fn);
+    vm.register_function(b"fpassthru", fpassthru_fn);
+    vm.register_function(b"linkinfo", linkinfo_fn);
+    vm.register_function(b"parse_ini_file", parse_ini_file_fn);
     vm.register_function(b"header", header_fn);
     vm.register_function(b"headers_sent", headers_sent_fn);
     vm.register_function(b"http_response_code", http_response_code_fn);
@@ -3664,7 +3684,7 @@ fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn file_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::read(path.to_string_lossy().as_ref() as &str) {
+    match std::fs::read(&*path.to_string_lossy() as &str) {
         Ok(data) => Ok(Value::String(PhpString::from_vec(data))),
         Err(_) => Ok(Value::False),
     }
@@ -3679,10 +3699,10 @@ fn file_put_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         std::fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open(path.to_string_lossy().as_ref() as &str)
+            .open(&*path.to_string_lossy() as &str)
             .and_then(|mut f| f.write_all(data.as_bytes()).map(|_| data.len()))
     } else {
-        std::fs::write(path.to_string_lossy().as_ref() as &str, data.as_bytes()).map(|_| data.len())
+        std::fs::write(&*path.to_string_lossy() as &str, data.as_bytes()).map(|_| data.len())
     };
     match result {
         Ok(len) => Ok(Value::Long(len as i64)),
@@ -3691,7 +3711,7 @@ fn file_put_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 }
 fn realpath_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::canonicalize(path.to_string_lossy().as_ref() as &str) {
+    match std::fs::canonicalize(&*path.to_string_lossy() as &str) {
         Ok(p) => Ok(Value::String(PhpString::from_string(
             p.to_string_lossy().to_string(),
         ))),
@@ -3708,14 +3728,14 @@ fn getcwd_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 fn chdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::env::set_current_dir(path.to_string_lossy().as_ref() as &str) {
+    match std::env::set_current_dir(&*path.to_string_lossy() as &str) {
         Ok(_) => Ok(Value::True),
         Err(_) => Ok(Value::False),
     }
 }
 fn filesize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::metadata(path.to_string_lossy().as_ref() as &str) {
+    match std::fs::metadata(&*path.to_string_lossy() as &str) {
         Ok(m) => Ok(Value::Long(m.len() as i64)),
         Err(_) => Ok(Value::False),
     }
@@ -3732,7 +3752,7 @@ fn touch_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     Ok(
-        if std::path::Path::new(path.to_string_lossy().as_ref() as &str)
+        if std::path::Path::new(&*path.to_string_lossy() as &str)
             .read_link()
             .is_ok()
         {
@@ -3744,7 +3764,7 @@ fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn stat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::metadata(path.to_string_lossy().as_ref() as &str) {
+    match std::fs::metadata(&*path.to_string_lossy() as &str) {
         Ok(m) => {
             let mut result = PhpArray::new();
             result.set(
@@ -6517,4 +6537,123 @@ fn tmpfile_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // Return a file handle to a temp file - simplified stub
     // In PHP this returns a resource; we'll return false for now
     Ok(Value::False)
+}
+
+fn filemtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::metadata(&*path.to_string_lossy()) {
+        Ok(meta) => {
+            if let Ok(modified) = meta.modified() {
+                let secs = modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                Ok(Value::Long(secs as i64))
+            } else {
+                Ok(Value::False)
+            }
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn fileatime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::metadata(&*path.to_string_lossy()) {
+        Ok(meta) => {
+            if let Ok(accessed) = meta.accessed() {
+                let secs = accessed.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                Ok(Value::Long(secs as i64))
+            } else {
+                Ok(Value::False)
+            }
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    filemtime_fn(vm, args)
+}
+
+fn fileinode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&*path.to_string_lossy()) {
+            Ok(meta) => Ok(Value::Long(meta.ino() as i64)),
+            Err(_) => Ok(Value::False),
+        }
+    }
+    #[cfg(not(unix))]
+    Ok(Value::False)
+}
+
+fn fileowner_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&*path.to_string_lossy()) {
+            Ok(meta) => Ok(Value::Long(meta.uid() as i64)),
+            Err(_) => Ok(Value::False),
+        }
+    }
+    #[cfg(not(unix))]
+    Ok(Value::Long(0))
+}
+
+fn filegroup_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&*path.to_string_lossy()) {
+            Ok(meta) => Ok(Value::Long(meta.gid() as i64)),
+            Err(_) => Ok(Value::False),
+        }
+    }
+    #[cfg(not(unix))]
+    Ok(Value::Long(0))
+}
+
+fn chown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn fputcsv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn fpassthru_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn linkinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&*path.to_string_lossy()) {
+            Ok(meta) => Ok(Value::Long(meta.dev() as i64)),
+            Err(_) => Ok(Value::Long(-1)),
+        }
+    }
+    #[cfg(not(unix))]
+    Ok(Value::Long(-1))
+}
+
+fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    match std::fs::read_to_string(&*path.to_string_lossy()) {
+        Ok(content) => {
+            let ini_args = vec![
+                Value::String(PhpString::from_string(content)),
+                if process_sections { Value::True } else { Value::False },
+                Value::Long(scanner_mode),
+            ];
+            parse_ini_string_fn(vm, &ini_args)
+        }
+        Err(_) => Ok(Value::False),
+    }
 }
