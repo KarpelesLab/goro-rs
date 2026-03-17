@@ -1540,6 +1540,15 @@ fn range_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if use_float {
         let start = start_val.to_double();
         let end = end_val.to_double();
+        if start.is_nan() || end.is_nan() || start.is_infinite() || end.is_infinite() {
+            return Err(VmError {
+                message: format!(
+                    "range(): Argument #1 ($start) must be a finite number, {} provided",
+                    if start.is_nan() { "NAN" } else if start.is_infinite() { "INF" } else { "value" }
+                ),
+                line: 0,
+            });
+        }
         let step = step_val
             .map(|v| v.to_double().abs())
             .unwrap_or(1.0)
@@ -1573,6 +1582,18 @@ fn range_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let step = step_val
         .map(|v| v.to_long().unsigned_abs().max(1) as i64)
         .unwrap_or(1);
+
+    // Check for excessive size
+    let size = if step > 0 {
+        ((end as i128 - start as i128).unsigned_abs() / step as u128) + 1
+    } else {
+        1
+    };
+    if size > 10_000_000 {
+        // Just return empty array for extremely large ranges to avoid memory issues
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+
     let mut result = PhpArray::new();
     if start <= end {
         let mut i = start;
