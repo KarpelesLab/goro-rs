@@ -88,6 +88,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"bin2hex", bin2hex);
     vm.register_function(b"crc32", crc32_fn);
     vm.register_function(b"str_increment", str_increment);
+    vm.register_function(b"str_decrement", str_decrement);
+    vm.register_function(b"quotemeta", quotemeta_fn);
 }
 
 fn strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2197,4 +2199,96 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn str_decrement(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return Err(VmError {
+            message: "str_decrement(): Argument #1 ($string) must not be empty".into(),
+            line: 0,
+        });
+    }
+    if bytes == b"a" || bytes == b"A" || bytes == b"0" {
+        return Err(VmError {
+            message: format!(
+                "str_decrement(): Argument #1 ($string) \"{}\" is out of decrement range",
+                s.to_string_lossy()
+            ),
+            line: 0,
+        });
+    }
+    let mut result = bytes.to_vec();
+    let mut i = result.len() - 1;
+    loop {
+        let ch = result[i];
+        match ch {
+            b'1'..=b'9' => { result[i] -= 1; break; }
+            b'0' => {
+                if i == 0 {
+                    if result.len() > 1 {
+                        result.remove(0);
+                    }
+                    break;
+                }
+                result[i] = b'9';
+                i -= 1;
+            }
+            b'b'..=b'z' => { result[i] -= 1; break; }
+            b'a' => {
+                if i == 0 {
+                    // Underflow at position 0 - remove this char
+                    if result.len() > 1 {
+                        result.remove(0);
+                    }
+                    break;
+                }
+                result[i] = b'z';
+                i -= 1;
+            }
+            b'B'..=b'Z' => { result[i] -= 1; break; }
+            b'A' => {
+                if i == 0 {
+                    if result.len() > 1 {
+                        result.remove(0);
+                    }
+                    break;
+                }
+                result[i] = b'Z';
+                i -= 1;
+            }
+            _ => break,
+        }
+    }
+    // Remove leading char when it became the "zero" value through borrow
+    // e.g. "10" -> "09" -> "9", "aa" -> "az" -> "z" (first 'a' is min for alpha)
+    if result.len() > 1 && result.len() == bytes.len() {
+        let first = result[0];
+        let orig_first = bytes[0];
+        // If the first char wrapped around to min value, remove it
+        if (first == b'0' && orig_first == b'1')
+            || (first == b'a' && orig_first == b'a')
+            || (first == b'A' && orig_first == b'A')
+        {
+            result.remove(0);
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn quotemeta_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        match b {
+            b'.' | b'\\' | b'+' | b'*' | b'?' | b'[' | b'^' | b']' | b'(' | b')' | b'$' => {
+                result.push(b'\\');
+                result.push(b);
+            }
+            _ => result.push(b),
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
 }

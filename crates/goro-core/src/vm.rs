@@ -282,6 +282,38 @@ impl Vm {
                 c.insert(b"ARRAY_UNIQUE_REGULAR".to_vec(), Value::Long(0));
                 c.insert(b"COUNT_NORMAL".to_vec(), Value::Long(0));
                 c.insert(b"COUNT_RECURSIVE".to_vec(), Value::Long(1));
+                // Pathinfo constants
+                c.insert(b"PATHINFO_DIRNAME".to_vec(), Value::Long(1));
+                c.insert(b"PATHINFO_BASENAME".to_vec(), Value::Long(2));
+                c.insert(b"PATHINFO_EXTENSION".to_vec(), Value::Long(4));
+                c.insert(b"PATHINFO_FILENAME".to_vec(), Value::Long(8));
+                c.insert(b"PATHINFO_ALL".to_vec(), Value::Long(15));
+                // File constants
+                c.insert(b"FILE_USE_INCLUDE_PATH".to_vec(), Value::Long(1));
+                c.insert(b"FILE_APPEND".to_vec(), Value::Long(8));
+                c.insert(b"FILE_IGNORE_NEW_LINES".to_vec(), Value::Long(2));
+                c.insert(b"FILE_SKIP_EMPTY_LINES".to_vec(), Value::Long(4));
+                c.insert(b"LOCK_EX".to_vec(), Value::Long(2));
+                c.insert(b"LOCK_SH".to_vec(), Value::Long(1));
+                c.insert(b"LOCK_UN".to_vec(), Value::Long(3));
+                c.insert(b"LOCK_NB".to_vec(), Value::Long(4));
+                c.insert(b"SEEK_SET".to_vec(), Value::Long(0));
+                c.insert(b"SEEK_CUR".to_vec(), Value::Long(1));
+                c.insert(b"SEEK_END".to_vec(), Value::Long(2));
+                c.insert(b"GLOB_MARK".to_vec(), Value::Long(1));
+                c.insert(b"GLOB_NOSORT".to_vec(), Value::Long(2));
+                c.insert(b"GLOB_NOCHECK".to_vec(), Value::Long(16));
+                c.insert(b"GLOB_NOESCAPE".to_vec(), Value::Long(64));
+                c.insert(b"GLOB_BRACE".to_vec(), Value::Long(128));
+                c.insert(b"GLOB_ONLYDIR".to_vec(), Value::Long(1073741824));
+                // PREG constants
+                c.insert(b"PREG_SPLIT_NO_EMPTY".to_vec(), Value::Long(1));
+                c.insert(b"PREG_SPLIT_DELIM_CAPTURE".to_vec(), Value::Long(2));
+                c.insert(b"PREG_SPLIT_OFFSET_CAPTURE".to_vec(), Value::Long(4));
+                c.insert(b"PREG_OFFSET_CAPTURE".to_vec(), Value::Long(256));
+                c.insert(b"PREG_UNMATCHED_AS_NULL".to_vec(), Value::Long(512));
+                c.insert(b"PREG_SET_ORDER".to_vec(), Value::Long(2));
+                c.insert(b"PREG_PATTERN_ORDER".to_vec(), Value::Long(1));
                 // String constants
                 c.insert(b"STR_PAD_RIGHT".to_vec(), Value::Long(1));
                 c.insert(b"STR_PAD_LEFT".to_vec(), Value::Long(0));
