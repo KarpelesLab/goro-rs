@@ -331,11 +331,18 @@ fn error_reporting(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(old))
 }
 
-fn set_error_handler(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
+fn set_error_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let prev = vm.error_handler.take();
+    if let Some(handler) = args.first() {
+        if !matches!(handler, Value::Null) {
+            vm.error_handler = Some(handler.clone());
+        }
+    }
+    Ok(prev.unwrap_or(Value::Null))
 }
 
-fn restore_error_handler(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn restore_error_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.error_handler = None;
     Ok(Value::True)
 }
 

@@ -217,7 +217,13 @@ impl PhpGenerator {
                                 ip -= 1; // Re-execute to start yielding
                             }
                             _ => {
-                                self.write_operand(&op.result, Value::Null);
+                                // Non-iterable - throw error
+                                return Err(crate::vm::VmError {
+                                    message:
+                                        "Can use \"yield from\" only with arrays and Traversables"
+                                            .to_string(),
+                                    line: op.line,
+                                });
                             }
                         }
                     }

@@ -123,6 +123,8 @@ pub struct Vm {
     error_reporting_stack: Vec<i64>,
     /// Pending return value (for deferred return in finally blocks)
     pending_return: Option<Value>,
+    /// User error handler callback (from set_error_handler)
+    pub error_handler: Option<Value>,
 }
 
 impl Vm {
@@ -146,6 +148,7 @@ impl Vm {
             call_depth: 0,
             error_reporting_stack: Vec::new(),
             pending_return: None,
+            error_handler: None,
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
