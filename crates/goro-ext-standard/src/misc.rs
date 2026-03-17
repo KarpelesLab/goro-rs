@@ -2397,7 +2397,10 @@ fn str_contains_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let hb = h.as_bytes();
     let nb = n.as_bytes();
-    for i in 0..=hb.len().saturating_sub(nb.len()) {
+    if nb.len() > hb.len() {
+        return Ok(Value::False);
+    }
+    for i in 0..=hb.len() - nb.len() {
         if &hb[i..i + nb.len()] == nb {
             return Ok(Value::True);
         }
