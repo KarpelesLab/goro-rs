@@ -3064,10 +3064,33 @@ impl Vm {
                     let subject_repr = match &subject {
                         Value::True => "true".to_string(),
                         Value::False => "false".to_string(),
-                        Value::Null | Value::Undef => "null".to_string(),
+                        Value::Null | Value::Undef => "NULL".to_string(),
                         Value::Long(n) => n.to_string(),
-                        Value::Double(f) => format!("{}", f),
-                        Value::String(s) => format!("'{}'", s.to_string_lossy()),
+                        Value::Double(f) => {
+                            // PHP shows 5.0 not 5 for floats
+                            let s = format!("{}", f);
+                            if !s.contains('.') && !s.contains('E') && !s.contains('e') {
+                                format!("{}.0", s)
+                            } else {
+                                s
+                            }
+                        }
+                        Value::String(s) => {
+                            let lossy = s.to_string_lossy();
+                            if lossy.len() > 15 {
+                                // Truncate with ...
+                                let truncated: String = lossy.chars().take(15).collect();
+                                format!("'{}'...'", truncated)
+                            } else {
+                                format!("'{}'", lossy)
+                            }
+                        }
+                        Value::Array(_) => "of type array".to_string(),
+                        Value::Object(obj) => {
+                            let obj_borrow = obj.borrow();
+                            let name = String::from_utf8_lossy(&obj_borrow.class_name);
+                            format!("of type {}", name)
+                        }
                         _ => subject.to_php_string().to_string_lossy(),
                     };
                     let msg = format!("Unhandled match case {}", subject_repr);

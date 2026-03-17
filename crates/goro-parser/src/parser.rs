@@ -2998,8 +2998,19 @@ impl Parser {
                 self.expect(&TokenKind::OpenBrace)?;
 
                 let mut arms = Vec::new();
+                let mut has_default = false;
                 while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
                     if self.eat(&TokenKind::Default) {
+                        if has_default {
+                            return Err(ParseError {
+                                message: "Match expressions may only contain one default arm"
+                                    .into(),
+                                span: self.span(),
+                            });
+                        }
+                        has_default = true;
+                        // Allow trailing comma: default, =>
+                        self.eat(&TokenKind::Comma);
                         self.expect(&TokenKind::DoubleArrow)?;
                         let body = self.parse_expression()?;
                         arms.push(MatchArm {
