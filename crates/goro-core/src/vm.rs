@@ -3794,12 +3794,40 @@ impl Vm {
                             });
                         }
                     } else {
-                        // Not an object - push call without $this
-                        self.pending_calls.push(PendingCall {
-                            name: method_name,
-                            args: vec![],
-                            named_args: Vec::new(),
-                        });
+                        // Check for closure methods on string/array values
+                        let method_lower: Vec<u8> = method_name
+                            .as_bytes()
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        match method_lower.as_slice() {
+                            b"bindto" | b"bind" => {
+                                // Closure::bindTo() - return closure as-is (simplified)
+                                self.pending_calls.push(PendingCall {
+                                    name: PhpString::from_bytes(b"__builtin_return"),
+                                    args: vec![obj_val.clone()],
+                                    named_args: Vec::new(),
+                                });
+                            }
+                            b"call" => {
+                                // Closure::call($newThis) - call closure with $this
+                                // For now, just set up a call to the closure
+                                let closure_name = obj_val.to_php_string();
+                                self.pending_calls.push(PendingCall {
+                                    name: closure_name,
+                                    args: vec![],
+                                    named_args: Vec::new(),
+                                });
+                            }
+                            _ => {
+                                // Not an object - push call without $this
+                                self.pending_calls.push(PendingCall {
+                                    name: method_name,
+                                    args: vec![],
+                                    named_args: Vec::new(),
+                                });
+                            }
+                        }
                     }
                 }
             }
