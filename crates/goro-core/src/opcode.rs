@@ -212,6 +212,8 @@ pub enum OpCode {
     // ---- Clone ----
     /// Clone an object: op1 = source, result = cloned copy
     CloneObj,
+    /// Get class name from object: op1 = object, result = class name string
+    GetClassName,
 
     // ---- Print ----
     /// print expr (returns 1)

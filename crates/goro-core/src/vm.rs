@@ -412,10 +412,16 @@ impl Vm {
     /// For generators, this returns "Generator".
     fn value_type_name(val: &Value) -> String {
         match val {
+            Value::Null | Value::Undef => "null".to_string(),
+            Value::True => "true".to_string(),
+            Value::False => "false".to_string(),
+            Value::Long(_) => "int".to_string(),
+            Value::Double(_) => "float".to_string(),
+            Value::String(_) => "string".to_string(),
+            Value::Array(_) => "array".to_string(),
             Value::Object(obj) => String::from_utf8_lossy(&obj.borrow().class_name).into_owned(),
             Value::Generator(_) => "Generator".to_string(),
             Value::Reference(r) => Self::value_type_name(&r.borrow()),
-            other => other.type_name().to_string(),
         }
     }
 
@@ -2932,9 +2938,33 @@ impl Vm {
                             let cloned_arr = arr.borrow().clone();
                             Value::Array(Rc::new(RefCell::new(cloned_arr)))
                         }
-                        other => other.clone(),
+                        _other => {
+                            let type_name = Self::value_type_name(_other);
+                            let msg = format!("clone(): Argument #1 ($object) must be of type object, {} given", type_name);
+                            let exc_val = self.throw_type_error(msg.clone());
+                            self.current_exception = Some(exc_val);
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
+                        }
                     };
                     self.write_operand(&op.result, cloned, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::GetClassName => {
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let class_name = match &val {
+                        Value::Object(obj) => {
+                            Value::String(PhpString::from_vec(obj.borrow().class_name.clone()))
+                        }
+                        _ => Value::String(PhpString::empty()),
+                    };
+                    self.write_operand(&op.result, class_name, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 OpCode::ArrayUnset => {

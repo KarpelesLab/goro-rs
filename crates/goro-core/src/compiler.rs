@@ -3062,6 +3062,19 @@ impl Compiler {
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => name.clone(),
                     _ => {
+                        // $expr::class - emit GetClassName opcode
+                        if constant == b"class" {
+                            let obj_operand = self.compile_expr(class)?;
+                            let tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::GetClassName,
+                                op1: obj_operand,
+                                op2: OperandType::Unused,
+                                result: OperandType::Tmp(tmp),
+                                line: expr.span.line,
+                            });
+                            return Ok(OperandType::Tmp(tmp));
+                        }
                         let _ = self.compile_expr(class)?;
                         let idx = self.op_array.add_literal(Value::Null);
                         return Ok(OperandType::Const(idx));
