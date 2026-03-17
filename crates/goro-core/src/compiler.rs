@@ -2741,6 +2741,13 @@ impl Compiler {
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
 
+                // If inside a class method, automatically capture $this
+                let has_this = self.current_class.is_some()
+                    && self.op_array.cv_names.contains(&b"this".to_vec());
+                if has_this {
+                    closure_compiler.op_array.get_or_create_cv(b"this");
+                }
+
                 // Set up use vars as the first CVs (before params)
                 for use_var in use_vars {
                     closure_compiler
@@ -2794,8 +2801,9 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                // If there are use vars, create an array [closure_name, use_val_1, use_val_2, ...]
-                if !use_vars.is_empty() {
+                // If there are use vars (or $this), create an array [closure_name, use_val_1, ...]
+                let needs_capture = !use_vars.is_empty() || has_this;
+                if needs_capture {
                     let arr_tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
                         opcode: OpCode::ArrayNew,
@@ -2815,6 +2823,17 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: expr.span.line,
                     });
+                    // Capture $this if in class context
+                    if has_this {
+                        let this_cv = self.op_array.get_or_create_cv(b"this");
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayAppend,
+                            op1: OperandType::Tmp(arr_tmp),
+                            op2: OperandType::Cv(this_cv),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                    }
                     // Subsequent elements: captured use var values
                     for use_var in use_vars {
                         let cv = self.op_array.get_or_create_cv(&use_var.variable);
