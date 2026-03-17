@@ -24,6 +24,8 @@ Active development. Core language features, OOP, generators, exceptions, closure
 - ext/spl: 32/781 (4.1%)
 - Zend/traits: 47/216 (21.8%)
 - Zend/generators: 34/184 (18.5%)
+- Zend/try: 12/80 (15.0%)
+- Zend/match: 19/35 (54.3%)
 
 Key ext/standard pass rates: strings 115/730, math 21/171, file 22/840, general 30/318, ctype 24/49.
 
