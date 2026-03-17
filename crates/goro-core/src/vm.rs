@@ -981,7 +981,7 @@ impl Vm {
 
                 OpCode::Print => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
-                    let s = val.to_php_string();
+                    let s = self.value_to_string(&val);
                     self.write_output(s.as_bytes());
                     self.write_operand(
                         &op.result,
@@ -2360,9 +2360,10 @@ impl Vm {
                 }
                 OpCode::CastString => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let str_val = self.value_to_string(&val);
                     self.write_operand(
                         &op.result,
-                        Value::String(val.to_php_string()),
+                        Value::String(str_val),
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -3877,7 +3878,6 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
-                        let builtin_result;
                         {
                             let obj_borrow = obj.borrow();
                             class_name_orig = obj_borrow.class_name.clone();
@@ -3886,7 +3886,26 @@ impl Vm {
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
-                            builtin_result = match method_name_lower.as_slice() {
+                        } // obj_borrow dropped here
+
+                        // Only apply builtin exception methods to Throwable subclasses
+                        let is_throwable = class_name_lower == b"exception"
+                            || class_name_lower == b"error"
+                            || is_builtin_subclass(&class_name_lower, b"exception")
+                            || is_builtin_subclass(&class_name_lower, b"error")
+                            || self.class_extends(&class_name_lower, b"exception")
+                            || self.class_extends(&class_name_lower, b"error");
+
+                        // Check if the class has a user-defined method for this call
+                        let has_user_method = self
+                            .classes
+                            .get(&class_name_lower)
+                            .map(|c| c.methods.contains_key(&method_name_lower))
+                            .unwrap_or(false);
+
+                        let builtin_result = if is_throwable && !has_user_method {
+                            let obj_borrow = obj.borrow();
+                            match method_name_lower.as_slice() {
                                 b"getmessage" => Some(obj_borrow.get_property(b"message")),
                                 b"getcode" => Some(obj_borrow.get_property(b"code")),
                                 b"getfile" => Some(obj_borrow.get_property(b"file")),
@@ -3898,8 +3917,10 @@ impl Vm {
                                 b"getprevious" => Some(obj_borrow.get_property(b"previous")),
                                 b"__tostring" => Some(obj_borrow.get_property(b"message")),
                                 _ => None,
-                            };
-                        } // obj_borrow dropped here
+                            }
+                        } else {
+                            None
+                        };
 
                         if let Some(result) = builtin_result {
                             self.pending_calls.push(PendingCall {

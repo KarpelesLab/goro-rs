@@ -864,11 +864,16 @@ fn array_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn array_splice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        let length = args.get(2).map(|v| Some(v.to_long())).unwrap_or(None);
+        // length is nullable: null means remove everything from offset
+        let length = match args.get(2) {
+            Some(Value::Null) | None => None,
+            Some(v) => Some(v.to_long()),
+        };
         let replacement = args.get(3);
 
         let mut arr_mut = arr.borrow_mut();
-        let entries: Vec<Value> = arr_mut.values().cloned().collect();
+        let entries: Vec<(goro_core::array::ArrayKey, Value)> =
+            arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let total = entries.len() as i64;
 
         let start = if offset < 0 {
@@ -883,31 +888,39 @@ fn array_splice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         let end = (start + len).min(entries.len());
 
-        // Extract removed elements
-        let removed: Vec<Value> = entries[start..end].to_vec();
+        // Extract removed elements (values only, re-indexed)
+        let removed: Vec<Value> = entries[start..end].iter().map(|(_, v)| v.clone()).collect();
 
-        // Build new array
-        let mut new_entries: Vec<Value> = entries[..start].to_vec();
+        // Build new array: re-index integer keys, preserve string keys
+        let mut new_arr = PhpArray::new();
+        // Elements before the splice point
+        for (k, v) in &entries[..start] {
+            match k {
+                goro_core::array::ArrayKey::String(_) => new_arr.set(k.clone(), v.clone()),
+                goro_core::array::ArrayKey::Int(_) => new_arr.push(v.clone()),
+            }
+        }
+        // Replacement elements (always re-indexed)
         if let Some(repl) = replacement {
             if let Value::Array(repl_arr) = repl {
                 let repl_arr = repl_arr.borrow();
                 for (_, v) in repl_arr.iter() {
-                    new_entries.push(v.clone());
+                    new_arr.push(v.clone());
                 }
             } else {
-                new_entries.push(repl.clone());
+                new_arr.push(repl.clone());
             }
         }
-        new_entries.extend_from_slice(&entries[end..]);
-
-        // Replace the array contents
-        let mut new_arr = PhpArray::new();
-        for val in new_entries {
-            new_arr.push(val);
+        // Elements after the splice point
+        for (k, v) in &entries[end..] {
+            match k {
+                goro_core::array::ArrayKey::String(_) => new_arr.set(k.clone(), v.clone()),
+                goro_core::array::ArrayKey::Int(_) => new_arr.push(v.clone()),
+            }
         }
         *arr_mut = new_arr;
 
-        // Return removed elements
+        // Return removed elements (always re-indexed)
         let mut removed_arr = PhpArray::new();
         for val in removed {
             removed_arr.push(val);

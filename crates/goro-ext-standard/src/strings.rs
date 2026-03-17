@@ -646,15 +646,26 @@ fn nl2br(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn chunk_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let body = args.first().unwrap_or(&Value::Null).to_php_string();
-    let chunklen = args.get(1).map(|v| v.to_long()).unwrap_or(76) as usize;
+    let chunklen = args.get(1).map(|v| v.to_long()).unwrap_or(76);
     let end = args
         .get(2)
         .map(|v| v.to_php_string())
         .unwrap_or_else(|| PhpString::from_bytes(b"\r\n"));
 
+    // PHP 8.0+: chunklen must be >= 1
+    if chunklen < 1 {
+        vm.emit_warning("chunk_split(): Argument #2 ($chunklen) must be greater than 0");
+        return Ok(Value::False);
+    }
+    let chunklen = chunklen as usize;
+
     let bytes = body.as_bytes();
+    if bytes.is_empty() {
+        // Empty body returns just the end separator
+        return Ok(Value::String(end));
+    }
     let mut result = Vec::new();
     for chunk in bytes.chunks(chunklen) {
         result.extend_from_slice(chunk);
@@ -1095,28 +1106,55 @@ fn str_shuffle(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(bytes)))
 }
 
-fn substr_compare(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let main_str = args.first().unwrap_or(&Value::Null).to_php_string();
     let str2 = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    let length = args.get(3).map(|v| v.to_long());
+    // length is nullable: null means no length limit
+    let length = match args.get(3) {
+        Some(Value::Null) | None => None,
+        Some(v) => Some(v.to_long()),
+    };
     let case_insensitive = args.get(4).map(|v| v.is_truthy()).unwrap_or(false);
 
     let main_bytes = main_str.as_bytes();
+    let main_len = main_bytes.len() as i64;
+
+    // Resolve negative offset
     let start = if offset < 0 {
-        (main_bytes.len() as i64 + offset).max(0) as usize
+        let resolved = main_len + offset;
+        if resolved < 0 {
+            vm.emit_warning(&format!(
+                "substr_compare(): Starting position cannot exceed initial string length"
+            ));
+            return Ok(Value::False);
+        }
+        resolved as usize
     } else {
+        if offset > main_len {
+            vm.emit_warning(&format!(
+                "substr_compare(): Starting position cannot exceed initial string length"
+            ));
+            return Ok(Value::False);
+        }
         offset as usize
     };
 
-    if start >= main_bytes.len() {
-        return Ok(Value::False);
+    // If length is explicitly 0, result is always 0
+    if let Some(0) = length {
+        return Ok(Value::Long(0));
     }
 
     let sub = &main_bytes[start..];
-    let cmp_len = length
-        .map(|l| l as usize)
-        .unwrap_or(sub.len().max(str2.len()));
+    let cmp_len = match length {
+        Some(l) if l > 0 => l as usize,
+        Some(l) if l < 0 => {
+            // Negative length: not valid in PHP 8.0+
+            vm.emit_warning("substr_compare(): Argument #4 ($length) must be greater than or equal to 0");
+            return Ok(Value::False);
+        }
+        _ => sub.len().max(str2.len()),
+    };
 
     let a = &sub[..cmp_len.min(sub.len())];
     let b = &str2.as_bytes()[..cmp_len.min(str2.len())];
