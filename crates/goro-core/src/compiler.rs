@@ -964,6 +964,20 @@ impl Compiler {
                 let catch_start = self.op_array.current_offset();
                 let mut end_of_catch_jumps = Vec::new();
 
+                // If there's a finally block, push a second exception handler
+                // so that re-thrown exceptions from catch-miss go through finally
+                let finally_guard = if finally_body.is_some() {
+                    Some(self.op_array.emit(Op {
+                        opcode: OpCode::TryBegin,
+                        op1: OperandType::JmpTarget(0), // no catch - patched to finally
+                        op2: OperandType::JmpTarget(0), // finally target - patched below
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    }))
+                } else {
+                    None
+                };
+
                 // Store exception in a temp for type checking
                 let exc_tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
@@ -1071,6 +1085,16 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
+                // End the finally guard before the rethrow
+                if finally_guard.is_some() {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::TryEnd,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                }
 
                 // Patch TryBegin to point to catch start
                 self.op_array.ops[try_begin as usize].op1 = OperandType::JmpTarget(catch_start);
@@ -1118,6 +1142,15 @@ impl Compiler {
                     // Patch TryBegin's finally target
                     self.op_array.ops[try_begin as usize].op2 =
                         OperandType::JmpTarget(finally_start);
+
+                    // Patch the finally guard to point to finally
+                    if let Some(guard_pos) = finally_guard {
+                        self.op_array.ops[guard_pos as usize].op1 =
+                            OperandType::JmpTarget(finally_start); // catch goes to finally
+                        self.op_array.ops[guard_pos as usize].op2 =
+                            OperandType::JmpTarget(finally_start); // finally target
+                    }
+
                     self.op_array.current_offset()
                 } else {
                     let end = self.op_array.current_offset();

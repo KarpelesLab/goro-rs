@@ -2699,15 +2699,23 @@ impl Vm {
                 OpCode::Throw => {
                     let exc_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
 
-                    if let Some((catch_target, _finally_target, _exc_tmp)) =
-                        exception_handlers.pop()
+                    if let Some((catch_target, finally_target, _exc_tmp)) = exception_handlers.pop()
                     {
                         // Store exception for the catch block to access
                         self.current_exception = Some(exc_val);
-                        // Jump to catch handler
-                        ip = catch_target as usize;
+
+                        if catch_target > 0 {
+                            // Has catch block - jump to it
+                            // If there's also a finally, it will be reached via Jmp after catch
+                            ip = catch_target as usize;
+                        } else if finally_target > 0 {
+                            // No catch, only finally - jump to finally
+                            // Exception stays in current_exception for ReturnDeferred to re-throw
+                            ip = finally_target as usize;
+                        }
                     } else {
-                        // No handler - store exception and return error
+                        // No handler - check if there's a pending finally from an outer scope
+                        // Store exception and return error
                         let msg = if let Value::Object(obj) = &exc_val {
                             let obj = obj.borrow();
                             let class = String::from_utf8_lossy(&obj.class_name).to_string();
@@ -2960,7 +2968,26 @@ impl Vm {
                     if let Some(val) = self.pending_return.take() {
                         return Ok(val);
                     }
-                    // Otherwise continue (no pending return, came from normal flow)
+                    // If there's a pending exception, re-throw it
+                    if let Some(exc) = &self.current_exception {
+                        let msg = if let Value::Object(obj) = exc {
+                            let obj = obj.borrow();
+                            let class = String::from_utf8_lossy(&obj.class_name).to_string();
+                            let message = obj.get_property(b"message");
+                            format!(
+                                "Uncaught {}: {}",
+                                class,
+                                message.to_php_string().to_string_lossy()
+                            )
+                        } else {
+                            "Uncaught exception".to_string()
+                        };
+                        return Err(VmError {
+                            message: msg,
+                            line: op.line,
+                        });
+                    }
+                    // Otherwise continue (no pending return or exception)
                 }
 
                 OpCode::ArrayAppendRef => {
