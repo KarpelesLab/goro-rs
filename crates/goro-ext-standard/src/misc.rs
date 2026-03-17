@@ -3041,6 +3041,13 @@ fn json_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn json_encode_value(val: &Value) -> String {
+    json_encode_value_depth(val, 0)
+}
+
+fn json_encode_value_depth(val: &Value, depth: usize) -> String {
+    if depth > 512 {
+        return "null".to_string();
+    }
     match val {
         Value::Null | Value::Undef => "null".to_string(),
         Value::True => "true".to_string(),
@@ -3071,12 +3078,11 @@ fn json_encode_value(val: &Value) -> String {
         }
         Value::Array(arr) => {
             let arr = arr.borrow();
-            // Check if it's a sequential array
             let is_list = arr.iter().enumerate().all(
                 |(i, (k, _))| matches!(k, goro_core::array::ArrayKey::Int(n) if *n == i as i64),
             );
             if is_list {
-                let parts: Vec<String> = arr.values().map(json_encode_value).collect();
+                let parts: Vec<String> = arr.values().map(|v| json_encode_value_depth(v, depth + 1)).collect();
                 format!("[{}]", parts.join(","))
             } else {
                 let parts: Vec<String> = arr
@@ -3088,14 +3094,25 @@ fn json_encode_value(val: &Value) -> String {
                                 format!("\"{}\"", s.to_string_lossy())
                             }
                         };
-                        format!("{}:{}", key_str, json_encode_value(v))
+                        format!("{}:{}", key_str, json_encode_value_depth(v, depth + 1))
                     })
                     .collect();
                 format!("{{{}}}", parts.join(","))
             }
         }
-        Value::Object(_) | Value::Generator(_) => "null".to_string(), // TODO: implement object JSON encoding
-        Value::Reference(r) => json_encode_value(&r.borrow()),
+        Value::Object(obj) => {
+            let obj = obj.borrow();
+            if obj.properties.is_empty() {
+                return "{}".to_string();
+            }
+            let parts: Vec<String> = obj.properties.iter().map(|(name, val)| {
+                let key = String::from_utf8_lossy(name);
+                format!("\"{}\":{}", key, json_encode_value_depth(val, depth + 1))
+            }).collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Generator(_) => "null".to_string(),
+        Value::Reference(r) => json_encode_value_depth(&r.borrow(), depth),
     }
 }
 
@@ -3841,10 +3858,13 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
-    let s = serialize_value(val);
+    let s = serialize_value_depth(val, 0);
     Ok(Value::String(PhpString::from_string(s)))
 }
-fn serialize_value(val: &Value) -> String {
+fn serialize_value_depth(val: &Value, depth: usize) -> String {
+    if depth > 128 {
+        return "N;".to_string();
+    }
     match val {
         Value::Null | Value::Undef => "N;".to_string(),
         Value::True => "b:1;".to_string(),
@@ -3862,7 +3882,7 @@ fn serialize_value(val: &Value) -> String {
                         result.push_str(&format!("s:{}:\"{}\";", s.len(), s.to_string_lossy()))
                     }
                 }
-                result.push_str(&serialize_value(val));
+                result.push_str(&serialize_value_depth(val, depth + 1));
             }
             result.push('}');
             result
@@ -3875,13 +3895,13 @@ fn serialize_value(val: &Value) -> String {
             for (name, val) in &obj.properties {
                 let name_str = String::from_utf8_lossy(name);
                 result.push_str(&format!("s:{}:\"{}\";", name.len(), name_str));
-                result.push_str(&serialize_value(val));
+                result.push_str(&serialize_value_depth(val, depth + 1));
             }
             result.push('}');
             result
         }
         Value::Generator(_) => "N;".to_string(),
-        Value::Reference(r) => serialize_value(&r.borrow()),
+        Value::Reference(r) => serialize_value_depth(&r.borrow(), depth),
     }
 }
 fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

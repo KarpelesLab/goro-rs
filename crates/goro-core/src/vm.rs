@@ -904,7 +904,7 @@ impl Vm {
         mut cvs: Vec<Value>,
     ) -> Result<Value, VmError> {
         self.call_depth += 1;
-        if self.call_depth > 256 {
+        if self.call_depth > 100 {
             self.call_depth -= 1;
             return Err(VmError {
                 message: "Maximum call depth exceeded (possible infinite recursion)".into(),

@@ -205,7 +205,7 @@ fn execute_php_with_timeout(
     let timed_out2 = timed_out.clone();
 
     let handle = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024) // 8MB stack
+        .stack_size(32 * 1024 * 1024) // 32MB stack
         .spawn(move || {
             // Change to test directory if provided, otherwise use temp dir
             if let Some(ref dir) = dir_path {
@@ -509,24 +509,33 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Some(test) = PhptTest::parse(&content) {
                 let test_dir = path.parent();
-                match run_test_with_dir(&test, test_dir) {
-                    TestResult::Pass => {
+                // Wrap in catch_unwind to prevent stack overflows from killing the runner
+                let test_name = test.name.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_test_with_dir(&test, test_dir)
+                }));
+                match result {
+                    Ok(TestResult::Pass) => {
                         pass += 1;
-                        println!("PASS: {}", test.name);
+                        println!("PASS: {}", test_name);
                     }
-                    TestResult::Fail { expected, actual } => {
+                    Ok(TestResult::Fail { expected, actual }) => {
                         fail += 1;
-                        println!("FAIL: {}", test.name);
+                        println!("FAIL: {}", test_name);
                         println!("  Expected: {:?}", expected);
                         println!("  Actual:   {:?}", actual);
                     }
-                    TestResult::Skip(reason) => {
+                    Ok(TestResult::Skip(reason)) => {
                         skip += 1;
-                        println!("SKIP: {} ({})", test.name, reason);
+                        println!("SKIP: {} ({})", test_name, reason);
                     }
-                    TestResult::Error(msg) => {
+                    Ok(TestResult::Error(msg)) => {
                         error += 1;
-                        println!("ERROR: {} ({})", test.name, msg);
+                        println!("ERROR: {} ({})", test_name, msg);
+                    }
+                    Err(_) => {
+                        error += 1;
+                        println!("ERROR: {} (panic/stack overflow)", test_name);
                     }
                 }
             }
