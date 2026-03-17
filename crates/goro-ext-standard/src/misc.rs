@@ -151,7 +151,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_change_key_case", array_change_key_case_fn);
     vm.register_function(b"array_diff_key", array_diff_key_fn);
     vm.register_function(b"array_diff_assoc", array_diff_assoc_fn);
-    vm.register_function(b"array_diff_uassoc", array_diff_uassoc_fn);
     vm.register_function(b"array_intersect_key", array_intersect_key_fn);
     vm.register_function(b"array_intersect_assoc", array_intersect_assoc_fn);
     vm.register_function(b"array_all", array_all_fn);
@@ -189,6 +188,24 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"iterator_to_array", iterator_to_array_fn);
     vm.register_function(b"iterator_count", iterator_count_fn);
     vm.register_function(b"array_map", array_map);
+    vm.register_function(b"key_exists", array_key_exists);
+    vm.register_function(b"array_replace", array_replace_fn);
+    vm.register_function(b"array_replace_recursive", array_replace_recursive_fn);
+    vm.register_function(b"array_find", array_find_fn);
+    vm.register_function(b"array_find_key", array_find_key_fn);
+    vm.register_function(b"array_intersect_ukey", array_intersect_ukey_fn);
+    vm.register_function(b"array_intersect_uassoc", array_intersect_uassoc_fn);
+    vm.register_function(b"array_diff_ukey", array_diff_ukey_fn);
+    vm.register_function(b"array_diff_uassoc", array_diff_uassoc_fn);
+    vm.register_function(b"array_udiff", array_udiff_fn);
+    vm.register_function(b"array_udiff_assoc", array_udiff_assoc_fn);
+    vm.register_function(b"array_udiff_uassoc", array_udiff_uassoc_fn);
+    vm.register_function(b"array_uintersect", array_uintersect_fn);
+    vm.register_function(b"array_uintersect_assoc", array_uintersect_assoc_fn);
+    vm.register_function(b"array_uintersect_uassoc", array_uintersect_uassoc_fn);
+    vm.register_function(b"array_product", array_product_fn);
+    vm.register_function(b"array_sum", array_sum_fn);
+    // sizeof is an alias for count (registered in type_funcs.rs)
 
     // Date
     vm.register_function(b"time", time_fn);
@@ -4249,11 +4266,6 @@ fn array_intersect_assoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     }
 }
 
-fn array_diff_uassoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Simplified: same as array_diff_assoc (ignores the callback for now)
-    array_diff_assoc_fn(_vm, args)
-}
-
 fn array_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // PHP 8.5: array_all($array, $callback) - returns true if all elements pass callback
     // Without callable support, just check truthiness
@@ -5496,4 +5508,450 @@ fn sys_get_temp_dir_fn3(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
     Ok(Value::String(PhpString::from_string(
         std::env::temp_dir().to_string_lossy().to_string(),
     )))
+}
+
+fn array_replace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    for arg in args {
+        if let Value::Array(arr) = arg {
+            let arr = arr.borrow();
+            for (key, value) in arr.iter() {
+                result.set(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn array_replace_recursive_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+
+    let mut result = if let Value::Array(arr) = &args[0] {
+        arr.borrow().clone()
+    } else {
+        PhpArray::new()
+    };
+
+    for arg in &args[1..] {
+        if let Value::Array(arr) = arg {
+            let arr = arr.borrow();
+            for (key, value) in arr.iter() {
+                if let Value::Array(inner_new) = value {
+                    if let Some(existing) = result.get(&key) {
+                        if let Value::Array(inner_old) = existing {
+                            // Recursively merge
+                            let merged_val = array_replace_recursive_inner(
+                                &inner_old.borrow(),
+                                &inner_new.borrow(),
+                            );
+                            result.set(key.clone(), merged_val);
+                            continue;
+                        }
+                    }
+                }
+                result.set(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn array_replace_recursive_inner(base: &PhpArray, replacement: &PhpArray) -> Value {
+    let mut result = base.clone();
+    for (key, value) in replacement.iter() {
+        if let Value::Array(inner_new) = value {
+            if let Some(existing) = result.get(&key) {
+                if let Value::Array(inner_old) = existing {
+                    let merged = array_replace_recursive_inner(&inner_old.borrow(), &inner_new.borrow());
+                    result.set(key.clone(), merged);
+                    continue;
+                }
+            }
+        }
+        result.set(key.clone(), value.clone());
+    }
+    Value::Array(Rc::new(RefCell::new(result)))
+}
+
+fn array_find_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arr = match args.first() {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => return Ok(Value::Null),
+    };
+    let callback = match args.get(1) {
+        Some(v) => v.clone(),
+        _ => return Ok(Value::Null),
+    };
+    let arr = arr.borrow();
+    for (_key, value) in arr.iter() {
+        let result = call_user_func(vm, &[callback.clone(), value.clone()])?;
+        if result.is_truthy() {
+            return Ok(value.clone());
+        }
+    }
+    Ok(Value::Null)
+}
+
+fn array_find_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arr = match args.first() {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => return Ok(Value::Null),
+    };
+    let callback = match args.get(1) {
+        Some(v) => v.clone(),
+        _ => return Ok(Value::Null),
+    };
+    let arr = arr.borrow();
+    for (key, value) in arr.iter() {
+        let result = call_user_func(vm, &[callback.clone(), value.clone()])?;
+        if result.is_truthy() {
+            return Ok(match key {
+                ArrayKey::Int(n) => Value::Long(*n),
+                ArrayKey::String(s) => Value::String(s.clone()),
+            });
+        }
+    }
+    Ok(Value::Null)
+}
+
+fn array_product_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arr = match args.first() {
+        Some(Value::Array(arr)) => arr.borrow(),
+        _ => return Ok(Value::Long(0)),
+    };
+    let mut product_int: i64 = 1;
+    let mut is_float = false;
+    let mut product_float: f64 = 1.0;
+    for (_, value) in arr.iter() {
+        match value {
+            Value::Double(f) => {
+                if !is_float {
+                    is_float = true;
+                    product_float = product_int as f64;
+                }
+                product_float *= f;
+            }
+            _ => {
+                let n = value.to_long();
+                if is_float {
+                    product_float *= n as f64;
+                } else {
+                    product_int = product_int.wrapping_mul(n);
+                }
+            }
+        }
+    }
+    if is_float {
+        Ok(Value::Double(product_float))
+    } else {
+        Ok(Value::Long(product_int))
+    }
+}
+
+fn array_sum_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arr = match args.first() {
+        Some(Value::Array(arr)) => arr.borrow(),
+        _ => return Ok(Value::Long(0)),
+    };
+    let mut sum_int: i64 = 0;
+    let mut is_float = false;
+    let mut sum_float: f64 = 0.0;
+    for (_, value) in arr.iter() {
+        match value {
+            Value::Double(f) => {
+                if !is_float {
+                    is_float = true;
+                    sum_float = sum_int as f64;
+                }
+                sum_float += f;
+            }
+            _ => {
+                let n = value.to_long();
+                if is_float {
+                    sum_float += n as f64;
+                } else {
+                    sum_int = sum_int.wrapping_add(n);
+                }
+            }
+        }
+    }
+    if is_float {
+        Ok(Value::Double(sum_float))
+    } else {
+        Ok(Value::Long(sum_int))
+    }
+}
+
+// User-callback comparison functions
+fn array_intersect_ukey_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    array_u_op(vm, args, true, true, false)
+}
+fn array_intersect_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    array_u_op(vm, args, true, true, true)
+}
+fn array_diff_ukey_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    array_u_op(vm, args, false, true, false)
+}
+fn array_diff_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    array_u_op(vm, args, false, true, true)
+}
+fn array_udiff_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    array_u_op(vm, args, false, false, false)
+}
+fn array_udiff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // udiff_assoc: compare values with callback, keys with ==
+    array_udiff_with_key_check(vm, args, false)
+}
+fn array_udiff_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // udiff_uassoc: two callbacks - value compare and key compare
+    array_udiff_uassoc_impl(vm, args)
+}
+fn array_uintersect_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    array_u_op(vm, args, true, false, false)
+}
+fn array_uintersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // uintersect_assoc: compare values with callback, keys with ==
+    array_udiff_with_key_check(vm, args, true)
+}
+fn array_uintersect_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    array_uintersect_uassoc_impl(vm, args)
+}
+
+/// Generic user-callback array operation
+/// is_intersect: true = keep matches, false = keep non-matches
+/// compare_keys: true = compare keys, false = compare values
+/// also_compare_values: if compare_keys, also check value equality
+fn array_u_op(
+    vm: &mut Vm,
+    args: &[Value],
+    is_intersect: bool,
+    compare_keys: bool,
+    also_compare_values: bool,
+) -> Result<Value, VmError> {
+    if args.len() < 3 {
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    let callback = args.last().unwrap().clone();
+    let first = match &args[0] {
+        Value::Array(arr) => arr.borrow().clone(),
+        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    };
+    let other_arrays: Vec<PhpArray> = args[1..args.len() - 1]
+        .iter()
+        .filter_map(|v| {
+            if let Value::Array(arr) = v {
+                Some(arr.borrow().clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut result = PhpArray::new();
+    for (key, value) in first.iter() {
+        let key_val = match key {
+            ArrayKey::Int(n) => Value::Long(*n),
+            ArrayKey::String(s) => Value::String(s.clone()),
+        };
+        let mut found_in_all = true;
+        for other in &other_arrays {
+            let mut found_in_this = false;
+            for (okey, ovalue) in other.iter() {
+                let okey_val = match okey {
+                    ArrayKey::Int(n) => Value::Long(*n),
+                    ArrayKey::String(s) => Value::String(s.clone()),
+                };
+                if compare_keys {
+                    let cmp_result = call_user_func(vm, &[callback.clone(), key_val.clone(), okey_val.clone()])?;
+                    if cmp_result.to_long() == 0 {
+                        if also_compare_values {
+                            if value.equals(ovalue) {
+                                found_in_this = true;
+                                break;
+                            }
+                        } else {
+                            found_in_this = true;
+                            break;
+                        }
+                    }
+                } else {
+                    // Compare values
+                    let cmp_result = call_user_func(vm, &[callback.clone(), value.clone(), ovalue.clone()])?;
+                    if cmp_result.to_long() == 0 {
+                        found_in_this = true;
+                        break;
+                    }
+                }
+            }
+            if !found_in_this {
+                found_in_all = false;
+                break;
+            }
+        }
+        if is_intersect == found_in_all {
+            result.set(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn array_udiff_with_key_check(
+    vm: &mut Vm,
+    args: &[Value],
+    is_intersect: bool,
+) -> Result<Value, VmError> {
+    if args.len() < 3 {
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    let callback = args.last().unwrap().clone();
+    let first = match &args[0] {
+        Value::Array(arr) => arr.borrow().clone(),
+        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    };
+    let other_arrays: Vec<PhpArray> = args[1..args.len() - 1]
+        .iter()
+        .filter_map(|v| {
+            if let Value::Array(arr) = v {
+                Some(arr.borrow().clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut result = PhpArray::new();
+    for (key, value) in first.iter() {
+        let mut found_in_all = true;
+        for other in &other_arrays {
+            let mut found = false;
+            if let Some(ovalue) = other.get(&key) {
+                let cmp_result = call_user_func(vm, &[callback.clone(), value.clone(), ovalue.clone()])?;
+                if cmp_result.to_long() == 0 {
+                    found = true;
+                }
+            }
+            if !found {
+                found_in_all = false;
+                break;
+            }
+        }
+        if is_intersect == found_in_all {
+            result.set(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 4 {
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    let key_callback = args[args.len() - 1].clone();
+    let val_callback = args[args.len() - 2].clone();
+    let first = match &args[0] {
+        Value::Array(arr) => arr.borrow().clone(),
+        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    };
+    let other_arrays: Vec<PhpArray> = args[1..args.len() - 2]
+        .iter()
+        .filter_map(|v| {
+            if let Value::Array(arr) = v {
+                Some(arr.borrow().clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut result = PhpArray::new();
+    for (key, value) in first.iter() {
+        let key_val = match key {
+            ArrayKey::Int(n) => Value::Long(*n),
+            ArrayKey::String(s) => Value::String(s.clone()),
+        };
+        let mut found_in_all = true;
+        for other in &other_arrays {
+            let mut found = false;
+            for (okey, ovalue) in other.iter() {
+                let okey_val = match okey {
+                    ArrayKey::Int(n) => Value::Long(*n),
+                    ArrayKey::String(s) => Value::String(s.clone()),
+                };
+                let key_cmp = call_user_func(vm, &[key_callback.clone(), key_val.clone(), okey_val])?;
+                if key_cmp.to_long() == 0 {
+                    let val_cmp = call_user_func(vm, &[val_callback.clone(), value.clone(), ovalue.clone()])?;
+                    if val_cmp.to_long() == 0 {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                found_in_all = false;
+                break;
+            }
+        }
+        if !found_in_all {
+            result.set(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 4 {
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    let key_callback = args[args.len() - 1].clone();
+    let val_callback = args[args.len() - 2].clone();
+    let first = match &args[0] {
+        Value::Array(arr) => arr.borrow().clone(),
+        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    };
+    let other_arrays: Vec<PhpArray> = args[1..args.len() - 2]
+        .iter()
+        .filter_map(|v| {
+            if let Value::Array(arr) = v {
+                Some(arr.borrow().clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut result = PhpArray::new();
+    for (key, value) in first.iter() {
+        let key_val = match key {
+            ArrayKey::Int(n) => Value::Long(*n),
+            ArrayKey::String(s) => Value::String(s.clone()),
+        };
+        let mut found_in_all = true;
+        for other in &other_arrays {
+            let mut found = false;
+            for (okey, ovalue) in other.iter() {
+                let okey_val = match okey {
+                    ArrayKey::Int(n) => Value::Long(*n),
+                    ArrayKey::String(s) => Value::String(s.clone()),
+                };
+                let key_cmp = call_user_func(vm, &[key_callback.clone(), key_val.clone(), okey_val])?;
+                if key_cmp.to_long() == 0 {
+                    let val_cmp = call_user_func(vm, &[val_callback.clone(), value.clone(), ovalue.clone()])?;
+                    if val_cmp.to_long() == 0 {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                found_in_all = false;
+                break;
+            }
+        }
+        if found_in_all {
+            result.set(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
