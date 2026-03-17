@@ -852,6 +852,199 @@ impl Vm {
         false
     }
 
+    /// Dispatch method calls for SPL built-in classes
+    fn dispatch_spl_method(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        match class_lower {
+            b"arrayobject" | b"arrayiterator" => {
+                self.spl_array_method(method_lower, obj)
+            }
+            b"splfixedarray" => {
+                self.spl_fixed_array_method(method_lower, obj)
+            }
+            b"spldoublylinkedlist" | b"splstack" | b"splqueue" => {
+                self.spl_linked_list_method(method_lower, obj)
+            }
+            b"splobjectstorage" => {
+                self.spl_object_storage_method(method_lower, obj)
+            }
+            b"splpriorityqueue" => {
+                self.spl_priority_queue_method(method_lower, obj)
+            }
+            _ => None,
+        }
+    }
+
+    fn spl_array_method(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        let storage_prop = b"__spl_array";
+        match method {
+            b"offsetget" => {
+                // Retrieved from pending call args later
+                None
+            }
+            b"offsetset" => None,
+            b"offsetexists" => None,
+            b"offsetunset" => None,
+            b"count" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(storage_prop);
+                if let Value::Array(a) = arr {
+                    Some(Value::Long(a.borrow().len() as i64))
+                } else {
+                    Some(Value::Long(0))
+                }
+            }
+            b"getarraycopy" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(storage_prop);
+                if let Value::Array(a) = arr {
+                    Some(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))))
+                } else {
+                    Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+                }
+            }
+            b"append" => None,
+            b"getflags" => {
+                let ob = obj.borrow();
+                let flags = ob.get_property(b"__spl_flags");
+                Some(flags)
+            }
+            b"setflags" => None,
+            b"getiterator" => None,
+            _ => None,
+        }
+    }
+
+    fn spl_fixed_array_method(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        match method {
+            b"count" | b"getsize" => {
+                let ob = obj.borrow();
+                let size = ob.get_property(b"__spl_size");
+                Some(size)
+            }
+            b"setsize" => None,
+            b"toarray" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(b"__spl_array");
+                if let Value::Array(a) = arr {
+                    Some(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))))
+                } else {
+                    Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn spl_linked_list_method(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        let storage_prop = b"__spl_array";
+        match method {
+            b"count" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(storage_prop);
+                if let Value::Array(a) = arr {
+                    Some(Value::Long(a.borrow().len() as i64))
+                } else {
+                    Some(Value::Long(0))
+                }
+            }
+            b"isempty" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(storage_prop);
+                if let Value::Array(a) = arr {
+                    Some(if a.borrow().len() == 0 { Value::True } else { Value::False })
+                } else {
+                    Some(Value::True)
+                }
+            }
+            b"top" | b"current" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(storage_prop);
+                if let Value::Array(a) = arr {
+                    let a = a.borrow();
+                    a.values().last().cloned().map(|v| v)
+                } else {
+                    None
+                }
+            }
+            b"bottom" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(storage_prop);
+                if let Value::Array(a) = arr {
+                    let a = a.borrow();
+                    a.values().next().cloned().map(|v| v)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn spl_object_storage_method(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        match method {
+            b"count" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(b"__spl_array");
+                if let Value::Array(a) = arr {
+                    Some(Value::Long(a.borrow().len() as i64))
+                } else {
+                    Some(Value::Long(0))
+                }
+            }
+            b"contains" => None,
+            _ => None,
+        }
+    }
+
+    fn spl_priority_queue_method(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        match method {
+            b"count" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(b"__spl_array");
+                if let Value::Array(a) = arr {
+                    Some(Value::Long(a.borrow().len() as i64))
+                } else {
+                    Some(Value::Long(0))
+                }
+            }
+            b"isempty" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(b"__spl_array");
+                if let Value::Array(a) = arr {
+                    Some(if a.borrow().len() == 0 { Value::True } else { Value::False })
+                } else {
+                    Some(Value::True)
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub fn write_output(&mut self, data: &[u8]) {
         if let Some(buf) = self.ob_stack.last_mut() {
             buf.extend_from_slice(data);
@@ -2198,28 +2391,56 @@ impl Vm {
                         if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
                             // For Exception-like classes, set message/code from args
                             if !call.args.is_empty() {
-                                // First arg (after $this) is message, second is code
-                                // args[0] = $this (for method calls)
                                 let this_idx = if call.args.len() > 1 { 0 } else { usize::MAX };
                                 if this_idx == 0
                                     && let Value::Object(obj) = &call.args[0]
                                 {
                                     let mut obj_mut = obj.borrow_mut();
-                                    if call.args.len() > 1 {
-                                        obj_mut.set_property(
-                                            b"message".to_vec(),
-                                            call.args[1].clone(),
-                                        );
-                                    }
-                                    if call.args.len() > 2 {
-                                        obj_mut
-                                            .set_property(b"code".to_vec(), call.args[2].clone());
-                                    }
-                                    if call.args.len() > 3 {
-                                        obj_mut.set_property(
-                                            b"previous".to_vec(),
-                                            call.args[3].clone(),
-                                        );
+                                    let class_lower: Vec<u8> = obj_mut.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                                    // SPL class constructors
+                                    match class_lower.as_slice() {
+                                        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
+                                            // __construct($array = [], $flags = 0, $iteratorClass = "ArrayIterator")
+                                            if call.args.len() > 1 {
+                                                if let Value::Array(_) = &call.args[1] {
+                                                    obj_mut.set_property(b"__spl_array".to_vec(), call.args[1].clone());
+                                                } else if let Value::Object(src) = &call.args[1] {
+                                                    // Copy properties as array
+                                                    let src = src.borrow();
+                                                    let mut arr = PhpArray::new();
+                                                    for (name, val) in &src.properties {
+                                                        arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                                                    }
+                                                    obj_mut.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(arr))));
+                                                }
+                                            }
+                                            if call.args.len() > 2 {
+                                                obj_mut.set_property(b"__spl_flags".to_vec(), call.args[2].clone());
+                                            }
+                                        }
+                                        b"splfixedarray" => {
+                                            // __construct($size = 0)
+                                            let size = if call.args.len() > 1 { call.args[1].to_long() } else { 0 };
+                                            let mut arr = PhpArray::new();
+                                            for i in 0..size {
+                                                arr.push(Value::Null);
+                                            }
+                                            obj_mut.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(arr))));
+                                            obj_mut.set_property(b"__spl_size".to_vec(), Value::Long(size));
+                                        }
+                                        _ => {
+                                            // Default exception/error constructor
+                                            if call.args.len() > 1 {
+                                                obj_mut.set_property(b"message".to_vec(), call.args[1].clone());
+                                            }
+                                            if call.args.len() > 2 {
+                                                obj_mut.set_property(b"code".to_vec(), call.args[2].clone());
+                                            }
+                                            if call.args.len() > 3 {
+                                                obj_mut.set_property(b"previous".to_vec(), call.args[3].clone());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -3698,6 +3919,22 @@ impl Vm {
                             b"domainexception" => b"DomainException".to_vec(),
                             b"assertionerror" => b"AssertionError".to_vec(),
                             b"unhandledmatcherror" => b"UnhandledMatchError".to_vec(),
+                            // SPL classes
+                            b"arrayobject" => b"ArrayObject".to_vec(),
+                            b"arrayiterator" => b"ArrayIterator".to_vec(),
+                            b"splfixedarray" => b"SplFixedArray".to_vec(),
+                            b"spldoublylinkedlist" => b"SplDoublyLinkedList".to_vec(),
+                            b"splstack" => b"SplStack".to_vec(),
+                            b"splqueue" => b"SplQueue".to_vec(),
+                            b"splpriorityqueue" => b"SplPriorityQueue".to_vec(),
+                            b"splmaxheap" => b"SplMaxHeap".to_vec(),
+                            b"splminheap" => b"SplMinHeap".to_vec(),
+                            b"splobjectstorage" => b"SplObjectStorage".to_vec(),
+                            b"recursivearrayiterator" => b"RecursiveArrayIterator".to_vec(),
+                            b"lengthexception" => b"LengthException".to_vec(),
+                            b"outofrangeexception" => b"OutOfRangeException".to_vec(),
+                            b"outofboundsexception" => b"OutOfBoundsException".to_vec(),
+                            b"invalidargumentexception" => b"InvalidArgumentException".to_vec(),
                             _ => class_name.as_bytes().to_vec(),
                         }
                     };
@@ -3730,6 +3967,38 @@ impl Vm {
                             b"trace".to_vec(),
                             Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
                         );
+                    }
+
+                    // Initialize SPL class internal storage
+                    match name_lower.as_slice() {
+                        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
+                            obj.set_property(
+                                b"__spl_array".to_vec(),
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            );
+                            obj.set_property(b"__spl_flags".to_vec(), Value::Long(0));
+                        }
+                        b"splfixedarray" => {
+                            obj.set_property(
+                                b"__spl_array".to_vec(),
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            );
+                            obj.set_property(b"__spl_size".to_vec(), Value::Long(0));
+                        }
+                        b"spldoublylinkedlist" | b"splstack" | b"splqueue" | b"splpriorityqueue"
+                        | b"splmaxheap" | b"splminheap" => {
+                            obj.set_property(
+                                b"__spl_array".to_vec(),
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            );
+                        }
+                        b"splobjectstorage" => {
+                            obj.set_property(
+                                b"__spl_array".to_vec(),
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            );
+                        }
+                        _ => {}
                     }
 
                     // Initialize properties from class definition
@@ -3918,6 +4187,13 @@ impl Vm {
                                 b"__tostring" => Some(obj_borrow.get_property(b"message")),
                                 _ => None,
                             }
+                        } else if !has_user_method {
+                            // SPL class method dispatch
+                            self.dispatch_spl_method(
+                                &class_name_lower,
+                                &method_name_lower,
+                                obj,
+                            )
                         } else {
                             None
                         };
@@ -4523,11 +4799,15 @@ fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" => {
                 Some(b"exception".to_vec())
             }
-            b"overflowexception" | b"underflowexception" => Some(b"runtimeexception".to_vec()),
+            b"overflowexception" | b"underflowexception" | b"outofboundsexception" => {
+                Some(b"runtimeexception".to_vec())
+            }
             b"invalidargumentexception"
             | b"badmethodcallexception"
             | b"domainexception"
-            | b"unexpectedvalueexception" => Some(b"logicexception".to_vec()),
+            | b"unexpectedvalueexception"
+            | b"lengthexception"
+            | b"outofrangeexception" => Some(b"logicexception".to_vec()),
             b"badfunctioncallexception" => Some(b"badmethodcallexception".to_vec()),
             b"exception" => Some(b"throwable".to_vec()),
             _ => None,
