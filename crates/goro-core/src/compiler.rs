@@ -2690,6 +2690,14 @@ impl Compiler {
             ExprKind::Isset(exprs) => {
                 // isset() returns true if all vars are set and not null
                 // Uses IssetCheck opcode that checks for both Undef and Null
+                // Suppress warnings during isset check (e.g., Undefined array key)
+                self.op_array.emit(Op {
+                    opcode: OpCode::ErrorSuppress,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
                 if exprs.len() == 1 {
                     let val = self.compile_expr(&exprs[0])?;
                     let tmp = self.op_array.alloc_temp();
@@ -2698,6 +2706,13 @@ impl Compiler {
                         op1: val,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
+                        line: expr.span.line,
+                    });
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
                         line: expr.span.line,
                     });
                     Ok(OperandType::Tmp(tmp))
@@ -2734,12 +2749,33 @@ impl Compiler {
                             result_tmp = and_tmp;
                         }
                     }
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
                     Ok(OperandType::Tmp(result_tmp))
                 }
             }
 
             ExprKind::Empty(inner) => {
+                self.op_array.emit(Op {
+                    opcode: OpCode::ErrorSuppress,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
                 let val = self.compile_expr(inner)?;
+                self.op_array.emit(Op {
+                    opcode: OpCode::ErrorRestore,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::BooleanNot,
