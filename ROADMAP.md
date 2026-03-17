@@ -2,9 +2,28 @@
 
 ## Current Status
 
-**Test Suite**: 217/871 (24.9%) top-level, ~1560 total (all dirs with proper timeouts)
+**Test Suite**: 217/871 (24.9%) top-level, ~1223 total (all dirs with proper timeouts)
 
 ### Recently Completed (this session)
+- [x] **Finally blocks fixed** - normal flow now executes finally blocks properly
+- [x] **var_dump recursion detection** - tracks object identity to prevent stack overflow
+- [x] **foreach over objects** - iterates public properties
+- [x] **is_a() / is_subclass_of()** - proper parent chain walking
+- [x] **$expr::class** - GetClassName opcode for runtime class name resolution
+- [x] **Return type checking** - TypeError on return type mismatch
+- [x] **unserialize()** - full parser for null, bool, int, float, string, array, object
+- [x] **Object serialize()** - proper O: format output
+- [x] **fn&() / function &()** - reference return closures/arrows parsed
+- [x] **static function use()** - use clause for static closures parsed
+- [x] **Exception getFile/getLine/getCode/getPrevious/getTrace** - proper methods
+- [x] **clone TypeError** - throws TypeError for non-object clone
+- [x] **var_export float fix** - 1.0 instead of 1.
+- [x] **str_decrement()** - with proper borrow/shrink behavior
+- [x] **quotemeta()** - regex metacharacter escaping
+- [x] **PATHINFO/FILE/SEEK/LOCK/GLOB/PREG constants** - added
+- [x] **array_replace/replace_recursive, array_find/find_key** - implemented
+- [x] **array_product, array_sum** - implemented
+- [x] **User-callback array functions** - 10 functions (ukey, uassoc, udiff variants)
 - [x] Named arguments (basic support)
 - [x] Parameter type checking with PHP coercion
 - [x] MD5 and SHA1 hash from scratch (no external deps)

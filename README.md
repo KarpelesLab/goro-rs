@@ -11,28 +11,27 @@ Active development. Core language features, OOP, generators, exceptions, closure
 | Test Directory | Pass | Total | Rate |
 |---|---|---|---|
 | Zend/tests (top-level) | 217 | 871 | 24.9% |
-| All tests (Zend+ext+standard) | ~1580 | ~18615 | ~8.5% |
+| All tests (Zend+ext+standard) | ~1223 | ~11950 | ~10.2% |
 
 **Key directory pass rates:**
-- ext/standard/strings: 169/705 (24.0%)
+- ext/standard/strings: 170/730 (23.3%)
 - ext/standard/math: 70/171 (40.9%)
-- ext/standard/general_functions: 42/318 (13.2%)
-- ext/standard/file: 34/840 (4.0%)
+- ext/standard/general_functions: 43/324 (13.3%)
+- ext/standard/file: 34/897 (3.8%)
 - ext/ctype: 35/49 (71.4%)
-- ext/json: 16/79 (20.3%)
-- ext/date: 27/688 (3.9%)
-- ext/spl: 32/781 (4.1%)
-- Zend/traits: 57/216 (26.4%)
-- Zend/generators: 34/184 (18.5%)
-- Zend/try: 12/80 (15.0%)
+- ext/date: 26/688 (3.8%)
+- ext/spl: 30/781 (3.8%)
+- Zend/traits: 58/216 (26.9%)
+- Zend/type_declarations: 86/496 (17.3%)
+- Zend/try: 20/80 (25.0%)
 - Zend/match: 20/35 (57.1%)
 - Zend/closures: 32/135 (23.7%)
+- Zend/magic_methods: 29/157 (18.5%)
 - Zend/inheritance: 25/70 (35.7%)
-- Zend/generators: 43/184 (23.4%)
+- Zend/return_types: 20/89 (22.5%)
+- Zend/foreach: 14/58 (24.1%)
 
-Key ext/standard pass rates: strings 115/730, math 21/171, file 22/840, general 30/318, ctype 24/49.
-
-Best categories: match (54%), nullable_types (63%), temporary_cleaning (52%), switch (41%), inheritance (35%).
+Best categories: ctype (71%), match (57%), nullable_types (64%), math (41%), inheritance (36%), temporary_cleaning (59%).
 
 *Test runner supports recursive directories, SKIPIF sections, EXPECTF pattern matching with backtracking, and timeout protection.*
 
@@ -77,13 +76,14 @@ Best categories: match (54%), nullable_types (63%), temporary_cleaning (52%), sw
 ### Not Yet Implemented
 - Full interface/trait enforcement
 - Enums (parsed but not enforced)
-- `__destruct`, `__isset`, `__unset`, `__debugInfo`
-- Late static binding (`static::` in inherited contexts)
-- Proper type declarations and enforcement
-- Named arguments (parsed but not matched to params)
+- `__isset`, `__unset`, `__debugInfo` magic methods
+- Full visibility enforcement (protected/private access checks)
+- `declare(strict_types=1)` enforcement
 - Fibers
 - Many extensions (pcre, pdo, curl, etc.)
 - Full error/warning message output
+- `foreach` by-reference modification
+- Namespace resolution at runtime
 
 ## Building
 
