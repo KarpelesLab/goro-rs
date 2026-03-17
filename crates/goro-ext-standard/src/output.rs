@@ -389,8 +389,29 @@ fn format_php_float_serialize(f: f64) -> String {
             s
         }
     } else {
-        format!("{}", f)
+        // PHP serialize_precision=-1: shortest roundtrip representation
+        // Use ryu-style formatting for exact roundtrip
+        let mut buf = ryu_format(f);
+        // Ensure no trailing dot
+        if buf.ends_with('.') {
+            buf.push('0');
+        }
+        buf
     }
+}
+
+/// Format float with shortest roundtrip representation (like PHP serialize_precision=-1)
+fn ryu_format(f: f64) -> String {
+    // Try increasing precision until roundtrip works
+    for prec in 0..20 {
+        let s = format!("{:.prec$}", f, prec = prec);
+        if let Ok(parsed) = s.parse::<f64>() {
+            if parsed == f {
+                return s;
+            }
+        }
+    }
+    format!("{}", f)
 }
 
 fn format_float(f: f64) -> String {
