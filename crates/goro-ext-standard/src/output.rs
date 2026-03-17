@@ -73,8 +73,60 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
             let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
-            let prop_count = obj_borrow.properties.len();
+            let class_lower: Vec<u8> = obj_borrow
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             let oid = obj_borrow.object_id;
+
+            // Check if this is an SPL class with __spl_array - display array contents instead
+            let is_spl_array_class = matches!(
+                class_lower.as_slice(),
+                b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+                    | b"splfixedarray" | b"spldoublylinkedlist" | b"splstack" | b"splqueue"
+            );
+
+            if is_spl_array_class {
+                let spl_arr = obj_borrow.get_property(b"__spl_array");
+                if let Value::Array(a) = spl_arr {
+                    // Clone to avoid borrow issues
+                    let arr_clone = a.borrow().clone();
+                    let count = arr_clone.len();
+                    let class_name_owned = class_name.to_string();
+                    drop(obj_borrow);
+                    vm.write_output(
+                        format!(
+                            "{}object({})#{} ({}) {{\n",
+                            prefix, class_name_owned, oid, count
+                        )
+                        .as_bytes(),
+                    );
+                    if !seen.insert(oid) {
+                        vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                        vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                        return;
+                    }
+                    for (key, value) in arr_clone.iter() {
+                        match key {
+                            goro_core::array::ArrayKey::Int(n) => {
+                                vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
+                            }
+                            goro_core::array::ArrayKey::String(s) => {
+                                vm.write_output(
+                                    format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes(),
+                                );
+                            }
+                        }
+                        var_dump_value(vm, value, indent + 2, seen);
+                    }
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    seen.remove(&oid);
+                    return;
+                }
+            }
+
+            let prop_count = obj_borrow.properties.len();
             vm.write_output(
                 format!(
                     "{}object({})#{} ({}) {{\n",
@@ -92,11 +144,6 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             }
 
             // Look up class to get property visibility info
-            let class_lower: Vec<u8> = obj_borrow
-                .class_name
-                .iter()
-                .map(|b| b.to_ascii_lowercase())
-                .collect();
             let class_info = vm.classes.get(&class_lower).cloned();
 
             // Properties are in declaration order (Vec preserves insertion order)
@@ -104,6 +151,10 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             let obj_class_name = obj_borrow.class_name.clone();
             drop(obj_borrow);
             for (name, value) in &props {
+                // Skip internal SPL properties
+                if name.starts_with(b"__spl_") {
+                    continue;
+                }
                 let name_str = String::from_utf8_lossy(name);
                 // Determine visibility
                 let vis = class_info.as_ref().and_then(|c| {
@@ -253,11 +304,54 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
         }
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
-            let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+            let class_name = String::from_utf8_lossy(&obj_borrow.class_name).into_owned();
+            let class_lower: Vec<u8> = obj_borrow
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             let prefix = " ".repeat(indent);
+
+            // Check if this is an SPL class with __spl_array
+            let is_spl_array_class = matches!(
+                class_lower.as_slice(),
+                b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+                    | b"splfixedarray" | b"spldoublylinkedlist" | b"splstack" | b"splqueue"
+            );
+
+            if is_spl_array_class {
+                let spl_arr = obj_borrow.get_property(b"__spl_array");
+                if let Value::Array(a) = spl_arr {
+                    let arr_clone = a.borrow().clone();
+                    drop(obj_borrow);
+                    buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
+                    buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
+                    for (key, value) in arr_clone.iter() {
+                        match key {
+                            goro_core::array::ArrayKey::Int(n) => {
+                                buf.extend_from_slice(format!("{}    [{}] => ", prefix, n).as_bytes());
+                            }
+                            goro_core::array::ArrayKey::String(s) => {
+                                buf.extend_from_slice(
+                                    format!("{}    [{}] => ", prefix, s.to_string_lossy()).as_bytes(),
+                                );
+                            }
+                        }
+                        print_r_value(value, buf, indent + 8);
+                        buf.push(b'\n');
+                    }
+                    buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+                    return;
+                }
+            }
+
             buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (name, value) in &obj_borrow.properties {
+                // Skip internal SPL properties
+                if name.starts_with(b"__spl_") {
+                    continue;
+                }
                 let name_str = String::from_utf8_lossy(name);
                 buf.extend_from_slice(format!("{}    [{}] => ", prefix, name_str).as_bytes());
                 print_r_value(value, buf, indent + 8);

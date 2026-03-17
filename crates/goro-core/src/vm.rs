@@ -974,14 +974,44 @@ impl Vm {
                     Some(Value::True)
                 }
             }
-            b"top" | b"current" => {
+            b"top" => {
                 let ob = obj.borrow();
                 let arr = ob.get_property(storage_prop);
                 if let Value::Array(a) = arr {
                     let a = a.borrow();
-                    a.values().last().cloned().map(|v| v)
+                    if a.len() == 0 {
+                        // top() on empty list should throw, but for now return null
+                        Some(Value::Null)
+                    } else {
+                        Some(a.values().last().cloned().unwrap_or(Value::Null))
+                    }
                 } else {
-                    None
+                    Some(Value::Null)
+                }
+            }
+            b"current" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(storage_prop);
+                let pos = ob.get_property(b"__spl_pos");
+                let iter_mode = ob.get_property(b"__spl_iter_mode");
+                let mode = if let Value::Long(m) = iter_mode { m } else { 0 };
+                let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
+                if let Value::Array(a) = arr {
+                    let a = a.borrow();
+                    let len = a.len();
+                    if len == 0 {
+                        Some(Value::Null)
+                    } else {
+                        // Check IT_MODE_LIFO (bit 1) - if set, iterate in reverse
+                        let actual_pos = if (mode & 2) != 0 {
+                            if pos_val < len { len - 1 - pos_val } else { return Some(Value::Null); }
+                        } else {
+                            pos_val
+                        };
+                        Some(a.values().nth(actual_pos).cloned().unwrap_or(Value::Null))
+                    }
+                } else {
+                    Some(Value::Null)
                 }
             }
             b"bottom" => {
@@ -989,10 +1019,55 @@ impl Vm {
                 let arr = ob.get_property(storage_prop);
                 if let Value::Array(a) = arr {
                     let a = a.borrow();
-                    a.values().next().cloned().map(|v| v)
+                    if a.len() == 0 {
+                        Some(Value::Null)
+                    } else {
+                        Some(a.values().next().cloned().unwrap_or(Value::Null))
+                    }
                 } else {
-                    None
+                    Some(Value::Null)
                 }
+            }
+            b"valid" => {
+                let ob = obj.borrow();
+                let arr = ob.get_property(storage_prop);
+                let pos = ob.get_property(b"__spl_pos");
+                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
+                if let Value::Array(a) = arr {
+                    let a = a.borrow();
+                    Some(if (pos_val as usize) < a.len() { Value::True } else { Value::False })
+                } else {
+                    Some(Value::False)
+                }
+            }
+            b"key" => {
+                let ob = obj.borrow();
+                let pos = ob.get_property(b"__spl_pos");
+                Some(if let Value::Long(p) = pos { Value::Long(p) } else { Value::Long(0) })
+            }
+            b"next" => {
+                let mut ob = obj.borrow_mut();
+                let pos = ob.get_property(b"__spl_pos");
+                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
+                ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos_val + 1));
+                Some(Value::Null)
+            }
+            b"prev" => {
+                let mut ob = obj.borrow_mut();
+                let pos = ob.get_property(b"__spl_pos");
+                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
+                ob.set_property(b"__spl_pos".to_vec(), Value::Long(if pos_val > 0 { pos_val - 1 } else { 0 }));
+                Some(Value::Null)
+            }
+            b"rewind" => {
+                let mut ob = obj.borrow_mut();
+                ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                Some(Value::Null)
+            }
+            b"getiteratormode" => {
+                let ob = obj.borrow();
+                let mode = ob.get_property(b"__spl_iter_mode");
+                Some(if let Value::Long(_) = mode { mode } else { Value::Long(0) })
             }
             _ => None,
         }
@@ -1057,6 +1132,8 @@ impl Vm {
             b"spldoublylinkedlist" | b"splstack" | b"splqueue" => matches!(
                 method,
                 b"push" | b"pop" | b"shift" | b"unshift" | b"enqueue" | b"dequeue"
+                    | b"setiteratormode" | b"offsetget" | b"offsetset"
+                    | b"offsetexists" | b"offsetunset" | b"add"
             ),
             b"splfixedarray" => matches!(
                 method,
@@ -1167,33 +1244,22 @@ impl Vm {
                             }
                             Some(Value::Null)
                         }
-                        b"pop" | b"dequeue" => {
+                        b"pop" => {
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
                             if let Value::Array(a) = arr {
                                 let mut a = a.borrow_mut();
-                                let len = a.len();
-                                if len > 0 {
-                                    let last_key = ArrayKey::Int((len - 1) as i64);
-                                    let val = a.get(&last_key).cloned().unwrap_or(Value::Null);
-                                    a.remove(&last_key);
-                                    Some(val)
-                                } else {
-                                    Some(Value::Null)
-                                }
+                                a.pop().map(|v| Some(v)).unwrap_or(Some(Value::Null))
                             } else {
                                 Some(Value::Null)
                             }
                         }
-                        b"shift" => {
+                        b"dequeue" | b"shift" => {
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
                             if let Value::Array(a) = arr {
                                 let mut a = a.borrow_mut();
-                                let first_key = ArrayKey::Int(0);
-                                let val = a.get(&first_key).cloned().unwrap_or(Value::Null);
-                                a.remove(&first_key);
-                                Some(val)
+                                a.shift().map(|v| Some(v)).unwrap_or(Some(Value::Null))
                             } else {
                                 Some(Value::Null)
                             }
@@ -1203,13 +1269,76 @@ impl Vm {
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
                             if let Value::Array(a) = arr {
-                                // Prepend - shift all existing keys up
                                 let mut new_arr = PhpArray::new();
                                 new_arr.push(val);
                                 for (_, v) in a.borrow().iter() {
                                     new_arr.push(v.clone());
                                 }
                                 *a.borrow_mut() = new_arr;
+                            }
+                            Some(Value::Null)
+                        }
+                        b"setiteratormode" => {
+                            let mode = args.get(1).cloned().unwrap_or(Value::Long(0));
+                            let mut ob = obj.borrow_mut();
+                            ob.set_property(b"__spl_iter_mode".to_vec(), mode);
+                            Some(Value::Null)
+                        }
+                        b"offsetget" => {
+                            let key = args.get(1)?;
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let k = Self::value_to_array_key(key.clone());
+                                Some(a.borrow().get(&k).cloned().unwrap_or(Value::Null))
+                            } else {
+                                Some(Value::Null)
+                            }
+                        }
+                        b"offsetset" => {
+                            let key = args.get(1).cloned().unwrap_or(Value::Null);
+                            let val = args.get(2).cloned().unwrap_or(Value::Null);
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                if matches!(key, Value::Null) {
+                                    a.borrow_mut().push(val);
+                                } else {
+                                    let k = Self::value_to_array_key(key);
+                                    a.borrow_mut().set(k, val);
+                                }
+                            }
+                            Some(Value::Null)
+                        }
+                        b"offsetexists" => {
+                            let key = args.get(1)?;
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let k = Self::value_to_array_key(key.clone());
+                                Some(if a.borrow().get(&k).is_some() { Value::True } else { Value::False })
+                            } else {
+                                Some(Value::False)
+                            }
+                        }
+                        b"offsetunset" => {
+                            let key = args.get(1)?;
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let k = Self::value_to_array_key(key.clone());
+                                a.borrow_mut().remove(&k);
+                            }
+                            Some(Value::Null)
+                        }
+                        b"add" => {
+                            let index = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
+                            let val = args.get(2).cloned().unwrap_or(Value::Null);
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let k = ArrayKey::Int(index);
+                                a.borrow_mut().set(k, val);
                             }
                             Some(Value::Null)
                         }
@@ -3057,17 +3186,27 @@ impl Vm {
                 OpCode::ArrayAppend => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    if let Value::Array(arr) = arr_val {
+                    if let Value::Array(arr) = &arr_val {
                         arr.borrow_mut().push(val);
+                    } else if let Value::Object(obj) = &arr_val {
+                        // ArrayAccess: $obj[] = $val -> offsetSet(null, $val)
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let args = vec![arr_val.clone(), Value::Null, val];
+                        self.handle_spl_docall(&class_lower, b"offsetset", &args);
                     }
                 }
                 OpCode::ArraySet => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
-                    if let Value::Array(arr) = arr_val {
+                    if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val);
                         arr.borrow_mut().set(key, val);
+                    } else if let Value::Object(obj) = &arr_val {
+                        // ArrayAccess: $obj[$key] = $val -> offsetSet($key, $val)
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let args = vec![arr_val.clone(), key_val, val];
+                        self.handle_spl_docall(&class_lower, b"offsetset", &args);
                     } else if matches!(arr_val, Value::String(_)) {
                         // String offset write: $str[n] = 'x'
                         let idx = key_val.to_long();
@@ -3154,6 +3293,15 @@ impl Vm {
                         } else {
                             Value::String(PhpString::empty())
                         }
+                    } else if let Value::Object(obj) = &arr_val {
+                        // ArrayAccess: $obj[$key] -> offsetGet($key)
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let args = vec![arr_val.clone(), key_val.clone()];
+                        self.handle_spl_docall(&class_lower, b"offsetget", &args)
+                            .unwrap_or_else(|| {
+                                // Try user-defined offsetGet
+                                Value::Null
+                            })
                     } else {
                         Value::Null
                     };
@@ -3177,17 +3325,24 @@ impl Vm {
                             &static_cv_keys,
                         );
                     } else if let Value::Object(obj) = &arr_val {
-                        // Convert object properties to an array for iteration
+                        // Check if this is an SPL/ArrayAccess class with __spl_array
                         let obj_borrow = obj.borrow();
-                        let mut arr = PhpArray::new();
-                        for (name, value) in &obj_borrow.properties {
-                            arr.set(
-                                ArrayKey::String(PhpString::from_vec(name.clone())),
-                                value.clone(),
-                            );
-                        }
+                        let spl_arr = obj_borrow.get_property(b"__spl_array");
+                        let arr_val = if let Value::Array(a) = spl_arr {
+                            // Use the internal SPL array for iteration
+                            Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                        } else {
+                            // Convert object properties to an array for iteration
+                            let mut arr = PhpArray::new();
+                            for (name, value) in &obj_borrow.properties {
+                                arr.set(
+                                    ArrayKey::String(PhpString::from_vec(name.clone())),
+                                    value.clone(),
+                                );
+                            }
+                            Value::Array(Rc::new(RefCell::new(arr)))
+                        };
                         drop(obj_borrow);
-                        let arr_val = Value::Array(Rc::new(RefCell::new(arr)));
                         self.write_operand(
                             &op.result,
                             arr_val,
@@ -3766,6 +3921,11 @@ impl Vm {
                             let key = Self::value_to_array_key(key_val.clone());
                             arr.borrow_mut().remove(&key);
                         }
+                    } else if let Some(Value::Object(obj)) = arr_val {
+                        // ArrayAccess: unset($obj[$key]) -> offsetUnset($key)
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let args = vec![Value::Object(obj), key_val];
+                        self.handle_spl_docall(&class_lower, b"offsetunset", &args);
                     }
                 }
 

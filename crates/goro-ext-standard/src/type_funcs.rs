@@ -170,6 +170,17 @@ fn count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     match val {
         Value::Array(arr) => Ok(Value::Long(arr.borrow().len() as i64)),
+        Value::Object(obj) => {
+            // Check for Countable interface / __spl_array property
+            let ob = obj.borrow();
+            let spl_arr = ob.get_property(b"__spl_array");
+            if let Value::Array(a) = spl_arr {
+                Ok(Value::Long(a.borrow().len() as i64))
+            } else {
+                // Non-countable object - return property count or 1
+                Ok(Value::Long(1))
+            }
+        }
         Value::Null | Value::Undef => Ok(Value::Long(0)),
         _ => {
             // PHP 8: count() on non-array/Countable emits warning and returns 0
