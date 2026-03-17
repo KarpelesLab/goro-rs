@@ -841,7 +841,6 @@ impl Vm {
                 OpCode::Nop => {}
 
                 OpCode::Echo => {
-                    self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let s = self.value_to_string(&val);
                     self.output.extend_from_slice(s.as_bytes());
@@ -1057,7 +1056,6 @@ impl Vm {
                     self.write_operand(&op.result, a.pow(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Concat => {
-                    self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     self.check_undefined_cv(&op.op2, &cvs, op_array, op.line);
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
