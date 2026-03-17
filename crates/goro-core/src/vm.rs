@@ -838,7 +838,11 @@ impl Vm {
                     Some(p) => p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(),
                     None => return false,
                 },
-                None => return false,
+                None => {
+                    // Current class is not user-defined; check if it's a built-in
+                    // that extends the target through the built-in hierarchy
+                    return is_builtin_subclass(&current, target_name);
+                }
             };
             if parent == target_name {
                 return true;

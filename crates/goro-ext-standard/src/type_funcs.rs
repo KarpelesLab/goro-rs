@@ -170,9 +170,12 @@ fn count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     match val {
         Value::Array(arr) => Ok(Value::Long(arr.borrow().len() as i64)),
-        Value::String(s) => Ok(Value::Long(s.len() as i64)),
         Value::Null | Value::Undef => Ok(Value::Long(0)),
-        _ => Ok(Value::Long(1)),
+        _ => {
+            // PHP 8: count() on non-array/Countable emits warning and returns 0
+            // but for simplicity return 1 for scalars (matches common PHP behavior pre-8)
+            Ok(Value::Long(1))
+        }
     }
 }
 

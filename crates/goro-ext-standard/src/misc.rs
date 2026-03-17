@@ -53,7 +53,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_slice", array_slice);
     vm.register_function(b"array_splice", array_splice);
     vm.register_function(b"array_search", array_search);
-    vm.register_function(b"array_key_exists", array_key_exists);
+    vm.register_function(b"array_key_exists", array_key_exists_fn2);
     vm.register_function(b"in_array", in_array);
     vm.register_function(b"array_map", array_map);
     vm.register_function(b"array_filter", array_filter);
@@ -188,7 +188,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"iterator_to_array", iterator_to_array_fn);
     vm.register_function(b"iterator_count", iterator_count_fn);
     vm.register_function(b"array_map", array_map);
-    vm.register_function(b"key_exists", array_key_exists);
+    vm.register_function(b"key_exists", array_key_exists_fn2);
     vm.register_function(b"array_replace", array_replace_fn);
     vm.register_function(b"array_replace_recursive", array_replace_recursive_fn);
     vm.register_function(b"array_find", array_find_fn);
