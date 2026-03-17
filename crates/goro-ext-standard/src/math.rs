@@ -73,6 +73,15 @@ fn abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(match val {
         Value::Long(n) => Value::Long(n.abs()),
         Value::Double(f) => Value::Double(f.abs()),
+        Value::String(s) => {
+            // Check if string contains a float (has '.', 'e', 'E')
+            let bytes = s.as_bytes();
+            if bytes.iter().any(|&b| b == b'.' || b == b'e' || b == b'E') {
+                Value::Double(val.to_double().abs())
+            } else {
+                Value::Long(val.to_long().abs())
+            }
+        }
         _ => Value::Long(val.to_long().abs()),
     })
 }
