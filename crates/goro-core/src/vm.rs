@@ -1903,17 +1903,30 @@ impl Vm {
                         }
                     } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
                         // Built-in function
-                        let result = func(self, &call.args).map_err(|e| VmError {
-                            message: e.message,
-                            line: op.line,
-                        })?;
-                        self.write_operand(
-                            &op.result,
-                            result,
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
+                        match func(self, &call.args) {
+                            Ok(result) => {
+                                self.write_operand(
+                                    &op.result,
+                                    result,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                            }
+                            Err(e) => {
+                                // Check if there's a pending exception to catch
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                }
+                                return Err(VmError {
+                                    message: e.message,
+                                    line: op.line,
+                                });
+                            }
+                        }
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
                     {
                         // Resolve named arguments by reordering to match parameter positions
@@ -3619,6 +3632,8 @@ impl Vm {
                             b"closedgeneratorexception" => b"ClosedGeneratorException".to_vec(),
                             b"unexpectedvalueexception" => b"UnexpectedValueException".to_vec(),
                             b"domainexception" => b"DomainException".to_vec(),
+                            b"assertionerror" => b"AssertionError".to_vec(),
+                            b"unhandledmatcherror" => b"UnhandledMatchError".to_vec(),
                             _ => class_name.as_bytes().to_vec(),
                         }
                     };
@@ -4415,7 +4430,8 @@ fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             | b"valueerror"
             | b"argumentcounterror"
             | b"rangeerror"
-            | b"unhandledmatcherror" => Some(b"error".to_vec()),
+            | b"unhandledmatcherror"
+            | b"assertionerror" => Some(b"error".to_vec()),
             b"arithmeticerror" => Some(b"error".to_vec()),
             b"divisionbyzeroerror" => Some(b"arithmeticerror".to_vec()),
             b"error" => Some(b"throwable".to_vec()),

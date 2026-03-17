@@ -1682,13 +1682,48 @@ fn ini_restore(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn set_time_limit(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
-fn php_assert(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
-    Ok(if val.is_truthy() {
-        Value::True
+    if val.is_truthy() {
+        Ok(Value::True)
     } else {
-        Value::False
-    })
+        // Get the description if provided (2nd argument)
+        let description = args.get(1);
+
+        // If description is a Throwable, throw it directly
+        if let Some(Value::Object(obj)) = description {
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if class_lower == b"assertionerror" || class_lower == b"exception" || class_lower == b"error"
+                || goro_core::vm::is_builtin_subclass(&class_lower, b"exception")
+                || goro_core::vm::is_builtin_subclass(&class_lower, b"error")
+            {
+                vm.current_exception = Some(Value::Object(obj.clone()));
+                return Err(VmError {
+                    message: "assert() failed".into(),
+                    line: 0,
+                });
+            }
+        }
+
+        // Throw AssertionError
+        let msg = match description {
+            Some(Value::String(s)) => s.to_string_lossy(),
+            _ => "assert(false)".to_string(),
+        };
+        let err_id = vm.next_object_id();
+        let mut err_obj = goro_core::object::PhpObject::new(b"AssertionError".to_vec(), err_id);
+        err_obj.set_property(b"message".to_vec(), Value::String(PhpString::from_string(msg.clone())));
+        err_obj.set_property(b"code".to_vec(), Value::Long(0));
+        err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"Unknown")));
+        err_obj.set_property(b"line".to_vec(), Value::Long(0));
+        err_obj.set_property(b"previous".to_vec(), Value::Null);
+        let exc = Value::Object(Rc::new(RefCell::new(err_obj)));
+        vm.current_exception = Some(exc);
+        Err(VmError {
+            message: format!("assert(): {} failed", msg),
+            line: 0,
+        })
+    }
 }
 fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
