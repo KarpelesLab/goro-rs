@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Test Suite**: 219/871 (25.1%) top-level, ~1574 total (all dirs with proper timeouts)
+**Test Suite**: 219/871 (25.1%) top-level, ~1589 total (all dirs with proper timeouts)
 
 ### Recently Completed (this session)
 - [x] **Finally blocks fixed** - normal flow now executes finally blocks properly
