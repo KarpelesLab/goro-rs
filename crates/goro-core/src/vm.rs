@@ -241,9 +241,10 @@ impl Vm {
                     b"PHP_BINARY".to_vec(),
                     Value::String(PhpString::from_bytes(b"goro")),
                 );
-                c.insert(b"STDIN".to_vec(), Value::Null);
-                c.insert(b"STDOUT".to_vec(), Value::Null);
-                c.insert(b"STDERR".to_vec(), Value::Null);
+                // File handles - use Long as resource placeholders
+                c.insert(b"STDIN".to_vec(), Value::Long(0));
+                c.insert(b"STDOUT".to_vec(), Value::Long(1));
+                c.insert(b"STDERR".to_vec(), Value::Long(2));
                 c.insert(
                     b"DIRECTORY_SEPARATOR".to_vec(),
                     Value::String(PhpString::from_bytes(b"/")),
@@ -445,7 +446,7 @@ impl Vm {
     /// Return a type name string for error messages.
     /// For objects, this returns the class name (e.g. "stdClass") instead of just "object".
     /// For generators, this returns "Generator".
-    fn value_type_name(val: &Value) -> String {
+    pub fn value_type_name(val: &Value) -> String {
         match val {
             Value::Null | Value::Undef => "null".to_string(),
             Value::True => "true".to_string(),
@@ -498,7 +499,7 @@ impl Vm {
 
     /// Create a TypeError exception object and set it as current_exception.
     /// Returns the error message for use in VmError if no exception handler is available.
-    fn throw_type_error(&mut self, message: String) -> Value {
+    pub fn throw_type_error(&mut self, message: String) -> Value {
         let err_id = self.next_object_id;
         self.next_object_id += 1;
         let mut err_obj = PhpObject::new(b"TypeError".to_vec(), err_id);
@@ -1042,6 +1043,332 @@ impl Vm {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Check if this is an SPL method that needs call arguments
+    fn is_spl_args_method(&self, class: &[u8], method: &[u8]) -> bool {
+        match class {
+            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(
+                method,
+                b"offsetget" | b"offsetset" | b"offsetexists" | b"offsetunset"
+                    | b"append" | b"exchangearray" | b"setflags"
+            ),
+            b"spldoublylinkedlist" | b"splstack" | b"splqueue" => matches!(
+                method,
+                b"push" | b"pop" | b"shift" | b"unshift" | b"enqueue" | b"dequeue"
+            ),
+            b"splfixedarray" => matches!(
+                method,
+                b"offsetget" | b"offsetset" | b"offsetexists" | b"offsetunset" | b"setsize"
+            ),
+            b"splobjectstorage" => matches!(
+                method,
+                b"attach" | b"detach" | b"contains" | b"offsetget" | b"offsetset"
+            ),
+            b"splpriorityqueue" => matches!(method, b"insert" | b"extract"),
+            _ => false,
+        }
+    }
+
+    /// Handle SPL method calls with arguments at DoCall time
+    fn handle_spl_docall(
+        &mut self,
+        class: &[u8],
+        method: &[u8],
+        args: &[Value],
+    ) -> Option<Value> {
+        // args[0] is $this, rest are method args
+        let this = args.first()?;
+        if let Value::Object(obj) = this {
+            match class {
+                b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
+                    match method {
+                        b"offsetget" => {
+                            let key = args.get(1)?;
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let k = Self::value_to_array_key(key.clone());
+                                Some(a.borrow().get(&k).cloned().unwrap_or(Value::Null))
+                            } else {
+                                Some(Value::Null)
+                            }
+                        }
+                        b"offsetset" => {
+                            let key = args.get(1).cloned().unwrap_or(Value::Null);
+                            let val = args.get(2).cloned().unwrap_or(Value::Null);
+                            let mut ob = obj.borrow_mut();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                if matches!(key, Value::Null) {
+                                    a.borrow_mut().push(val);
+                                } else {
+                                    let k = Self::value_to_array_key(key);
+                                    a.borrow_mut().set(k, val);
+                                }
+                            }
+                            Some(Value::Null)
+                        }
+                        b"offsetexists" => {
+                            let key = args.get(1)?;
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let k = Self::value_to_array_key(key.clone());
+                                Some(if a.borrow().get(&k).is_some() { Value::True } else { Value::False })
+                            } else {
+                                Some(Value::False)
+                            }
+                        }
+                        b"offsetunset" => {
+                            let key = args.get(1)?;
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let k = Self::value_to_array_key(key.clone());
+                                a.borrow_mut().remove(&k);
+                            }
+                            Some(Value::Null)
+                        }
+                        b"append" => {
+                            let val = args.get(1).cloned().unwrap_or(Value::Null);
+                            let mut ob = obj.borrow_mut();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                a.borrow_mut().push(val);
+                            }
+                            Some(Value::Null)
+                        }
+                        b"exchangearray" => {
+                            let new_arr = args.get(1).cloned().unwrap_or(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                            let mut ob = obj.borrow_mut();
+                            let old = ob.get_property(b"__spl_array");
+                            ob.set_property(b"__spl_array".to_vec(), new_arr);
+                            Some(old)
+                        }
+                        b"setflags" => {
+                            let flags = args.get(1).cloned().unwrap_or(Value::Long(0));
+                            let mut ob = obj.borrow_mut();
+                            ob.set_property(b"__spl_flags".to_vec(), flags);
+                            Some(Value::Null)
+                        }
+                        _ => None,
+                    }
+                }
+                b"spldoublylinkedlist" | b"splstack" | b"splqueue" => {
+                    match method {
+                        b"push" | b"enqueue" => {
+                            let val = args.get(1).cloned().unwrap_or(Value::Null);
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                a.borrow_mut().push(val);
+                            }
+                            Some(Value::Null)
+                        }
+                        b"pop" | b"dequeue" => {
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let mut a = a.borrow_mut();
+                                let len = a.len();
+                                if len > 0 {
+                                    let last_key = ArrayKey::Int((len - 1) as i64);
+                                    let val = a.get(&last_key).cloned().unwrap_or(Value::Null);
+                                    a.remove(&last_key);
+                                    Some(val)
+                                } else {
+                                    Some(Value::Null)
+                                }
+                            } else {
+                                Some(Value::Null)
+                            }
+                        }
+                        b"shift" => {
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let mut a = a.borrow_mut();
+                                let first_key = ArrayKey::Int(0);
+                                let val = a.get(&first_key).cloned().unwrap_or(Value::Null);
+                                a.remove(&first_key);
+                                Some(val)
+                            } else {
+                                Some(Value::Null)
+                            }
+                        }
+                        b"unshift" => {
+                            let val = args.get(1).cloned().unwrap_or(Value::Null);
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                // Prepend - shift all existing keys up
+                                let mut new_arr = PhpArray::new();
+                                new_arr.push(val);
+                                for (_, v) in a.borrow().iter() {
+                                    new_arr.push(v.clone());
+                                }
+                                *a.borrow_mut() = new_arr;
+                            }
+                            Some(Value::Null)
+                        }
+                        _ => None,
+                    }
+                }
+                b"splfixedarray" => {
+                    match method {
+                        b"offsetget" => {
+                            let key = args.get(1)?;
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let idx = key.to_long();
+                                Some(a.borrow().get(&ArrayKey::Int(idx)).cloned().unwrap_or(Value::Null))
+                            } else {
+                                Some(Value::Null)
+                            }
+                        }
+                        b"offsetset" => {
+                            let key = args.get(1).cloned().unwrap_or(Value::Null);
+                            let val = args.get(2).cloned().unwrap_or(Value::Null);
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let idx = key.to_long();
+                                a.borrow_mut().set(ArrayKey::Int(idx), val);
+                            }
+                            Some(Value::Null)
+                        }
+                        b"offsetexists" => {
+                            let key = args.get(1)?;
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let idx = key.to_long();
+                                Some(if a.borrow().get(&ArrayKey::Int(idx)).is_some() { Value::True } else { Value::False })
+                            } else {
+                                Some(Value::False)
+                            }
+                        }
+                        b"offsetunset" => {
+                            let key = args.get(1)?;
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let idx = key.to_long();
+                                a.borrow_mut().set(ArrayKey::Int(idx), Value::Null);
+                            }
+                            Some(Value::Null)
+                        }
+                        b"setsize" => {
+                            let size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                            let mut ob = obj.borrow_mut();
+                            ob.set_property(b"__spl_size".to_vec(), Value::Long(size));
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let mut a = a.borrow_mut();
+                                let current = a.len();
+                                if (size as usize) > current {
+                                    for _ in current..(size as usize) {
+                                        a.push(Value::Null);
+                                    }
+                                }
+                            }
+                            Some(Value::Null)
+                        }
+                        _ => None,
+                    }
+                }
+                b"splobjectstorage" => {
+                    match method {
+                        b"attach" => {
+                            let key_obj = args.get(1)?;
+                            let data = args.get(2).cloned().unwrap_or(Value::Null);
+                            if let Value::Object(key_o) = key_obj {
+                                let hash = format!("{:016x}", key_o.borrow().object_id);
+                                let ob = obj.borrow();
+                                let arr = ob.get_property(b"__spl_array");
+                                if let Value::Array(a) = arr {
+                                    a.borrow_mut().set(
+                                        ArrayKey::String(PhpString::from_string(hash)),
+                                        data,
+                                    );
+                                }
+                            }
+                            Some(Value::Null)
+                        }
+                        b"detach" => {
+                            let key_obj = args.get(1)?;
+                            if let Value::Object(key_o) = key_obj {
+                                let hash = format!("{:016x}", key_o.borrow().object_id);
+                                let ob = obj.borrow();
+                                let arr = ob.get_property(b"__spl_array");
+                                if let Value::Array(a) = arr {
+                                    a.borrow_mut().remove(&ArrayKey::String(PhpString::from_string(hash)));
+                                }
+                            }
+                            Some(Value::Null)
+                        }
+                        b"contains" => {
+                            let key_obj = args.get(1)?;
+                            if let Value::Object(key_o) = key_obj {
+                                let hash = format!("{:016x}", key_o.borrow().object_id);
+                                let ob = obj.borrow();
+                                let arr = ob.get_property(b"__spl_array");
+                                if let Value::Array(a) = arr {
+                                    Some(if a.borrow().get(&ArrayKey::String(PhpString::from_string(hash))).is_some() {
+                                        Value::True
+                                    } else {
+                                        Value::False
+                                    })
+                                } else {
+                                    Some(Value::False)
+                                }
+                            } else {
+                                Some(Value::False)
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                b"splpriorityqueue" => {
+                    match method {
+                        b"insert" => {
+                            let val = args.get(1).cloned().unwrap_or(Value::Null);
+                            let _priority = args.get(2).cloned().unwrap_or(Value::Long(0));
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                a.borrow_mut().push(val);
+                            }
+                            Some(Value::Null)
+                        }
+                        b"extract" => {
+                            let ob = obj.borrow();
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let mut a = a.borrow_mut();
+                                let len = a.len();
+                                if len > 0 {
+                                    let key = ArrayKey::Int((len - 1) as i64);
+                                    let val = a.get(&key).cloned().unwrap_or(Value::Null);
+                                    a.remove(&key);
+                                    Some(val)
+                                } else {
+                                    Some(Value::Null)
+                                }
+                            } else {
+                                Some(Value::Null)
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
         }
     }
 
@@ -2063,6 +2390,62 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
+                    } else if func_name_lower == b"splfixedarray::fromarray" {
+                        // SplFixedArray::fromArray($array, $preserveKeys = true)
+                        let input = call.args.first().cloned().unwrap_or(Value::Null);
+                        let _preserve_keys = call.args.get(1).cloned().unwrap_or(Value::True);
+                        let oid = self.next_object_id();
+                        let obj = PhpObject::new(b"SplFixedArray".to_vec(), oid);
+                        let obj_rc = Rc::new(RefCell::new(obj));
+                        if let Value::Array(src) = &input {
+                            let src = src.borrow();
+                            let len = src.len();
+                            let mut arr = PhpArray::new();
+                            for (i, (_, v)) in src.iter().enumerate() {
+                                arr.set(ArrayKey::Int(i as i64), v.clone());
+                            }
+                            {
+                                let mut obj_mut = obj_rc.borrow_mut();
+                                obj_mut.set_property(
+                                    b"__spl_array".to_vec(),
+                                    Value::Array(Rc::new(RefCell::new(arr))),
+                                );
+                                obj_mut.set_property(b"__spl_size".to_vec(), Value::Long(len as i64));
+                            }
+                        } else {
+                            let mut obj_mut = obj_rc.borrow_mut();
+                            obj_mut.set_property(
+                                b"__spl_array".to_vec(),
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            );
+                            obj_mut.set_property(b"__spl_size".to_vec(), Value::Long(0));
+                        }
+                        self.write_operand(
+                            &op.result,
+                            Value::Object(obj_rc),
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else if func_name_lower.starts_with(b"__spl::") {
+                        // SPL method call with args
+                        let spl_path = &func_name_lower[7..]; // skip "__spl::"
+                        if let Some(sep) = spl_path.iter().position(|&b| b == b':') {
+                            if sep + 1 < spl_path.len() && spl_path[sep + 1] == b':' {
+                                let spl_class = &spl_path[..sep];
+                                let spl_method = &spl_path[sep + 2..];
+                                let result = self
+                                    .handle_spl_docall(spl_class, spl_method, &call.args)
+                                    .unwrap_or(Value::Null);
+                                self.write_operand(
+                                    &op.result,
+                                    result,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                            }
+                        }
                     } else if func_name_lower == b"__builtin_return" {
                         let result = call.args.first().cloned().unwrap_or(Value::Null);
                         self.write_operand(
@@ -4202,6 +4585,17 @@ impl Vm {
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::from_bytes(b"__builtin_return"),
                                 args: vec![result],
+                                named_args: Vec::new(),
+                            });
+                        } else if !has_user_method && self.is_spl_args_method(&class_name_lower, &method_name_lower) {
+                            // SPL method that needs args - defer to DoCall with __spl:: prefix
+                            let mut spl_name = b"__spl::".to_vec();
+                            spl_name.extend_from_slice(&class_name_lower);
+                            spl_name.extend_from_slice(b"::");
+                            spl_name.extend_from_slice(&method_name_lower);
+                            self.pending_calls.push(PendingCall {
+                                name: PhpString::from_vec(spl_name),
+                                args: vec![obj_val.clone()],
                                 named_args: Vec::new(),
                             });
                         } else

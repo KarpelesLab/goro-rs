@@ -136,6 +136,34 @@ impl PhpArray {
         self.entries.push((ArrayKey::Int(key), value));
     }
 
+    /// Remove and return the last element (like array_pop)
+    pub fn pop(&mut self) -> Option<Value> {
+        self.entries.pop().map(|(_, v)| v)
+    }
+
+    /// Remove and return the first element (like array_shift)
+    pub fn shift(&mut self) -> Option<Value> {
+        if self.entries.is_empty() {
+            None
+        } else {
+            Some(self.entries.remove(0).1)
+        }
+    }
+
+    /// Insert a value at the beginning with key 0 (like array_unshift)
+    pub fn unshift(&mut self, value: Value) {
+        self.entries.insert(0, (ArrayKey::Int(0), value));
+        // Re-key all integer-keyed entries
+        let mut next = 0i64;
+        for entry in &mut self.entries {
+            if let ArrayKey::Int(_) = &entry.0 {
+                entry.0 = ArrayKey::Int(next);
+                next += 1;
+            }
+        }
+        self.next_int_key = next;
+    }
+
     /// Remove an entry by key
     pub fn remove(&mut self, key: &ArrayKey) -> Option<Value> {
         if let Some(pos) = self.entries.iter().position(|(k, _)| k == key) {

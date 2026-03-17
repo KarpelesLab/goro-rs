@@ -4946,16 +4946,23 @@ fn array_key_last_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::Null)
     }
 }
-fn array_is_list_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Array(arr)) = args.first() {
-        let arr = arr.borrow();
-        let is_list = arr
-            .iter()
-            .enumerate()
-            .all(|(i, (k, _))| matches!(k, goro_core::array::ArrayKey::Int(n) if *n == i as i64));
-        Ok(if is_list { Value::True } else { Value::False })
-    } else {
-        Ok(Value::False)
+fn array_is_list_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    match args.first() {
+        Some(Value::Array(arr)) => {
+            let arr = arr.borrow();
+            let is_list = arr
+                .iter()
+                .enumerate()
+                .all(|(i, (k, _))| matches!(k, goro_core::array::ArrayKey::Int(n) if *n == i as i64));
+            Ok(if is_list { Value::True } else { Value::False })
+        }
+        _ => {
+            let type_name = args.first().map(|v| Vm::value_type_name(v)).unwrap_or("null".to_string());
+            let msg = format!("array_is_list(): Argument #1 ($array) must be of type array, {} given", type_name);
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: 0 })
+        }
     }
 }
 #[allow(dead_code)]
