@@ -206,6 +206,9 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_product", array_product_fn);
     vm.register_function(b"array_sum", array_sum_fn);
     vm.register_function(b"parse_ini_string", parse_ini_string_fn);
+    vm.register_function(b"assert_options", assert_options_fn);
+    vm.register_function(b"ftruncate", ftruncate_fn);
+    vm.register_function(b"tmpfile", tmpfile_fn);
     // sizeof is an alias for count (registered in type_funcs.rs)
 
     // Date
@@ -6468,4 +6471,29 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn assert_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let option = args.first().map(|v| v.to_long()).unwrap_or(0);
+    // Return previous value for the option
+    match option {
+        1 => Ok(Value::Long(1)),  // ASSERT_ACTIVE
+        2 => Ok(Value::Long(0)),  // ASSERT_WARNING (deprecated)
+        3 => Ok(Value::Long(0)),  // ASSERT_BAIL (deprecated)
+        4 => Ok(Value::Long(0)),  // ASSERT_QUIET_EVAL (deprecated)
+        5 => Ok(Value::Null),     // ASSERT_CALLBACK (deprecated)
+        6 => Ok(Value::Long(1)),  // ASSERT_EXCEPTION
+        _ => Ok(Value::False),
+    }
+}
+
+fn ftruncate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // ftruncate($handle, $size) - stub
+    Ok(Value::True)
+}
+
+fn tmpfile_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Return a file handle to a temp file - simplified stub
+    // In PHP this returns a resource; we'll return false for now
+    Ok(Value::False)
 }
