@@ -284,6 +284,14 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"debug_backtrace", debug_backtrace_fn);
     vm.register_function(b"debug_print_backtrace", debug_print_backtrace_fn);
     vm.register_function(b"array_key_exists", array_key_exists_fn2);
+    vm.register_function(b"set_include_path", set_include_path_fn);
+    vm.register_function(b"get_include_path", get_include_path_fn);
+    vm.register_function(b"restore_include_path", restore_include_path_fn);
+    vm.register_function(b"get_resource_type", get_resource_type_fn);
+    vm.register_function(b"link", link_fn);
+    vm.register_function(b"unlink", unlink_fn2);
+    vm.register_function(b"rename", rename_fn2);
+    vm.register_function(b"copy", copy_fn2);
     vm.register_function(b"file_get_contents", file_get_contents_fn);
     vm.register_function(b"file_put_contents", file_put_contents_fn);
     vm.register_function(b"realpath", realpath_fn);
@@ -4623,4 +4631,56 @@ fn natcmp(a: &str, b: &str) -> std::cmp::Ordering {
         }
     }
     ab.len().cmp(&bb.len())
+}
+
+fn set_include_path_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let _path = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(Value::String(PhpString::from_bytes(b".")))
+}
+
+fn get_include_path_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b".")))
+}
+
+fn restore_include_path_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
+}
+
+fn get_resource_type_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"Unknown")))
+}
+
+fn link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let target = args.first().unwrap_or(&Value::Null).to_php_string();
+    let link = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    match std::fs::hard_link(&*target.to_string_lossy(), &*link.to_string_lossy()) {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn unlink_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::remove_file(&*path.to_string_lossy()) {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn rename_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let from = args.first().unwrap_or(&Value::Null).to_php_string();
+    let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    match std::fs::rename(&*from.to_string_lossy(), &*to.to_string_lossy()) {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn copy_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let from = args.first().unwrap_or(&Value::Null).to_php_string();
+    let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    match std::fs::copy(&*from.to_string_lossy(), &*to.to_string_lossy()) {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
 }
