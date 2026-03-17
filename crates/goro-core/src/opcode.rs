@@ -279,6 +279,8 @@ pub struct OpArray {
     pub is_generator: bool,
     /// Parameter type information (indexed by CV index, None if no type hint)
     pub param_types: Vec<Option<ParamTypeInfo>>,
+    /// Return type constraint (None if no return type declared)
+    pub return_type: Option<ParamType>,
 }
 
 impl OpArray {
@@ -294,6 +296,7 @@ impl OpArray {
             child_functions: Vec::new(),
             is_generator: false,
             param_types: Vec::new(),
+            return_type: None,
         }
     }
 

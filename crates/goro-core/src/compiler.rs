@@ -714,7 +714,7 @@ impl Compiler {
             }
 
             StmtKind::FunctionDecl {
-                name, params, body, ..
+                name, params, body, return_type, ..
             } => {
                 // Check if this function contains yield (making it a generator)
                 let is_generator = stmts_contain_yield(body);
@@ -723,6 +723,11 @@ impl Compiler {
                 let mut func_compiler = Compiler::new();
                 func_compiler.op_array.name = name.clone();
                 func_compiler.op_array.is_generator = is_generator;
+
+                // Set return type
+                if let Some(hint) = return_type {
+                    func_compiler.op_array.return_type = Some(type_hint_to_param_type(hint));
+                }
 
                 // Set up parameter CVs and default values
                 func_compiler.op_array.param_count = params.len() as u32;
@@ -1247,6 +1252,7 @@ impl Compiler {
                         ClassMember::Method {
                             name: method_name,
                             params,
+                            return_type: method_return_type,
                             body: method_body,
                             visibility,
                             is_static,
@@ -1289,6 +1295,10 @@ impl Compiler {
                                 let mut method_compiler = Compiler::new();
                                 method_compiler.op_array.name = method_name.clone();
                                 method_compiler.op_array.is_generator = method_is_generator;
+                                if let Some(hint) = method_return_type {
+                                    method_compiler.op_array.return_type =
+                                        Some(type_hint_to_param_type(hint));
+                                }
                                 method_compiler.current_class = Some(name.clone());
                                 method_compiler.current_parent_class = extends.clone();
 

@@ -509,6 +509,45 @@ impl Vm {
         Value::Object(Rc::new(RefCell::new(err_obj)))
     }
 
+    /// Check if a return value matches the declared return type
+    fn value_matches_return_type(&self, value: &Value, ret_type: &ParamType) -> bool {
+        match ret_type {
+            ParamType::Simple(name) => {
+                match name.as_slice() {
+                    b"void" => matches!(value, Value::Null | Value::Undef),
+                    b"never" => false, // never type means function should never return
+                    b"mixed" => true,
+                    _ => self.value_matches_type(value, ret_type),
+                }
+            }
+            ParamType::Nullable(_) => {
+                if matches!(value, Value::Null | Value::Undef) {
+                    return true;
+                }
+                self.value_matches_type(value, ret_type)
+            }
+            _ => self.value_matches_type(value, ret_type),
+        }
+    }
+
+    /// Get a human-readable name for a ParamType
+    fn param_type_name(pt: &ParamType) -> String {
+        match pt {
+            ParamType::Simple(name) => String::from_utf8_lossy(name).to_string(),
+            ParamType::Nullable(inner) => format!("?{}", Self::param_type_name(inner)),
+            ParamType::Union(types) => types
+                .iter()
+                .map(|t| Self::param_type_name(t))
+                .collect::<Vec<_>>()
+                .join("|"),
+            ParamType::Intersection(types) => types
+                .iter()
+                .map(|t| Self::param_type_name(t))
+                .collect::<Vec<_>>()
+                .join("&"),
+        }
+    }
+
     /// Check if a value matches a single ParamType constraint.
     /// Returns true if the value is acceptable for the given type.
     fn value_matches_type(&self, value: &Value, param_type: &ParamType) -> bool {
@@ -867,6 +906,28 @@ impl Vm {
         }
         let result = self.execute_op_array_inner(op_array, cvs);
         self.call_depth -= 1;
+
+        // Check return type if declared
+        if let Ok(ref val) = result {
+            if let Some(ref ret_type) = op_array.return_type {
+                if !self.value_matches_return_type(val, ret_type) {
+                    let func_name = String::from_utf8_lossy(&op_array.name);
+                    let actual_type = Self::value_type_name(val);
+                    let expected_type = Self::param_type_name(ret_type);
+                    let msg = format!(
+                        "{}(): Return value must be of type {}, {} returned",
+                        func_name, expected_type, actual_type
+                    );
+                    let exc_val = self.throw_type_error(msg.clone());
+                    self.current_exception = Some(exc_val);
+                    return Err(VmError {
+                        message: msg,
+                        line: 0,
+                    });
+                }
+            }
+        }
+
         result
     }
 
