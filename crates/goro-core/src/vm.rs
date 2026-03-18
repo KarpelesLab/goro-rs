@@ -3154,6 +3154,30 @@ impl Vm {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let arr = match val {
                         Value::Array(a) => a,
+                        Value::Object(obj) => {
+                            let ob = obj.borrow();
+                            // Check for SPL array classes
+                            let spl_arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = spl_arr {
+                                Rc::new(RefCell::new(a.borrow().clone()))
+                            } else {
+                                // Regular object: convert properties to array
+                                let mut arr = PhpArray::new();
+                                for (name, value) in &ob.properties {
+                                    if name.starts_with(b"__spl_") {
+                                        continue;
+                                    }
+                                    arr.set(
+                                        ArrayKey::String(PhpString::from_vec(name.clone())),
+                                        value.clone(),
+                                    );
+                                }
+                                Rc::new(RefCell::new(arr))
+                            }
+                        }
+                        Value::Null | Value::Undef => {
+                            Rc::new(RefCell::new(PhpArray::new()))
+                        }
                         other => {
                             let mut arr = PhpArray::new();
                             arr.push(other);
@@ -4499,6 +4523,7 @@ impl Vm {
                             b"arithmeticerror" => b"ArithmeticError".to_vec(),
                             b"divisionbyzeroerror" => b"DivisionByZeroError".to_vec(),
                             b"argumentcounterror" => b"ArgumentCountError".to_vec(),
+                            b"errorexception" => b"ErrorException".to_vec(),
                             b"closedgeneratorexception" => b"ClosedGeneratorException".to_vec(),
                             b"unexpectedvalueexception" => b"UnexpectedValueException".to_vec(),
                             b"domainexception" => b"DomainException".to_vec(),
@@ -4769,6 +4794,14 @@ impl Vm {
                                     Some(Value::String(PhpString::from_bytes(b"")))
                                 }
                                 b"getprevious" => Some(obj_borrow.get_property(b"previous")),
+                                b"getseverity" => {
+                                    let severity = obj_borrow.get_property(b"severity");
+                                    Some(if matches!(severity, Value::Undef | Value::Null) {
+                                        Value::Long(1) // E_ERROR default
+                                    } else {
+                                        severity
+                                    })
+                                }
                                 b"__tostring" => Some(obj_borrow.get_property(b"message")),
                                 _ => None,
                             }
@@ -5371,9 +5404,56 @@ impl Default for Vm {
 ///      │  └─ UnexpectedValueException
 ///      └─ ClosedGeneratorException
 pub fn is_builtin_subclass(child: &[u8], parent: &[u8]) -> bool {
+    // Check SPL interface implementation
+    if is_builtin_implements(child, parent) {
+        return true;
+    }
     // Get the parent chain for the child class
     let parents = builtin_parent_chain(child);
-    parents.iter().any(|p| p == parent)
+    if parents.iter().any(|p| p == parent) {
+        return true;
+    }
+    // Also check if any parent class implements the interface
+    for p in &parents {
+        if is_builtin_implements(p, parent) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_builtin_implements(class: &[u8], interface: &[u8]) -> bool {
+    match class {
+        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(
+            interface,
+            b"iteratoraggregate" | b"traversable" | b"arrayaccess" | b"serializable" | b"countable"
+        ),
+        b"splfixedarray" => matches!(
+            interface,
+            b"iterator" | b"traversable" | b"arrayaccess" | b"countable"
+        ),
+        b"spldoublylinkedlist" => matches!(
+            interface,
+            b"iterator" | b"traversable" | b"countable" | b"serializable" | b"arrayaccess"
+        ),
+        b"splstack" | b"splqueue" => matches!(
+            interface,
+            b"iterator" | b"traversable" | b"countable" | b"serializable" | b"arrayaccess"
+        ),
+        b"splobjectstorage" => matches!(
+            interface,
+            b"countable" | b"iterator" | b"traversable" | b"serializable" | b"arrayaccess"
+        ),
+        b"splpriorityqueue" => matches!(
+            interface,
+            b"iterator" | b"traversable" | b"countable"
+        ),
+        b"splheap" | b"splminheap" | b"splmaxheap" => matches!(
+            interface,
+            b"iterator" | b"traversable" | b"countable"
+        ),
+        _ => false,
+    }
 }
 
 fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
@@ -5405,7 +5485,11 @@ fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             | b"lengthexception"
             | b"outofrangeexception" => Some(b"logicexception".to_vec()),
             b"badfunctioncallexception" => Some(b"badmethodcallexception".to_vec()),
+            b"errorexception" => Some(b"exception".to_vec()),
             b"exception" => Some(b"throwable".to_vec()),
+            // SPL class hierarchy
+            b"splstack" | b"splqueue" => Some(b"spldoublylinkedlist".to_vec()),
+            b"splminheap" | b"splmaxheap" => Some(b"splheap".to_vec()),
             _ => None,
         };
         if let Some(p) = parent {
