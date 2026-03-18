@@ -214,6 +214,8 @@ pub enum OpCode {
     CloneObj,
     /// Get class name from object: op1 = object, result = class name string
     GetClassName,
+    /// Check if object property is set (calls __isset if available)
+    PropertyIsset,
 
     // ---- Print ----
     /// print expr (returns 1)

@@ -2716,6 +2716,33 @@ impl Compiler {
                     line: expr.span.line,
                 });
                 if exprs.len() == 1 {
+                    // Check if expression is a property access -> use PropertyIsset
+                    let is_prop_access = matches!(
+                        exprs[0].kind,
+                        ExprKind::PropertyAccess { .. }
+                    );
+                    if is_prop_access {
+                        if let ExprKind::PropertyAccess { object, property, .. } = &exprs[0].kind {
+                            let obj_operand = self.compile_expr(object)?;
+                            let prop_operand = self.compile_expr(property)?;
+                            let tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::PropertyIsset,
+                                op1: obj_operand,
+                                op2: prop_operand,
+                                result: OperandType::Tmp(tmp),
+                                line: expr.span.line,
+                            });
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ErrorRestore,
+                                op1: OperandType::Unused,
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                            return Ok(OperandType::Tmp(tmp));
+                        }
+                    }
                     let val = self.compile_expr(&exprs[0])?;
                     let tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {

@@ -3966,6 +3966,41 @@ impl Vm {
                     self.write_operand(&op.result, class_name, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::PropertyIsset => {
+                    // Check if object property is set (with __isset support)
+                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let prop_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
+                    let result = if let Value::Object(obj) = &obj_val {
+                        let ob = obj.borrow();
+                        if ob.has_property(prop_name.as_bytes()) {
+                            let val = ob.get_property(prop_name.as_bytes());
+                            if matches!(val, Value::Null) { Value::False } else { Value::True }
+                        } else {
+                            let class_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            drop(ob);
+                            // Try __isset magic
+                            let has_isset = self.classes.get(&class_lower)
+                                .map(|c| c.methods.contains_key(&b"__isset".to_vec()))
+                                .unwrap_or(false);
+                            if has_isset && self.magic_depth < 5 {
+                                self.magic_depth += 1;
+                                let method = self.classes.get(&class_lower).unwrap().get_method(b"__isset").unwrap().op_array.clone();
+                                let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+                                if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
+                                if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); }
+                                let isset_result = self.execute_op_array(&method, fn_cvs).unwrap_or(Value::False);
+                                self.magic_depth -= 1;
+                                if isset_result.is_truthy() { Value::True } else { Value::False }
+                            } else {
+                                Value::False
+                            }
+                        }
+                    } else {
+                        Value::False
+                    };
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
                 OpCode::ArrayUnset => {
                     // Remove element from array: op1 = array CV, op2 = key
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
