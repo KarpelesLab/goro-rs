@@ -2110,11 +2110,107 @@ fn bin2hex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(hex)))
 }
 
-fn base64_encode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty())) // stub
+fn base64_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let data = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = data.as_bytes();
+    const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = Vec::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | (bytes[i + 2] as u32);
+        result.push(B64[((n >> 18) & 0x3F) as usize]);
+        result.push(B64[((n >> 12) & 0x3F) as usize]);
+        result.push(B64[((n >> 6) & 0x3F) as usize]);
+        result.push(B64[(n & 0x3F) as usize]);
+        i += 3;
+    }
+    let remaining = bytes.len() - i;
+    if remaining == 2 {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+        result.push(B64[((n >> 18) & 0x3F) as usize]);
+        result.push(B64[((n >> 12) & 0x3F) as usize]);
+        result.push(B64[((n >> 6) & 0x3F) as usize]);
+        result.push(b'=');
+    } else if remaining == 1 {
+        let n = (bytes[i] as u32) << 16;
+        result.push(B64[((n >> 18) & 0x3F) as usize]);
+        result.push(B64[((n >> 12) & 0x3F) as usize]);
+        result.push(b'=');
+        result.push(b'=');
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
 }
-fn base64_decode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty())) // stub
+
+fn base64_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let data = args.first().unwrap_or(&Value::Null).to_php_string();
+    let strict = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let input = data.as_bytes();
+
+    fn b64_val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    // Filter out whitespace (and invalid chars in non-strict mode)
+    let mut filtered = Vec::with_capacity(input.len());
+    for &b in input {
+        if b == b'=' {
+            filtered.push(b);
+        } else if let Some(_) = b64_val(b) {
+            filtered.push(b);
+        } else if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+            // whitespace is always ignored
+        } else if strict {
+            return Ok(Value::False);
+        }
+        // non-strict: skip invalid chars
+    }
+
+    // Validate padding in strict mode
+    if strict {
+        let content_len = filtered.iter().filter(|&&b| b != b'=').count();
+        let pad_len = filtered.iter().filter(|&&b| b == b'=').count();
+        // Check padding position (must be at end)
+        let first_pad = filtered.iter().position(|&b| b == b'=').unwrap_or(filtered.len());
+        if first_pad + pad_len != filtered.len() {
+            return Ok(Value::False);
+        }
+        // Check valid padding length
+        match content_len % 4 {
+            0 => if pad_len != 0 { return Ok(Value::False); },
+            2 => if pad_len != 2 { return Ok(Value::False); },
+            3 => if pad_len != 1 { return Ok(Value::False); },
+            _ => return Ok(Value::False),
+        }
+    }
+
+    // Decode
+    let mut result = Vec::new();
+    let vals: Vec<u8> = filtered.iter().filter_map(|&b| b64_val(b)).collect();
+    let mut i = 0;
+    while i + 3 < vals.len() {
+        let n = ((vals[i] as u32) << 18) | ((vals[i+1] as u32) << 12) | ((vals[i+2] as u32) << 6) | (vals[i+3] as u32);
+        result.push((n >> 16) as u8);
+        result.push((n >> 8) as u8);
+        result.push(n as u8);
+        i += 4;
+    }
+    let remaining = vals.len() - i;
+    if remaining == 3 {
+        let n = ((vals[i] as u32) << 18) | ((vals[i+1] as u32) << 12) | ((vals[i+2] as u32) << 6);
+        result.push((n >> 16) as u8);
+        result.push((n >> 8) as u8);
+    } else if remaining == 2 {
+        let n = ((vals[i] as u32) << 18) | ((vals[i+1] as u32) << 12);
+        result.push((n >> 16) as u8);
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 fn urlencode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
