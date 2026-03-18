@@ -11,6 +11,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"error_reporting", error_reporting);
     vm.register_function(b"set_error_handler", set_error_handler);
     vm.register_function(b"restore_error_handler", restore_error_handler);
+    vm.register_function(b"error_get_last", error_get_last_fn);
+    vm.register_function(b"error_clear_last", error_clear_last_fn);
     vm.register_function(b"set_exception_handler", set_exception_handler);
     vm.register_function(b"restore_exception_handler", restore_exception_handler);
     vm.register_function(b"trigger_error", trigger_error);
@@ -5322,4 +5324,12 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(_) => Ok(Value::False),
     }
+}
+
+fn error_get_last_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null) // stub - no last error tracking yet
+}
+
+fn error_clear_last_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
 }
