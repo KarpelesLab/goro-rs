@@ -1304,8 +1304,50 @@ fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_pad(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn array_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let input = args.first().unwrap_or(&Value::Null);
+    let pad_size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let pad_value = args.get(2).cloned().unwrap_or(Value::Null);
+
+    if let Value::Array(arr) = input {
+        let arr = arr.borrow();
+        let current_len = arr.len() as i64;
+        let abs_size = pad_size.unsigned_abs() as usize;
+
+        if abs_size <= current_len as usize {
+            // No padding needed, return a copy
+            let mut result = PhpArray::new();
+            for (k, v) in arr.iter() {
+                result.set(k.clone(), v.clone());
+            }
+            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+        }
+
+        let pad_count = abs_size - current_len as usize;
+        let mut result = PhpArray::new();
+
+        if pad_size < 0 {
+            // Pad at the beginning
+            for _ in 0..pad_count {
+                result.push(pad_value.clone());
+            }
+            for (_k, v) in arr.iter() {
+                result.push(v.clone());
+            }
+        } else {
+            // Pad at the end
+            for (_k, v) in arr.iter() {
+                result.push(v.clone());
+            }
+            for _ in 0..pad_count {
+                result.push(pad_value.clone());
+            }
+        }
+
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    } else {
+        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    }
 }
 
 fn array_fill(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3859,20 +3901,40 @@ fn is_numeric_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn dirname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let s = path.to_string_lossy();
-    let dir = std::path::Path::new(&s)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| ".".to_string());
-    Ok(Value::String(PhpString::from_string(dir)))
+    let levels = args.get(1).map(|v| v.to_long()).unwrap_or(1).max(1) as usize;
+    let mut result = s.to_string();
+    for _ in 0..levels {
+        // Strip trailing slashes (but not the root /)
+        while result.len() > 1 && result.ends_with('/') {
+            result.pop();
+        }
+        // Find last separator
+        if let Some(pos) = result.rfind('/') {
+            if pos == 0 {
+                result = "/".to_string();
+            } else {
+                result.truncate(pos);
+            }
+        } else {
+            result = ".".to_string();
+        }
+    }
+    Ok(Value::String(PhpString::from_string(result)))
 }
+
 fn basename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let suffix = args.get(1).map(|v| v.to_php_string());
     let s = path.to_string_lossy();
-    let mut base = std::path::Path::new(&s)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_default();
+    // Strip trailing slashes
+    let trimmed = s.trim_end_matches('/');
+    let mut base = if trimmed.is_empty() {
+        String::new()
+    } else if let Some(pos) = trimmed.rfind('/') {
+        trimmed[pos + 1..].to_string()
+    } else {
+        trimmed.to_string()
+    };
     if let Some(suf) = suffix {
         let suf_str = suf.to_string_lossy();
         if base.ends_with(&suf_str) && base.len() > suf_str.len() {
@@ -3881,8 +3943,52 @@ fn basename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::String(PhpString::from_string(base)))
 }
-fn pathinfo_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+
+fn pathinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let option = args.get(1).map(|v| v.to_long());
+    let s = path.to_string_lossy();
+
+    let dirname = {
+        let trimmed = s.trim_end_matches('/');
+        if let Some(pos) = trimmed.rfind('/') {
+            if pos == 0 { "/".to_string() } else { trimmed[..pos].to_string() }
+        } else {
+            ".".to_string()
+        }
+    };
+    let basename = {
+        let trimmed = s.trim_end_matches('/');
+        if let Some(pos) = trimmed.rfind('/') {
+            trimmed[pos + 1..].to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let extension = basename.rfind('.').map(|pos| basename[pos + 1..].to_string());
+    let filename = if let Some(pos) = basename.rfind('.') {
+        basename[..pos].to_string()
+    } else {
+        basename.clone()
+    };
+
+    match option {
+        Some(1) => Ok(Value::String(PhpString::from_string(dirname))),  // PATHINFO_DIRNAME
+        Some(2) => Ok(Value::String(PhpString::from_string(basename))), // PATHINFO_BASENAME
+        Some(4) => Ok(Value::String(PhpString::from_string(extension.unwrap_or_default()))), // PATHINFO_EXTENSION
+        Some(8) => Ok(Value::String(PhpString::from_string(filename))), // PATHINFO_FILENAME
+        _ => {
+            // Return full array
+            let mut result = PhpArray::new();
+            result.set(ArrayKey::String(PhpString::from_bytes(b"dirname")), Value::String(PhpString::from_string(dirname)));
+            result.set(ArrayKey::String(PhpString::from_bytes(b"basename")), Value::String(PhpString::from_string(basename)));
+            if let Some(ext) = extension {
+                result.set(ArrayKey::String(PhpString::from_bytes(b"extension")), Value::String(PhpString::from_string(ext)));
+            }
+            result.set(ArrayKey::String(PhpString::from_bytes(b"filename")), Value::String(PhpString::from_string(filename)));
+            Ok(Value::Array(Rc::new(RefCell::new(result))))
+        }
+    }
 }
 
 // === Regex stubs ===
