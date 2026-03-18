@@ -711,15 +711,24 @@ fn array_shift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn array_unshift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr_mut = arr.borrow_mut();
-        let existing: Vec<Value> = arr_mut.values().cloned().collect();
+        let existing: Vec<_> = arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let new_values: Vec<Value> = args[1..].to_vec();
 
         let mut new_arr = PhpArray::new();
+        // Prepended values always get sequential integer keys
         for val in &new_values {
             new_arr.push(val.clone());
         }
-        for val in &existing {
-            new_arr.push(val.clone());
+        // Existing entries: string keys preserved, integer keys re-indexed
+        for (key, val) in &existing {
+            match key {
+                ArrayKey::String(s) => {
+                    new_arr.set(ArrayKey::String(s.clone()), val.clone());
+                }
+                ArrayKey::Int(_) => {
+                    new_arr.push(val.clone());
+                }
+            }
         }
         *arr_mut = new_arr;
 
@@ -1223,7 +1232,9 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
         if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-            for (_key, val) in &entries {
+            for (key, val) in &entries {
+                // Wrap value in a Reference so by-ref params (&$v) work
+                let val_ref = Rc::new(RefCell::new(val.clone()));
                 let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
                 let mut idx = 0;
                 for cv in &captured {
@@ -1233,9 +1244,21 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 if idx < fn_cvs.len() {
-                    fn_cvs[idx] = val.clone();
+                    fn_cvs[idx] = Value::Reference(val_ref.clone());
+                    idx += 1;
+                }
+                // Pass key as second argument
+                if idx < fn_cvs.len() {
+                    let key_val = match key {
+                        ArrayKey::Int(n) => Value::Long(*n),
+                        ArrayKey::String(s) => Value::String(s.clone()),
+                    };
+                    fn_cvs[idx] = key_val;
                 }
                 let _ = vm.execute_fn(&user_fn, fn_cvs);
+                // Write modified value back to the array
+                let new_val = val_ref.borrow().clone();
+                arr.borrow_mut().set(key.clone(), new_val);
             }
         } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
             for (_key, val) in &entries {
@@ -2012,8 +2035,32 @@ fn extract_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn array_column(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
 }
-fn array_count_values(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let arr = arr.borrow();
+        let mut result = PhpArray::new();
+        for (_, val) in arr.iter() {
+            let key = match val {
+                Value::Long(n) => ArrayKey::Int(*n),
+                Value::String(s) => ArrayKey::String(s.clone()),
+                _ => {
+                    // PHP warns and skips non-int/non-string values
+                    let msg = "array_count_values(): Argument #1 ($array) can only have int or string values";
+                    vm.write_output(format!("\nWarning: {}\n", msg).as_bytes());
+                    continue;
+                }
+            };
+            if let Some(existing) = result.get(&key) {
+                let count = existing.to_long() + 1;
+                result.set(key, Value::Long(count));
+            } else {
+                result.set(key, Value::Long(1));
+            }
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    } else {
+        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    }
 }
 fn array_rand(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
@@ -5371,46 +5418,85 @@ fn clearstatcache_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let arr = args.first().unwrap_or(&Value::Null);
-    let callback = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    if let Value::Array(a) = arr {
-        let entries: Vec<_> = a
-            .borrow()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        for (key, val) in entries {
-            if let Value::Array(_) = &val {
-                // Recurse
-                let sub_args = vec![val, Value::String(callback.clone())];
-                array_walk_recursive_fn(vm, &sub_args)?;
-            } else {
-                // Call callback(value, key)
-                let key_val = match &key {
-                    goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
-                    goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),
-                };
-                let cb_args = vec![val, key_val];
-                let cb_lower: Vec<u8> = callback
-                    .as_bytes()
-                    .iter()
-                    .map(|b| b.to_ascii_lowercase())
-                    .collect();
-                if let Some(func) = vm.functions.get(&cb_lower).copied() {
-                    func(vm, &cb_args)?;
-                } else if let Some(user_fn) = vm.user_functions.get(&cb_lower).cloned() {
-                    let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                    for (i, arg) in cb_args.iter().enumerate() {
-                        if i < fn_cvs.len() {
-                            fn_cvs[i] = arg.clone();
-                        }
+    let arr_val = args.first().unwrap_or(&Value::Null);
+    let callback = args.get(1).unwrap_or(&Value::Null);
+
+    // Extract callback function name and captured vars
+    let (func_name, captured) = match callback {
+        Value::String(s) => (s.as_bytes().to_vec(), vec![]),
+        Value::Array(cb) => {
+            let cb = cb.borrow();
+            let vals: Vec<Value> = cb.values().cloned().collect();
+            if vals.is_empty() {
+                return Ok(Value::True);
+            }
+            (
+                vals[0].to_php_string().as_bytes().to_vec(),
+                vals[1..].to_vec(),
+            )
+        }
+        _ => return Ok(Value::True),
+    };
+
+    if let Value::Array(a) = arr_val {
+        walk_recursive_inner(vm, a, &func_name, &captured)?;
+    }
+    Ok(Value::True)
+}
+
+fn walk_recursive_inner(
+    vm: &mut Vm,
+    arr: &Rc<RefCell<PhpArray>>,
+    func_name: &[u8],
+    captured: &[Value],
+) -> Result<(), VmError> {
+    let entries: Vec<_> = arr
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    for (key, val) in entries {
+        if let Value::Array(sub_arr) = &val {
+            // Recurse into sub-arrays
+            walk_recursive_inner(vm, sub_arr, func_name, captured)?;
+        } else {
+            // Call callback(&$value, $key) on leaf values
+            let key_val = match &key {
+                ArrayKey::Int(n) => Value::Long(*n),
+                ArrayKey::String(s) => Value::String(s.clone()),
+            };
+
+            if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                // Wrap value in a Reference so by-ref params (&$v) work
+                let val_ref = Rc::new(RefCell::new(val.clone()));
+                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                let mut idx = 0;
+                for cv in captured {
+                    if idx < fn_cvs.len() {
+                        fn_cvs[idx] = cv.clone();
+                        idx += 1;
                     }
-                    vm.execute_fn(&user_fn, fn_cvs)?;
                 }
+                if idx < fn_cvs.len() {
+                    fn_cvs[idx] = Value::Reference(val_ref.clone());
+                    idx += 1;
+                }
+                if idx < fn_cvs.len() {
+                    fn_cvs[idx] = key_val;
+                }
+                let _ = vm.execute_fn(&user_fn, fn_cvs);
+                // Write modified value back to the array
+                let new_val = val_ref.borrow().clone();
+                arr.borrow_mut().set(key.clone(), new_val);
+            } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+                let _ = builtin(vm, &[val, key_val]);
             }
         }
     }
-    Ok(Value::True)
+    Ok(())
 }
 
 fn fgetcsv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
