@@ -4036,10 +4036,27 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
-                    if let Value::Object(obj) = obj_val {
-                        let mut obj = obj.borrow_mut();
-                        obj.properties
-                            .retain(|(name, _)| name != prop_name.as_bytes());
+                    if let Value::Object(obj) = &obj_val {
+                        let has_prop = obj.borrow().has_property(prop_name.as_bytes());
+                        if has_prop {
+                            obj.borrow_mut().properties
+                                .retain(|(name, _)| name != prop_name.as_bytes());
+                        } else {
+                            // Try __unset magic method
+                            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let has_unset = self.classes.get(&class_lower)
+                                .map(|c| c.methods.contains_key(&b"__unset".to_vec()))
+                                .unwrap_or(false);
+                            if has_unset && self.magic_depth < 5 {
+                                self.magic_depth += 1;
+                                let method = self.classes.get(&class_lower).unwrap().get_method(b"__unset").unwrap().op_array.clone();
+                                let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+                                if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
+                                if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); }
+                                let _ = self.execute_op_array(&method, fn_cvs);
+                                self.magic_depth -= 1;
+                            }
+                        }
                     }
                 }
 
