@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-date"
+version = "0.1.0"
+edition = "2024"
+description = "PHP date/time extension for goro-rs"
+
+[dependencies]
+goro-core = { path = "../goro-core" }

@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-ctype"
+version = "0.1.0"
+edition = "2024"
+description = "PHP ctype extension for goro-rs"
+
+[dependencies]
+goro-core = { path = "../goro-core" }

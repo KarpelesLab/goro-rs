@@ -278,6 +278,10 @@ fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
     // Execute
     let mut vm = Vm::new();
     goro_ext_standard::register_standard_functions(&mut vm);
+    goro_ext_date::register(&mut vm);
+    goro_ext_json::register(&mut vm);
+    goro_ext_ctype::register(&mut vm);
+    goro_ext_hash::register(&mut vm);
     for class in compiled_classes {
         vm.register_class(class);
     }

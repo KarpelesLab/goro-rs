@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-json"
+version = "0.1.0"
+edition = "2024"
+description = "PHP JSON extension for goro-rs"
+
+[dependencies]
+goro-core = { path = "../goro-core" }

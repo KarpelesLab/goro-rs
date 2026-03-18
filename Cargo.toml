@@ -5,6 +5,10 @@ members = [
     "crates/goro-vfs",
     "crates/goro-sapi",
     "crates/goro-ext-standard",
+    "crates/goro-ext-date",
+    "crates/goro-ext-json",
+    "crates/goro-ext-ctype",
+    "crates/goro-ext-hash",
     "crates/goro-phpt",
 ]
 resolver = "2"
@@ -22,6 +26,10 @@ goro-parser = { path = "crates/goro-parser" }
 goro-vfs = { path = "crates/goro-vfs" }
 goro-sapi = { path = "crates/goro-sapi" }
 goro-ext-standard = { path = "crates/goro-ext-standard" }
+goro-ext-date = { path = "crates/goro-ext-date" }
+goro-ext-json = { path = "crates/goro-ext-json" }
+goro-ext-ctype = { path = "crates/goro-ext-ctype" }
+goro-ext-hash = { path = "crates/goro-ext-hash" }
 goro-phpt = { path = "crates/goro-phpt" }
 
 [features]

@@ -10,3 +10,7 @@ goro-parser = { path = "../goro-parser" }
 goro-sapi = { path = "../goro-sapi" }
 goro-vfs = { path = "../goro-vfs" }
 goro-ext-standard = { path = "../goro-ext-standard" }
+goro-ext-date = { path = "../goro-ext-date" }
+goro-ext-json = { path = "../goro-ext-json" }
+goro-ext-ctype = { path = "../goro-ext-ctype" }
+goro-ext-hash = { path = "../goro-ext-hash" }
