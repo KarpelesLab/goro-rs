@@ -2018,6 +2018,23 @@ impl Compiler {
                 operand,
                 prefix,
             } => {
+                // Unary plus just coerces to number - return the operand directly
+                if matches!(op, UnaryOp::Plus) {
+                    let val = self.compile_expr(operand)?;
+                    // Emit CastInt/CastDouble to coerce to numeric
+                    // Actually PHP unary + just returns the value coerced to number
+                    // For simplicity, add 0 to force numeric coercion
+                    let tmp = self.op_array.alloc_temp();
+                    let zero_idx = self.op_array.add_literal(Value::Long(0));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Add,
+                        op1: val,
+                        op2: OperandType::Const(zero_idx),
+                        result: OperandType::Tmp(tmp),
+                        line: expr.span.line,
+                    });
+                    return Ok(OperandType::Tmp(tmp));
+                }
                 let val = self.compile_expr(operand)?;
                 let tmp = self.op_array.alloc_temp();
                 let opcode = match (op, prefix) {
