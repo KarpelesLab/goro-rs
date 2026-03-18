@@ -5219,6 +5219,24 @@ impl Vm {
     // ---- Generator support methods ----
     // These methods are called by the generator executor to interact with the VM
 
+    /// Increment call depth and check for overflow (used by generator resume to prevent stack overflow)
+    pub fn enter_generator_resume(&mut self, line: u32) -> Result<(), VmError> {
+        self.call_depth += 1;
+        if self.call_depth > 100 {
+            self.call_depth -= 1;
+            return Err(VmError {
+                message: "Maximum call depth exceeded (possible infinite recursion)".into(),
+                line,
+            });
+        }
+        Ok(())
+    }
+
+    /// Decrement call depth after generator resume completes
+    pub fn leave_generator_resume(&mut self) {
+        self.call_depth -= 1;
+    }
+
     /// Initialize a function call from generator context
     pub fn generator_init_fcall(&mut self, name_val: Value) {
         if let Value::Array(arr) = &name_val {

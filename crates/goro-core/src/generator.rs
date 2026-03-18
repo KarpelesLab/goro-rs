@@ -90,6 +90,18 @@ impl PhpGenerator {
             return Ok(false);
         }
 
+        // Track call depth to prevent stack overflow from recursive yield-from
+        vm.enter_generator_resume(0)?;
+
+        let result = self.resume_inner(vm);
+
+        vm.leave_generator_resume();
+
+        result
+    }
+
+    /// Inner resume implementation (depth check is done by the caller)
+    fn resume_inner(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
         let op_array = self.op_array.clone();
         let mut ip = self.ip;
 
