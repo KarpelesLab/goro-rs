@@ -15,8 +15,24 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"hash_equals", hash_equals_fn);
 }
 
-fn crc32_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let data = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = data.as_bytes();
+    // CRC32B (standard CRC32 used by PHP's crc32() function)
+    let mut crc: u32 = 0xFFFFFFFF;
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    crc ^= 0xFFFFFFFF;
+    // PHP returns signed integer
+    Ok(Value::Long(crc as i32 as i64))
 }
 fn md5_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();

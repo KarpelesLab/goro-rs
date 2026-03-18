@@ -2824,10 +2824,20 @@ fn is_numeric_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => Value::False,
     })
 }
-fn dirname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let s = path.to_string_lossy();
-    let levels = args.get(1).map(|v| v.to_long()).unwrap_or(1).max(1) as usize;
+    let levels_raw = args.get(1).map(|v| v.to_long()).unwrap_or(1);
+    if levels_raw < 1 {
+        let msg = "dirname(): Argument #2 ($levels) must be greater than or equal to 1".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
+    let levels = levels_raw as usize;
     let mut result = s.to_string();
     for _ in 0..levels {
         // Strip trailing slashes (but not the root /)
