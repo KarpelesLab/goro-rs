@@ -853,6 +853,151 @@ impl PhpGenerator {
                     }
                 }
 
+                OpCode::Throw => {
+                    let exc_val = self.read_operand(&op.op1, &op_array.literals);
+                    vm.current_exception = Some(exc_val);
+                    if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
+                        ip = catch_target as usize;
+                    } else {
+                        self.state = GeneratorState::Completed;
+                        self.ip = ip;
+                        return Err(VmError {
+                            message: "Uncaught exception in generator".to_string(),
+                            line: op.line,
+                        });
+                    }
+                }
+
+                OpCode::TryBegin => {
+                    if let (OperandType::JmpTarget(catch), OperandType::JmpTarget(_finally)) =
+                        (op.op1, op.op2)
+                    {
+                        self.exception_handlers.push((catch, 0, 0));
+                    }
+                }
+
+                OpCode::TryEnd => {
+                    self.exception_handlers.pop();
+                }
+
+                OpCode::CatchException => {
+                    if let Some(exc) = vm.current_exception.take() {
+                        self.write_operand(&op.op1, exc);
+                    }
+                }
+
+                OpCode::TypeCheck => {
+                    let exc_val = self.read_operand(&op.op1, &op_array.literals);
+                    let type_name = self.read_operand(&op.op2, &op_array.literals);
+                    let type_str = type_name.to_php_string();
+                    let type_lower: Vec<u8> = type_str.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let matches = if let Value::Object(obj) = &exc_val {
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        class_lower == type_lower
+                            || crate::vm::is_builtin_subclass(&class_lower, &type_lower)
+                            || vm.class_extends(&class_lower, &type_lower)
+                            || type_lower == b"throwable"
+                    } else {
+                        false
+                    };
+                    self.write_operand(&op.result, if matches { Value::True } else { Value::False });
+                }
+
+                OpCode::PropertyGet => {
+                    let obj_val = self.read_operand(&op.op1, &op_array.literals);
+                    let prop_name = self.read_operand(&op.op2, &op_array.literals).to_php_string();
+                    let result = if let Value::Object(obj) = &obj_val {
+                        obj.borrow().get_property(prop_name.as_bytes())
+                    } else {
+                        Value::Null
+                    };
+                    self.write_operand(&op.result, result);
+                }
+
+                OpCode::PropertySet => {
+                    let obj_val = self.read_operand(&op.op1, &op_array.literals);
+                    let prop_name = self.read_operand(&op.op2, &op_array.literals).to_php_string();
+                    let val = self.read_operand(&op.result, &op_array.literals);
+                    if let Value::Object(obj) = &obj_val {
+                        obj.borrow_mut().set_property(prop_name.as_bytes().to_vec(), val);
+                    }
+                }
+
+                OpCode::IssetCheck => {
+                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    let result = match val {
+                        Value::Null | Value::Undef => Value::False,
+                        _ => Value::True,
+                    };
+                    self.write_operand(&op.result, result);
+                }
+
+                OpCode::ErrorSuppress => {
+                    vm.error_reporting_stack.push(vm.error_reporting);
+                    vm.error_reporting = 0;
+                }
+
+                OpCode::ErrorRestore => {
+                    if let Some(saved) = vm.error_reporting_stack.pop() {
+                        vm.error_reporting = saved;
+                    }
+                }
+
+                OpCode::ArrayUnset => {
+                    let key_val = self.read_operand(&op.op2, &op_array.literals);
+                    let arr_val = if let OperandType::Cv(idx) = &op.op1 {
+                        self.cvs.get(*idx as usize).cloned()
+                    } else {
+                        None
+                    };
+                    if let Some(Value::Array(arr)) = arr_val {
+                        let key = Vm::value_to_array_key(key_val);
+                        arr.borrow_mut().remove(&key);
+                    }
+                }
+
+                OpCode::CloneObj => {
+                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    let cloned = match &val {
+                        Value::Object(obj) => {
+                            let obj_borrow = obj.borrow();
+                            let clone_id = vm.next_object_id();
+                            let mut new_obj = crate::object::PhpObject::new(obj_borrow.class_name.clone(), clone_id);
+                            for (name, value) in &obj_borrow.properties {
+                                new_obj.set_property(name.clone(), value.clone());
+                            }
+                            Value::Object(Rc::new(RefCell::new(new_obj)))
+                        }
+                        other => other.clone(),
+                    };
+                    self.write_operand(&op.result, cloned);
+                }
+
+                OpCode::ArraySpread => {
+                    let target_val = if let OperandType::Tmp(idx) = &op.op1 {
+                        self.tmps.get(*idx as usize).cloned()
+                    } else if let OperandType::Cv(idx) = &op.op1 {
+                        self.cvs.get(*idx as usize).cloned()
+                    } else {
+                        None
+                    };
+                    let source = self.read_operand(&op.op2, &op_array.literals);
+                    if let (Some(Value::Array(target)), Value::Array(source_arr)) = (target_val, source) {
+                        let source_borrow = source_arr.borrow();
+                        let mut target_borrow = target.borrow_mut();
+                        for (key, val) in source_borrow.iter() {
+                            match key {
+                                crate::array::ArrayKey::Int(_) => {
+                                    target_borrow.push(val.clone());
+                                }
+                                crate::array::ArrayKey::String(s) => {
+                                    target_borrow.set(crate::array::ArrayKey::String(s.clone()), val.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // For any unhandled opcode, just skip it
                 _ => {
                     // Skip unimplemented opcodes in generator context

@@ -122,7 +122,7 @@ pub struct Vm {
     /// Current call depth (to prevent stack overflow from infinite recursion)
     call_depth: u32,
     /// Stack of saved error_reporting levels (for @ operator)
-    error_reporting_stack: Vec<i64>,
+    pub error_reporting_stack: Vec<i64>,
     /// Pending return value (for deferred return in finally blocks)
     pending_return: Option<Value>,
     /// User error handler callback (from set_error_handler)
