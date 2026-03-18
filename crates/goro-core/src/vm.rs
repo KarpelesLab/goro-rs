@@ -2527,6 +2527,27 @@ impl Vm {
                         call.named_args.push((name, val));
                     }
                 }
+                OpCode::SendRef => {
+                    // Send a value as a reference - for by-ref function arguments
+                    // Creates a Reference wrapper so builtins can write back
+                    let val = if let OperandType::Cv(idx) = &op.op1 {
+                        let i = *idx as usize;
+                        if let Some(Value::Reference(r)) = cvs.get(i) {
+                            Value::Reference(r.clone())
+                        } else {
+                            // Create a new reference for the variable
+                            let current = cvs.get(i).cloned().unwrap_or(Value::Null);
+                            let r = Rc::new(RefCell::new(current));
+                            cvs[i] = Value::Reference(r.clone());
+                            Value::Reference(r)
+                        }
+                    } else {
+                        self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                    };
+                    if let Some(call) = self.pending_calls.last_mut() {
+                        call.args.push(val);
+                    }
+                }
                 OpCode::SendUnpack => {
                     // Unpack an array into individual arguments
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);

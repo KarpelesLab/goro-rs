@@ -242,6 +242,8 @@ pub enum OpCode {
     IssetCheck,
     /// Make a CV into a reference (wrap in Rc<RefCell>): op1 = CV to make ref
     MakeRef,
+    /// Send a value as a reference (for by-ref function args like preg_match &$matches)
+    SendRef,
     /// Append to array without deref (preserves Reference wrapper): op1 = array, op2 = CV
     ArrayAppendRef,
     /// Dynamic variable read: op1 = name expr, result = value

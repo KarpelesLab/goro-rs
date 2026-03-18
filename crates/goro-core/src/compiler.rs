@@ -54,6 +54,24 @@ impl Default for Compiler {
 }
 
 impl Compiler {
+    /// Check if a builtin function's parameter at given position is by-reference
+    fn is_builtin_byref_param(func_name: Option<&[u8]>, pos: usize) -> bool {
+        match func_name {
+            Some(name) => {
+                let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                match (lower.as_slice(), pos) {
+                    // preg_match($pattern, $subject, &$matches, $flags, $offset)
+                    (b"preg_match", 2) => true,
+                    (b"preg_match_all", 2) => true,
+                    // sscanf with output vars (positions 2+)
+                    (b"sscanf", p) if p >= 2 => true,
+                    _ => false,
+                }
+            }
+            None => false,
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             op_array: OpArray::new(),
@@ -67,6 +85,15 @@ impl Compiler {
 
     /// Compile and emit SendVal/SendNamedVal/SendUnpack opcodes for function call arguments.
     fn compile_send_args(&mut self, args: &[Argument], line: u32) -> CompileResult<()> {
+        self.compile_send_args_with_name(args, line, None)
+    }
+
+    fn compile_send_args_with_name(
+        &mut self,
+        args: &[Argument],
+        line: u32,
+        func_name: Option<&[u8]>,
+    ) -> CompileResult<()> {
         for (i, arg) in args.iter().enumerate() {
             let val = self.compile_expr(&arg.value)?;
             if arg.unpack {
@@ -78,7 +105,6 @@ impl Compiler {
                     line,
                 });
             } else if let Some(name) = &arg.name {
-                // Named argument: emit SendNamedVal with the argument name as a constant
                 let name_idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(name.clone())));
@@ -90,9 +116,11 @@ impl Compiler {
                     line,
                 });
             } else {
+                // Check if this argument position is by-ref for known builtins
+                let is_byref = Self::is_builtin_byref_param(func_name, i);
                 let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
                 self.op_array.emit(Op {
-                    opcode: OpCode::SendVal,
+                    opcode: if is_byref { OpCode::SendRef } else { OpCode::SendVal },
                     op1: val,
                     op2: OperandType::Const(pos_idx),
                     result: OperandType::Unused,
@@ -2164,8 +2192,13 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                // Send arguments
-                self.compile_send_args(args, expr.span.line)?;
+                // Send arguments (pass function name for by-ref detection)
+                let func_name_for_ref = if let ExprKind::Identifier(ref n) = name.kind {
+                    Some(n.as_slice())
+                } else {
+                    None
+                };
+                self.compile_send_args_with_name(args, expr.span.line, func_name_for_ref)?;
 
                 // Do the call
                 let tmp = self.op_array.alloc_temp();
