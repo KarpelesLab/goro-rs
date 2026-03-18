@@ -1222,10 +1222,44 @@ impl Compiler {
                                     ExprKind::True => Value::True,
                                     ExprKind::False => Value::False,
                                     ExprKind::Null => Value::Null,
-                                    ExprKind::Array(elements) if elements.is_empty() => {
-                                        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
-                                            crate::array::PhpArray::new(),
-                                        )))
+                                    ExprKind::Array(elements) => {
+                                        let mut arr = crate::array::PhpArray::new();
+                                        let mut all_const = true;
+                                        for elem in elements {
+                                            let val = Self::eval_const_expr(&elem.value);
+                                            if let Some(v) = val {
+                                                if let Some(key_expr) = &elem.key {
+                                                    if let Some(k) = Self::eval_const_expr(key_expr) {
+                                                        let key = match k {
+                                                            Value::Long(n) => crate::array::ArrayKey::Int(n),
+                                                            Value::String(s) => crate::array::ArrayKey::String(s),
+                                                            _ => { all_const = false; break; }
+                                                        };
+                                                        arr.set(key, v);
+                                                    } else {
+                                                        all_const = false;
+                                                        break;
+                                                    }
+                                                } else {
+                                                    arr.push(v);
+                                                }
+                                            } else {
+                                                all_const = false;
+                                                break;
+                                            }
+                                        }
+                                        if all_const {
+                                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr)))
+                                        } else {
+                                            Value::Null
+                                        }
+                                    }
+                                    ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => {
+                                        match Self::eval_const_expr(operand) {
+                                            Some(Value::Long(n)) => Value::Long(-n),
+                                            Some(Value::Double(f)) => Value::Double(-f),
+                                            _ => Value::Null,
+                                        }
                                     }
                                     _ => Value::Null,
                                 }
@@ -2035,6 +2069,57 @@ impl Compiler {
                     });
                     return Ok(OperandType::Tmp(tmp));
                 }
+
+                // Handle increment/decrement on property access: $obj->prop++ etc.
+                if matches!(op, UnaryOp::PostIncrement | UnaryOp::PostDecrement | UnaryOp::PreIncrement | UnaryOp::PreDecrement)
+                {
+                    if let ExprKind::PropertyAccess { object, property, .. } = &operand.kind {
+                        let obj_op = self.compile_expr(object)?;
+                        let prop_name = match &property.kind {
+                            ExprKind::Identifier(name) => name.clone(),
+                            _ => vec![],
+                        };
+                        if !prop_name.is_empty() {
+                            let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(prop_name)));
+                            // Fetch current value
+                            let old_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::PropertyGet,
+                                op1: obj_op,
+                                op2: OperandType::Const(name_idx),
+                                result: OperandType::Tmp(old_tmp),
+                                line: expr.span.line,
+                            });
+                            // Increment/decrement
+                            let new_tmp = self.op_array.alloc_temp();
+                            let inc_opcode = match op {
+                                UnaryOp::PostIncrement | UnaryOp::PreIncrement => OpCode::PostIncrement,
+                                _ => OpCode::PostDecrement,
+                            };
+                            self.op_array.emit(Op {
+                                opcode: inc_opcode,
+                                op1: OperandType::Tmp(old_tmp),
+                                op2: OperandType::Unused,
+                                result: OperandType::Tmp(new_tmp),
+                                line: expr.span.line,
+                            });
+                            // Write back to property (old_tmp now contains new value after PostInc/Dec modified it)
+                            self.op_array.emit(Op {
+                                opcode: OpCode::PropertySet,
+                                op1: obj_op,
+                                op2: OperandType::Tmp(old_tmp),
+                                result: OperandType::Const(name_idx),
+                                line: expr.span.line,
+                            });
+                            // For post-inc/dec, return old value (new_tmp); for pre, return new value (old_tmp)
+                            return match op {
+                                UnaryOp::PostIncrement | UnaryOp::PostDecrement => Ok(OperandType::Tmp(new_tmp)),
+                                _ => Ok(OperandType::Tmp(old_tmp)),
+                            };
+                        }
+                    }
+                }
+
                 let val = self.compile_expr(operand)?;
                 let tmp = self.op_array.alloc_temp();
                 let opcode = match (op, prefix) {
@@ -3556,6 +3641,44 @@ impl Compiler {
                 ),
                 line: expr.span.line,
             }),
+        }
+    }
+
+    /// Evaluate a constant expression at compile time (for property defaults, etc.)
+    fn eval_const_expr(expr: &Expr) -> Option<Value> {
+        match &expr.kind {
+            ExprKind::Int(n) => Some(Value::Long(*n)),
+            ExprKind::Float(f) => Some(Value::Double(*f)),
+            ExprKind::String(s) => Some(Value::String(PhpString::from_vec(s.clone()))),
+            ExprKind::True => Some(Value::True),
+            ExprKind::False => Some(Value::False),
+            ExprKind::Null => Some(Value::Null),
+            ExprKind::Array(elements) => {
+                let mut arr = crate::array::PhpArray::new();
+                for elem in elements {
+                    let val = Self::eval_const_expr(&elem.value)?;
+                    if let Some(key_expr) = &elem.key {
+                        let k = Self::eval_const_expr(key_expr)?;
+                        let key = match k {
+                            Value::Long(n) => crate::array::ArrayKey::Int(n),
+                            Value::String(s) => crate::array::ArrayKey::String(s),
+                            _ => return None,
+                        };
+                        arr.set(key, val);
+                    } else {
+                        arr.push(val);
+                    }
+                }
+                Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+            }
+            ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => {
+                match Self::eval_const_expr(operand)? {
+                    Value::Long(n) => Some(Value::Long(-n)),
+                    Value::Double(f) => Some(Value::Double(-f)),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 }

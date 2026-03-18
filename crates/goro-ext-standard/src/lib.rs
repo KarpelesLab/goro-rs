@@ -1,6 +1,7 @@
 pub mod math;
 pub mod misc;
 pub mod output;
+pub mod regex;
 pub mod strings;
 pub mod type_funcs;
 
@@ -13,4 +14,5 @@ pub fn register_standard_functions(vm: &mut Vm) {
     type_funcs::register(vm);
     math::register(vm);
     misc::register(vm);
+    regex::register(vm);
 }

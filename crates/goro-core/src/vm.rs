@@ -853,6 +853,51 @@ impl Vm {
         false
     }
 
+    /// Check if a class (by lowercase name) implements a given interface (by lowercase name).
+    /// Walks up the parent chain and checks each class's interfaces list.
+    fn class_implements_interface(&self, class_name: &[u8], iface_name: &[u8]) -> bool {
+        let mut current: Vec<u8> = class_name.to_vec();
+        for _ in 0..50 {
+            if let Some(ce) = self.classes.get(&current) {
+                // Check this class's interfaces
+                for iface in &ce.interfaces {
+                    let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if iface_lower == iface_name {
+                        return true;
+                    }
+                    // Check if the interface itself extends the target interface
+                    if self.class_implements_interface(&iface_lower, iface_name) {
+                        return true;
+                    }
+                }
+                // Walk up to parent
+                match &ce.parent {
+                    Some(p) => {
+                        current = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    }
+                    None => return false,
+                }
+            } else {
+                // Built-in class - check known built-in interfaces
+                return self.builtin_implements_interface(&current, iface_name);
+            }
+        }
+        false
+    }
+
+    /// Check if a built-in class implements a given interface
+    fn builtin_implements_interface(&self, class_lower: &[u8], iface_name: &[u8]) -> bool {
+        match iface_name {
+            b"iterator" => matches!(
+                class_lower,
+                b"arrayiterator" | b"splfixedarray" | b"spldoublylinkedlist"
+                    | b"splstack" | b"splqueue" | b"splpriorityqueue"
+            ),
+            b"iteratoraggregate" => matches!(class_lower, b"arrayobject"),
+            _ => false,
+        }
+    }
+
     /// Dispatch method calls for SPL built-in classes
     fn dispatch_spl_method(
         &mut self,
@@ -3388,14 +3433,78 @@ impl Vm {
                             &static_cv_keys,
                         );
                     } else if let Value::Object(obj) = &arr_val {
-                        // Check if this is an SPL/ArrayAccess class with __spl_array
-                        let obj_borrow = obj.borrow();
-                        let spl_arr = obj_borrow.get_property(b"__spl_array");
-                        let arr_val = if let Value::Array(a) = spl_arr {
-                            // Use the internal SPL array for iteration
-                            Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                        // Check for SPL __spl_array first (built-in SPL classes)
+                        let has_spl_array = {
+                            let ob = obj.borrow();
+                            matches!(ob.get_property(b"__spl_array"), Value::Array(_))
+                        };
+
+                        if has_spl_array && !self.class_implements_interface(&class_lower, b"iterator") {
+                            // SPL class with internal array - iterate the array directly
+                            let obj_borrow = obj.borrow();
+                            let spl_arr = obj_borrow.get_property(b"__spl_array");
+                            let arr_val = if let Value::Array(a) = spl_arr {
+                                Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                            } else {
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new())))
+                            };
+                            drop(obj_borrow);
+                            self.write_operand(
+                                &op.result,
+                                arr_val,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                        } else if self.class_implements_interface(&class_lower, b"iteratoraggregate") {
+                            // IteratorAggregate: call getIterator() and iterate the result
+                            let iter_obj = self.call_object_method(&arr_val, b"getIterator", &[]);
+                            if let Some(iter_val) = iter_obj {
+                                if let Value::Object(_) = &iter_val {
+                                    // Call rewind() on the returned Iterator
+                                    self.call_object_method(&iter_val, b"rewind", &[]);
+                                    // Store the iterator object for ForeachNext
+                                    self.write_operand(
+                                        &op.result,
+                                        iter_val,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                } else {
+                                    // getIterator() didn't return an object, store as-is
+                                    self.write_operand(
+                                        &op.result,
+                                        iter_val,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                }
+                            } else {
+                                self.write_operand(
+                                    &op.result,
+                                    Value::Null,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                            }
+                        } else if self.class_implements_interface(&class_lower, b"iterator") {
+                            // Iterator: call rewind() and store the object
+                            self.call_object_method(&arr_val, b"rewind", &[]);
+                            self.write_operand(
+                                &op.result,
+                                arr_val,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
                         } else {
-                            // Convert object properties to an array for iteration
+                            // Plain object: convert properties to an array for iteration
+                            let obj_borrow = obj.borrow();
                             let mut arr = PhpArray::new();
                             for (name, value) in &obj_borrow.properties {
                                 arr.set(
@@ -3403,16 +3512,16 @@ impl Vm {
                                     value.clone(),
                                 );
                             }
-                            Value::Array(Rc::new(RefCell::new(arr)))
-                        };
-                        drop(obj_borrow);
-                        self.write_operand(
-                            &op.result,
-                            arr_val,
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
+                            let arr_val = Value::Array(Rc::new(RefCell::new(arr)));
+                            drop(obj_borrow);
+                            self.write_operand(
+                                &op.result,
+                                arr_val,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                        }
                     } else {
                         // Store value in the iterator tmp slot
                         self.write_operand(
@@ -3471,6 +3580,46 @@ impl Vm {
                             let value = gen_borrow.current_value.clone();
                             let key = gen_borrow.current_key.clone();
                             drop(gen_borrow);
+
+                            // Save the key for ForeachKey to read
+                            foreach_gen_keys.insert(iter_idx, key);
+
+                            self.write_operand(
+                                &op.result,
+                                value,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                            foreach_positions.insert(iter_idx, pos + 1);
+                        }
+                    } else if let Value::Object(_) = &arr_val {
+                        // Iterator object: call valid(), current(), key(), next()
+                        // On pos > 0, advance first via next()
+                        if pos > 0 {
+                            self.call_object_method(&arr_val, b"next", &[]);
+                        }
+
+                        // Check valid()
+                        let valid = self
+                            .call_object_method(&arr_val, b"valid", &[])
+                            .unwrap_or(Value::False);
+                        let is_valid = valid.is_truthy();
+
+                        if !is_valid {
+                            // Done - jump to end
+                            if let OperandType::JmpTarget(target) = op.op2 {
+                                ip = target as usize;
+                            }
+                        } else {
+                            // Get current value
+                            let value = self
+                                .call_object_method(&arr_val, b"current", &[])
+                                .unwrap_or(Value::Null);
+                            // Get key
+                            let key = self
+                                .call_object_method(&arr_val, b"key", &[])
+                                .unwrap_or(Value::Long(pos as i64));
 
                             // Save the key for ForeachKey to read
                             foreach_gen_keys.insert(iter_idx, key);
@@ -3550,6 +3699,19 @@ impl Vm {
 
                     if let Value::Generator(_) = &arr_val {
                         // Use the key saved by ForeachNext before it advanced
+                        let key_val = foreach_gen_keys
+                            .get(&iter_idx)
+                            .cloned()
+                            .unwrap_or(Value::Long(0));
+                        self.write_operand(
+                            &op.result,
+                            key_val,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else if let Value::Object(_) = &arr_val {
+                        // Iterator object: use the key saved by ForeachNext
                         let key_val = foreach_gen_keys
                             .get(&iter_idx)
                             .cloned()

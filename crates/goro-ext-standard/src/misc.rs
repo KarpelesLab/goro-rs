@@ -315,12 +315,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"basename", basename_fn);
     vm.register_function(b"pathinfo", pathinfo_fn);
 
-    // Regex stubs
-    vm.register_function(b"preg_match", preg_match);
-    vm.register_function(b"preg_match_all", preg_match_all);
-    vm.register_function(b"preg_replace", preg_replace);
-    vm.register_function(b"preg_split", preg_split);
-    vm.register_function(b"preg_quote", preg_quote);
+    // Regex functions are now in the regex module (regex.rs)
 }
 
 // === Error handling ===
@@ -3021,24 +3016,6 @@ fn pathinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
     }
-}
-
-// === Regex stubs ===
-fn preg_match(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
-}
-fn preg_match_all(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
-}
-fn preg_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Return subject unchanged
-    Ok(args.get(2).cloned().unwrap_or(Value::Null))
-}
-fn preg_split(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-}
-fn preg_quote(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(args.first().cloned().unwrap_or(Value::Null))
 }
 
 // Additional commonly needed stubs
