@@ -31,8 +31,8 @@ fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     crc ^= 0xFFFFFFFF;
-    // PHP returns signed integer
-    Ok(Value::Long(crc as i32 as i64))
+    // PHP 64-bit returns unsigned 32-bit value as positive integer
+    Ok(Value::Long(crc as i64))
 }
 fn md5_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();

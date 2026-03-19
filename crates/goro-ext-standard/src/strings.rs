@@ -318,31 +318,92 @@ fn str_repeat(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(repeated)))
 }
 
-fn str_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let search = args.first().unwrap_or(&Value::Null).to_php_string();
-    let replace = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let subject = args.get(2).unwrap_or(&Value::Null).to_php_string();
-
-    let s = subject.as_bytes();
-    let find = search.as_bytes();
-    let rep = replace.as_bytes();
-
-    if find.is_empty() {
-        return Ok(Value::String(subject));
+/// Helper: single string search/replace, returns (result, count_of_replacements)
+fn str_replace_single(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> (Vec<u8>, i64) {
+    if needle.is_empty() {
+        return (haystack.to_vec(), 0);
     }
-
     let mut result = Vec::new();
+    let mut count = 0i64;
     let mut i = 0;
-    while i < s.len() {
-        if i + find.len() <= s.len() && &s[i..i + find.len()] == find {
-            result.extend_from_slice(rep);
-            i += find.len();
+    while i < haystack.len() {
+        if i + needle.len() <= haystack.len() && &haystack[i..i + needle.len()] == needle {
+            result.extend_from_slice(replacement);
+            i += needle.len();
+            count += 1;
         } else {
-            result.push(s[i]);
+            result.push(haystack[i]);
             i += 1;
         }
     }
-    Ok(Value::String(PhpString::from_vec(result)))
+    (result, count)
+}
+
+fn str_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let search_val = args.first().unwrap_or(&Value::Null);
+    let replace_val = args.get(1).unwrap_or(&Value::Null);
+    let subject_val = args.get(2).unwrap_or(&Value::Null);
+    let count_ref = args.get(3);
+
+    let mut total_count = 0i64;
+
+    // Build search/replace pairs
+    let pairs: Vec<(PhpString, PhpString)> = match search_val {
+        Value::Array(search_arr) => {
+            let search_arr = search_arr.borrow();
+            let replace_values: Vec<PhpString> = match replace_val {
+                Value::Array(replace_arr) => {
+                    let replace_arr = replace_arr.borrow();
+                    replace_arr.values().map(|v| v.to_php_string()).collect()
+                }
+                _ => vec![replace_val.to_php_string()],
+            };
+            search_arr
+                .values()
+                .enumerate()
+                .map(|(i, sv)| {
+                    let rv = replace_values.get(i).cloned().unwrap_or_else(PhpString::empty);
+                    (sv.to_php_string(), rv)
+                })
+                .collect()
+        }
+        _ => {
+            vec![(search_val.to_php_string(), replace_val.to_php_string())]
+        }
+    };
+
+    let result = match subject_val {
+        Value::Array(subject_arr) => {
+            let subject_arr = subject_arr.borrow();
+            let mut result_arr = PhpArray::new();
+            for (key, val) in subject_arr.iter() {
+                let mut current = val.to_php_string().as_bytes().to_vec();
+                for (needle, replacement) in &pairs {
+                    let (new_val, cnt) = str_replace_single(&current, needle.as_bytes(), replacement.as_bytes());
+                    total_count += cnt;
+                    current = new_val;
+                }
+                result_arr.set(key.clone(), Value::String(PhpString::from_vec(current)));
+            }
+            Value::Array(Rc::new(RefCell::new(result_arr)))
+        }
+        _ => {
+            let mut current = subject_val.to_php_string().as_bytes().to_vec();
+            for (needle, replacement) in &pairs {
+                let (new_val, cnt) = str_replace_single(&current, needle.as_bytes(), replacement.as_bytes());
+                total_count += cnt;
+                current = new_val;
+            }
+            Value::String(PhpString::from_vec(current))
+        }
+    };
+
+    // Set count if provided as reference
+    if let Some(Value::Reference(r)) = count_ref {
+        *r.borrow_mut() = Value::Long(total_count);
+    }
+
+    Ok(result)
 }
 
 fn explode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -833,15 +894,26 @@ fn stripslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn addcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn addcslashes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let charlist = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let charlist_val = args.get(1).unwrap_or(&Value::Null);
+    // TypeError if charlist is an array
+    if matches!(charlist_val, Value::Array(_)) {
+        let msg = "addcslashes(): Argument #2 ($characters) must be of type string, array given".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg,
+            line: 0,
+        });
+    }
+    let charlist = charlist_val.to_php_string();
     let chars = charlist.as_bytes();
     // Expand ranges (e.g., "a..z" means all chars from a to z)
     let mut char_set = [false; 256];
     let mut i = 0;
     while i < chars.len() {
-        if i + 2 < chars.len() && chars[i + 1] == b'.' && chars[i + 2] == b'.' && i + 3 < chars.len() {
+        if i + 3 < chars.len() && chars[i + 1] == b'.' && chars[i + 2] == b'.' {
             let start = chars[i];
             let end = chars[i + 3];
             if start <= end {
@@ -849,8 +921,12 @@ fn addcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     char_set[c as usize] = true;
                 }
             } else {
-                // Reverse range - still set the endpoints
+                // Invalid range - warn and set each individual character
+                vm.emit_warning(&format!(
+                    "addcslashes(): Invalid '..'-range, '..'-range needs to be incrementing"
+                ));
                 char_set[start as usize] = true;
+                char_set[b'.' as usize] = true;
                 char_set[end as usize] = true;
             }
             i += 4;
@@ -1227,6 +1303,19 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let main_bytes = main_str.as_bytes();
     let main_len = main_bytes.len() as i64;
 
+    // Check negative length first (ValueError)
+    if let Some(l) = length {
+        if l < 0 {
+            let msg = "substr_compare(): Argument #4 ($length) must be greater than or equal to 0".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            if let Value::Object(obj) = &exc {
+                obj.borrow_mut().class_name = b"ValueError".to_vec();
+            }
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+    }
+
     // Resolve negative offset
     let start = if offset < 0 {
         let resolved = main_len + offset;
@@ -1255,11 +1344,6 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let sub = &main_bytes[start..];
     let cmp_len = match length {
         Some(l) if l > 0 => l as usize,
-        Some(l) if l < 0 => {
-            // Negative length: not valid in PHP 8.0+
-            vm.emit_warning("substr_compare(): Argument #4 ($length) must be greater than or equal to 0");
-            return Ok(Value::False);
-        }
         _ => sub.len().max(str2.len()),
     };
 
@@ -1275,8 +1359,60 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn similar_text(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0)) // stub
+fn similar_text(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s1 = args.first().unwrap_or(&Value::Null).to_php_string();
+    let s2 = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let percent_ref = args.get(2);
+
+    let a = s1.as_bytes();
+    let b = s2.as_bytes();
+
+    fn longest_common(a: &[u8], b: &[u8], pos_a: &mut usize, pos_b: &mut usize) -> usize {
+        let mut max_len = 0usize;
+        *pos_a = 0;
+        *pos_b = 0;
+        for i in 0..a.len() {
+            for j in 0..b.len() {
+                let mut l = 0;
+                while i + l < a.len() && j + l < b.len() && a[i + l] == b[j + l] {
+                    l += 1;
+                }
+                if l > max_len {
+                    max_len = l;
+                    *pos_a = i;
+                    *pos_b = j;
+                }
+            }
+        }
+        max_len
+    }
+
+    fn similar_chars(a: &[u8], b: &[u8]) -> usize {
+        let mut pos_a = 0;
+        let mut pos_b = 0;
+        let max_len = longest_common(a, b, &mut pos_a, &mut pos_b);
+        if max_len == 0 {
+            return 0;
+        }
+        let mut sum = max_len;
+        if pos_a > 0 && pos_b > 0 {
+            sum += similar_chars(&a[..pos_a], &b[..pos_b]);
+        }
+        if pos_a + max_len < a.len() && pos_b + max_len < b.len() {
+            sum += similar_chars(&a[pos_a + max_len..], &b[pos_b + max_len..]);
+        }
+        sum
+    }
+
+    let sim = similar_chars(a, b) as i64;
+    let total = (a.len() + b.len()) as f64;
+
+    if let Some(Value::Reference(r)) = percent_ref {
+        let pct = if total > 0.0 { (sim as f64 * 200.0) / total } else { 0.0 };
+        *r.borrow_mut() = Value::Double(pct);
+    }
+
+    Ok(Value::Long(sim))
 }
 
 fn soundex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1512,10 +1648,20 @@ fn strcmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }))
 }
 
-fn strncmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args.first().unwrap_or(&Value::Null).to_php_string();
     let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let len = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let len_raw = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    if len_raw < 0 {
+        let msg = "strncmp(): Argument #3 ($length) must be greater than or equal to 0".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
+    let len = len_raw as usize;
     let a_sub = &a.as_bytes()[..len.min(a.len())];
     let b_sub = &b.as_bytes()[..len.min(b.len())];
     Ok(Value::Long(match a_sub.cmp(b_sub) {
@@ -1545,10 +1691,20 @@ fn strcasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }))
 }
 
-fn strncasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args.first().unwrap_or(&Value::Null).to_php_string();
     let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let len = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let len_raw = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    if len_raw < 0 {
+        let msg = "strncasecmp(): Argument #3 ($length) must be greater than or equal to 0".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
+    let len = len_raw as usize;
     let a_sub: Vec<u8> = a.as_bytes()[..len.min(a.len())]
         .iter()
         .map(|c| c.to_ascii_lowercase())
@@ -1746,31 +1902,115 @@ fn str_ireplace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn wordwrap(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let width = args.get(1).map(|v| v.to_long()).unwrap_or(75) as usize;
+    let width = args.get(1).map(|v| v.to_long()).unwrap_or(75);
     let brk = args
         .get(2)
         .map(|v| v.to_php_string())
         .unwrap_or_else(|| PhpString::from_bytes(b"\n"));
     let cut_long = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
-    let _ = cut_long; // Simplified - ignoring cut_long for now
-    let mut result = Vec::new();
-    let mut line_len = 0;
-    for &byte in s.as_bytes() {
-        if byte == b'\n' {
-            result.push(byte);
-            line_len = 0;
-        } else {
-            if line_len >= width && byte == b' ' {
-                result.extend_from_slice(brk.as_bytes());
-                line_len = 0;
-            } else {
-                result.push(byte);
-                line_len += 1;
-            }
-        }
+
+    if width < 1 && cut_long {
+        return Err(VmError {
+            message: "wordwrap(): Argument #2 ($width) must be greater than or equal to 1 when argument #4 ($cut_long_words) is true".into(),
+            line: 0,
+        });
     }
+
+    let width = if cut_long { width.max(1) as usize } else { width.max(0) as usize };
+    let bytes = s.as_bytes();
+    let brk_bytes = brk.as_bytes();
+
+    if brk_bytes.is_empty() {
+        let msg = "wordwrap(): Argument #3 ($break) must not be empty".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
+
+    if bytes.is_empty() {
+        return Ok(Value::String(PhpString::empty()));
+    }
+
+    let mut result = Vec::new();
+    let mut last_start = 0;  // Start of current line segment
+    let mut last_space: Option<usize> = None;  // Position of last space seen
+    let mut line_len: usize = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            // Existing newline resets line
+            result.extend_from_slice(&bytes[last_start..=i]);
+            last_start = i + 1;
+            last_space = None;
+            line_len = 0;
+            i += 1;
+            continue;
+        }
+
+        // Increment line length for this character
+        line_len += 1;
+
+        if bytes[i] == b' ' {
+            if line_len > width {
+                // Line exceeds width at a space -> break here (replace space)
+                result.extend_from_slice(&bytes[last_start..i]);
+                result.extend_from_slice(brk_bytes);
+                last_start = i + 1;
+                last_space = None;
+                line_len = 0;
+                i += 1;
+                continue;
+            }
+            last_space = Some(i);
+        } else if line_len > width {
+            // Line exceeds width at a non-space char
+            if let Some(sp) = last_space {
+                if sp > last_start {
+                    // Wrap at last space (replace it) only if there's content before it
+                    result.extend_from_slice(&bytes[last_start..sp]);
+                    result.extend_from_slice(brk_bytes);
+                    last_start = sp + 1;
+                    line_len = i + 1 - last_start;
+                    last_space = None;
+                    // Re-scan for spaces in the portion we're keeping
+                    for j in last_start..=i {
+                        if bytes[j] == b' ' {
+                            last_space = Some(j);
+                        }
+                    }
+                } else if cut_long {
+                    // Space at start of line or no usable space with cut_long
+                    result.extend_from_slice(&bytes[last_start..i]);
+                    result.extend_from_slice(brk_bytes);
+                    last_start = i;
+                    line_len = 1;
+                    last_space = None;
+                }
+            } else if cut_long {
+                // No space found - cut the word
+                result.extend_from_slice(&bytes[last_start..i]);
+                result.extend_from_slice(brk_bytes);
+                last_start = i;
+                line_len = 1;
+                last_space = None;
+            }
+            // else: no space and no cut_long, just continue
+        }
+
+        i += 1;
+    }
+
+    // Append remaining
+    if last_start < bytes.len() {
+        result.extend_from_slice(&bytes[last_start..]);
+    }
+
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
@@ -1957,7 +2197,7 @@ fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
-    let result = (crc ^ 0xFFFFFFFF) as i32;
+    let result = crc ^ 0xFFFFFFFF;
     Ok(Value::Long(result as i64))
 }
 
@@ -2528,16 +2768,180 @@ fn get_html_translation_table_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, 
 
 fn html_entity_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let input = s.to_string_lossy();
-    let result = input
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#039;", "'")
-        .replace("&apos;", "'")
-        .replace("&nbsp;", "\u{00A0}");
-    Ok(Value::String(PhpString::from_string(result)))
+    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(3); // ENT_QUOTES | ENT_SUBSTITUTE
+    let _encoding = args.get(2); // Ignored for now, assume UTF-8
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            // Try to find closing ;
+            if let Some(semi_offset) = bytes[i..].iter().position(|&b| b == b';') {
+                let entity = &bytes[i+1..i+semi_offset];
+                let decoded = decode_html_entity(entity, flags);
+                if let Some(decoded_bytes) = decoded {
+                    result.extend_from_slice(&decoded_bytes);
+                    i += semi_offset + 1;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn decode_html_entity(entity: &[u8], flags: i64) -> Option<Vec<u8>> {
+    // Numeric entities
+    if entity.first() == Some(&b'#') {
+        let num_str = &entity[1..];
+        let codepoint = if num_str.first() == Some(&b'x') || num_str.first() == Some(&b'X') {
+            // Hex
+            let hex = std::str::from_utf8(&num_str[1..]).ok()?;
+            u32::from_str_radix(hex, 16).ok()?
+        } else {
+            // Decimal
+            let dec = std::str::from_utf8(num_str).ok()?;
+            dec.parse::<u32>().ok()?
+        };
+        let ch = char::from_u32(codepoint)?;
+        let mut buf = [0u8; 4];
+        let encoded = ch.encode_utf8(&mut buf);
+        return Some(encoded.as_bytes().to_vec());
+    }
+
+    // Named entities
+    let entity_str = std::str::from_utf8(entity).ok()?;
+    match entity_str {
+        "amp" => Some(b"&".to_vec()),
+        "lt" => Some(b"<".to_vec()),
+        "gt" => Some(b">".to_vec()),
+        "quot" if flags & 3 != 0 => Some(b"\"".to_vec()),
+        "apos" if flags & (16 | 32) != 0 => Some(b"'".to_vec()),
+        "nbsp" => Some("\u{00A0}".as_bytes().to_vec()),
+        "iexcl" => Some("\u{00A1}".as_bytes().to_vec()),
+        "cent" => Some("\u{00A2}".as_bytes().to_vec()),
+        "pound" => Some("\u{00A3}".as_bytes().to_vec()),
+        "curren" => Some("\u{00A4}".as_bytes().to_vec()),
+        "yen" => Some("\u{00A5}".as_bytes().to_vec()),
+        "brvbar" => Some("\u{00A6}".as_bytes().to_vec()),
+        "sect" => Some("\u{00A7}".as_bytes().to_vec()),
+        "uml" => Some("\u{00A8}".as_bytes().to_vec()),
+        "copy" => Some("\u{00A9}".as_bytes().to_vec()),
+        "ordf" => Some("\u{00AA}".as_bytes().to_vec()),
+        "laquo" => Some("\u{00AB}".as_bytes().to_vec()),
+        "not" => Some("\u{00AC}".as_bytes().to_vec()),
+        "shy" => Some("\u{00AD}".as_bytes().to_vec()),
+        "reg" => Some("\u{00AE}".as_bytes().to_vec()),
+        "macr" => Some("\u{00AF}".as_bytes().to_vec()),
+        "deg" => Some("\u{00B0}".as_bytes().to_vec()),
+        "plusmn" => Some("\u{00B1}".as_bytes().to_vec()),
+        "sup2" => Some("\u{00B2}".as_bytes().to_vec()),
+        "sup3" => Some("\u{00B3}".as_bytes().to_vec()),
+        "acute" => Some("\u{00B4}".as_bytes().to_vec()),
+        "micro" => Some("\u{00B5}".as_bytes().to_vec()),
+        "para" => Some("\u{00B6}".as_bytes().to_vec()),
+        "middot" => Some("\u{00B7}".as_bytes().to_vec()),
+        "cedil" => Some("\u{00B8}".as_bytes().to_vec()),
+        "sup1" => Some("\u{00B9}".as_bytes().to_vec()),
+        "ordm" => Some("\u{00BA}".as_bytes().to_vec()),
+        "raquo" => Some("\u{00BB}".as_bytes().to_vec()),
+        "frac14" => Some("\u{00BC}".as_bytes().to_vec()),
+        "frac12" => Some("\u{00BD}".as_bytes().to_vec()),
+        "frac34" => Some("\u{00BE}".as_bytes().to_vec()),
+        "iquest" => Some("\u{00BF}".as_bytes().to_vec()),
+        "times" => Some("\u{00D7}".as_bytes().to_vec()),
+        "divide" => Some("\u{00F7}".as_bytes().to_vec()),
+        "euro" => Some("\u{20AC}".as_bytes().to_vec()),
+        "trade" => Some("\u{2122}".as_bytes().to_vec()),
+        "ndash" => Some("\u{2013}".as_bytes().to_vec()),
+        "mdash" => Some("\u{2014}".as_bytes().to_vec()),
+        "lsquo" => Some("\u{2018}".as_bytes().to_vec()),
+        "rsquo" => Some("\u{2019}".as_bytes().to_vec()),
+        "ldquo" => Some("\u{201C}".as_bytes().to_vec()),
+        "rdquo" => Some("\u{201D}".as_bytes().to_vec()),
+        "bull" => Some("\u{2022}".as_bytes().to_vec()),
+        "hellip" => Some("\u{2026}".as_bytes().to_vec()),
+        "prime" => Some("\u{2032}".as_bytes().to_vec()),
+        "Prime" => Some("\u{2033}".as_bytes().to_vec()),
+        "lsaquo" => Some("\u{2039}".as_bytes().to_vec()),
+        "rsaquo" => Some("\u{203A}".as_bytes().to_vec()),
+        "oline" => Some("\u{203E}".as_bytes().to_vec()),
+        "frasl" => Some("\u{2044}".as_bytes().to_vec()),
+        "ensp" => Some("\u{2002}".as_bytes().to_vec()),
+        "emsp" => Some("\u{2003}".as_bytes().to_vec()),
+        "thinsp" => Some("\u{2009}".as_bytes().to_vec()),
+        "dagger" => Some("\u{2020}".as_bytes().to_vec()),
+        "Dagger" => Some("\u{2021}".as_bytes().to_vec()),
+        "permil" => Some("\u{2030}".as_bytes().to_vec()),
+        // Common accented chars
+        "Agrave" => Some("\u{00C0}".as_bytes().to_vec()),
+        "Aacute" => Some("\u{00C1}".as_bytes().to_vec()),
+        "Acirc" => Some("\u{00C2}".as_bytes().to_vec()),
+        "Atilde" => Some("\u{00C3}".as_bytes().to_vec()),
+        "Auml" => Some("\u{00C4}".as_bytes().to_vec()),
+        "Aring" => Some("\u{00C5}".as_bytes().to_vec()),
+        "AElig" => Some("\u{00C6}".as_bytes().to_vec()),
+        "Ccedil" => Some("\u{00C7}".as_bytes().to_vec()),
+        "Egrave" => Some("\u{00C8}".as_bytes().to_vec()),
+        "Eacute" => Some("\u{00C9}".as_bytes().to_vec()),
+        "Ecirc" => Some("\u{00CA}".as_bytes().to_vec()),
+        "Euml" => Some("\u{00CB}".as_bytes().to_vec()),
+        "Igrave" => Some("\u{00CC}".as_bytes().to_vec()),
+        "Iacute" => Some("\u{00CD}".as_bytes().to_vec()),
+        "Icirc" => Some("\u{00CE}".as_bytes().to_vec()),
+        "Iuml" => Some("\u{00CF}".as_bytes().to_vec()),
+        "ETH" => Some("\u{00D0}".as_bytes().to_vec()),
+        "Ntilde" => Some("\u{00D1}".as_bytes().to_vec()),
+        "Ograve" => Some("\u{00D2}".as_bytes().to_vec()),
+        "Oacute" => Some("\u{00D3}".as_bytes().to_vec()),
+        "Ocirc" => Some("\u{00D4}".as_bytes().to_vec()),
+        "Otilde" => Some("\u{00D5}".as_bytes().to_vec()),
+        "Ouml" => Some("\u{00D6}".as_bytes().to_vec()),
+        "Oslash" => Some("\u{00D8}".as_bytes().to_vec()),
+        "Ugrave" => Some("\u{00D9}".as_bytes().to_vec()),
+        "Uacute" => Some("\u{00DA}".as_bytes().to_vec()),
+        "Ucirc" => Some("\u{00DB}".as_bytes().to_vec()),
+        "Uuml" => Some("\u{00DC}".as_bytes().to_vec()),
+        "Yacute" => Some("\u{00DD}".as_bytes().to_vec()),
+        "THORN" => Some("\u{00DE}".as_bytes().to_vec()),
+        "szlig" => Some("\u{00DF}".as_bytes().to_vec()),
+        "agrave" => Some("\u{00E0}".as_bytes().to_vec()),
+        "aacute" => Some("\u{00E1}".as_bytes().to_vec()),
+        "acirc" => Some("\u{00E2}".as_bytes().to_vec()),
+        "atilde" => Some("\u{00E3}".as_bytes().to_vec()),
+        "auml" => Some("\u{00E4}".as_bytes().to_vec()),
+        "aring" => Some("\u{00E5}".as_bytes().to_vec()),
+        "aelig" => Some("\u{00E6}".as_bytes().to_vec()),
+        "ccedil" => Some("\u{00E7}".as_bytes().to_vec()),
+        "egrave" => Some("\u{00E8}".as_bytes().to_vec()),
+        "eacute" => Some("\u{00E9}".as_bytes().to_vec()),
+        "ecirc" => Some("\u{00EA}".as_bytes().to_vec()),
+        "euml" => Some("\u{00EB}".as_bytes().to_vec()),
+        "igrave" => Some("\u{00EC}".as_bytes().to_vec()),
+        "iacute" => Some("\u{00ED}".as_bytes().to_vec()),
+        "icirc" => Some("\u{00EE}".as_bytes().to_vec()),
+        "iuml" => Some("\u{00EF}".as_bytes().to_vec()),
+        "eth" => Some("\u{00F0}".as_bytes().to_vec()),
+        "ntilde" => Some("\u{00F1}".as_bytes().to_vec()),
+        "ograve" => Some("\u{00F2}".as_bytes().to_vec()),
+        "oacute" => Some("\u{00F3}".as_bytes().to_vec()),
+        "ocirc" => Some("\u{00F4}".as_bytes().to_vec()),
+        "otilde" => Some("\u{00F5}".as_bytes().to_vec()),
+        "ouml" => Some("\u{00F6}".as_bytes().to_vec()),
+        "oslash" => Some("\u{00F8}".as_bytes().to_vec()),
+        "ugrave" => Some("\u{00F9}".as_bytes().to_vec()),
+        "uacute" => Some("\u{00FA}".as_bytes().to_vec()),
+        "ucirc" => Some("\u{00FB}".as_bytes().to_vec()),
+        "uuml" => Some("\u{00FC}".as_bytes().to_vec()),
+        "yacute" => Some("\u{00FD}".as_bytes().to_vec()),
+        "thorn" => Some("\u{00FE}".as_bytes().to_vec()),
+        "yuml" => Some("\u{00FF}".as_bytes().to_vec()),
+        _ => None,
+    }
 }
 
 fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2599,8 +3003,19 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let tag_name = &bytes[name_start..i];
             let tag_name_lower = tag_name.to_ascii_lowercase();
 
+            // Skip attributes, handling quoted strings
             while i < bytes.len() && bytes[i] != b'>' {
-                i += 1;
+                if bytes[i] == b'"' {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' { i += 1; }
+                    if i < bytes.len() { i += 1; }
+                } else if bytes[i] == b'\'' {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'\'' { i += 1; }
+                    if i < bytes.len() { i += 1; }
+                } else {
+                    i += 1;
+                }
             }
             if i < bytes.len() { i += 1; }
 

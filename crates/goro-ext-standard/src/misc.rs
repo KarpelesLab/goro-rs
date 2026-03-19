@@ -251,22 +251,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"escapeshellcmd", escapeshellcmd_fn);
     vm.register_function(b"htmlspecialchars", htmlspecialchars);
     vm.register_function(b"htmlentities", htmlentities);
-    vm.register_function(b"html_entity_decode", html_entity_decode);
     vm.register_function(b"htmlspecialchars_decode", htmlspecialchars_decode);
-    vm.register_function(b"str_word_count", str_word_count);
-    vm.register_function(b"substr_count", substr_count);
-    vm.register_function(b"substr_replace", substr_replace);
-    vm.register_function(b"str_ireplace", str_ireplace);
-    vm.register_function(b"stripos", stripos);
-    vm.register_function(b"strrpos", strrpos);
-    vm.register_function(b"strripos", strripos);
-    vm.register_function(b"strcmp", strcmp);
-    vm.register_function(b"strncmp", strncmp);
-    vm.register_function(b"strcasecmp", strcasecmp);
-    vm.register_function(b"strncasecmp", strncasecmp);
-    vm.register_function(b"str_contains", str_contains_fn);
-    vm.register_function(b"wordwrap", wordwrap);
-    vm.register_function(b"printf", printf);
     vm.register_function(b"fprintf", fprintf_fn);
     vm.register_function(b"vfprintf", vfprintf_fn);
     vm.register_function(b"sscanf", sscanf_fn);
@@ -1322,7 +1307,7 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-fn array_combine(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let keys = match args.first() {
         Some(Value::Array(a)) => a.borrow(),
         _ => return Ok(Value::False),
@@ -1331,13 +1316,39 @@ fn array_combine(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::Array(a)) => a.borrow(),
         _ => return Ok(Value::False),
     };
+    let keys_len = keys.len();
+    let vals_len = vals.len();
+    if keys_len != vals_len {
+        let msg = "array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
     let mut result = PhpArray::new();
     let keys_vec: Vec<_> = keys.values().cloned().collect();
     let vals_vec: Vec<_> = vals.values().cloned().collect();
     for (k, v) in keys_vec.iter().zip(vals_vec.iter()) {
         let key = match k {
             Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
-            Value::String(s) => goro_core::array::ArrayKey::String(s.clone()),
+            Value::String(s) => {
+                // PHP coerces numeric string keys to integers
+                let s_str = s.to_string_lossy();
+                if let Ok(n) = s_str.parse::<i64>() {
+                    if n.to_string() == s_str {
+                        goro_core::array::ArrayKey::Int(n)
+                    } else {
+                        goro_core::array::ArrayKey::String(s.clone())
+                    }
+                } else {
+                    goro_core::array::ArrayKey::String(s.clone())
+                }
+            }
+            Value::True => goro_core::array::ArrayKey::Int(1),
+            Value::False | Value::Null => goro_core::array::ArrayKey::Int(0),
+            Value::Double(f) => goro_core::array::ArrayKey::Int(*f as i64),
             _ => goro_core::array::ArrayKey::String(k.to_php_string()),
         };
         result.set(key, v.clone());
@@ -1498,21 +1509,42 @@ fn array_merge_recursive(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_diff(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.len() < 2 {
+fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
-    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
+    // Validate all arguments are arrays
+    for (i, arg) in args.iter().enumerate() {
+        if !matches!(arg, Value::Array(_)) {
+            let type_name = Vm::value_type_name(arg);
+            let msg = format!("array_diff(): Argument #{} must be of type array, {} given", i + 1, type_name);
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+    }
+    if args.len() < 2 {
+        // Single array arg: return a copy
+        if let Value::Array(a) = &args[0] {
+            return Ok(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))));
+        }
+    }
+    if let (Some(Value::Array(a)), _) = (args.first(), args.get(1)) {
         let a = a.borrow();
-        let b = b.borrow();
-        let b_vals: Vec<_> = b
-            .values()
-            .map(|v| v.to_php_string().as_bytes().to_vec())
-            .collect();
+        // Collect all values from arrays at index 1+
+        let mut other_vals: Vec<Vec<u8>> = Vec::new();
+        for arg in &args[1..] {
+            if let Value::Array(b) = arg {
+                let b = b.borrow();
+                for v in b.values() {
+                    other_vals.push(v.to_php_string().as_bytes().to_vec());
+                }
+            }
+        }
         let mut result = PhpArray::new();
         for (key, val) in a.iter() {
             let s = val.to_php_string().as_bytes().to_vec();
-            if !b_vals.contains(&s) {
+            if !other_vals.contains(&s) {
                 result.set(key.clone(), val.clone());
             }
         }
@@ -2082,8 +2114,89 @@ fn debug_zval_refcount(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
 fn extract_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
 }
-fn array_column(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn array_column(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let input = match args.first() {
+        Some(Value::Array(a)) => a.borrow(),
+        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    };
+    let column_key = args.get(1).unwrap_or(&Value::Null);
+    let index_key = args.get(2);
+
+    let mut result = PhpArray::new();
+
+    for (_, row) in input.iter() {
+        let row_ref = match row {
+            Value::Array(a) => a.clone(),
+            Value::Object(o) => {
+                // Convert object properties to array-like access
+                let obj = o.borrow();
+                let mut arr = PhpArray::new();
+                for (k, v) in obj.properties.iter() {
+                    let key = goro_core::array::ArrayKey::String(PhpString::from_vec(k.clone()));
+                    arr.set(key, v.clone());
+                }
+                Rc::new(RefCell::new(arr))
+            }
+            _ => continue,
+        };
+        let row_arr = row_ref.borrow();
+
+        // Get the value to store
+        let value = if matches!(column_key, Value::Null) {
+            // null column_key means return the whole row
+            row.clone()
+        } else {
+            let col_key = value_to_array_key(column_key);
+            match row_arr.get(&col_key) {
+                Some(v) => v.clone(),
+                None => continue,
+            }
+        };
+
+        // Determine the key
+        if let Some(idx_key_val) = index_key {
+            if matches!(idx_key_val, Value::Null) {
+                result.push(value);
+            } else {
+                let idx_k = value_to_array_key(idx_key_val);
+                if let Some(idx_val) = row_arr.get(&idx_k) {
+                    let key = match &idx_val {
+                        Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
+                        Value::String(s) => goro_core::array::ArrayKey::String(s.clone()),
+                        Value::True => goro_core::array::ArrayKey::Int(1),
+                        Value::False | Value::Null => goro_core::array::ArrayKey::Int(0),
+                        Value::Double(f) => goro_core::array::ArrayKey::Int(*f as i64),
+                        _ => goro_core::array::ArrayKey::String(idx_val.to_php_string()),
+                    };
+                    result.set(key, value);
+                } else {
+                    result.push(value);
+                }
+            }
+        } else {
+            result.push(value);
+        }
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn value_to_array_key(val: &Value) -> goro_core::array::ArrayKey {
+    match val {
+        Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
+        Value::String(s) => {
+            // Try to parse as integer
+            if let Ok(n) = s.to_string_lossy().parse::<i64>() {
+                goro_core::array::ArrayKey::Int(n)
+            } else {
+                goro_core::array::ArrayKey::String(s.clone())
+            }
+        }
+        Value::True => goro_core::array::ArrayKey::Int(1),
+        Value::False | Value::Null => goro_core::array::ArrayKey::Int(0),
+        Value::Double(f) => goro_core::array::ArrayKey::Int(*f as i64),
+        _ => goro_core::array::ArrayKey::String(val.to_php_string()),
+    }
 }
 fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
@@ -2095,8 +2208,7 @@ fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::String(s) => ArrayKey::String(s.clone()),
                 _ => {
                     // PHP warns and skips non-int/non-string values
-                    let msg = "array_count_values(): Argument #1 ($array) can only have int or string values";
-                    vm.write_output(format!("\nWarning: {}\n", msg).as_bytes());
+                    vm.emit_warning("array_count_values(): Argument #1 ($array) can only have int or string values");
                     continue;
                 }
             };
@@ -2340,12 +2452,16 @@ fn rawurldecode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 fn htmlspecialchars(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(11); // ENT_QUOTES | ENT_SUBSTITUTE (default)
+    let _double_encode = args.get(3).map(|v| v.is_truthy()).unwrap_or(true);
+    let ent_compat = flags & 2 != 0;  // ENT_COMPAT
+    let ent_quotes = flags & 3 == 3;  // ENT_QUOTES (both single and double)
     let mut result = Vec::new();
     for &b in s.as_bytes() {
         match b {
             b'&' => result.extend_from_slice(b"&amp;"),
-            b'"' => result.extend_from_slice(b"&quot;"),
-            b'\'' => result.extend_from_slice(b"&#039;"),
+            b'"' if ent_compat || ent_quotes => result.extend_from_slice(b"&quot;"),
+            b'\'' if ent_quotes => result.extend_from_slice(b"&#039;"),
             b'<' => result.extend_from_slice(b"&lt;"),
             b'>' => result.extend_from_slice(b"&gt;"),
             _ => result.push(b),
@@ -2359,8 +2475,23 @@ fn htmlentities(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn html_entity_decode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::empty()))
 }
-fn htmlspecialchars_decode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
+fn htmlspecialchars_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(3); // ENT_QUOTES | ENT_SUBSTITUTE
+    let input = s.to_string_lossy();
+    let mut result = input
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">");
+    if flags & 2 != 0 {
+        // ENT_COMPAT - decode double quotes
+        result = result.replace("&quot;", "\"");
+    }
+    if flags & 4 != 0 || flags & 3 == 3 {
+        // ENT_QUOTES - decode single quotes
+        result = result.replace("&#039;", "'").replace("&apos;", "'");
+    }
+    Ok(Value::String(PhpString::from_string(result)))
 }
 
 fn str_word_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2591,8 +2722,237 @@ fn vfprintf_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
 }
 
-fn sscanf_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
+fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let input = args.first().unwrap_or(&Value::Null).to_php_string();
+    let format = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let input_bytes = input.as_bytes();
+    let format_bytes = format.as_bytes();
+
+    let has_refs = args.len() > 2;
+    let mut results: Vec<Value> = Vec::new();
+    let mut input_pos = 0usize;
+    let mut fmt_pos = 0usize;
+
+    while fmt_pos < format_bytes.len() {
+        if format_bytes[fmt_pos] == b'%' {
+            fmt_pos += 1;
+            if fmt_pos >= format_bytes.len() { break; }
+
+            // Handle %% literal
+            if format_bytes[fmt_pos] == b'%' {
+                if input_pos < input_bytes.len() && input_bytes[input_pos] == b'%' {
+                    input_pos += 1;
+                }
+                fmt_pos += 1;
+                continue;
+            }
+
+            // Handle argument swapping like %2$s
+            let _swap_arg = if format_bytes[fmt_pos].is_ascii_digit() && fmt_pos + 1 < format_bytes.len() && format_bytes[fmt_pos + 1] == b'$' {
+                let _n = (format_bytes[fmt_pos] - b'0') as usize;
+                fmt_pos += 2;
+                Some(_n)
+            } else {
+                None
+            };
+
+            // Handle width
+            let mut suppress = false;
+            if fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b'*' {
+                suppress = true;
+                fmt_pos += 1;
+            }
+            let mut width: Option<usize> = None;
+            let width_start = fmt_pos;
+            while fmt_pos < format_bytes.len() && format_bytes[fmt_pos].is_ascii_digit() {
+                fmt_pos += 1;
+            }
+            if fmt_pos > width_start {
+                width = std::str::from_utf8(&format_bytes[width_start..fmt_pos]).ok().and_then(|s| s.parse().ok());
+            }
+
+            if fmt_pos >= format_bytes.len() { break; }
+            let spec = format_bytes[fmt_pos];
+            fmt_pos += 1;
+
+            // Skip leading whitespace for numeric types
+            match spec {
+                b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'g' => {
+                    while input_pos < input_bytes.len() && input_bytes[input_pos] == b' ' {
+                        input_pos += 1;
+                    }
+                }
+                _ => {}
+            }
+
+            match spec {
+                b'd' | b'i' | b'u' => {
+                    // Read integer
+                    let start = input_pos;
+                    if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
+                        input_pos += 1;
+                    }
+                    let mut count = 0usize;
+                    let max = width.unwrap_or(usize::MAX);
+                    while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() && count < max {
+                        input_pos += 1;
+                        count += 1;
+                    }
+                    if input_pos > start {
+                        if !suppress {
+                            let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
+                            let val = s.parse::<i64>().unwrap_or(0);
+                            results.push(Value::Long(val));
+                        }
+                    } else if !suppress {
+                        results.push(Value::Null);
+                    }
+                }
+                b'x' | b'X' => {
+                    // Read hex integer
+                    if input_pos + 1 < input_bytes.len() && input_bytes[input_pos] == b'0'
+                        && (input_bytes[input_pos + 1] == b'x' || input_bytes[input_pos + 1] == b'X') {
+                        input_pos += 2;
+                    }
+                    let start = input_pos;
+                    let max = width.unwrap_or(usize::MAX);
+                    let mut count = 0;
+                    while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_hexdigit() && count < max {
+                        input_pos += 1;
+                        count += 1;
+                    }
+                    if !suppress {
+                        let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
+                        let val = i64::from_str_radix(s, 16).unwrap_or(0);
+                        results.push(Value::Long(val));
+                    }
+                }
+                b'o' => {
+                    let start = input_pos;
+                    let max = width.unwrap_or(usize::MAX);
+                    let mut count = 0;
+                    while input_pos < input_bytes.len() && input_bytes[input_pos] >= b'0' && input_bytes[input_pos] <= b'7' && count < max {
+                        input_pos += 1;
+                        count += 1;
+                    }
+                    if !suppress {
+                        let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
+                        let val = i64::from_str_radix(s, 8).unwrap_or(0);
+                        results.push(Value::Long(val));
+                    }
+                }
+                b'f' | b'e' | b'g' => {
+                    let start = input_pos;
+                    if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
+                        input_pos += 1;
+                    }
+                    while input_pos < input_bytes.len() && (input_bytes[input_pos].is_ascii_digit() || input_bytes[input_pos] == b'.') {
+                        input_pos += 1;
+                    }
+                    if !suppress {
+                        let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
+                        let val = s.parse::<f64>().unwrap_or(0.0);
+                        results.push(Value::Double(val));
+                    }
+                }
+                b's' => {
+                    // Read non-whitespace string
+                    let start = input_pos;
+                    let max = width.unwrap_or(usize::MAX);
+                    let mut count = 0;
+                    while input_pos < input_bytes.len() && input_bytes[input_pos] != b' ' && input_bytes[input_pos] != b'\t' && input_bytes[input_pos] != b'\n' && count < max {
+                        input_pos += 1;
+                        count += 1;
+                    }
+                    if !suppress {
+                        results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                    }
+                }
+                b'c' => {
+                    // Read single char (or width chars)
+                    let n = width.unwrap_or(1);
+                    let start = input_pos;
+                    let end = (input_pos + n).min(input_bytes.len());
+                    input_pos = end;
+                    if !suppress {
+                        results.push(Value::String(PhpString::from_vec(input_bytes[start..end].to_vec())));
+                    }
+                }
+                b'n' => {
+                    // Number of characters consumed so far
+                    if !suppress {
+                        results.push(Value::Long(input_pos as i64));
+                    }
+                }
+                b'[' => {
+                    // Character class [abc] or [^abc]
+                    let negated = fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b'^';
+                    if negated { fmt_pos += 1; }
+                    let mut char_set = Vec::new();
+                    // Special case: ] as first char is literal
+                    if fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b']' {
+                        char_set.push(b']');
+                        fmt_pos += 1;
+                    }
+                    while fmt_pos < format_bytes.len() && format_bytes[fmt_pos] != b']' {
+                        char_set.push(format_bytes[fmt_pos]);
+                        fmt_pos += 1;
+                    }
+                    if fmt_pos < format_bytes.len() { fmt_pos += 1; } // skip ]
+                    let start = input_pos;
+                    let max = width.unwrap_or(usize::MAX);
+                    let mut count = 0;
+                    while input_pos < input_bytes.len() && count < max {
+                        let in_set = char_set.contains(&input_bytes[input_pos]);
+                        if (negated && in_set) || (!negated && !in_set) {
+                            break;
+                        }
+                        input_pos += 1;
+                        count += 1;
+                    }
+                    if !suppress {
+                        if input_pos > start {
+                            results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                        } else {
+                            results.push(Value::Null);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else if format_bytes[fmt_pos] == b' ' || format_bytes[fmt_pos] == b'\t' || format_bytes[fmt_pos] == b'\n' {
+            // Whitespace in format matches any amount of whitespace in input
+            fmt_pos += 1;
+            while input_pos < input_bytes.len() && (input_bytes[input_pos] == b' ' || input_bytes[input_pos] == b'\t' || input_bytes[input_pos] == b'\n') {
+                input_pos += 1;
+            }
+        } else {
+            // Literal match
+            if input_pos < input_bytes.len() && input_bytes[input_pos] == format_bytes[fmt_pos] {
+                input_pos += 1;
+            }
+            fmt_pos += 1;
+        }
+    }
+
+    if has_refs {
+        // Write results to reference arguments
+        for (i, val) in results.iter().enumerate() {
+            if let Some(arg) = args.get(i + 2) {
+                if let Value::Reference(r) = arg {
+                    *r.borrow_mut() = val.clone();
+                }
+            }
+        }
+        Ok(Value::Long(results.len() as i64))
+    } else {
+        // Return array of results
+        let mut arr = PhpArray::new();
+        for val in results {
+            arr.push(val);
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+    }
 }
 // === Shell ===
 
@@ -3797,8 +4157,31 @@ fn array_last_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_change_key_case_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_change_key_case_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        // Check type of case argument - must be int-like
+        if let Some(case_val) = args.get(1) {
+            if matches!(case_val, Value::Array(_) | Value::Object(_)) {
+                let type_name = match case_val {
+                    Value::Array(_) => "array",
+                    Value::Object(_) => "object",
+                    _ => "unknown",
+                };
+                let msg = format!("array_change_key_case(): Argument #2 ($case) must be of type int, {} given", type_name);
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: 0 });
+            }
+            // For string values, throw TypeError too
+            if let Value::String(s) = case_val {
+                if s.to_string_lossy().parse::<i64>().is_err() {
+                    let msg = "array_change_key_case(): Argument #2 ($case) must be of type int, string given".to_string();
+                    let exc = vm.throw_type_error(msg.clone());
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: 0 });
+                }
+            }
+        }
         let case = args.get(1).map(|v| v.to_long()).unwrap_or(0); // 0=lower, 1=upper
         let arr = arr.borrow();
         let mut result = PhpArray::new();
@@ -3906,15 +4289,26 @@ fn http_response_code_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
 
 fn array_diff_key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 2 {
+        if let Some(Value::Array(a)) = args.first() {
+            return Ok(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))));
+        }
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
-    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
+    if let Some(Value::Array(a)) = args.first() {
         let a = a.borrow();
-        let b = b.borrow();
-        let b_keys: Vec<_> = b.keys().cloned().collect();
+        // Collect all keys from arrays at index 1+
+        let mut other_keys: Vec<ArrayKey> = Vec::new();
+        for arg in &args[1..] {
+            if let Value::Array(b) = arg {
+                let b = b.borrow();
+                for key in b.keys() {
+                    other_keys.push(key.clone());
+                }
+            }
+        }
         let mut result = PhpArray::new();
         for (key, val) in a.iter() {
-            if !b_keys.contains(key) {
+            if !other_keys.contains(key) {
                 result.set(key.clone(), val.clone());
             }
         }
@@ -3926,15 +4320,29 @@ fn array_diff_key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_diff_assoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 2 {
+        if let Some(Value::Array(a)) = args.first() {
+            return Ok(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))));
+        }
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
-    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
+    if let Some(Value::Array(a)) = args.first() {
         let a = a.borrow();
-        let b = b.borrow();
         let mut result = PhpArray::new();
         for (key, val) in a.iter() {
-            let b_val = b.get(key);
-            if b_val.is_none() || !b_val.unwrap().equals(val) {
+            let val_str = val.to_php_string().as_bytes().to_vec();
+            let mut found_in_other = false;
+            for arg in &args[1..] {
+                if let Value::Array(b) = arg {
+                    let b = b.borrow();
+                    if let Some(b_val) = b.get(key) {
+                        if b_val.to_php_string().as_bytes() == val_str.as_slice() {
+                            found_in_other = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !found_in_other {
                 result.set(key.clone(), val.clone());
             }
         }
@@ -3985,29 +4393,81 @@ fn array_intersect_assoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     }
 }
 
-fn array_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // PHP 8.5: array_all($array, $callback) - returns true if all elements pass callback
-    // Without callable support, just check truthiness
+fn array_all_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
-        let arr = arr.borrow();
-        Ok(if arr.values().all(|v| v.is_truthy()) {
-            Value::True
+        let arr_data: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let callback = args.get(1);
+
+        if let Some(cb) = callback {
+            let func_name = cb.to_php_string().as_bytes().to_vec();
+            let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+            for (key, val) in &arr_data {
+                let key_val = match key {
+                    ArrayKey::Int(n) => Value::Long(*n),
+                    ArrayKey::String(s) => Value::String(s.clone()),
+                };
+                if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+                    if !builtin(vm, &[val.clone(), key_val])?.is_truthy() {
+                        return Ok(Value::False);
+                    }
+                } else if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                    let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                    if !fn_cvs.is_empty() { fn_cvs[0] = val.clone(); }
+                    if fn_cvs.len() > 1 { fn_cvs[1] = key_val; }
+                    if !vm.execute_fn(&user_fn, fn_cvs)?.is_truthy() {
+                        return Ok(Value::False);
+                    }
+                }
+            }
+            Ok(Value::True)
         } else {
-            Value::False
-        })
+            Ok(if arr_data.iter().all(|(_, v)| v.is_truthy()) {
+                Value::True
+            } else {
+                Value::False
+            })
+        }
     } else {
         Ok(Value::False)
     }
 }
 
-fn array_any_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_any_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
-        let arr = arr.borrow();
-        Ok(if arr.values().any(|v| v.is_truthy()) {
-            Value::True
+        let arr_data: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let callback = args.get(1);
+
+        if let Some(cb) = callback {
+            let func_name = cb.to_php_string().as_bytes().to_vec();
+            let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+            for (key, val) in &arr_data {
+                let key_val = match key {
+                    ArrayKey::Int(n) => Value::Long(*n),
+                    ArrayKey::String(s) => Value::String(s.clone()),
+                };
+                if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+                    if builtin(vm, &[val.clone(), key_val])?.is_truthy() {
+                        return Ok(Value::True);
+                    }
+                } else if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                    let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                    if !fn_cvs.is_empty() { fn_cvs[0] = val.clone(); }
+                    if fn_cvs.len() > 1 { fn_cvs[1] = key_val; }
+                    if vm.execute_fn(&user_fn, fn_cvs)?.is_truthy() {
+                        return Ok(Value::True);
+                    }
+                }
+            }
+            Ok(Value::False)
         } else {
-            Value::False
-        })
+            Ok(if arr_data.iter().any(|(_, v)| v.is_truthy()) {
+                Value::True
+            } else {
+                Value::False
+            })
+        }
     } else {
         Ok(Value::False)
     }

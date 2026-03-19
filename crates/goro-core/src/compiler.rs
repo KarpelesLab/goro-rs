@@ -71,6 +71,14 @@ impl Compiler {
                     (b"preg_replace_callback_array", 3) => true,
                     // sscanf with output vars (positions 2+)
                     (b"sscanf", p) if p >= 2 => true,
+                    // str_replace($search, $replace, $subject, &$count)
+                    (b"str_replace", 3) => true,
+                    // str_ireplace($search, $replace, $subject, &$count)
+                    (b"str_ireplace", 3) => true,
+                    // similar_text($str1, $str2, &$percent)
+                    (b"similar_text", 2) => true,
+                    // settype(&$var, $type)
+                    (b"settype", 0) => true,
                     _ => false,
                 }
             }
