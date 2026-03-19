@@ -236,8 +236,15 @@ fn substr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let length = args.get(2).map(|v| v.to_long());
     let end = match length {
-        Some(l) if l < 0 => ((len + l) as usize).max(start),
-        Some(l) => (start + l as usize).min(bytes.len()),
+        Some(l) if l < 0 => {
+            let end_pos = len + l;
+            if end_pos <= start as i64 { start } else { end_pos as usize }
+        }
+        Some(l) if l >= 0 => {
+            let end_pos = start as i64 + l;
+            if end_pos > bytes.len() as i64 { bytes.len() } else { end_pos as usize }
+        }
+        Some(_) => start, // shouldn't happen but safety fallback
         None => bytes.len(),
     };
 
@@ -282,7 +289,11 @@ fn str_contains(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let h = haystack.as_bytes();
     let n = needle.as_bytes();
 
-    for i in 0..=(h.len().saturating_sub(n.len())) {
+    if n.len() > h.len() {
+        return Ok(Value::False);
+    }
+
+    for i in 0..=(h.len() - n.len()) {
         if &h[i..i + n.len()] == n {
             return Ok(Value::True);
         }
@@ -1771,6 +1782,9 @@ fn stristr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+    if needle.is_empty() {
+        return Ok(Value::False);
+    }
     let h_lower: Vec<u8> = haystack
         .as_bytes()
         .iter()
@@ -1816,17 +1830,37 @@ fn strtok_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(s))
 }
 
+fn compute_substr_range(s_len: usize, offset: i64, length: Option<i64>) -> (usize, usize) {
+    let start = if offset >= 0 {
+        (offset as usize).min(s_len)
+    } else {
+        s_len.saturating_sub((-offset) as usize)
+    };
+    let end = match length {
+        Some(l) if l < 0 => {
+            let end_pos = s_len as i64 + l;
+            if end_pos <= start as i64 { start } else { end_pos as usize }
+        }
+        Some(l) => {
+            let end_pos = start as i64 + l;
+            if end_pos > s_len as i64 { s_len } else if end_pos < start as i64 { start } else { end_pos as usize }
+        }
+        None => s_len,
+    };
+    (start, end)
+}
+
 fn strspn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let chars = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let length = args.get(3).map(|v| v.to_long() as usize);
+    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let length = args.get(3).map(|v| v.to_long());
     let s_bytes = s.as_bytes();
     let chars_bytes = chars.as_bytes();
-    let start = offset.min(s_bytes.len());
-    let end = length
-        .map(|l| (start + l).min(s_bytes.len()))
-        .unwrap_or(s_bytes.len());
+    let (start, end) = compute_substr_range(s_bytes.len(), offset, length);
+    if start >= end {
+        return Ok(Value::Long(0));
+    }
     let count = s_bytes[start..end]
         .iter()
         .take_while(|b| chars_bytes.contains(b))
@@ -1837,14 +1871,14 @@ fn strspn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn strcspn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let chars = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let length = args.get(3).map(|v| v.to_long() as usize);
+    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let length = args.get(3).map(|v| v.to_long());
     let s_bytes = s.as_bytes();
     let chars_bytes = chars.as_bytes();
-    let start = offset.min(s_bytes.len());
-    let end = length
-        .map(|l| (start + l).min(s_bytes.len()))
-        .unwrap_or(s_bytes.len());
+    let (start, end) = compute_substr_range(s_bytes.len(), offset, length);
+    if start >= end {
+        return Ok(Value::Long(0));
+    }
     let count = s_bytes[start..end]
         .iter()
         .take_while(|b| !chars_bytes.contains(b))
@@ -2031,12 +2065,14 @@ fn strrpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     let start = if offset >= 0 {
-        offset as usize
+        (offset as usize).min(h.len())
     } else {
         h.len().saturating_sub((-offset) as usize)
     };
-    let search = &h[..h.len()];
-    if let Some(pos) = search[start..].windows(n.len()).rposition(|w| w == n) {
+    if start >= h.len() {
+        return Ok(Value::False);
+    }
+    if let Some(pos) = h[start..].windows(n.len()).rposition(|w| w == n) {
         Ok(Value::Long((start + pos) as i64))
     } else {
         Ok(Value::False)

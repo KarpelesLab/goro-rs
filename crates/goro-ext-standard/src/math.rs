@@ -225,6 +225,12 @@ fn intdiv(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: 0,
         });
     }
+    if a == i64::MIN && b == -1 {
+        return Err(VmError {
+            message: "Division of PHP_INT_MIN by -1 is not an integer".into(),
+            line: 0,
+        });
+    }
     Ok(Value::Long(a / b))
 }
 
@@ -401,39 +407,82 @@ fn rad2deg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .to_degrees(),
     ))
 }
-fn base_convert_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let num_str = args.first().unwrap_or(&Value::Null).to_php_string();
     let from_base = args.get(1).map(|v| v.to_long()).unwrap_or(10) as u32;
     let to_base = args.get(2).map(|v| v.to_long()).unwrap_or(10) as u32;
+    if from_base < 2 || from_base > 36 {
+        vm.emit_warning_at("base_convert(): Invalid `from_base` (2 <= from_base <= 36)", 0);
+        return Ok(Value::False);
+    }
+    if to_base < 2 || to_base > 36 {
+        vm.emit_warning_at("base_convert(): Invalid `to_base` (2 <= to_base <= 36)", 0);
+        return Ok(Value::False);
+    }
     let val = i64::from_str_radix(&num_str.to_string_lossy(), from_base).unwrap_or(0);
-    let result = match to_base {
-        2 => format!("{:b}", val),
-        8 => format!("{:o}", val),
-        16 => format!("{:x}", val),
-        10 => format!("{}", val),
-        _ => format!("{}", val),
-    };
+    let result = int_to_base(val as u64, to_base);
     Ok(Value::String(goro_core::string::PhpString::from_string(
         result,
     )))
 }
+
+fn int_to_base(mut val: u64, base: u32) -> String {
+    if val == 0 {
+        return "0".to_string();
+    }
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut result = Vec::new();
+    while val > 0 {
+        result.push(digits[(val % base as u64) as usize]);
+        val /= base as u64;
+    }
+    result.reverse();
+    String::from_utf8(result).unwrap_or_default()
+}
 fn bindec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(Value::Long(
-        i64::from_str_radix(&s.to_string_lossy(), 2).unwrap_or(0),
-    ))
+    Ok(parse_base_string(&s.to_string_lossy(), 2))
 }
 fn octdec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(Value::Long(
-        i64::from_str_radix(&s.to_string_lossy(), 8).unwrap_or(0),
-    ))
+    Ok(parse_base_string(&s.to_string_lossy(), 8))
 }
 fn hexdec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(Value::Long(
-        i64::from_str_radix(&s.to_string_lossy(), 16).unwrap_or(0),
-    ))
+    Ok(parse_base_string(&s.to_string_lossy(), 16))
+}
+
+/// Parse a string in the given base, returning Long if it fits, Double otherwise
+fn parse_base_string(s: &str, base: u32) -> Value {
+    // Try parsing as unsigned first (PHP treats these as unsigned)
+    let trimmed = s.trim();
+    match u64::from_str_radix(trimmed, base) {
+        Ok(n) => {
+            if n <= i64::MAX as u64 {
+                Value::Long(n as i64)
+            } else {
+                Value::Double(n as f64)
+            }
+        }
+        Err(_) => {
+            // Too large for u64, compute as float
+            let mut result: f64 = 0.0;
+            let base_f = base as f64;
+            for c in trimmed.chars() {
+                let digit = match c {
+                    '0'..='9' => c as u32 - '0' as u32,
+                    'a'..='f' => c as u32 - 'a' as u32 + 10,
+                    'A'..='F' => c as u32 - 'A' as u32 + 10,
+                    _ => break,
+                };
+                if digit >= base {
+                    break;
+                }
+                result = result * base_f + digit as f64;
+            }
+            Value::Double(result)
+        }
+    }
 }
 fn decbin_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(goro_core::string::PhpString::from_string(
@@ -570,8 +619,9 @@ fn mt_getrandmax_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let num = args.first().unwrap_or(&Value::Null).to_double();
-    let decimals = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let val = args.first().unwrap_or(&Value::Null);
+    let decimals_raw = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let decimals = if decimals_raw < 0 { 0usize } else { decimals_raw.min(100000) as usize };
     let dec_point = match args.get(2).map(|v| v.deref()) {
         Some(Value::Null) | Some(Value::Undef) | None => ".".to_string(),
         Some(v) => v.to_php_string().to_string_lossy(),
@@ -581,7 +631,40 @@ fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.to_php_string().to_string_lossy(),
     };
 
-    let formatted = format!("{:.prec$}", num, prec = decimals);
+    // For integer values, format without going through float
+    let formatted = if let Value::Long(n) = val {
+        if decimals > 0 {
+            format!("{}.{}", n, "0".repeat(decimals))
+        } else {
+            format!("{}", n)
+        }
+    } else {
+        let num = val.to_double();
+        if num.is_nan() {
+            if decimals > 0 {
+                format!("NAN{}{}", dec_point, "0".repeat(decimals))
+            } else {
+                "NAN".to_string()
+            }
+        } else if num.is_infinite() {
+            if num > 0.0 {
+                if decimals > 0 {
+                    format!("INF{}{}", dec_point, "0".repeat(decimals))
+                } else {
+                    "INF".to_string()
+                }
+            } else {
+                if decimals > 0 {
+                    format!("-INF{}{}", dec_point, "0".repeat(decimals))
+                } else {
+                    "-INF".to_string()
+                }
+            }
+        } else {
+            format!("{:.prec$}", num, prec = decimals)
+        }
+    };
+
     let parts: Vec<&str> = formatted.split('.').collect();
     let int_part = parts[0];
     let dec_part = parts.get(1).unwrap_or(&"");
@@ -589,17 +672,24 @@ fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Add thousands separator
     let negative = int_part.starts_with('-');
     let digits: &str = if negative { &int_part[1..] } else { int_part };
-    let mut with_sep = String::new();
-    for (i, c) in digits.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 && !thousands_sep.is_empty() {
-            with_sep = format!("{}{}{}", c, thousands_sep, with_sep);
-        } else {
-            with_sep.insert(0, c);
+
+    // Don't add thousands sep to non-numeric parts (NAN, INF)
+    let with_sep = if digits.chars().all(|c| c.is_ascii_digit()) {
+        let mut result = String::new();
+        for (i, c) in digits.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 && !thousands_sep.is_empty() {
+                result = format!("{}{}{}", c, thousands_sep, result);
+            } else {
+                result.insert(0, c);
+            }
         }
-    }
-    if negative {
-        with_sep.insert(0, '-');
-    }
+        if negative {
+            result.insert(0, '-');
+        }
+        result
+    } else {
+        int_part.to_string()
+    };
 
     let result = if decimals > 0 {
         format!("{}{}{}", with_sep, dec_point, dec_part)

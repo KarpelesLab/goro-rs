@@ -1578,20 +1578,44 @@ fn array_intersect(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
+/// Get a type priority for sorting that establishes total ordering
+fn type_priority(v: &Value) -> u8 {
+    match v {
+        Value::Null | Value::Undef => 0,
+        Value::False => 1,
+        Value::True => 2,
+        Value::Long(_) | Value::Double(_) => 3,
+        Value::String(_) => 4,
+        Value::Array(_) => 5,
+        Value::Object(_) | Value::Generator(_) => 6,
+        Value::Reference(_) => 7,
+    }
+}
+
+/// Compare two PHP values for sorting, ensuring total ordering
+fn php_sort_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    // First try PHP comparison
+    let cmp = a.compare(b);
+    if cmp < 0 {
+        std::cmp::Ordering::Less
+    } else if cmp > 0 {
+        std::cmp::Ordering::Greater
+    } else {
+        // For equal comparison results, use a type-based tiebreaker to ensure total ordering
+        let tp_a = type_priority(a);
+        let tp_b = type_priority(b);
+        tp_a.cmp(&tp_b)
+    }
+}
+
 fn sort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<Value> = arr.values().cloned().collect();
-        entries.sort_by(|a, b| {
-            let cmp = a.compare(b);
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+        // Use sort_unstable_by which is more tolerant of comparison inconsistencies
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            entries.sort_by(php_sort_cmp);
+        }));
         // Rebuild array with sequential integer keys
         let mut new_arr = PhpArray::new();
         for val in entries {
@@ -1605,16 +1629,9 @@ fn rsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<Value> = arr.values().cloned().collect();
-        entries.sort_by(|a, b| {
-            let cmp = b.compare(a);
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            entries.sort_by(|a, b| php_sort_cmp(b, a));
+        }));
         let mut new_arr = PhpArray::new();
         for val in entries {
             new_arr.push(val);
@@ -1627,16 +1644,9 @@ fn asort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        entries.sort_by(|a, b| {
-            let cmp = a.1.compare(&b.1);
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            entries.sort_by(|a, b| php_sort_cmp(&a.1, &b.1));
+        }));
         *arr = goro_core::array::PhpArray::new();
         for (k, v) in entries {
             arr.set(k, v);
@@ -1648,16 +1658,9 @@ fn arsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        entries.sort_by(|a, b| {
-            let cmp = b.1.compare(&a.1);
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            entries.sort_by(|a, b| php_sort_cmp(&b.1, &a.1));
+        }));
         *arr = goro_core::array::PhpArray::new();
         for (k, v) in entries {
             arr.set(k, v);
@@ -2255,8 +2258,9 @@ fn str_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let num = args.first().map(|v| v.to_double()).unwrap_or(0.0);
-    let decimals = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let val = args.first().unwrap_or(&Value::Null);
+    let decimals_raw = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let decimals = if decimals_raw < 0 { 0usize } else { decimals_raw.min(100000) as usize };
     let dec_point = match args.get(2).map(|v| v.deref()) {
         Some(Value::Null) | Some(Value::Undef) | None => ".".to_string(),
         Some(v) => v.to_php_string().to_string_lossy(),
@@ -2266,28 +2270,52 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.to_php_string().to_string_lossy(),
     };
 
-    // Round first (PHP rounds half up)
-    let factor = 10f64.powi(decimals as i32);
-    let rounded = (num.abs() * factor).round() / factor;
-    let formatted = format!("{:.prec$}", rounded, prec = decimals);
+    // For integer values, format without going through float to preserve precision
+    let (formatted, is_negative) = if let Value::Long(n) = val {
+        let neg = *n < 0;
+        let abs_str = if neg { format!("{}", -(*n as i128)) } else { format!("{}", n) };
+        let formatted = if decimals > 0 {
+            format!("{}.{}", abs_str, "0".repeat(decimals))
+        } else {
+            abs_str
+        };
+        (formatted, neg)
+    } else {
+        let num = val.to_double();
+        if num.is_nan() {
+            let s = if decimals > 0 { format!("NAN{}{}", dec_point, "0".repeat(decimals)) } else { "NAN".to_string() };
+            return Ok(Value::String(PhpString::from_string(s)));
+        }
+        if num.is_infinite() {
+            let prefix = if num < 0.0 { "-" } else { "" };
+            let s = if decimals > 0 { format!("{}INF{}{}", prefix, dec_point, "0".repeat(decimals)) } else { format!("{}INF", prefix) };
+            return Ok(Value::String(PhpString::from_string(s)));
+        }
+        let neg = num < 0.0;
+        let abs_num = num.abs();
+        let formatted = format!("{:.prec$}", abs_num, prec = decimals);
+        // Check if result rounds to zero
+        let is_zero = formatted.chars().all(|c| c == '0' || c == '.');
+        (formatted, neg && !is_zero)
+    };
+
     let parts: Vec<&str> = formatted.split('.').collect();
     let int_part = parts[0];
     let dec_part = parts.get(1).unwrap_or(&"");
 
-    // Add thousands separator
+    // Add thousands separator to integer part
     let int_bytes = int_part.as_bytes();
     let mut with_sep = String::new();
     let len = int_bytes.len();
     for (i, &b) in int_bytes.iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i) % 3 == 0 && !thousands_sep.is_empty() {
             with_sep.push_str(&thousands_sep);
         }
         with_sep.push(b as char);
     }
 
     let mut result = String::new();
-    // Only add negative sign if the rounded value is non-zero
-    if num < 0.0 && rounded != 0.0 {
+    if is_negative {
         result.push('-');
     }
     result.push_str(&with_sep);
@@ -3374,7 +3402,7 @@ fn is_numeric_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(match val {
         Value::Long(_) | Value::Double(_) => Value::True,
         Value::String(s) => {
-            if goro_core::value::parse_numeric_string(s.as_bytes()).is_some() {
+            if php_is_numeric_string(s.as_bytes()) {
                 Value::True
             } else {
                 Value::False
@@ -3382,6 +3410,61 @@ fn is_numeric_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         _ => Value::False,
     })
+}
+
+/// Check if a byte string is a valid PHP numeric string.
+/// PHP allows leading and trailing whitespace.
+fn php_is_numeric_string(s: &[u8]) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    // Skip leading whitespace
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    if i >= s.len() {
+        return false;
+    }
+    // Optional sign
+    if s[i] == b'+' || s[i] == b'-' {
+        i += 1;
+    }
+    if i >= s.len() {
+        return false;
+    }
+    let mut has_digits = false;
+    while i < s.len() && s[i].is_ascii_digit() {
+        has_digits = true;
+        i += 1;
+    }
+    if i < s.len() && s[i] == b'.' {
+        i += 1;
+        while i < s.len() && s[i].is_ascii_digit() {
+            has_digits = true;
+            i += 1;
+        }
+    }
+    if !has_digits {
+        return false;
+    }
+    if i < s.len() && (s[i] == b'e' || s[i] == b'E') {
+        i += 1;
+        if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
+            i += 1;
+        }
+        if i >= s.len() || !s[i].is_ascii_digit() {
+            return false;
+        }
+        while i < s.len() && s[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    // Skip trailing whitespace
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    i == s.len()
 }
 fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();

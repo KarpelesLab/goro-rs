@@ -2034,7 +2034,11 @@ impl Vm {
                     if !fn_cvs.is_empty() {
                         fn_cvs[0] = obj_val.clone(); // $this
                     }
+                    self.called_class_stack.push(obj_rc.borrow().class_name.clone());
+                    self.class_scope_stack.push(class_lower.clone());
                     let _ = self.execute_op_array(&destruct_op, fn_cvs);
+                    self.class_scope_stack.pop();
+                    self.called_class_stack.pop();
                 }
             }
         }
