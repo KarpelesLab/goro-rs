@@ -164,11 +164,13 @@ pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult
     };
 
     let actual = String::from_utf8_lossy(&output).to_string();
+    // Normalize \r\n to \n for comparison (PHP test files use \n line endings)
+    let actual_normalized = actual.replace("\r\n", "\n");
 
     // Compare with expected output
     if let Some(expected) = test.expect_section() {
         let expected_trimmed = expected.trim();
-        let actual_trimmed = actual.trim();
+        let actual_trimmed = actual_normalized.trim();
         if actual_trimmed == expected_trimmed {
             TestResult::Pass
         } else {
@@ -180,7 +182,7 @@ pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult
     } else if let Some(pattern) = test.expectf_section() {
         // EXPECTF: convert printf-style patterns to regex
         let pattern_trimmed = pattern.trim();
-        let actual_trimmed = actual.trim();
+        let actual_trimmed = actual_normalized.trim();
         if matches_expectf(pattern_trimmed, actual_trimmed) {
             TestResult::Pass
         } else {

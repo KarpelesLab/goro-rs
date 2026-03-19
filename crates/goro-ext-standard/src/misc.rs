@@ -1180,7 +1180,14 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let callback = args.get(1);
         let mut result = PhpArray::new();
 
-        if let Some(cb) = callback {
+        // Treat null/undef callback same as no callback
+        let has_callback = match callback {
+            Some(Value::Null) | Some(Value::Undef) | None => false,
+            Some(_) => true,
+        };
+
+        if has_callback {
+            let cb = callback.unwrap();
             // Get callback function
             let (func_name, captured) = match cb {
                 Value::String(s) => (s.as_bytes().to_vec(), vec![]),
@@ -1347,7 +1354,8 @@ fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             Value::True => goro_core::array::ArrayKey::Int(1),
-            Value::False | Value::Null => goro_core::array::ArrayKey::Int(0),
+            Value::False => goro_core::array::ArrayKey::Int(0),
+            Value::Null | Value::Undef => goro_core::array::ArrayKey::String(PhpString::empty()),
             Value::Double(f) => goro_core::array::ArrayKey::Int(*f as i64),
             _ => goro_core::array::ArrayKey::String(k.to_php_string()),
         };
@@ -1939,11 +1947,13 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn ini_get(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(vm
-        .constants
-        .get(name.as_bytes())
-        .cloned()
-        .unwrap_or(Value::False))
+    match vm.constants.get(name.as_bytes()) {
+        Some(val) => {
+            // ini_get always returns string values
+            Ok(Value::String(val.to_php_string()))
+        }
+        None => Ok(Value::False),
+    }
 }
 fn ini_restore(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)

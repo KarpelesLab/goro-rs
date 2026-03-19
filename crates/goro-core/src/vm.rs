@@ -132,6 +132,8 @@ pub struct Vm {
     pub error_handler: Option<Value>,
     /// Next ID for bound closure names
     next_bound_closure_id: u64,
+    /// JSON last error code (0 = no error)
+    pub json_last_error: i64,
 }
 
 impl Vm {
@@ -159,6 +161,7 @@ impl Vm {
             pending_return: None,
             error_handler: None,
             next_bound_closure_id: 0,
+            json_last_error: 0,
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -2368,9 +2371,20 @@ impl Vm {
                 OpCode::BitwiseAnd => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let result = if matches!(a.deref(), Value::String(_)) && matches!(b.deref(), Value::String(_)) {
+                        let sa = a.to_php_string();
+                        let sb = b.to_php_string();
+                        let ab = sa.as_bytes();
+                        let bb = sb.as_bytes();
+                        let len = ab.len().min(bb.len());
+                        let res: Vec<u8> = (0..len).map(|i| ab[i] & bb[i]).collect();
+                        Value::String(crate::string::PhpString::from_vec(res))
+                    } else {
+                        Value::Long(a.to_long() & b.to_long())
+                    };
                     self.write_operand(
                         &op.result,
-                        Value::Long(a.to_long() & b.to_long()),
+                        result,
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -2379,9 +2393,24 @@ impl Vm {
                 OpCode::BitwiseOr => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let result = if matches!(a.deref(), Value::String(_)) && matches!(b.deref(), Value::String(_)) {
+                        let sa = a.to_php_string();
+                        let sb = b.to_php_string();
+                        let ab = sa.as_bytes();
+                        let bb = sb.as_bytes();
+                        let max_len = ab.len().max(bb.len());
+                        let res: Vec<u8> = (0..max_len).map(|i| {
+                            let a_byte = if i < ab.len() { ab[i] } else { 0 };
+                            let b_byte = if i < bb.len() { bb[i] } else { 0 };
+                            a_byte | b_byte
+                        }).collect();
+                        Value::String(crate::string::PhpString::from_vec(res))
+                    } else {
+                        Value::Long(a.to_long() | b.to_long())
+                    };
                     self.write_operand(
                         &op.result,
-                        Value::Long(a.to_long() | b.to_long()),
+                        result,
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -2390,9 +2419,20 @@ impl Vm {
                 OpCode::BitwiseXor => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let result = if matches!(a.deref(), Value::String(_)) && matches!(b.deref(), Value::String(_)) {
+                        let sa = a.to_php_string();
+                        let sb = b.to_php_string();
+                        let ab = sa.as_bytes();
+                        let bb = sb.as_bytes();
+                        let len = ab.len().min(bb.len());
+                        let res: Vec<u8> = (0..len).map(|i| ab[i] ^ bb[i]).collect();
+                        Value::String(crate::string::PhpString::from_vec(res))
+                    } else {
+                        Value::Long(a.to_long() ^ b.to_long())
+                    };
                     self.write_operand(
                         &op.result,
-                        Value::Long(a.to_long() ^ b.to_long()),
+                        result,
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -2400,9 +2440,17 @@ impl Vm {
                 }
                 OpCode::BitwiseNot => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let result = if matches!(a.deref(), Value::String(_)) {
+                        let sa = a.to_php_string();
+                        let bytes = sa.as_bytes();
+                        let res: Vec<u8> = bytes.iter().map(|b| !b).collect();
+                        Value::String(crate::string::PhpString::from_vec(res))
+                    } else {
+                        Value::Long(!a.to_long())
+                    };
                     self.write_operand(
                         &op.result,
-                        Value::Long(!a.to_long()),
+                        result,
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -2771,9 +2819,20 @@ impl Vm {
                 OpCode::AssignBitwiseAnd => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let result = if matches!(cv_val.deref(), Value::String(_)) && matches!(rhs.deref(), Value::String(_)) {
+                        let sa = cv_val.to_php_string();
+                        let sb = rhs.to_php_string();
+                        let ab = sa.as_bytes();
+                        let bb = sb.as_bytes();
+                        let len = ab.len().min(bb.len());
+                        let res: Vec<u8> = (0..len).map(|i| ab[i] & bb[i]).collect();
+                        Value::String(crate::string::PhpString::from_vec(res))
+                    } else {
+                        Value::Long(cv_val.to_long() & rhs.to_long())
+                    };
                     self.write_operand(
                         &op.op1,
-                        Value::Long(cv_val.to_long() & rhs.to_long()),
+                        result,
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -2782,9 +2841,24 @@ impl Vm {
                 OpCode::AssignBitwiseOr => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let result = if matches!(cv_val.deref(), Value::String(_)) && matches!(rhs.deref(), Value::String(_)) {
+                        let sa = cv_val.to_php_string();
+                        let sb = rhs.to_php_string();
+                        let ab = sa.as_bytes();
+                        let bb = sb.as_bytes();
+                        let max_len = ab.len().max(bb.len());
+                        let res: Vec<u8> = (0..max_len).map(|i| {
+                            let a_byte = if i < ab.len() { ab[i] } else { 0 };
+                            let b_byte = if i < bb.len() { bb[i] } else { 0 };
+                            a_byte | b_byte
+                        }).collect();
+                        Value::String(crate::string::PhpString::from_vec(res))
+                    } else {
+                        Value::Long(cv_val.to_long() | rhs.to_long())
+                    };
                     self.write_operand(
                         &op.op1,
-                        Value::Long(cv_val.to_long() | rhs.to_long()),
+                        result,
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -2793,9 +2867,20 @@ impl Vm {
                 OpCode::AssignBitwiseXor => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let result = if matches!(cv_val.deref(), Value::String(_)) && matches!(rhs.deref(), Value::String(_)) {
+                        let sa = cv_val.to_php_string();
+                        let sb = rhs.to_php_string();
+                        let ab = sa.as_bytes();
+                        let bb = sb.as_bytes();
+                        let len = ab.len().min(bb.len());
+                        let res: Vec<u8> = (0..len).map(|i| ab[i] ^ bb[i]).collect();
+                        Value::String(crate::string::PhpString::from_vec(res))
+                    } else {
+                        Value::Long(cv_val.to_long() ^ rhs.to_long())
+                    };
                     self.write_operand(
                         &op.op1,
-                        Value::Long(cv_val.to_long() ^ rhs.to_long()),
+                        result,
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,

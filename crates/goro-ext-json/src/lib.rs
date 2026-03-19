@@ -28,12 +28,26 @@ const JSON_UNESCAPED_UNICODE: i64 = 256;
 // const JSON_PARTIAL_OUTPUT_ON_ERROR: i64 = 512;
 // const JSON_THROW_ON_ERROR: i64 = 4194304;
 
-fn json_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     let flags = match args.get(1) {
         Some(v) => v.to_long(),
         None => 0,
     };
+
+    // Check for NAN/INF at top level
+    if let Value::Double(f) = val {
+        if f.is_nan() || f.is_infinite() {
+            vm.json_last_error = 7; // JSON_ERROR_INF_OR_NAN
+            // JSON_PARTIAL_OUTPUT_ON_ERROR flag
+            if flags & 512 != 0 {
+                return Ok(Value::String(PhpString::from_bytes(b"0")));
+            }
+            return Ok(Value::False);
+        }
+    }
+
+    vm.json_last_error = 0;
     let s = json_encode_value_flags(val, 0, flags);
     Ok(Value::String(PhpString::from_string(s)))
 }
@@ -291,12 +305,24 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             parser.skip_whitespace();
             if parser.pos < parser.input.len() {
                 // Trailing data after valid JSON
+                vm.json_last_error = 4; // JSON_ERROR_SYNTAX
                 Ok(Value::Null)
             } else {
+                vm.json_last_error = 0;
                 Ok(val)
             }
         }
-        None => Ok(Value::Null),
+        None => {
+            // Determine error type
+            if json_bytes.is_empty() {
+                vm.json_last_error = 4; // JSON_ERROR_SYNTAX
+            } else if parser.depth > parser.max_depth {
+                vm.json_last_error = 6; // JSON_ERROR_DEPTH
+            } else {
+                vm.json_last_error = 4; // JSON_ERROR_SYNTAX
+            }
+            Ok(Value::Null)
+        }
     }
 }
 
@@ -648,11 +674,25 @@ impl<'a, 'b> JsonParser<'a, 'b> {
         }
     }
 }
-fn json_last_error(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+fn json_last_error(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(vm.json_last_error))
 }
-fn json_last_error_msg(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"No error")))
+fn json_last_error_msg(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let msg = match vm.json_last_error {
+        0 => "No error",
+        1 => "Maximum stack depth exceeded",
+        2 => "Invalid or malformed JSON",
+        3 => "Control character error, possibly incorrectly encoded",
+        4 => "Syntax error",
+        5 => "Malformed UTF-8 characters, possibly incorrectly encoded",
+        6 => "Recursion detected",
+        7 => "Inf and NaN cannot be JSON encoded",
+        8 => "Type is not supported",
+        9 => "The decoded property name is invalid",
+        10 => "Single unpaired UTF-16 surrogate in unicode escape",
+        _ => "Unknown error",
+    };
+    Ok(Value::String(PhpString::from_bytes(msg.as_bytes())))
 }
 
 fn json_validate(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

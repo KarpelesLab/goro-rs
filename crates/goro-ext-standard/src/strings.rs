@@ -322,10 +322,19 @@ fn str_ends_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn str_repeat(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let times = args.get(1).map(|v| v.to_long()).unwrap_or(0).max(0) as usize;
-    let repeated = s.as_bytes().repeat(times);
+    let times = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if times < 0 {
+        let msg = "str_repeat(): Argument #2 ($times) must be greater than or equal to 0".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
+    let repeated = s.as_bytes().repeat(times as usize);
     Ok(Value::String(PhpString::from_vec(repeated)))
 }
 
@@ -424,6 +433,7 @@ fn explode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let delimiter = args.first().unwrap_or(&Value::Null).to_php_string();
     let string = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let limit = args.get(2).map(|v| v.to_long()).unwrap_or(i64::MAX);
 
     let d = delimiter.as_bytes();
     let s = string.as_bytes();
@@ -435,19 +445,58 @@ fn explode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
 
-    let mut arr = PhpArray::new();
+    // First, split without limit to get all pieces
+    let mut pieces: Vec<Vec<u8>> = Vec::new();
     let mut start = 0;
     let mut i = 0;
     while i + d.len() <= s.len() {
         if &s[i..i + d.len()] == d {
-            arr.push(Value::String(PhpString::from_vec(s[start..i].to_vec())));
+            pieces.push(s[start..i].to_vec());
             i += d.len();
             start = i;
         } else {
             i += 1;
         }
     }
-    arr.push(Value::String(PhpString::from_vec(s[start..].to_vec())));
+    pieces.push(s[start..].to_vec());
+
+    let mut arr = PhpArray::new();
+    if limit > 0 {
+        let limit = limit as usize;
+        if limit >= pieces.len() {
+            for p in pieces {
+                arr.push(Value::String(PhpString::from_vec(p)));
+            }
+        } else {
+            // Return first (limit-1) pieces, then rest joined
+            for p in &pieces[..limit - 1] {
+                arr.push(Value::String(PhpString::from_vec(p.clone())));
+            }
+            // Join remaining pieces with delimiter
+            let mut rest = Vec::new();
+            for (j, p) in pieces[limit - 1..].iter().enumerate() {
+                if j > 0 {
+                    rest.extend_from_slice(d);
+                }
+                rest.extend_from_slice(p);
+            }
+            arr.push(Value::String(PhpString::from_vec(rest)));
+        }
+    } else if limit < 0 {
+        // Negative limit: return all except last -limit elements
+        let drop = (-limit) as usize;
+        if drop >= pieces.len() {
+            // Return empty array - but PHP returns array with empty string? No, empty array
+            // Actually PHP returns empty array when limit drops all
+        } else {
+            for p in &pieces[..pieces.len() - drop] {
+                arr.push(Value::String(PhpString::from_vec(p.clone())));
+            }
+        }
+    } else {
+        // limit == 0: treated as 1
+        arr.push(Value::String(PhpString::from_vec(s.to_vec())));
+    }
 
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
@@ -745,10 +794,15 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|v| v.to_php_string())
         .unwrap_or_else(|| PhpString::from_bytes(b"\r\n"));
 
-    // PHP 8.0+: chunklen must be >= 1
+    // PHP 8.0+: chunklen must be >= 1 (throws ValueError)
     if chunklen < 1 {
-        vm.emit_warning("chunk_split(): Argument #2 ($chunklen) must be greater than 0");
-        return Ok(Value::False);
+        let msg = "chunk_split(): Argument #2 ($length) must be greater than 0".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
     }
     let chunklen = chunklen as usize;
 
@@ -1428,17 +1482,10 @@ fn similar_text(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn soundex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let input = s.to_string_lossy().to_uppercase();
-    if input.is_empty() {
-        return Ok(Value::False);
-    }
-
-    let mut result = String::new();
-    let bytes = input.as_bytes();
-    result.push(bytes[0] as char);
+    let bytes = s.as_bytes();
 
     let code = |c: u8| -> u8 {
-        match c {
+        match c.to_ascii_uppercase() {
             b'B' | b'F' | b'P' | b'V' => b'1',
             b'C' | b'G' | b'J' | b'K' | b'Q' | b'S' | b'X' | b'Z' => b'2',
             b'D' | b'T' => b'3',
@@ -1449,8 +1496,21 @@ fn soundex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    let mut last = code(bytes[0]);
-    for &b in &bytes[1..] {
+    // Find the first alphabetic character
+    let first_alpha = bytes.iter().position(|b| b.is_ascii_alphabetic());
+    if first_alpha.is_none() {
+        // No alphabetic characters - return "0000" (PHP 8.5 behavior)
+        return Ok(Value::String(PhpString::from_bytes(b"0000")));
+    }
+    let first_idx = first_alpha.unwrap();
+    let mut result = String::new();
+    result.push((bytes[first_idx]).to_ascii_uppercase() as char);
+
+    let mut last = code(bytes[first_idx]);
+    for &b in &bytes[first_idx + 1..] {
+        if !b.is_ascii_alphabetic() {
+            continue;
+        }
         let c = code(b);
         if c != b'0' && c != last {
             result.push(c as char);
@@ -1515,49 +1575,79 @@ fn levenshtein(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(matrix[len1][len2] as i64))
 }
 
-fn count_chars(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn count_chars(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+
+    if mode < 0 || mode > 4 {
+        let msg = "count_chars(): Argument #2 ($mode) must be between 0 and 4 (inclusive)".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
 
     let mut counts = [0i64; 256];
     for &b in s.as_bytes() {
         counts[b as usize] += 1;
     }
 
-    use goro_core::array::PhpArray;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    let mut result = PhpArray::new();
     match mode {
-        0 => {
-            for i in 0..256 {
-                result.set(
-                    goro_core::array::ArrayKey::Int(i as i64),
-                    Value::Long(counts[i]),
-                );
-            }
-        }
-        1 => {
+        3 => {
+            // Return string with all unique bytes used
+            let mut chars = Vec::new();
             for i in 0..256 {
                 if counts[i] > 0 {
-                    result.set(
-                        goro_core::array::ArrayKey::Int(i as i64),
-                        Value::Long(counts[i]),
-                    );
+                    chars.push(i as u8);
                 }
             }
+            Ok(Value::String(PhpString::from_vec(chars)))
         }
-        2 => {
+        4 => {
+            // Return string with all bytes NOT used
+            let mut chars = Vec::new();
             for i in 0..256 {
                 if counts[i] == 0 {
-                    result.set(goro_core::array::ArrayKey::Int(i as i64), Value::Long(0));
+                    chars.push(i as u8);
                 }
             }
+            Ok(Value::String(PhpString::from_vec(chars)))
         }
-        _ => {}
+        _ => {
+            let mut result = PhpArray::new();
+            match mode {
+                0 => {
+                    for i in 0..256 {
+                        result.set(
+                            goro_core::array::ArrayKey::Int(i as i64),
+                            Value::Long(counts[i]),
+                        );
+                    }
+                }
+                1 => {
+                    for i in 0..256 {
+                        if counts[i] > 0 {
+                            result.set(
+                                goro_core::array::ArrayKey::Int(i as i64),
+                                Value::Long(counts[i]),
+                            );
+                        }
+                    }
+                }
+                2 => {
+                    for i in 0..256 {
+                        if counts[i] == 0 {
+                            result.set(goro_core::array::ArrayKey::Int(i as i64), Value::Long(0));
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(result))))
+        }
     }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn str_split_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1914,33 +2004,85 @@ fn substr_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn str_ireplace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let search = args.first().unwrap_or(&Value::Null).to_php_string();
-    let replace = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let subject = args.get(2).unwrap_or(&Value::Null).to_php_string();
-    let search_lower: Vec<u8> = search
-        .as_bytes()
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
+    let search_val = args.first().unwrap_or(&Value::Null);
+    let replace_val = args.get(1).unwrap_or(&Value::Null);
+    let subject_val = args.get(2).unwrap_or(&Value::Null);
+
+    // Build search/replace pairs (same logic as str_replace but case-insensitive)
+    let pairs: Vec<(PhpString, PhpString)> = match (search_val, replace_val) {
+        (Value::Array(sa), Value::Array(ra)) => {
+            let sa = sa.borrow();
+            let ra = ra.borrow();
+            let search_vals: Vec<_> = sa.values().collect();
+            let replace_vals: Vec<_> = ra.values().collect();
+            let mut pairs = Vec::new();
+            for (i, sv) in search_vals.iter().enumerate() {
+                let rv = replace_vals.get(i).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::empty());
+                pairs.push((sv.to_php_string(), rv));
+            }
+            pairs
+        }
+        (Value::Array(sa), _) => {
+            let sa = sa.borrow();
+            sa.values().map(|sv| (sv.to_php_string(), replace_val.to_php_string())).collect()
+        }
+        _ => {
+            vec![(search_val.to_php_string(), replace_val.to_php_string())]
+        }
+    };
+
+    let result = match subject_val {
+        Value::Array(subject_arr) => {
+            let subject_arr = subject_arr.borrow();
+            let mut result_arr = PhpArray::new();
+            for (key, val) in subject_arr.iter() {
+                let mut current = val.to_php_string().as_bytes().to_vec();
+                for (needle, replacement) in &pairs {
+                    let (new_val, _) = str_ireplace_single(&current, needle.as_bytes(), replacement.as_bytes());
+                    current = new_val;
+                }
+                result_arr.set(key.clone(), Value::String(PhpString::from_vec(current)));
+            }
+            Value::Array(Rc::new(RefCell::new(result_arr)))
+        }
+        _ => {
+            let mut current = subject_val.to_php_string().as_bytes().to_vec();
+            for (needle, replacement) in &pairs {
+                let (new_val, _) = str_ireplace_single(&current, needle.as_bytes(), replacement.as_bytes());
+                current = new_val;
+            }
+            Value::String(PhpString::from_vec(current))
+        }
+    };
+
+    Ok(result)
+}
+
+fn str_ireplace_single(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> (Vec<u8>, i64) {
+    if needle.is_empty() {
+        return (haystack.to_vec(), 0);
+    }
+    let needle_lower: Vec<u8> = needle.iter().map(|b| b.to_ascii_lowercase()).collect();
     let mut result = Vec::new();
-    let subject_bytes = subject.as_bytes();
+    let mut count = 0i64;
     let mut i = 0;
-    while i < subject_bytes.len() {
-        if i + search_lower.len() <= subject_bytes.len() {
-            let window: Vec<u8> = subject_bytes[i..i + search_lower.len()]
+    while i < haystack.len() {
+        if i + needle_lower.len() <= haystack.len() {
+            let window: Vec<u8> = haystack[i..i + needle_lower.len()]
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
-            if window == search_lower {
-                result.extend_from_slice(replace.as_bytes());
-                i += search_lower.len();
+            if window == needle_lower {
+                result.extend_from_slice(replacement);
+                i += needle_lower.len();
+                count += 1;
                 continue;
             }
         }
-        result.push(subject_bytes[i]);
+        result.push(haystack[i]);
         i += 1;
     }
-    Ok(Value::String(PhpString::from_vec(result)))
+    (result, count)
 }
 
 fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3076,12 +3218,33 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn nl2br_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let is_xhtml = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
-    let br = if is_xhtml { "<br />" } else { "<br>" };
-    let input = s.to_string_lossy();
-    let result = input.replace("\r\n", &format!("{}\r\n", br))
-        .replace("\n", &format!("{}\n", br))
-        .replace("\r", &format!("{}\r", br));
-    Ok(Value::String(PhpString::from_string(result)))
+    let br = if is_xhtml { b"<br />" as &[u8] } else { b"<br>" as &[u8] };
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len() * 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' {
+            result.extend_from_slice(br);
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                // \r\n - emit both chars but only one <br>
+                result.push(b'\r');
+                result.push(b'\n');
+                i += 2;
+            } else {
+                // standalone \r
+                result.push(b'\r');
+                i += 1;
+            }
+        } else if bytes[i] == b'\n' {
+            result.extend_from_slice(br);
+            result.push(b'\n');
+            i += 1;
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 
 fn str_getcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
