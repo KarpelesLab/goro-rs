@@ -288,6 +288,8 @@ pub struct OpArray {
     /// Class scope for this function (lowercase). Set for methods and closures defined within a class.
     /// Used to determine visibility access rights at runtime.
     pub scope_class: Option<Vec<u8>>,
+    /// Whether this is a static closure (declared with `static function() {}`)
+    pub is_static_closure: bool,
 }
 
 impl OpArray {
@@ -305,6 +307,7 @@ impl OpArray {
             param_types: Vec::new(),
             return_type: None,
             scope_class: None,
+            is_static_closure: false,
         }
     }
 

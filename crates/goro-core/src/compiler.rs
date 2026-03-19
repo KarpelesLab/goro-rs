@@ -2968,6 +2968,7 @@ impl Compiler {
                 params,
                 body,
                 use_vars,
+                is_static,
                 ..
             } => {
                 // Compile closure body as a child function
@@ -2980,14 +2981,16 @@ impl Compiler {
                 let mut closure_compiler = Compiler::new();
                 closure_compiler.op_array.name = closure_name.clone();
                 closure_compiler.op_array.is_generator = is_generator;
+                closure_compiler.op_array.is_static_closure = *is_static;
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
                 closure_compiler.op_array.scope_class = self.op_array.scope_class.clone()
                     .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
 
-                // If inside a class method, automatically capture $this
-                let has_this = self.current_class.is_some()
+                // If inside a class method and not static, automatically capture $this
+                let has_this = !is_static
+                    && self.current_class.is_some()
                     && self.op_array.cv_names.contains(&b"this".to_vec());
                 if has_this {
                     closure_compiler.op_array.get_or_create_cv(b"this");

@@ -130,6 +130,8 @@ pub struct Vm {
     pending_return: Option<Value>,
     /// User error handler callback (from set_error_handler)
     pub error_handler: Option<Value>,
+    /// Next ID for bound closure names
+    next_bound_closure_id: u64,
 }
 
 impl Vm {
@@ -156,6 +158,7 @@ impl Vm {
             error_reporting_stack: Vec::new(),
             pending_return: None,
             error_handler: None,
+            next_bound_closure_id: 0,
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -987,6 +990,211 @@ impl Vm {
     pub fn register_user_function(&mut self, name: &[u8], op_array: OpArray) {
         self.user_functions
             .insert(name.to_ascii_lowercase(), op_array);
+    }
+
+    /// Bind a closure to a new $this and/or scope class.
+    /// Returns the new closure value (string or array), or Value::Null on failure.
+    pub fn bind_closure(&mut self, closure_val: &Value, new_this: Value, scope: Value, scope_provided: bool) -> Value {
+        // Extract the closure function name and any existing captured values
+        let (closure_name, captured_values) = match closure_val {
+            Value::String(s) => {
+                (s.as_bytes().to_vec(), Vec::new())
+            }
+            Value::Array(arr) => {
+                let arr_borrow = arr.borrow();
+                let mut values: Vec<Value> = arr_borrow.values().cloned().collect();
+                if values.is_empty() {
+                    return Value::Null;
+                }
+                let name = values.remove(0).to_php_string().as_bytes().to_vec();
+                (name, values)
+            }
+            _ => return Value::Null,
+        };
+
+        // Look up the original closure's OpArray
+        let closure_name_lower: Vec<u8> = closure_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let original_op = match self.user_functions.get(&closure_name_lower) {
+            Some(op) => op.clone(),
+            None => return Value::Null,
+        };
+
+        // Validate scope argument type
+        if scope_provided {
+            match &scope {
+                Value::Null | Value::String(_) | Value::Object(_) => {}
+                _ => {
+                    let type_name = match &scope {
+                        Value::Array(_) => "array",
+                        Value::Long(_) => "int",
+                        Value::Double(_) => "float",
+                        Value::True | Value::False => "bool",
+                        _ => "unknown",
+                    };
+                    let exc = self.throw_type_error(format!(
+                        "Closure::bindTo(): Argument #2 ($newScope) must be of type object|string|null, {} given",
+                        type_name
+                    ));
+                    self.current_exception = Some(exc);
+                    return Value::Null;
+                }
+            }
+        }
+
+        // Check if trying to bind an instance to a static closure
+        if !matches!(new_this, Value::Null) && original_op.is_static_closure {
+            self.emit_warning("Cannot bind an instance to a static closure, this will be an error in PHP 9");
+        }
+
+        // Find $this CV position in the original closure
+        let this_cv_pos = original_op.cv_names.iter().position(|n| n == b"this");
+
+        // Check if closure uses $this - if trying to unbind, warn and return NULL
+        if matches!(new_this, Value::Null) && this_cv_pos == Some(0) {
+            // Check if $this was actually captured (i.e., it was in the captured values)
+            let had_this_captured = !captured_values.is_empty();
+            if had_this_captured {
+                // Check if the closure actually uses $this in opcodes
+                let uses_this = original_op.ops.iter().any(|instr| {
+                    matches!(instr.op1, OperandType::Cv(0))
+                        || matches!(instr.op2, OperandType::Cv(0))
+                        || matches!(instr.result, OperandType::Cv(0))
+                });
+                if uses_this {
+                    self.emit_warning("Cannot unbind $this of closure using $this, this will be an error in PHP 9");
+                    return Value::Null;
+                }
+            }
+        }
+
+        // Determine the new scope class
+        let new_scope: Option<Vec<u8>> = if scope_provided {
+            match &scope {
+                Value::Null => None,
+                Value::String(s) => {
+                    let bytes = s.as_bytes();
+                    if bytes.eq_ignore_ascii_case(b"static") {
+                        original_op.scope_class.clone()
+                    } else {
+                        Some(bytes.to_ascii_lowercase())
+                    }
+                }
+                Value::Object(obj) => {
+                    let obj_borrow = obj.borrow();
+                    Some(obj_borrow.class_name.to_ascii_lowercase())
+                }
+                _ => original_op.scope_class.clone(),
+            }
+        } else {
+            if !matches!(new_this, Value::Null) {
+                if let Some(scope) = &original_op.scope_class {
+                    Some(scope.clone())
+                } else if let Value::Object(obj) = &new_this {
+                    let obj_borrow = obj.borrow();
+                    Some(obj_borrow.class_name.to_ascii_lowercase())
+                } else {
+                    None
+                }
+            } else {
+                original_op.scope_class.clone()
+            }
+        };
+
+        // Create a new bound closure name
+        let bound_id = self.next_bound_closure_id;
+        self.next_bound_closure_id += 1;
+        let new_closure_name = format!("__bound_closure_{}", bound_id).into_bytes();
+
+        // Clone and modify the OpArray
+        let mut new_op = original_op.clone();
+        new_op.name = new_closure_name.clone();
+        new_op.scope_class = new_scope;
+
+        // Determine the $this CV position in the new OpArray
+        let needs_this_cv = !matches!(new_this, Value::Null);
+        if needs_this_cv {
+            if let Some(pos) = this_cv_pos {
+                if pos != 0 {
+                    // $this exists but not at CV[0] - move it there
+                    // Remove from current position
+                    new_op.cv_names.remove(pos);
+                    // Insert at 0
+                    new_op.cv_names.insert(0, b"this".to_vec());
+                    // Remap CV references in opcodes:
+                    // Old CV[pos] -> new CV[0]
+                    // Old CV[0..pos-1] -> new CV[1..pos]
+                    // Old CV[pos+1..] -> unchanged
+                    let pos_u32 = pos as u32;
+                    for op_instr in &mut new_op.ops {
+                        remap_cv_operand(&mut op_instr.op1, pos_u32);
+                        remap_cv_operand(&mut op_instr.op2, pos_u32);
+                        remap_cv_operand(&mut op_instr.result, pos_u32);
+                    }
+                }
+                // If pos == 0, it's already there, nothing to do
+            } else {
+                // $this doesn't exist at all - insert at CV[0], shifting everything
+                new_op.cv_names.insert(0, b"this".to_vec());
+                for op_instr in &mut new_op.ops {
+                    shift_cv_operand(&mut op_instr.op1);
+                    shift_cv_operand(&mut op_instr.op2);
+                    shift_cv_operand(&mut op_instr.result);
+                }
+                if !new_op.param_types.is_empty() {
+                    new_op.param_types.insert(0, None);
+                }
+            }
+        };
+
+        // Register the new function
+        self.register_user_function(&new_closure_name, new_op);
+
+        // Build the result capture array
+        // The capture array: [closure_name, captured_val_for_cv0, captured_val_for_cv1, ...]
+        // These captured values map sequentially to CVs starting at CV[0].
+        // Parameters come after via SendVal.
+
+        if needs_this_cv || !captured_values.is_empty() {
+            let mut result_values: Vec<Value> = Vec::new();
+            result_values.push(Value::String(PhpString::from_vec(new_closure_name)));
+
+            if needs_this_cv {
+                if this_cv_pos == Some(0) {
+                    // $this was at CV[0] and stays there - replace in captures
+                    result_values.push(new_this);
+                    if captured_values.len() > 1 {
+                        result_values.extend(captured_values.into_iter().skip(1));
+                    }
+                } else {
+                    // $this was either at a non-zero position or didn't exist
+                    // After remap/insert, it's now at CV[0]
+                    // Add $this as the first captured value
+                    result_values.push(new_this);
+                    // Add the rest of the captured values (they map to CV[1], CV[2], ...)
+                    result_values.extend(captured_values);
+                }
+            } else {
+                // Not binding $this
+                if this_cv_pos == Some(0) && !captured_values.is_empty() {
+                    // Unbinding $this - skip it from captures
+                    result_values.extend(captured_values.into_iter().skip(1));
+                } else {
+                    result_values.extend(captured_values);
+                }
+                if result_values.len() == 1 {
+                    // Only the name, return as string
+                    return result_values.remove(0);
+                }
+            }
+
+            let mut arr = crate::array::PhpArray::new();
+            for v in result_values {
+                arr.push(v);
+            }
+            Value::Array(Rc::new(RefCell::new(arr)))
+        } else {
+            Value::String(PhpString::from_vec(new_closure_name))
+        }
     }
 
     /// Register a built-in function
@@ -2792,11 +3000,26 @@ impl Vm {
                     } else if func_name_lower == b"closure::bind"
                         || func_name_lower == b"closure::bindto"
                     {
-                        // Closure::bind($closure, $newThis, $newScope) - return closure as-is for now
+                        // Closure::bind($closure, $newThis, $newScope)
                         let closure = call.args.first().cloned().unwrap_or(Value::Null);
+                        let new_this = call.args.get(1).cloned().unwrap_or(Value::Null);
+                        let scope = call.args.get(2).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"static")));
+                        let scope_provided = call.args.len() >= 3;
+                        let result = self.bind_closure(&closure, new_this, scope, scope_provided);
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: "Uncaught TypeError".into(),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         self.write_operand(
                             &op.result,
-                            closure,
+                            result,
                             &mut cvs,
                             &mut tmps,
                             &static_cv_keys,
@@ -2862,6 +3085,80 @@ impl Vm {
                         self.write_operand(
                             &op.result,
                             result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else if func_name_lower == b"__closure_bindto" {
+                        // $closure->bindTo($newThis, $scope)
+                        // args[0] = closure value, args[1] = $newThis, args[2] = $scope
+                        let closure = call.args.first().cloned().unwrap_or(Value::Null);
+                        let new_this = call.args.get(1).cloned().unwrap_or(Value::Null);
+                        let scope = call.args.get(2).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"static")));
+                        let scope_provided = call.args.len() >= 3;
+                        let result = self.bind_closure(&closure, new_this, scope, scope_provided);
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: "Uncaught TypeError".into(),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else if func_name_lower == b"__closure_call" {
+                        // $closure->call($newThis, ...$args)
+                        // args[0] = closure value, args[1] = $newThis, args[2..] = extra args
+                        let closure = call.args.first().cloned().unwrap_or(Value::Null);
+                        let new_this = call.args.get(1).cloned().unwrap_or(Value::Null);
+                        let extra_args: Vec<Value> = call.args.get(2..).map(|s| s.to_vec()).unwrap_or_default();
+
+                        let scope = if let Value::Object(obj) = &new_this {
+                            Value::Object(obj.clone())
+                        } else {
+                            Value::Null
+                        };
+                        let bound = self.bind_closure(&closure, new_this, scope, true);
+
+                        // Now call the bound closure
+                        if let Value::Array(arr) = &bound {
+                            let arr_borrow = arr.borrow();
+                            let mut values: Vec<Value> = arr_borrow.values().cloned().collect();
+                            if !values.is_empty() {
+                                let name = values.remove(0).to_php_string();
+                                values.extend(extra_args);
+                                drop(arr_borrow);
+                                self.pending_calls.push(PendingCall {
+                                    name,
+                                    args: values,
+                                    named_args: Vec::new(),
+                                });
+                                ip -= 1;
+                                continue;
+                            }
+                        } else if let Value::String(name) = &bound {
+                            let mut args = Vec::new();
+                            args.extend(extra_args);
+                            self.pending_calls.push(PendingCall {
+                                name: name.clone(),
+                                args,
+                                named_args: Vec::new(),
+                            });
+                            ip -= 1;
+                            continue;
+                        }
+                        self.write_operand(
+                            &op.result,
+                            Value::Null,
                             &mut cvs,
                             &mut tmps,
                             &static_cv_keys,
@@ -5712,20 +6009,18 @@ impl Vm {
                             .collect();
                         match method_lower.as_slice() {
                             b"bindto" | b"bind" => {
-                                // Closure::bindTo() - return closure as-is (simplified)
+                                // Closure::bindTo($newThis, $scope) - defer to DoFCall
                                 self.pending_calls.push(PendingCall {
-                                    name: PhpString::from_bytes(b"__builtin_return"),
+                                    name: PhpString::from_bytes(b"__closure_bindto"),
                                     args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
                                 });
                             }
                             b"call" => {
-                                // Closure::call($newThis) - call closure with $this
-                                // For now, just set up a call to the closure
-                                let closure_name = obj_val.to_php_string();
+                                // Closure::call($newThis, ...$args) - bind and call
                                 self.pending_calls.push(PendingCall {
-                                    name: closure_name,
-                                    args: vec![],
+                                    name: PhpString::from_bytes(b"__closure_call"),
+                                    args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
                                 });
                             }
@@ -6237,6 +6532,26 @@ fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     chain
+}
+
+/// Shift a CV operand index by +1 (used when inserting $this as CV[0] in bound closures)
+fn shift_cv_operand(operand: &mut OperandType) {
+    if let OperandType::Cv(idx) = operand {
+        *idx += 1;
+    }
+}
+
+/// Remap CV operand when moving CV[old_pos] to CV[0].
+/// CV[old_pos] -> CV[0], CV[0..old_pos-1] -> CV[1..old_pos]
+fn remap_cv_operand(operand: &mut OperandType, old_pos: u32) {
+    if let OperandType::Cv(idx) = operand {
+        if *idx == old_pos {
+            *idx = 0;
+        } else if *idx < old_pos {
+            *idx += 1;
+        }
+        // CVs after old_pos stay the same
+    }
 }
 
 /// PHP increment: for strings, follows alphabetic increment rules
