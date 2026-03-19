@@ -509,6 +509,31 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
+                Some(b'$')
+                    if self
+                        .peek_at(1)
+                        .is_some_and(|c| c == b'{') && self
+                        .peek_at(2)
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') =>
+                {
+                    // ${variable} interpolation (deprecated syntax, equivalent to {$variable})
+                    self.pending.push(Token::new(
+                        TokenKind::InterpolatedStringPart(result.clone()),
+                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                    ));
+                    result.clear();
+                    self.advance(); // consume $
+                    self.advance(); // consume {
+                    let var_name = self.scan_identifier();
+                    self.pending.push(Token::new(
+                        TokenKind::Variable(var_name),
+                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                    ));
+                    // Consume closing }
+                    if self.peek() == Some(b'}') {
+                        self.advance();
+                    }
+                }
                 Some(b'{')
                     if self
                         .peek_at(1)
@@ -1488,6 +1513,36 @@ impl<'a> Lexer<'a> {
                                 Span::new(self.pos as u32, self.pos as u32, self.line),
                             ));
                         }
+                    }
+                }
+                b'$' if i + 2 < len
+                    && content[i + 1] == b'{'
+                    && (content[i + 2].is_ascii_alphabetic() || content[i + 2] == b'_') =>
+                {
+                    // ${variable} interpolation (deprecated syntax)
+                    self.pending.push(Token::new(
+                        TokenKind::InterpolatedStringPart(result.clone()),
+                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                    ));
+                    result.clear();
+                    i += 2; // skip $ and {
+
+                    let var_start = i;
+                    while i < len
+                        && (content[i].is_ascii_alphanumeric()
+                            || content[i] == b'_'
+                            || content[i] >= 0x80)
+                    {
+                        i += 1;
+                    }
+                    let var_name = content[var_start..i].to_vec();
+                    self.pending.push(Token::new(
+                        TokenKind::Variable(var_name),
+                        Span::new(self.pos as u32, self.pos as u32, self.line),
+                    ));
+                    // Consume closing }
+                    if i < len && content[i] == b'}' {
+                        i += 1;
                     }
                 }
                 b'{' if i + 2 < len

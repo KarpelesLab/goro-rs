@@ -5234,14 +5234,17 @@ impl Vm {
                                         class.methods.insert(method_name.clone(), method.clone());
                                     }
                                 }
-                                // Inherit properties (child overrides take precedence)
+                                // Inherit properties (parent properties come first, child overrides take precedence)
                                 let child_prop_names: Vec<Vec<u8>> =
                                     class.properties.iter().map(|p| p.name.clone()).collect();
+                                let mut new_props = Vec::new();
                                 for prop in &parent.properties {
                                     if !child_prop_names.contains(&prop.name) {
-                                        class.properties.push(prop.clone());
+                                        new_props.push(prop.clone());
                                     }
                                 }
+                                new_props.append(&mut class.properties);
+                                class.properties = new_props;
                                 // Inherit constants
                                 for (const_name, const_val) in &parent.constants {
                                     if !class.constants.contains_key(const_name) {

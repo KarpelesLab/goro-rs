@@ -1846,10 +1846,18 @@ impl Compiler {
                         let idx = if let Some(idx_expr) = index {
                             self.compile_expr(idx_expr)?
                         } else {
-                            return Err(CompileError {
-                                message: "cannot use [] for compound assignment".into(),
+                            // $arr[] op= val: append with compound op
+                            // For a new element, starting value is null/empty
+                            // So $arr[] .= "test" => $arr[] = "" . "test" = "test"
+                            // Just compile as a simple array append
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppend,
+                                op1: arr,
+                                op2: val,
+                                result: OperandType::Unused,
                                 line: expr.span.line,
                             });
+                            return Ok(val);
                         };
 
                         let read_tmp = self.op_array.alloc_temp();

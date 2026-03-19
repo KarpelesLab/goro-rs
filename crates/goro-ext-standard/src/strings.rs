@@ -234,7 +234,7 @@ fn substr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let start = start.min(len) as usize;
 
-    let length = args.get(2).map(|v| v.to_long());
+    let length = args.get(2).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_long()) });
     let end = match length {
         Some(l) if l < 0 => {
             let end_pos = len + l;
@@ -260,12 +260,30 @@ fn substr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn strpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let offset_val = args.get(2).map(|v| v.to_long()).unwrap_or(0);
 
     let h = haystack.as_bytes();
     let n = needle.as_bytes();
 
-    if n.is_empty() || offset >= h.len() {
+    // Handle negative offset
+    let offset = if offset_val < 0 {
+        let abs = (-offset_val) as usize;
+        if abs > h.len() {
+            return Ok(Value::False);
+        }
+        h.len() - abs
+    } else {
+        offset_val as usize
+    };
+
+    if n.is_empty() {
+        if offset > h.len() {
+            return Ok(Value::False);
+        }
+        return Ok(Value::Long(offset as i64));
+    }
+
+    if offset >= h.len() {
         return Ok(Value::False);
     }
 
