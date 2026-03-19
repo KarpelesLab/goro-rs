@@ -4810,9 +4810,14 @@ impl Vm {
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
                                 // Copy trait methods (class's own methods take precedence)
+                                let class_name_lower: Vec<u8> = class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 for (method_name, method) in &trait_def.methods {
                                     if !class.methods.contains_key(method_name) {
-                                        class.methods.insert(method_name.clone(), method.clone());
+                                        let mut m = method.clone();
+                                        // Trait methods should have scope of the using class
+                                        m.declaring_class = class_name_lower.clone();
+                                        m.op_array.scope_class = Some(class_name_lower.clone());
+                                        class.methods.insert(method_name.clone(), m);
                                     }
                                 }
                                 // Copy trait properties (class's own properties take precedence)
@@ -4820,7 +4825,9 @@ impl Vm {
                                     class.properties.iter().map(|p| p.name.clone()).collect();
                                 for prop in &trait_def.properties {
                                     if !child_prop_names.contains(&prop.name) {
-                                        class.properties.push(prop.clone());
+                                        let mut p = prop.clone();
+                                        p.declaring_class = class_name_lower.clone();
+                                        class.properties.push(p);
                                     }
                                 }
                                 // Copy trait constants (class's own constants take precedence)
