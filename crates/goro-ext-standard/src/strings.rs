@@ -1662,13 +1662,18 @@ fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg, line: 0 });
     }
     let len = len_raw as usize;
-    let a_sub = &a.as_bytes()[..len.min(a.len())];
-    let b_sub = &b.as_bytes()[..len.min(b.len())];
-    Ok(Value::Long(match a_sub.cmp(b_sub) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }))
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let a_sub_len = len.min(a_bytes.len());
+    let b_sub_len = len.min(b_bytes.len());
+    // Compare byte-by-byte (returns actual difference like PHP)
+    let compare_len = a_sub_len.min(b_sub_len);
+    for i in 0..compare_len {
+        if a_bytes[i] != b_bytes[i] {
+            return Ok(Value::Long(a_bytes[i] as i64 - b_bytes[i] as i64));
+        }
+    }
+    Ok(Value::Long(a_sub_len as i64 - b_sub_len as i64))
 }
 
 fn strcasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1705,19 +1710,21 @@ fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg, line: 0 });
     }
     let len = len_raw as usize;
-    let a_sub: Vec<u8> = a.as_bytes()[..len.min(a.len())]
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let b_sub: Vec<u8> = b.as_bytes()[..len.min(b.len())]
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    Ok(Value::Long(match a_sub.cmp(&b_sub) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }))
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let a_sub_len = len.min(a_bytes.len());
+    let b_sub_len = len.min(b_bytes.len());
+    // Compare byte-by-byte like PHP does (returns actual difference)
+    let compare_len = a_sub_len.min(b_sub_len);
+    for i in 0..compare_len {
+        let ca = a_bytes[i].to_ascii_lowercase();
+        let cb = b_bytes[i].to_ascii_lowercase();
+        if ca != cb {
+            return Ok(Value::Long(ca as i64 - cb as i64));
+        }
+    }
+    // If all compared bytes are equal, compare by length
+    Ok(Value::Long(a_sub_len as i64 - b_sub_len as i64))
 }
 
 fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

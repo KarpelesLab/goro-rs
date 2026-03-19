@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::Rc;
 
@@ -6,6 +6,21 @@ use crate::array::PhpArray;
 use crate::generator::PhpGenerator;
 use crate::object::PhpObject;
 use crate::string::PhpString;
+
+thread_local! {
+    /// PHP `precision` ini setting. Default 14. -1 means shortest roundtrip.
+    static PHP_PRECISION: Cell<i32> = const { Cell::new(14) };
+}
+
+/// Set the PHP `precision` ini value (used by float-to-string conversion).
+pub fn set_php_precision(p: i32) {
+    PHP_PRECISION.with(|c| c.set(p));
+}
+
+/// Get the current PHP `precision` ini value.
+pub fn get_php_precision() -> i32 {
+    PHP_PRECISION.with(|c| c.get())
+}
 
 /// The core value type (equivalent to zval in PHP)
 #[derive(Clone, Default)]
@@ -705,8 +720,19 @@ impl Value {
     }
 }
 
-/// Format a float the way PHP does (14 significant digits, no trailing zeros)
+/// Format a float the way PHP does (respecting `precision` ini setting).
+/// With precision=14 (default), uses 14 significant digits.
+/// With precision=-1, uses shortest roundtrip representation.
 pub fn format_php_float(f: f64) -> String {
+    let precision = get_php_precision();
+    if precision < 0 {
+        return format_php_float_shortest(f);
+    }
+    format_php_float_with_precision(f, precision as usize)
+}
+
+/// Format a float using shortest-roundtrip representation (like precision=-1).
+fn format_php_float_shortest(f: f64) -> String {
     if f.is_nan() {
         return "NAN".to_string();
     }
@@ -725,9 +751,66 @@ pub fn format_php_float(f: f64) -> String {
         };
     }
 
-    // PHP uses G format with 14 significant digits
-    // This is equivalent to: sprintf("%.14G", f) but with some PHP-specific quirks
-    let s = format!("{:.14e}", f);
+    let abs = f.abs();
+    // Use scientific notation for very large/small numbers
+    if abs != 0.0 && (abs >= 1e15 || abs < 1e-4) {
+        // Find shortest roundtrip in scientific notation (start from 1 to ensure decimal point)
+        for prec in 1..20 {
+            let s = format!("{:.prec$e}", f, prec = prec);
+            if let Ok(parsed) = s.parse::<f64>() {
+                if parsed == f {
+                    // Convert to PHP format: uppercase E, explicit +
+                    if let Some(pos) = s.find('e') {
+                        let mantissa = &s[..pos];
+                        let exp: i32 = s[pos + 1..].parse().unwrap_or(0);
+                        let exp_str = if exp >= 0 {
+                            format!("E+{}", exp)
+                        } else {
+                            format!("E{}", exp)
+                        };
+                        return format!("{}{}", mantissa, exp_str);
+                    }
+                }
+            }
+        }
+        return format!("{}", f);
+    }
+
+    // Try increasing precision until roundtrip works
+    for prec in 0..20 {
+        let s = format!("{:.prec$}", f, prec = prec);
+        if let Ok(parsed) = s.parse::<f64>() {
+            if parsed == f {
+                return s;
+            }
+        }
+    }
+    format!("{}", f)
+}
+
+/// Format a float with a specific number of significant digits.
+fn format_php_float_with_precision(f: f64, sig_digits: usize) -> String {
+    if f.is_nan() {
+        return "NAN".to_string();
+    }
+    if f.is_infinite() {
+        return if f.is_sign_positive() {
+            "INF".to_string()
+        } else {
+            "-INF".to_string()
+        };
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
+    }
+
+    // PHP uses G format with `sig_digits` significant digits
+    // This is equivalent to: sprintf("%.{sig_digits}G", f) but with some PHP-specific quirks
+    let s = format!("{:.width$e}", f, width = sig_digits);
 
     // Parse the scientific notation
     let parts: Vec<&str> = s.split('e').collect();
@@ -736,22 +819,22 @@ pub fn format_php_float(f: f64) -> String {
     }
 
     let mantissa = parts[0];
-    let exp: i32 = parts[1].parse().unwrap_or(0);
+    let mut exp: i32 = parts[1].parse().unwrap_or(0);
 
     // Get the significant digits (strip sign and decimal point)
     let negative = mantissa.starts_with('-');
     let digits_str = mantissa.trim_start_matches('-').replace('.', "");
 
-    // Trim to 14 significant digits
-    let mut sig_digits: Vec<u8> = digits_str.bytes().take(14).collect();
+    // Trim to sig_digits significant digits
+    let mut digits_vec: Vec<u8> = digits_str.bytes().take(sig_digits).collect();
 
-    // Check if we need to round (15th digit)
-    if digits_str.len() > 14 {
-        let next_digit = digits_str.as_bytes()[14] - b'0';
+    // Check if we need to round (next digit)
+    if digits_str.len() > sig_digits {
+        let next_digit = digits_str.as_bytes()[sig_digits] - b'0';
         if next_digit >= 5 {
             // Round up
             let mut carry = true;
-            for d in sig_digits.iter_mut().rev() {
+            for d in digits_vec.iter_mut().rev() {
                 if carry {
                     if *d == b'9' {
                         *d = b'0';
@@ -762,20 +845,20 @@ pub fn format_php_float(f: f64) -> String {
                 }
             }
             if carry {
-                sig_digits.insert(0, b'1');
-                // Adjust exponent since we added a digit
-                // exp += 1; // actually this is handled below
+                digits_vec.insert(0, b'1');
+                // Adjust exponent since we added a leading digit
+                exp += 1;
             }
         }
     }
 
     // Remove trailing zeros from significant digits
-    while sig_digits.len() > 1 && *sig_digits.last().unwrap() == b'0' {
-        sig_digits.pop();
+    while digits_vec.len() > 1 && *digits_vec.last().unwrap() == b'0' {
+        digits_vec.pop();
     }
 
-    let sig_count = sig_digits.len();
-    let sig_str: String = sig_digits.iter().map(|&b| b as char).collect();
+    let sig_count = digits_vec.len();
+    let sig_str: String = digits_vec.iter().map(|&b| b as char).collect();
 
     // Position of decimal point: exp + 1 digits before decimal point
     let decimal_pos = exp + 1;
@@ -806,11 +889,11 @@ pub fn format_php_float(f: f64) -> String {
 
     // Use scientific notation for very large/small numbers (like PHP)
     if exp >= 15 || exp <= -5 {
-        // PHP uses uppercase E notation
+        // PHP uses uppercase E notation, always with at least one decimal digit
         let mantissa_part = if sig_count > 1 {
             format!("{}.{}", &sig_str[..1], &sig_str[1..])
         } else {
-            sig_str.clone()
+            format!("{}.0", sig_str)
         };
         let exp_str = if exp >= 0 {
             format!("E+{}", exp)

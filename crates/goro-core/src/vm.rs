@@ -4131,6 +4131,17 @@ impl Vm {
                             );
                         }
                     } else {
+                        // Emit warning for non-iterable values (null, bool, int, etc.)
+                        match &arr_val {
+                            Value::Null | Value::False | Value::True | Value::Long(_) | Value::Double(_) | Value::String(_) => {
+                                let type_name = Vm::value_type_name(&arr_val);
+                                self.emit_warning(&format!(
+                                    "foreach() argument must be of type array|object, {} given",
+                                    type_name
+                                ));
+                            }
+                            _ => {}
+                        }
                         // Store value in the iterator tmp slot
                         self.write_operand(
                             &op.result,
@@ -4991,12 +5002,20 @@ impl Vm {
                         }
                         Value::String(s) => {
                             let lossy = s.to_string_lossy();
+                            let escape_str = |input: &str| -> String {
+                                input
+                                    .replace('\\', "\\\\")
+                                    .replace('\n', "\\n")
+                                    .replace('\r', "\\r")
+                                    .replace('\t', "\\t")
+                                    .replace('\0', "\\0")
+                            };
                             if lossy.len() > 15 {
-                                // Truncate with ...
+                                // Truncate the raw string to 15 chars, then escape
                                 let truncated: String = lossy.chars().take(15).collect();
-                                format!("'{}'...'", truncated)
+                                format!("'{}...'", escape_str(&truncated))
                             } else {
-                                format!("'{}'", lossy)
+                                format!("'{}'", escape_str(&lossy))
                             }
                         }
                         Value::Array(_) => "of type array".to_string(),

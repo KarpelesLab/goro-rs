@@ -127,11 +127,14 @@ pub fn run_test(test: &PhptTest) -> TestResult {
 }
 
 pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult {
+    // Parse INI settings
+    let ini_settings = parse_ini_settings(test.ini_section());
+
     // Handle SKIPIF section
     if let Some(skipif) = test.skipif_section() {
         let skipif_trimmed = skipif.trim();
         if !skipif_trimmed.is_empty() {
-            match execute_php_with_timeout(skipif_trimmed.as_bytes(), 5, test_dir) {
+            match execute_php_with_timeout(skipif_trimmed.as_bytes(), 5, test_dir, &ini_settings) {
                 Ok(output) => {
                     let output_str = String::from_utf8_lossy(&output).to_lowercase();
                     if output_str.contains("skip") {
@@ -155,7 +158,7 @@ pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult
     };
 
     // Execute the source with a 5-second timeout
-    let output = match execute_php_with_timeout(source.as_bytes(), 5, test_dir) {
+    let output = match execute_php_with_timeout(source.as_bytes(), 5, test_dir, &ini_settings) {
         Ok(output) => output,
         Err(e) => return TestResult::Error(e),
     };
@@ -194,13 +197,34 @@ pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult
     }
 }
 
+/// Parse --INI-- section into key-value pairs
+fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
+    let mut settings = Vec::new();
+    if let Some(ini) = ini_section {
+        for line in ini.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(';') {
+                continue;
+            }
+            if let Some(eq) = line.find('=') {
+                let key = line[..eq].trim().to_string();
+                let value = line[eq + 1..].trim().to_string();
+                settings.push((key, value));
+            }
+        }
+    }
+    settings
+}
+
 fn execute_php_with_timeout(
     source: &[u8],
     timeout_secs: u64,
     test_dir: Option<&Path>,
+    ini_settings: &[(String, String)],
 ) -> Result<Vec<u8>, String> {
     let source = source.to_vec();
     let dir_path = test_dir.map(|p| p.to_path_buf());
+    let ini = ini_settings.to_vec();
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out2 = timed_out.clone();
 
@@ -213,7 +237,7 @@ fn execute_php_with_timeout(
             } else {
                 let _ = std::env::set_current_dir(std::env::temp_dir());
             }
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source)))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source, &ini)))
         })
         .map_err(|e| format!("Thread error: {}", e))?;
 
@@ -239,10 +263,22 @@ fn execute_php_with_timeout(
     }
 }
 
-fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
+fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result<Vec<u8>, String> {
     use goro_core::compiler::Compiler;
     use goro_core::vm::Vm;
+    use goro_core::value::{Value, set_php_precision};
+    use goro_core::string::PhpString;
     use goro_parser::{Lexer, Parser};
+
+    // Apply precision from INI settings (reset to default first)
+    set_php_precision(14);
+    for (key, value) in ini_settings {
+        if key == "precision" {
+            if let Ok(p) = value.parse::<i32>() {
+                set_php_precision(p);
+            }
+        }
+    }
 
     // Lex
     let mut lexer = Lexer::new(source);
@@ -282,6 +318,16 @@ fn execute_php_inner(source: &[u8]) -> Result<Vec<u8>, String> {
     goro_ext_json::register(&mut vm);
     goro_ext_ctype::register(&mut vm);
     goro_ext_hash::register(&mut vm);
+
+    // Apply all INI settings to the VM constants
+    for (key, value) in ini_settings {
+        let val = if let Ok(n) = value.parse::<i64>() {
+            Value::Long(n)
+        } else {
+            Value::String(PhpString::from_string(value.clone()))
+        };
+        vm.constants.insert(key.as_bytes().to_vec(), val);
+    }
     for class in compiled_classes {
         vm.register_class(class);
     }

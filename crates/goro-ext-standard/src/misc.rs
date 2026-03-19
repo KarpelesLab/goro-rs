@@ -1919,6 +1919,16 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let value = args.get(1).cloned().unwrap_or(Value::Null);
     let key = name.as_bytes().to_vec();
     let old = vm.constants.get(&key).cloned();
+    // Handle precision specially to update thread-local
+    if key == b"precision" {
+        if let Value::Long(p) = &value {
+            goro_core::value::set_php_precision(*p as i32);
+        } else if let Value::String(s) = &value {
+            if let Ok(p) = s.to_string_lossy().parse::<i32>() {
+                goro_core::value::set_php_precision(p);
+            }
+        }
+    }
     // Actually update the value
     vm.constants.insert(key, value);
     // Return old value or false if not previously set
@@ -3536,13 +3546,22 @@ fn trait_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn gc_collect_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
 }
-fn gc_enabled_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+fn gc_enabled_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let enabled = vm
+        .constants
+        .get(b"zend.enable_gc".as_ref())
+        .map(|v| v.is_truthy())
+        .unwrap_or(true);
+    Ok(if enabled { Value::True } else { Value::False })
 }
-fn gc_disable_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn gc_disable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.constants
+        .insert(b"zend.enable_gc".to_vec(), Value::Long(0));
     Ok(Value::Null)
 }
-fn gc_enable_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn gc_enable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.constants
+        .insert(b"zend.enable_gc".to_vec(), Value::Long(1));
     Ok(Value::Null)
 }
 fn get_object_vars_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

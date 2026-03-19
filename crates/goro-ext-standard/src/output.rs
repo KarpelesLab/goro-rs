@@ -482,34 +482,42 @@ fn format_php_float_serialize(f: f64) -> String {
     let abs = f.abs();
     if abs != 0.0 && !(1e-4..1e15).contains(&abs) {
         // Use scientific notation like PHP
-        let s = format!("{:e}", f);
-        if let Some(pos) = s.find('e') {
-            let mut mantissa = s[..pos].to_string();
-            let exp: i32 = s[pos + 1..].parse().unwrap_or(0);
-            // Ensure at least one decimal digit
-            if !mantissa.contains('.') {
-                mantissa.push_str(".0");
-            } else if mantissa.ends_with('.') {
-                mantissa.push('0');
+        // Find shortest scientific representation that roundtrips
+        for prec in 0..20 {
+            let s = format!("{:.prec$e}", f, prec = prec);
+            if let Ok(parsed) = s.parse::<f64>() {
+                if parsed == f {
+                    if let Some(pos) = s.find('e') {
+                        let mantissa = &s[..pos];
+                        let exp: i32 = s[pos + 1..].parse().unwrap_or(0);
+                        // Ensure at least one decimal digit
+                        let mantissa = if !mantissa.contains('.') {
+                            format!("{}.0", mantissa)
+                        } else if mantissa.ends_with('.') {
+                            format!("{}0", mantissa)
+                        } else {
+                            mantissa.to_string()
+                        };
+                        let exp_str = if exp >= 0 {
+                            format!("E+{}", exp)
+                        } else {
+                            format!("E{}", exp)
+                        };
+                        return format!("{}{}", mantissa, exp_str);
+                    }
+                }
             }
-            if exp >= 0 {
-                format!("{}E+{}", mantissa, exp)
-            } else {
-                format!("{}E{}", mantissa, exp)
-            }
-        } else {
-            s
         }
-    } else {
-        // PHP serialize_precision=-1: shortest roundtrip representation
-        // Use ryu-style formatting for exact roundtrip
-        let mut buf = ryu_format(f);
-        // Ensure no trailing dot
-        if buf.ends_with('.') {
-            buf.push('0');
-        }
-        buf
     }
+
+    // PHP serialize_precision=-1: shortest roundtrip representation
+    // Use ryu-style formatting for exact roundtrip
+    let mut buf = ryu_format(f);
+    // Ensure no trailing dot
+    if buf.ends_with('.') {
+        buf.push('0');
+    }
+    buf
 }
 
 /// Format float with shortest roundtrip representation (like PHP serialize_precision=-1)
