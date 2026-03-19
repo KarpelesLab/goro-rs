@@ -1304,11 +1304,13 @@ impl Compiler {
                                     .static_properties
                                     .insert(prop_name.clone(), default_val.clone());
                             }
+                            let declaring_class_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
                                 default: default_val,
                                 is_static: *is_static,
                                 visibility: vis,
+                                declaring_class: declaring_class_lower,
                             });
                         }
                         ClassMember::Method {
@@ -1339,11 +1341,13 @@ impl Compiler {
                                                     crate::object::Visibility::Private
                                                 }
                                             };
+                                            let declaring_class_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                             class.properties.push(PropertyDef {
                                                 name: param.name.clone(),
                                                 default: Value::Null,
                                                 is_static: false,
                                                 visibility: prop_vis,
+                                                declaring_class: declaring_class_lower,
                                             });
                                         }
                                     }
@@ -1363,6 +1367,7 @@ impl Compiler {
                                 }
                                 method_compiler.current_class = Some(name.clone());
                                 method_compiler.current_parent_class = extends.clone();
+                                method_compiler.op_array.scope_class = Some(name.iter().map(|b| b.to_ascii_lowercase()).collect());
 
                                 // First CV is always $this (for non-static methods)
                                 if !is_static {
@@ -1468,6 +1473,7 @@ impl Compiler {
                                 let param_count = params.len();
                                 let lower_name: Vec<u8> =
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let declaring_class_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 class.methods.insert(
                                     lower_name,
                                     MethodDef {
@@ -1477,6 +1483,7 @@ impl Compiler {
                                         is_static: *is_static,
                                         is_abstract: *is_abstract,
                                         visibility: vis,
+                                        declaring_class: declaring_class_lower,
                                     },
                                 );
                             } else {
@@ -1489,6 +1496,7 @@ impl Compiler {
                                 let param_count = params.len();
                                 let lower_name: Vec<u8> =
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let declaring_class_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 class.methods.insert(
                                     lower_name,
                                     MethodDef {
@@ -1498,6 +1506,7 @@ impl Compiler {
                                         is_static: *is_static,
                                         is_abstract: true,
                                         visibility: vis,
+                                        declaring_class: declaring_class_lower,
                                     },
                                 );
                             }
@@ -2967,6 +2976,9 @@ impl Compiler {
                 closure_compiler.op_array.is_generator = is_generator;
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
+                // Inherit scope_class from the enclosing function for visibility checks
+                closure_compiler.op_array.scope_class = self.op_array.scope_class.clone()
+                    .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
 
                 // If inside a class method, automatically capture $this
                 let has_this = self.current_class.is_some()
@@ -3124,6 +3136,9 @@ impl Compiler {
                 closure_compiler.op_array.name = closure_name.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
+                // Inherit scope_class from the enclosing function for visibility checks
+                closure_compiler.op_array.scope_class = self.op_array.scope_class.clone()
+                    .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
 
                 // Set up use vars as the first CVs (before params)
                 for uv in &use_vars {

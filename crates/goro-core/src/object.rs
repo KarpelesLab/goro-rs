@@ -26,6 +26,8 @@ pub struct PropertyDef {
     pub default: Value,
     pub is_static: bool,
     pub visibility: Visibility,
+    /// The class that originally declared this property (lowercase)
+    pub declaring_class: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +38,8 @@ pub struct MethodDef {
     pub is_static: bool,
     pub is_abstract: bool,
     pub visibility: Visibility,
+    /// The class that originally declared this method (lowercase)
+    pub declaring_class: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

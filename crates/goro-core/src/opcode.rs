@@ -285,6 +285,9 @@ pub struct OpArray {
     pub param_types: Vec<Option<ParamTypeInfo>>,
     /// Return type constraint (None if no return type declared)
     pub return_type: Option<ParamType>,
+    /// Class scope for this function (lowercase). Set for methods and closures defined within a class.
+    /// Used to determine visibility access rights at runtime.
+    pub scope_class: Option<Vec<u8>>,
 }
 
 impl OpArray {
@@ -301,6 +304,7 @@ impl OpArray {
             is_generator: false,
             param_types: Vec::new(),
             return_type: None,
+            scope_class: None,
         }
     }
 

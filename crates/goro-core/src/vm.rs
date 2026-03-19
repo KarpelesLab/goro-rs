@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
-use crate::object::{ClassEntry, PhpObject};
+use crate::object::{ClassEntry, PhpObject, Visibility};
 use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
 use crate::string::PhpString;
 use crate::value::Value;
@@ -119,6 +119,9 @@ pub struct Vm {
     destructible_objects: Vec<Value>,
     /// Stack of "called class" names for late static binding (static::)
     pub called_class_stack: Vec<Vec<u8>>,
+    /// Stack of "defining class" names for visibility checks (lowercase)
+    /// This tracks the class where the currently executing method was defined/declared.
+    class_scope_stack: Vec<Vec<u8>>,
     /// Current call depth (to prevent stack overflow from infinite recursion)
     call_depth: u32,
     /// Stack of saved error_reporting levels (for @ operator)
@@ -148,6 +151,7 @@ impl Vm {
             magic_depth: 0,
             destructible_objects: Vec::new(),
             called_class_stack: Vec::new(),
+            class_scope_stack: Vec::new(),
             call_depth: 0,
             error_reporting_stack: Vec::new(),
             pending_return: None,
@@ -406,6 +410,168 @@ impl Vm {
         } else {
             class_name
         }
+    }
+
+    /// Get the current calling class scope, if any.
+    /// This is the class where the currently executing method was defined.
+    /// Used for visibility checks. Falls back to called_class_stack if class_scope_stack is empty.
+    /// Returns the canonical (original case) class name by looking up the class table.
+    fn current_class_scope(&self) -> Option<Vec<u8>> {
+        let scope_lower = self.class_scope_stack.last().cloned()
+            .or_else(|| self.called_class_stack.last().map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect()));
+        scope_lower.map(|lower| {
+            // Look up canonical class name from class table
+            self.classes.get(&lower)
+                .map(|c| c.name.clone())
+                .unwrap_or(lower)
+        })
+    }
+
+    /// Check if `caller_class` (lowercase) has access to a member with the given visibility
+    /// declared in `declaring_class` (lowercase), where the member belongs to `target_class` (lowercase).
+    /// Returns None if access is allowed, or Some(error_message) if denied.
+    fn check_visibility(
+        &self,
+        visibility: Visibility,
+        declaring_class: &[u8],
+        target_class_display: &[u8],
+        member_name: &str,
+        is_property: bool,
+        caller_scope: Option<&[u8]>,
+    ) -> Option<String> {
+        match visibility {
+            Visibility::Public => None,
+            Visibility::Protected => {
+                if let Some(caller) = caller_scope {
+                    let caller_lower: Vec<u8> = caller.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    // For protected: find the root declaring class (highest ancestor that declares this member)
+                    let member_name_lower: Vec<u8> = member_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let root_declaring = if is_property {
+                        self.find_root_declaring_class_for_property(&declaring_lower, member_name.as_bytes())
+                    } else {
+                        self.find_root_declaring_class_for_method(&declaring_lower, &member_name_lower)
+                    };
+                    // Same class, or caller extends root declaring, or root declaring extends caller
+                    if caller_lower == root_declaring
+                        || self.class_extends(&caller_lower, &root_declaring)
+                        || self.class_extends(&root_declaring, &caller_lower)
+                    {
+                        None
+                    } else {
+                        Some(Self::format_access_error("protected", target_class_display, member_name, is_property, Some(caller)))
+                    }
+                } else {
+                    Some(Self::format_access_error("protected", target_class_display, member_name, is_property, None))
+                }
+            }
+            Visibility::Private => {
+                if let Some(caller) = caller_scope {
+                    let caller_lower: Vec<u8> = caller.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if caller_lower == declaring_lower {
+                        None
+                    } else {
+                        Some(Self::format_access_error("private", target_class_display, member_name, is_property, Some(caller)))
+                    }
+                } else {
+                    Some(Self::format_access_error("private", target_class_display, member_name, is_property, None))
+                }
+            }
+        }
+    }
+
+    fn format_access_error(vis_str: &str, target_class_display: &[u8], member_name: &str, is_property: bool, caller: Option<&[u8]>) -> String {
+        let target_display = String::from_utf8_lossy(target_class_display).to_string();
+        if is_property {
+            format!("Cannot access {} property {}::${}", vis_str, target_display, member_name)
+        } else {
+            // For constructors, PHP omits "method "; for other methods, it includes "method "
+            let is_constructor = member_name.eq_ignore_ascii_case("__construct");
+            let method_word = if is_constructor { "" } else { "method " };
+            let scope = if let Some(caller_bytes) = caller {
+                format!("scope {}", String::from_utf8_lossy(caller_bytes))
+            } else {
+                "global scope".to_string()
+            };
+            format!("Call to {} {}{}::{}() from {}", vis_str, method_word, target_display, member_name, scope)
+        }
+    }
+
+    /// Find the root declaring class for a method (the highest ancestor that declares it).
+    /// This is needed for protected access checks: if a method is declared protected in class A,
+    /// and overridden in B extends A, then any class that extends A can still access B::method().
+    fn find_root_declaring_class_for_method(&self, class_name_lower: &[u8], method_name_lower: &[u8]) -> Vec<u8> {
+        let mut root = class_name_lower.to_vec();
+        let mut current = class_name_lower.to_vec();
+        for _ in 0..50 {
+            if let Some(class) = self.classes.get(&current) {
+                if let Some(parent) = &class.parent {
+                    let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some(parent_class) = self.classes.get(&parent_lower) {
+                        if let Some(parent_method) = parent_class.get_method(method_name_lower) {
+                            // Only walk up if the parent method is not private
+                            // (private methods are not inherited for visibility purposes)
+                            if parent_method.visibility != Visibility::Private {
+                                root = parent_lower.clone();
+                                current = parent_lower;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        root
+    }
+
+    /// Find the root declaring class for a property (the highest ancestor that declares it).
+    fn find_root_declaring_class_for_property(&self, class_name_lower: &[u8], prop_name: &[u8]) -> Vec<u8> {
+        let mut root = class_name_lower.to_vec();
+        let mut current = class_name_lower.to_vec();
+        for _ in 0..50 {
+            if let Some(class) = self.classes.get(&current) {
+                if let Some(parent) = &class.parent {
+                    let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some(parent_class) = self.classes.get(&parent_lower) {
+                        if let Some(parent_prop) = parent_class.properties.iter().find(|p| p.name == prop_name) {
+                            // Only walk up if the parent property is not private
+                            if parent_prop.visibility != Visibility::Private {
+                                root = parent_lower.clone();
+                                current = parent_lower;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        root
+    }
+
+    /// Find the PropertyDef for a given property name in a class (by lowercase class name).
+    /// Walks up the parent chain to find the property definition.
+    fn find_property_def(&self, class_name_lower: &[u8], prop_name: &[u8]) -> Option<(Visibility, Vec<u8>)> {
+        let mut current = class_name_lower.to_vec();
+        for _ in 0..50 {
+            if let Some(class) = self.classes.get(&current) {
+                for prop in &class.properties {
+                    if prop.name == prop_name {
+                        return Some((prop.visibility, prop.declaring_class.clone()));
+                    }
+                }
+                if let Some(parent) = &class.parent {
+                    current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+        None
     }
 
     /// Emit a PHP warning message to output
@@ -1579,8 +1745,10 @@ impl Vm {
                         }
                     }
                     self.called_class_stack.push(class_lower.clone());
+                    self.class_scope_stack.push(method.declaring_class.clone());
                     let result = self.execute_op_array(&method_op, fn_cvs).ok();
                     self.called_class_stack.pop();
+                    self.class_scope_stack.pop();
                     return result;
                 }
             }
@@ -2738,6 +2906,59 @@ impl Vm {
                         }
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
                     {
+                        // Check visibility for static method calls (ClassName::method)
+                        if let Some(sep_pos) = func_name_lower.iter().position(|&b| b == b':') {
+                            if func_name_lower.get(sep_pos + 1) == Some(&b':') {
+                                let class_part_lower = &func_name_lower[..sep_pos];
+                                let method_part_lower = &func_name_lower[sep_pos + 2..];
+                                // Skip __call, __callstatic, __construct, and other magic methods
+                                let is_magic = method_part_lower.starts_with(b"__");
+                                if !is_magic {
+                                    if let Some(class) = self.classes.get(class_part_lower) {
+                                        if let Some(method) = class.get_method(method_part_lower) {
+                                            if method.visibility != Visibility::Public {
+                                                let method_vis = method.visibility;
+                                                let method_declaring = method.declaring_class.clone();
+                                                let method_display_name = String::from_utf8_lossy(&method.name).to_string();
+                                                // Use the original case class name from call.name
+                                                let orig_bytes = call.name.as_bytes();
+                                                let class_display = &orig_bytes[..sep_pos];
+                                                let caller_scope = self.current_class_scope();
+                                                if let Some(err_msg) = self.check_visibility(
+                                                    method_vis,
+                                                    &method_declaring,
+                                                    class_display,
+                                                    &method_display_name,
+                                                    false,
+                                                    caller_scope.as_deref(),
+                                                ) {
+                                                    let err_id = self.next_object_id;
+                                                    self.next_object_id += 1;
+                                                    let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
+                                                    err_obj.set_property(
+                                                        b"message".to_vec(),
+                                                        Value::String(PhpString::from_string(err_msg.clone())),
+                                                    );
+                                                    err_obj.set_property(b"code".to_vec(), Value::Long(0));
+                                                    self.current_exception =
+                                                        Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                                        ip = catch_target as usize;
+                                                        continue;
+                                                    } else {
+                                                        return Err(VmError {
+                                                            message: format!("Uncaught Error: {}", err_msg),
+                                                            line: op.line,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Resolve named arguments by reordering to match parameter positions
                         if !call.named_args.is_empty() {
                             let implicit_args_count = if user_fn
@@ -2874,6 +3095,16 @@ impl Vm {
                                     let orig_bytes = call.name.as_bytes();
                                     let class_part = orig_bytes[..pos].to_vec();
                                     self.called_class_stack.push(class_part);
+
+                                    // Push the defining class scope for visibility checks
+                                    let class_part_lower = &func_name_lower[..pos];
+                                    let method_part_lower = &func_name_lower[pos + 2..];
+                                    let defining_class = self.classes.get(class_part_lower)
+                                        .and_then(|c| c.get_method(method_part_lower))
+                                        .map(|m| m.declaring_class.clone())
+                                        .unwrap_or_else(|| class_part_lower.to_vec());
+                                    self.class_scope_stack.push(defining_class);
+
                                     true
                                 } else {
                                     false
@@ -2881,6 +3112,18 @@ impl Vm {
                             } else {
                                 false
                             };
+
+                        // For closures/functions with a scope_class, push the scope for visibility
+                        let pushed_scope_from_fn = if !pushed_called_class {
+                            if let Some(ref scope) = user_fn.scope_class {
+                                self.class_scope_stack.push(scope.clone());
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
 
                         // Save caller's globals before the call
                         if was_global {
@@ -2922,9 +3165,13 @@ impl Vm {
                         // Execute the function's op_array
                         let call_result = self.execute_op_array(&user_fn, func_cvs);
 
-                        // Pop the called class stack
+                        // Pop the called class stack and scope stack
                         if pushed_called_class {
                             self.called_class_stack.pop();
+                            self.class_scope_stack.pop();
+                        }
+                        if pushed_scope_from_fn {
+                            self.class_scope_stack.pop();
                         }
 
                         self.is_global_scope = was_global;
@@ -3095,9 +3342,11 @@ impl Vm {
                                                     Value::Array(Rc::new(RefCell::new(args_arr)));
                                             }
                                             self.called_class_stack.push(class_part.to_vec());
+                                            self.class_scope_stack.push(call_static.declaring_class.clone());
                                             let result =
                                                 self.execute_op_array(&call_static_op, fn_cvs)?;
                                             self.called_class_stack.pop();
+                                            self.class_scope_stack.pop();
                                             self.write_operand(
                                                 &op.result,
                                                 result,
@@ -4877,50 +5126,128 @@ impl Vm {
                         .to_php_string();
 
                     let result = if let Value::Object(obj) = &obj_val {
-                        let prop = obj.borrow().get_property(prop_name.as_bytes());
-                        if matches!(prop, Value::Null)
-                            && !obj.borrow().has_property(prop_name.as_bytes())
-                            && self.magic_depth < 5
-                        {
-                            // Try __get magic method (with recursion guard)
-                            let class_lower: Vec<u8> = obj
-                                .borrow()
-                                .class_name
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
+                        let class_name_orig = obj.borrow().class_name.clone();
+                        let class_lower: Vec<u8> = class_name_orig
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+
+                        // Check visibility before accessing the property
+                        let mut visibility_error: Option<String> = None;
+                        if let Some((vis, declaring_class)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
+                            if vis != Visibility::Public {
+                                let caller_scope = self.current_class_scope();
+                                let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                visibility_error = self.check_visibility(
+                                    vis,
+                                    &declaring_class,
+                                    &class_name_orig,
+                                    &prop_name_str,
+                                    true,
+                                    caller_scope.as_deref(),
+                                );
+                            }
+                        }
+
+                        if let Some(err_msg) = visibility_error {
+                            // Property is inaccessible - try __get magic method first
                             let has_get = self
                                 .classes
                                 .get(&class_lower)
                                 .map(|c| c.methods.contains_key(&b"__get".to_vec()))
                                 .unwrap_or(false);
-                            if has_get {
+                            if has_get && self.magic_depth < 5 {
                                 self.magic_depth += 1;
-                                let method = self
+                                let magic_method_def = self
                                     .classes
                                     .get(&class_lower)
                                     .unwrap()
                                     .get_method(b"__get")
-                                    .unwrap()
-                                    .op_array
-                                    .clone();
+                                    .unwrap();
+                                let method = magic_method_def.op_array.clone();
+                                let magic_declaring = magic_method_def.declaring_class.clone();
                                 let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
                                 if !fn_cvs.is_empty() {
                                     fn_cvs[0] = obj_val.clone();
-                                } // $this
+                                }
                                 if fn_cvs.len() > 1 {
                                     fn_cvs[1] = Value::String(prop_name.clone());
-                                } // $name
+                                }
+                                self.class_scope_stack.push(magic_declaring.clone());
+                                self.called_class_stack.push(class_name_orig.clone());
                                 let result = self
                                     .execute_op_array(&method, fn_cvs)
                                     .unwrap_or(Value::Null);
+                                self.called_class_stack.pop();
+                                self.class_scope_stack.pop();
                                 self.magic_depth -= 1;
                                 result
                             } else {
-                                Value::Null
+                                // No __get - throw the error
+                                let err_id = self.next_object_id;
+                                self.next_object_id += 1;
+                                let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
+                                err_obj.set_property(
+                                    b"message".to_vec(),
+                                    Value::String(PhpString::from_string(err_msg.clone())),
+                                );
+                                err_obj.set_property(b"code".to_vec(), Value::Long(0));
+                                self.current_exception =
+                                    Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                } else {
+                                    return Err(VmError {
+                                        message: format!("Uncaught Error: {}", err_msg),
+                                        line: op.line,
+                                    });
+                                }
                             }
                         } else {
-                            prop
+                            let prop = obj.borrow().get_property(prop_name.as_bytes());
+                            if matches!(prop, Value::Null)
+                                && !obj.borrow().has_property(prop_name.as_bytes())
+                                && self.magic_depth < 5
+                            {
+                                // Try __get magic method (with recursion guard)
+                                let has_get = self
+                                    .classes
+                                    .get(&class_lower)
+                                    .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                    .unwrap_or(false);
+                                if has_get {
+                                    self.magic_depth += 1;
+                                    let magic_method_def = self
+                                        .classes
+                                        .get(&class_lower)
+                                        .unwrap()
+                                        .get_method(b"__get")
+                                        .unwrap();
+                                    let method = magic_method_def.op_array.clone();
+                                    let magic_declaring = magic_method_def.declaring_class.clone();
+                                    let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+                                    if !fn_cvs.is_empty() {
+                                        fn_cvs[0] = obj_val.clone();
+                                    } // $this
+                                    if fn_cvs.len() > 1 {
+                                        fn_cvs[1] = Value::String(prop_name.clone());
+                                    } // $name
+                                    self.class_scope_stack.push(magic_declaring);
+                                    self.called_class_stack.push(class_name_orig.clone());
+                                    let result = self
+                                        .execute_op_array(&method, fn_cvs)
+                                        .unwrap_or(Value::Null);
+                                    self.called_class_stack.pop();
+                                    self.class_scope_stack.pop();
+                                    self.magic_depth -= 1;
+                                    result
+                                } else {
+                                    Value::Null
+                                }
+                            } else {
+                                prop
+                            }
                         }
                     } else {
                         Value::Null
@@ -4936,44 +5263,121 @@ impl Vm {
                         .to_php_string();
 
                     if let Value::Object(obj) = &obj_val {
-                        // Check for __set magic method
-                        let class_lower: Vec<u8> = obj
-                            .borrow()
-                            .class_name
+                        let class_name_orig = obj.borrow().class_name.clone();
+                        let class_lower: Vec<u8> = class_name_orig
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
-                        let has_set = self
-                            .classes
-                            .get(&class_lower)
-                            .map(|c| c.methods.contains_key(&b"__set".to_vec()))
-                            .unwrap_or(false);
-                        if has_set
-                            && !obj.borrow().has_property(prop_name.as_bytes())
-                            && self.magic_depth < 5
-                        {
-                            let method = self
+
+                        // Check visibility before setting the property
+                        let mut visibility_error: Option<String> = None;
+                        if let Some((vis, declaring_class)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
+                            if vis != Visibility::Public {
+                                let caller_scope = self.current_class_scope();
+                                let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                visibility_error = self.check_visibility(
+                                    vis,
+                                    &declaring_class,
+                                    &class_name_orig,
+                                    &prop_name_str,
+                                    true,
+                                    caller_scope.as_deref(),
+                                );
+                            }
+                        }
+
+                        if let Some(err_msg) = visibility_error {
+                            // Property is inaccessible - try __set magic method first
+                            let has_set = self
                                 .classes
                                 .get(&class_lower)
-                                .unwrap()
-                                .get_method(b"__set")
-                                .unwrap()
-                                .op_array
-                                .clone();
-                            let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
-                            if !fn_cvs.is_empty() {
-                                fn_cvs[0] = obj_val.clone();
+                                .map(|c| c.methods.contains_key(&b"__set".to_vec()))
+                                .unwrap_or(false);
+                            if has_set && self.magic_depth < 5 {
+                                self.magic_depth += 1;
+                                let magic_method_def = self
+                                    .classes
+                                    .get(&class_lower)
+                                    .unwrap()
+                                    .get_method(b"__set")
+                                    .unwrap();
+                                let method = magic_method_def.op_array.clone();
+                                let magic_declaring = magic_method_def.declaring_class.clone();
+                                let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+                                if !fn_cvs.is_empty() {
+                                    fn_cvs[0] = obj_val.clone();
+                                }
+                                if fn_cvs.len() > 1 {
+                                    fn_cvs[1] = Value::String(prop_name.clone());
+                                }
+                                if fn_cvs.len() > 2 {
+                                    fn_cvs[2] = value;
+                                }
+                                self.class_scope_stack.push(magic_declaring);
+                                self.called_class_stack.push(class_name_orig.clone());
+                                let _ = self.execute_op_array(&method, fn_cvs);
+                                self.called_class_stack.pop();
+                                self.class_scope_stack.pop();
+                                self.magic_depth -= 1;
+                            } else {
+                                // No __set - throw the error
+                                let err_id = self.next_object_id;
+                                self.next_object_id += 1;
+                                let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
+                                err_obj.set_property(
+                                    b"message".to_vec(),
+                                    Value::String(PhpString::from_string(err_msg.clone())),
+                                );
+                                err_obj.set_property(b"code".to_vec(), Value::Long(0));
+                                self.current_exception =
+                                    Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                } else {
+                                    return Err(VmError {
+                                        message: format!("Uncaught Error: {}", err_msg),
+                                        line: op.line,
+                                    });
+                                }
                             }
-                            if fn_cvs.len() > 1 {
-                                fn_cvs[1] = Value::String(prop_name.clone());
-                            }
-                            if fn_cvs.len() > 2 {
-                                fn_cvs[2] = value;
-                            }
-                            let _ = self.execute_op_array(&method, fn_cvs);
                         } else {
-                            obj.borrow_mut()
-                                .set_property(prop_name.as_bytes().to_vec(), value);
+                            let has_set = self
+                                .classes
+                                .get(&class_lower)
+                                .map(|c| c.methods.contains_key(&b"__set".to_vec()))
+                                .unwrap_or(false);
+                            if has_set
+                                && !obj.borrow().has_property(prop_name.as_bytes())
+                                && self.magic_depth < 5
+                            {
+                                let magic_method_def = self
+                                    .classes
+                                    .get(&class_lower)
+                                    .unwrap()
+                                    .get_method(b"__set")
+                                    .unwrap();
+                                let method = magic_method_def.op_array.clone();
+                                let magic_declaring = magic_method_def.declaring_class.clone();
+                                let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+                                if !fn_cvs.is_empty() {
+                                    fn_cvs[0] = obj_val.clone();
+                                }
+                                if fn_cvs.len() > 1 {
+                                    fn_cvs[1] = Value::String(prop_name.clone());
+                                }
+                                if fn_cvs.len() > 2 {
+                                    fn_cvs[2] = value;
+                                }
+                                self.class_scope_stack.push(magic_declaring);
+                                self.called_class_stack.push(class_name_orig.clone());
+                                let _ = self.execute_op_array(&method, fn_cvs);
+                                self.called_class_stack.pop();
+                                self.class_scope_stack.pop();
+                            } else {
+                                obj.borrow_mut()
+                                    .set_property(prop_name.as_bytes().to_vec(), value);
+                            }
                         }
                     }
                 }
@@ -5072,24 +5476,83 @@ impl Vm {
                         // Find the method in the class
                         if let Some(class) = self.classes.get(&class_name_lower) {
                             if let Some(method) = class.get_method(&method_name_lower) {
-                                // Create a synthetic function name for the pending call
-                                let mut func_name = class_name_orig.clone();
-                                func_name.extend_from_slice(b"::");
-                                func_name.extend_from_slice(&method.name);
+                                // Check method visibility
+                                let visibility_err = if method.visibility != Visibility::Public {
+                                    let method_vis = method.visibility;
+                                    let method_declaring = method.declaring_class.clone();
+                                    let method_display_name = String::from_utf8_lossy(&method.name).to_string();
+                                    let caller_scope = self.current_class_scope();
+                                    self.check_visibility(
+                                        method_vis,
+                                        &method_declaring,
+                                        &class_name_orig,
+                                        &method_display_name,
+                                        false,
+                                        caller_scope.as_deref(),
+                                    )
+                                } else {
+                                    None
+                                };
 
-                                // Register the method as a temporary user function
-                                let call_name = PhpString::from_vec(func_name.clone());
-                                self.user_functions.insert(
-                                    func_name.to_ascii_lowercase(),
-                                    method.op_array.clone(),
-                                );
+                                if visibility_err.is_none() {
+                                    // Method is accessible - set up the call
+                                    // Create a synthetic function name for the pending call
+                                    let mut func_name = class_name_orig.clone();
+                                    func_name.extend_from_slice(b"::");
+                                    func_name.extend_from_slice(&method.name);
 
-                                // Push the pending call with $this as the first implicit arg
-                                self.pending_calls.push(PendingCall {
-                                    name: call_name,
-                                    args: vec![obj_val.clone()], // $this is first arg, mapped to CV 0
-                                    named_args: Vec::new(),
-                                });
+                                    // Register the method as a temporary user function
+                                    let call_name = PhpString::from_vec(func_name.clone());
+                                    self.user_functions.insert(
+                                        func_name.to_ascii_lowercase(),
+                                        method.op_array.clone(),
+                                    );
+
+                                    // Push the pending call with $this as the first implicit arg
+                                    self.pending_calls.push(PendingCall {
+                                        name: call_name,
+                                        args: vec![obj_val.clone()], // $this is first arg, mapped to CV 0
+                                        named_args: Vec::new(),
+                                    });
+                                } else if let Some(call_method) = class.get_method(b"__call") {
+                                    // Method exists but is not accessible - fall through to __call
+                                    let mut func_name = class_name_orig.clone();
+                                    func_name.extend_from_slice(b"::__call");
+                                    let call_name = PhpString::from_vec(func_name.clone());
+                                    self.user_functions.insert(
+                                        func_name.to_ascii_lowercase(),
+                                        call_method.op_array.clone(),
+                                    );
+
+                                    let method_name_val = Value::String(method_name.clone());
+                                    self.pending_calls.push(PendingCall {
+                                        name: call_name,
+                                        args: vec![obj_val.clone(), method_name_val],
+                                        named_args: Vec::new(),
+                                    });
+                                } else {
+                                    // Method not accessible and no __call - throw error
+                                    let err_msg = visibility_err.unwrap();
+                                    let err_id = self.next_object_id;
+                                    self.next_object_id += 1;
+                                    let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
+                                    err_obj.set_property(
+                                        b"message".to_vec(),
+                                        Value::String(PhpString::from_string(err_msg.clone())),
+                                    );
+                                    err_obj.set_property(b"code".to_vec(), Value::Long(0));
+                                    self.current_exception =
+                                        Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        return Err(VmError {
+                                            message: format!("Uncaught Error: {}", err_msg),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
                             } else if let Some(call_method) = class.get_method(b"__call") {
                                 // __call magic method fallback
                                 let mut func_name = class_name_orig.clone();
