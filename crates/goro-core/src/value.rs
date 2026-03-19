@@ -334,7 +334,12 @@ impl Value {
     pub fn negate(&self) -> Value {
         match self {
             Value::Reference(r) => r.borrow().negate(),
-            Value::Long(n) => Value::Long(-n),
+            Value::Long(n) => {
+                match n.checked_neg() {
+                    Some(neg) => Value::Long(neg),
+                    None => Value::Double(-(*n as f64)),
+                }
+            }
             Value::Double(f) => Value::Double(-f),
             _ => {
                 let n = self.to_numeric();
@@ -399,7 +404,39 @@ impl Value {
             (Value::Long(a), Value::Double(b)) | (Value::Double(b), Value::Long(a)) => {
                 *a as f64 == *b
             }
-            (Value::String(a), Value::String(b)) => a.as_bytes() == b.as_bytes(),
+            (Value::String(a), Value::String(b)) => {
+                // PHP 8: if both strings are numeric, compare as numbers
+                // First try comparing as integers (handles large numbers that lose f64 precision)
+                let a_bytes = a.as_bytes();
+                let b_bytes = b.as_bytes();
+                let a_str = std::str::from_utf8(a_bytes).unwrap_or("");
+                let b_str = std::str::from_utf8(b_bytes).unwrap_or("");
+                let a_trimmed = a_str.trim();
+                let b_trimmed = b_str.trim();
+
+                // Check if both are pure integer strings
+                let a_is_int = is_integer_string(a_trimmed);
+                let b_is_int = is_integer_string(b_trimmed);
+
+                if a_is_int && b_is_int {
+                    // Try parsing as i64 first
+                    match (a_trimmed.parse::<i64>(), b_trimmed.parse::<i64>()) {
+                        (Ok(na), Ok(nb)) => na == nb,
+                        _ => {
+                            // Too large for i64 - compare the numeric value as strings
+                            // by normalizing (strip leading zeros, compare)
+                            compare_integer_strings(a_trimmed, b_trimmed) == 0
+                        }
+                    }
+                } else if let (Some(na), Some(nb)) = (
+                    parse_numeric_string(a_bytes),
+                    parse_numeric_string(b_bytes),
+                ) {
+                    na == nb
+                } else {
+                    a_bytes == b_bytes
+                }
+            }
             (Value::String(_), Value::Long(_)) | (Value::Long(_), Value::String(_)) => {
                 self.to_double() == other.to_double()
             }
@@ -620,7 +657,21 @@ impl Value {
             }
             (Value::String(a), Value::String(b)) => {
                 // PHP 8: if both strings are numeric, compare as numbers
-                if let (Some(na), Some(nb)) = (
+                let a_str = std::str::from_utf8(a.as_bytes()).unwrap_or("");
+                let b_str = std::str::from_utf8(b.as_bytes()).unwrap_or("");
+                let a_trimmed = a_str.trim();
+                let b_trimmed = b_str.trim();
+                let a_is_int = is_integer_string(a_trimmed);
+                let b_is_int = is_integer_string(b_trimmed);
+
+                if a_is_int && b_is_int {
+                    match (a_trimmed.parse::<i64>(), b_trimmed.parse::<i64>()) {
+                        (Ok(na), Ok(nb)) => {
+                            if na < nb { -1 } else if na > nb { 1 } else { 0 }
+                        }
+                        _ => compare_integer_strings(a_trimmed, b_trimmed),
+                    }
+                } else if let (Some(na), Some(nb)) = (
                     parse_numeric_string(a.as_bytes()),
                     parse_numeric_string(b.as_bytes()),
                 ) {
@@ -933,4 +984,38 @@ pub fn parse_numeric_string(s: &[u8]) -> Option<f64> {
     }
 
     s.parse::<f64>().ok()
+}
+
+/// Check if a trimmed string is a pure integer (digits only, with optional leading sign)
+fn is_integer_string(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let s = if s.starts_with('+') || s.starts_with('-') {
+        &s[1..]
+    } else {
+        s
+    };
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Compare two integer strings numerically (handling arbitrarily large numbers)
+fn compare_integer_strings(a: &str, b: &str) -> i64 {
+    let a_neg = a.starts_with('-');
+    let b_neg = b.starts_with('-');
+    if a_neg != b_neg {
+        return if a_neg { -1 } else { 1 };
+    }
+    let a_digits = a.trim_start_matches(|c: char| c == '-' || c == '+').trim_start_matches('0');
+    let b_digits = b.trim_start_matches(|c: char| c == '-' || c == '+').trim_start_matches('0');
+    let cmp = if a_digits.len() != b_digits.len() {
+        if a_digits.len() < b_digits.len() { -1 } else { 1 }
+    } else {
+        match a_digits.cmp(b_digits) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    };
+    if a_neg { -cmp } else { cmp }
 }

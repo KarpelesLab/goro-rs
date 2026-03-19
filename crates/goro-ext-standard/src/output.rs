@@ -415,6 +415,7 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             buf.push(b'\'');
             for &byte in s.as_bytes() {
                 match byte {
+                    b'\0' => buf.extend_from_slice(b"' . \"\\0\" . '"),
                     b'\'' => buf.extend_from_slice(b"\\'"),
                     b'\\' => buf.extend_from_slice(b"\\\\"),
                     _ => buf.push(byte),

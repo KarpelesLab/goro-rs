@@ -2691,7 +2691,9 @@ impl Compiler {
                     b"true" => Value::True,
                     b"false" => Value::False,
                     b"null" => Value::Null,
-                    b"stdin" | b"stdout" | b"stderr" => Value::Null, // TODO: streams
+                    b"stdin" => Value::Long(0),
+                    b"stdout" => Value::Long(1),
+                    b"stderr" => Value::Long(2),
                     b"e_all" => Value::Long(32767),
                     b"e_error" => Value::Long(1),
                     b"e_warning" => Value::Long(2),

@@ -66,12 +66,19 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"intval", intval_fn);
     vm.register_function(b"floatval", floatval_fn);
     vm.register_function(b"doubleval", floatval_fn);
+    vm.register_function(b"fpow", fpow_fn);
 }
 
 fn abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     Ok(match val {
-        Value::Long(n) => Value::Long(n.abs()),
+        Value::Long(n) => {
+            // i64::MIN.abs() would overflow, return as float in that case
+            match n.checked_abs() {
+                Some(abs_val) => Value::Long(abs_val),
+                None => Value::Double((*n as f64).abs()),
+            }
+        }
         Value::Double(f) => Value::Double(f.abs()),
         Value::String(s) => {
             // Check if string contains a float (has '.', 'e', 'E')
@@ -79,10 +86,20 @@ fn abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if bytes.iter().any(|&b| b == b'.' || b == b'e' || b == b'E') {
                 Value::Double(val.to_double().abs())
             } else {
-                Value::Long(val.to_long().abs())
+                let n = val.to_long();
+                match n.checked_abs() {
+                    Some(abs_val) => Value::Long(abs_val),
+                    None => Value::Double((n as f64).abs()),
+                }
             }
         }
-        _ => Value::Long(val.to_long().abs()),
+        _ => {
+            let n = val.to_long();
+            match n.checked_abs() {
+                Some(abs_val) => Value::Long(abs_val),
+                None => Value::Double((n as f64).abs()),
+            }
+        }
     })
 }
 
@@ -555,14 +572,14 @@ fn mt_getrandmax_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let num = args.first().unwrap_or(&Value::Null).to_double();
     let decimals = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let dec_point = args
-        .get(2)
-        .map(|v| v.to_php_string().to_string_lossy())
-        .unwrap_or_else(|| ".".to_string());
-    let thousands_sep = args
-        .get(3)
-        .map(|v| v.to_php_string().to_string_lossy())
-        .unwrap_or_else(|| ",".to_string());
+    let dec_point = match args.get(2).map(|v| v.deref()) {
+        Some(Value::Null) | Some(Value::Undef) | None => ".".to_string(),
+        Some(v) => v.to_php_string().to_string_lossy(),
+    };
+    let thousands_sep = match args.get(3).map(|v| v.deref()) {
+        Some(Value::Null) | Some(Value::Undef) | None => ",".to_string(),
+        Some(v) => v.to_php_string().to_string_lossy(),
+    };
 
     let formatted = format!("{:.prec$}", num, prec = decimals);
     let parts: Vec<&str> = formatted.split('.').collect();
@@ -687,4 +704,10 @@ fn floatval_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double(
         args.first().unwrap_or(&Value::Null).to_double(),
     ))
+}
+
+fn fpow_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let base = args.first().unwrap_or(&Value::Null).to_double();
+    let exp = args.get(1).unwrap_or(&Value::Null).to_double();
+    Ok(Value::Double(base.powf(exp)))
 }

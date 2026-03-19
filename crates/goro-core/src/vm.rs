@@ -349,8 +349,35 @@ impl Vm {
                 );
                 c.insert(b"M_LN2".to_vec(), Value::Double(std::f64::consts::LN_2));
                 c.insert(b"M_LN10".to_vec(), Value::Double(std::f64::consts::LN_10));
+                c.insert(
+                    b"M_PI_2".to_vec(),
+                    Value::Double(std::f64::consts::FRAC_PI_2),
+                );
+                c.insert(
+                    b"M_PI_4".to_vec(),
+                    Value::Double(std::f64::consts::FRAC_PI_4),
+                );
+                c.insert(
+                    b"M_1_PI".to_vec(),
+                    Value::Double(std::f64::consts::FRAC_1_PI),
+                );
+                c.insert(
+                    b"M_2_PI".to_vec(),
+                    Value::Double(std::f64::consts::FRAC_2_PI),
+                );
+                c.insert(
+                    b"M_2_SQRTPI".to_vec(),
+                    Value::Double(std::f64::consts::FRAC_2_SQRT_PI),
+                );
                 c.insert(b"M_SQRT2".to_vec(), Value::Double(std::f64::consts::SQRT_2));
                 c.insert(b"M_SQRT3".to_vec(), Value::Double(1.7320508075688772));
+                c.insert(
+                    b"M_SQRT1_2".to_vec(),
+                    Value::Double(std::f64::consts::FRAC_1_SQRT_2),
+                );
+                c.insert(b"M_EULER".to_vec(), Value::Double(0.5772156649015329));
+                c.insert(b"M_SQRTPI".to_vec(), Value::Double(1.772453850905516));
+                c.insert(b"M_LNPI".to_vec(), Value::Double(1.1447298858494002));
                 c.insert(b"INF".to_vec(), Value::Double(f64::INFINITY));
                 c.insert(b"NAN".to_vec(), Value::Double(f64::NAN));
                 // JSON constants

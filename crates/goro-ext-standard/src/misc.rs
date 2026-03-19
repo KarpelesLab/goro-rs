@@ -543,18 +543,95 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let callback = &args[0];
     let call_args: Vec<Value> = args[1..].to_vec();
 
-    // Get function name and captured vars
-    let (func_name, captured) = match callback {
-        Value::String(s) => (s.as_bytes().to_vec(), vec![]),
-        Value::Array(arr) => {
-            let arr = arr.borrow();
-            let vals: Vec<Value> = arr.values().cloned().collect();
-            if vals.is_empty() {
-                return Ok(Value::Null);
+    // Handle array callback: [class_or_object, method_name]
+    if let Value::Array(arr) = callback {
+        let arr_borrow = arr.borrow();
+        let vals: Vec<Value> = arr_borrow.values().cloned().collect();
+        drop(arr_borrow);
+        if vals.len() >= 2 {
+            let method_name = vals[1].to_php_string();
+            let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+            // Check if first element is a class name (string) or object
+            match &vals[0] {
+                Value::String(class_name) => {
+                    // Static method call: ['ClassName', 'method']
+                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some(class) = vm.classes.get(&class_lower).cloned() {
+                        if let Some(method) = class.methods.get(&method_lower) {
+                            let op = method.op_array.clone();
+                            let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
+                            for (i, arg) in call_args.iter().enumerate() {
+                                if i < fn_cvs.len() {
+                                    fn_cvs[i] = arg.clone();
+                                }
+                            }
+                            return vm.execute_fn(&op, fn_cvs);
+                        }
+                    }
+                    return Ok(Value::Null);
+                }
+                Value::Object(obj) => {
+                    // Object method call: [$obj, 'method']
+                    let class_lower: Vec<u8>;
+                    {
+                        let obj_borrow = obj.borrow();
+                        class_lower = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    }
+                    if let Some(class) = vm.classes.get(&class_lower).cloned() {
+                        if let Some(method) = class.methods.get(&method_lower) {
+                            let op = method.op_array.clone();
+                            let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
+                            // Set $this
+                            if let Some(this_idx) = op.cv_names.iter().position(|n| n == b"this") {
+                                fn_cvs[this_idx] = Value::Object(obj.clone());
+                            }
+                            for (i, arg) in call_args.iter().enumerate() {
+                                if i < fn_cvs.len() && op.cv_names.get(i).map(|n| n.as_slice()) != Some(b"this") {
+                                    fn_cvs[i] = arg.clone();
+                                }
+                            }
+                            return vm.execute_fn(&op, fn_cvs);
+                        }
+                    }
+                    return Ok(Value::Null);
+                }
+                _ => {}
             }
-            let name = vals[0].to_php_string().as_bytes().to_vec();
-            (name, vals[1..].to_vec())
         }
+        // Fall through to old behavior for other array callbacks (closures)
+        if !vals.is_empty() {
+            let name = vals[0].to_php_string().as_bytes().to_vec();
+            let captured: Vec<Value> = vals[1..].to_vec();
+            let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+            if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+                return builtin(vm, &call_args);
+            }
+            if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                let mut idx = 0;
+                for cv in &captured {
+                    if idx < fn_cvs.len() {
+                        fn_cvs[idx] = cv.clone();
+                        idx += 1;
+                    }
+                }
+                for arg in &call_args {
+                    if idx < fn_cvs.len() {
+                        fn_cvs[idx] = arg.clone();
+                        idx += 1;
+                    }
+                }
+                return vm.execute_fn(&user_fn, fn_cvs);
+            }
+        }
+        return Ok(Value::Null);
+    }
+
+    // Get function name from string callback
+    let func_name = match callback {
+        Value::String(s) => s.as_bytes().to_vec(),
         _ => return Ok(Value::Null),
     };
 
@@ -568,17 +645,9 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Try user function
     if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
         let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-        let mut idx = 0;
-        for cv in &captured {
-            if idx < fn_cvs.len() {
-                fn_cvs[idx] = cv.clone();
-                idx += 1;
-            }
-        }
-        for arg in &call_args {
-            if idx < fn_cvs.len() {
-                fn_cvs[idx] = arg.clone();
-                idx += 1;
+        for (i, arg) in call_args.iter().enumerate() {
+            if i < fn_cvs.len() {
+                fn_cvs[i] = arg.clone();
             }
         }
         return vm.execute_fn(&user_fn, fn_cvs);
@@ -1032,6 +1101,41 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
 
         // Get callback function name
+        match &callback {
+            Value::Null => {
+                // null callback = identity
+                for (key, val) in arr.iter() {
+                    result.set(key.clone(), val.clone());
+                }
+                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+            }
+            Value::Array(cb_arr) => {
+                let cb = cb_arr.borrow();
+                let vals: Vec<Value> = cb.values().cloned().collect();
+                drop(cb);
+                if vals.len() >= 2 {
+                    let method_name = vals[1].to_php_string();
+                    let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Value::String(class_name) = &vals[0] {
+                        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(class) = vm.classes.get(&class_lower).cloned() {
+                            if let Some(method) = class.methods.get(&method_lower) {
+                                let op = method.op_array.clone();
+                                for (key, val) in arr.iter() {
+                                    let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
+                                    if !fn_cvs.is_empty() { fn_cvs[0] = val.clone(); }
+                                    let mapped = vm.execute_fn(&op, fn_cvs)?;
+                                    result.set(key.clone(), mapped);
+                                }
+                                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
         let (func_name, captured_args) = match &callback {
             Value::String(s) => (s.as_bytes().to_vec(), vec![]),
             Value::Array(cb_arr) => {
@@ -1043,13 +1147,6 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let name = vals[0].to_php_string().as_bytes().to_vec();
                 let captured: Vec<Value> = vals[1..].to_vec();
                 (name, captured)
-            }
-            Value::Null => {
-                // null callback = identity
-                for (key, val) in arr.iter() {
-                    result.set(key.clone(), val.clone());
-                }
-                return Ok(Value::Array(Rc::new(RefCell::new(result))));
             }
             _ => return Ok(Value::Array(Rc::new(RefCell::new(result)))),
         };
@@ -2038,14 +2135,14 @@ fn str_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let num = args.first().map(|v| v.to_double()).unwrap_or(0.0);
     let decimals = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let dec_point = args
-        .get(2)
-        .map(|v| v.to_php_string().to_string_lossy())
-        .unwrap_or_else(|| ".".to_string());
-    let thousands_sep = args
-        .get(3)
-        .map(|v| v.to_php_string().to_string_lossy())
-        .unwrap_or_else(|| ",".to_string());
+    let dec_point = match args.get(2).map(|v| v.deref()) {
+        Some(Value::Null) | Some(Value::Undef) | None => ".".to_string(),
+        Some(v) => v.to_php_string().to_string_lossy(),
+    };
+    let thousands_sep = match args.get(3).map(|v| v.deref()) {
+        Some(Value::Null) | Some(Value::Undef) | None => ",".to_string(),
+        Some(v) => v.to_php_string().to_string_lossy(),
+    };
 
     // Round first (PHP rounds half up)
     let factor = 10f64.powi(decimals as i32);
@@ -2067,7 +2164,8 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let mut result = String::new();
-    if num < 0.0 {
+    // Only add negative sign if the rounded value is non-zero
+    if num < 0.0 && rounded != 0.0 {
         result.push('-');
     }
     result.push_str(&with_sep);
@@ -5241,7 +5339,18 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let arr_key = ArrayKey::String(PhpString::from_string(key));
             if process_sections {
                 if let Some(ref section) = current_section {
-                    let section_key = ArrayKey::String(PhpString::from_string(section.clone()));
+                    // Use integer key for pure integer section names
+                    let section_key = if let Ok(n) = section.parse::<i64>() {
+                        // Only use integer key if it doesn't start with '0' (to avoid octal confusion)
+                        // and doesn't start with '+' or '-' (PHP only converts positive integers)
+                        if !section.starts_with('0') || section == "0" {
+                            ArrayKey::Int(n)
+                        } else {
+                            ArrayKey::String(PhpString::from_string(section.clone()))
+                        }
+                    } else {
+                        ArrayKey::String(PhpString::from_string(section.clone()))
+                    };
                     // Get or create section array
                     let section_arr = if let Some(existing) = result.get(&section_key) {
                         if let Value::Array(arr) = existing {

@@ -570,12 +570,15 @@ pub fn do_sprintf(args: &[Value]) -> String {
                 b'e' => {
                     let f = arg.to_double();
                     let prec = precision.unwrap_or(6);
-                    format!("{:.prec$e}", f)
+                    let s = format!("{:.prec$e}", f);
+                    // PHP always shows +/- in exponent, Rust doesn't show +
+                    php_fix_exponent(&s)
                 }
                 b'E' => {
                     let f = arg.to_double();
                     let prec = precision.unwrap_or(6);
-                    format!("{:.prec$E}", f)
+                    let s = format!("{:.prec$E}", f);
+                    php_fix_exponent(&s)
                 }
                 b'g' | b'G' => {
                     let f = arg.to_double();
@@ -630,6 +633,22 @@ pub fn do_sprintf(args: &[Value]) -> String {
     }
 
     result
+}
+
+/// Fix scientific notation exponent to always show sign (e.g., e2 -> e+2)
+fn php_fix_exponent(s: &str) -> String {
+    // Find 'e' or 'E' and check if the next char is a digit (no sign)
+    if let Some(e_pos) = s.rfind(|c| c == 'e' || c == 'E') {
+        let after = &s[e_pos + 1..];
+        if !after.is_empty() && after.as_bytes()[0].is_ascii_digit() {
+            // Insert '+' after e/E
+            format!("{}+{}", &s[..e_pos + 1], after)
+        } else {
+            s.to_string()
+        }
+    } else {
+        s.to_string()
+    }
 }
 
 fn nl2br(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -818,9 +837,31 @@ fn addcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let charlist = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let chars = charlist.as_bytes();
+    // Expand ranges (e.g., "a..z" means all chars from a to z)
+    let mut char_set = [false; 256];
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 2 < chars.len() && chars[i + 1] == b'.' && chars[i + 2] == b'.' && i + 3 < chars.len() {
+            let start = chars[i];
+            let end = chars[i + 3];
+            if start <= end {
+                for c in start..=end {
+                    char_set[c as usize] = true;
+                }
+            } else {
+                // Reverse range - still set the endpoints
+                char_set[start as usize] = true;
+                char_set[end as usize] = true;
+            }
+            i += 4;
+        } else {
+            char_set[chars[i] as usize] = true;
+            i += 1;
+        }
+    }
     let mut result = Vec::new();
     for &b in s.as_bytes() {
-        if chars.contains(&b) {
+        if char_set[b as usize] {
             match b {
                 b'\n' => result.extend_from_slice(b"\\n"),
                 b'\r' => result.extend_from_slice(b"\\r"),
@@ -938,15 +979,81 @@ fn str_rot13(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let allowed = args.get(1);
+
+    // Build set of allowed tag names (lowercase)
+    let mut allowed_tags: Vec<Vec<u8>> = Vec::new();
+    if let Some(allowed_val) = allowed {
+        match allowed_val {
+            Value::String(allowed_str) => {
+                // Parse "<b><p><i>" format
+                let ab = allowed_str.as_bytes();
+                let mut j = 0;
+                while j < ab.len() {
+                    if ab[j] == b'<' {
+                        j += 1;
+                        let start = j;
+                        while j < ab.len() && ab[j] != b'>' && ab[j] != b' ' {
+                            j += 1;
+                        }
+                        if start < j {
+                            allowed_tags.push(ab[start..j].to_ascii_lowercase());
+                        }
+                        while j < ab.len() && ab[j] != b'>' {
+                            j += 1;
+                        }
+                        if j < ab.len() { j += 1; }
+                    } else {
+                        j += 1;
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                // Array of tag names ["b", "p", "i"]
+                let arr = arr.borrow();
+                for (_, v) in arr.iter() {
+                    let tag = v.to_php_string().to_string_lossy().to_ascii_lowercase();
+                    allowed_tags.push(tag.into_bytes());
+                }
+            }
+            _ => {}
+        }
+    }
+
     let bytes = s.as_bytes();
     let mut result = Vec::new();
-    let mut in_tag = false;
-    for &b in bytes {
-        match b {
-            b'<' => in_tag = true,
-            b'>' => in_tag = false,
-            _ if !in_tag => result.push(b),
-            _ => {}
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Find the end of the tag
+            let tag_start = i;
+            i += 1;
+            let is_closing = i < bytes.len() && bytes[i] == b'/';
+            if is_closing { i += 1; }
+
+            // Extract tag name
+            let name_start = i;
+            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' && bytes[i] != b'/' {
+                i += 1;
+            }
+            let tag_name = &bytes[name_start..i];
+            let tag_name_lower = tag_name.to_ascii_lowercase();
+
+            // Skip to end of tag
+            while i < bytes.len() && bytes[i] != b'>' {
+                i += 1;
+            }
+            if i < bytes.len() { i += 1; } // skip >
+
+            // Check if this tag is allowed
+            if !allowed_tags.is_empty() && !tag_name_lower.is_empty() && allowed_tags.iter().any(|t| t == &tag_name_lower) {
+                result.extend_from_slice(&bytes[tag_start..i]);
+            }
+            // Otherwise, the tag is stripped (nothing added to result)
+        } else {
+            result.push(bytes[i]);
+            i += 1;
         }
     }
     Ok(Value::String(PhpString::from_vec(result)))
@@ -1229,15 +1336,20 @@ fn levenshtein(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .to_php_string()
         .to_string_lossy();
 
+    // Optional costs: insertion_cost, replacement_cost, deletion_cost
+    let ins_cost = args.get(2).map(|v| v.to_long() as usize).unwrap_or(1);
+    let rep_cost = args.get(3).map(|v| v.to_long() as usize).unwrap_or(1);
+    let del_cost = args.get(4).map(|v| v.to_long() as usize).unwrap_or(1);
+
     let len1 = s1.len();
     let len2 = s2.len();
     let mut matrix = vec![vec![0usize; len2 + 1]; len1 + 1];
 
     for i in 0..=len1 {
-        matrix[i][0] = i;
+        matrix[i][0] = i * del_cost;
     }
     for j in 0..=len2 {
-        matrix[0][j] = j;
+        matrix[0][j] = j * ins_cost;
     }
 
     for i in 1..=len1 {
@@ -1245,10 +1357,10 @@ fn levenshtein(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let cost = if s1.as_bytes()[i - 1] == s2.as_bytes()[j - 1] {
                 0
             } else {
-                1
+                rep_cost
             };
-            matrix[i][j] = (matrix[i - 1][j] + 1)
-                .min(matrix[i][j - 1] + 1)
+            matrix[i][j] = (matrix[i - 1][j] + del_cost)
+                .min(matrix[i][j - 1] + ins_cost)
                 .min(matrix[i - 1][j - 1] + cost);
         }
     }
@@ -2430,21 +2542,73 @@ fn html_entity_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
 
 fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let allowed = args.get(1);
+
+    // Build set of allowed tag names (lowercase)
+    let mut allowed_tags: Vec<Vec<u8>> = Vec::new();
+    if let Some(allowed_val) = allowed {
+        match allowed_val {
+            Value::String(allowed_str) => {
+                let ab = allowed_str.as_bytes();
+                let mut j = 0;
+                while j < ab.len() {
+                    if ab[j] == b'<' {
+                        j += 1;
+                        let start = j;
+                        while j < ab.len() && ab[j] != b'>' && ab[j] != b' ' {
+                            j += 1;
+                        }
+                        if start < j {
+                            allowed_tags.push(ab[start..j].to_ascii_lowercase());
+                        }
+                        while j < ab.len() && ab[j] != b'>' {
+                            j += 1;
+                        }
+                        if j < ab.len() { j += 1; }
+                    } else {
+                        j += 1;
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                let arr = arr.borrow();
+                for (_, v) in arr.iter() {
+                    let tag = v.to_php_string().to_string_lossy().to_ascii_lowercase();
+                    allowed_tags.push(tag.into_bytes());
+                }
+            }
+            _ => {}
+        }
+    }
+
     let bytes = s.as_bytes();
     let mut result = Vec::new();
-    let mut in_tag = false;
     let mut i = 0;
+
     while i < bytes.len() {
         if bytes[i] == b'<' {
-            in_tag = true;
+            let tag_start = i;
             i += 1;
-        } else if bytes[i] == b'>' && in_tag {
-            in_tag = false;
-            i += 1;
-        } else if !in_tag {
-            result.push(bytes[i]);
-            i += 1;
+            let is_closing = i < bytes.len() && bytes[i] == b'/';
+            if is_closing { i += 1; }
+
+            let name_start = i;
+            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' && bytes[i] != b'/' {
+                i += 1;
+            }
+            let tag_name = &bytes[name_start..i];
+            let tag_name_lower = tag_name.to_ascii_lowercase();
+
+            while i < bytes.len() && bytes[i] != b'>' {
+                i += 1;
+            }
+            if i < bytes.len() { i += 1; }
+
+            if !allowed_tags.is_empty() && !tag_name_lower.is_empty() && allowed_tags.iter().any(|t| t == &tag_name_lower) {
+                result.extend_from_slice(&bytes[tag_start..i]);
+            }
         } else {
+            result.push(bytes[i]);
             i += 1;
         }
     }
