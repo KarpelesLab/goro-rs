@@ -87,6 +87,7 @@ struct RegexFlags {
     dotall: bool,           // s
     extended: bool,         // x
     ungreedy: bool,         // U
+    anchored: bool,         // A
 }
 
 // ============================================================================
@@ -98,6 +99,7 @@ struct RegexParser<'a> {
     pos: usize,
     group_count: usize,
     flags: RegexFlags,
+    group_names: Vec<(usize, Vec<u8>)>,
 }
 
 impl<'a> RegexParser<'a> {
@@ -107,6 +109,7 @@ impl<'a> RegexParser<'a> {
             pos: 0,
             group_count: 0,
             flags,
+            group_names: Vec::new(),
         }
     }
 
@@ -387,6 +390,9 @@ impl<'a> RegexParser<'a> {
                     Ok(RegexNode::NonWordBoundary)
                 }
             }
+            Some(b'A') if !in_class => Ok(RegexNode::StartAnchor), // \A = start of subject
+            Some(b'Z') if !in_class => Ok(RegexNode::EndAnchor),   // \Z = end of subject (or before final \n)
+            Some(b'z') if !in_class => Ok(RegexNode::EndAnchor),   // \z = absolute end of subject
             Some(b'n') => Ok(RegexNode::Literal(b'\n')),
             Some(b'r') => Ok(RegexNode::Literal(b'\r')),
             Some(b't') => Ok(RegexNode::Literal(b'\t')),
@@ -411,6 +417,20 @@ impl<'a> RegexParser<'a> {
                 }
                 if has_brace && self.peek() == Some(b'}') {
                     self.advance();
+                }
+                Ok(RegexNode::Literal(val))
+            }
+            Some(b'0') => {
+                // Octal escape \0, \0nn
+                let mut val: u8 = 0;
+                for _ in 0..2 {
+                    match self.peek() {
+                        Some(c) if c >= b'0' && c <= b'7' => {
+                            self.advance();
+                            val = val * 8 + (c - b'0');
+                        }
+                        _ => break,
+                    }
                 }
                 Ok(RegexNode::Literal(val))
             }
@@ -441,6 +461,33 @@ impl<'a> RegexParser<'a> {
                     }
                     self.advance();
                     return Ok(RegexNode::NonCapturingGroup {
+                        node: Box::new(inner),
+                    });
+                }
+                Some(b'\'') => {
+                    // (?'name'...) — named capture group with single-quote syntax
+                    self.advance();
+                    let mut name = Vec::new();
+                    while let Some(ch) = self.peek() {
+                        if ch == b'\'' {
+                            self.advance();
+                            break;
+                        }
+                        name.push(ch);
+                        self.advance();
+                    }
+                    self.group_count += 1;
+                    let index = self.group_count;
+                    if !name.is_empty() {
+                        self.group_names.push((index, name));
+                    }
+                    let inner = self.parse_alternation()?;
+                    if self.peek() != Some(b')') {
+                        return Err("unclosed group".into());
+                    }
+                    self.advance();
+                    return Ok(RegexNode::Group {
+                        index,
                         node: Box::new(inner),
                     });
                 }
@@ -497,16 +544,20 @@ impl<'a> RegexParser<'a> {
                         }
                         _ => {
                             // (?<name>...) — named capture group
-                            // Skip the name, treat as capture group
+                            let mut name = Vec::new();
                             while let Some(ch) = self.peek() {
                                 if ch == b'>' {
                                     self.advance();
                                     break;
                                 }
+                                name.push(ch);
                                 self.advance();
                             }
                             self.group_count += 1;
                             let index = self.group_count;
+                            if !name.is_empty() {
+                                self.group_names.push((index, name));
+                            }
                             let inner = self.parse_alternation()?;
                             if self.peek() != Some(b')') {
                                 return Err("unclosed group".into());
@@ -524,16 +575,21 @@ impl<'a> RegexParser<'a> {
                     // (?P<name>...) or (?P=name) — named capture/backreference
                     if self.peek() == Some(b'<') {
                         self.advance();
-                        // Skip the name
+                        // Capture the name
+                        let mut name = Vec::new();
                         while let Some(ch) = self.peek() {
                             if ch == b'>' {
                                 self.advance();
                                 break;
                             }
+                            name.push(ch);
                             self.advance();
                         }
                         self.group_count += 1;
                         let index = self.group_count;
+                        if !name.is_empty() {
+                            self.group_names.push((index, name));
+                        }
                         let inner = self.parse_alternation()?;
                         if self.peek() != Some(b')') {
                             return Err("unclosed group".into());
@@ -1533,6 +1589,7 @@ pub struct CompiledRegex {
     ast: RegexNode,
     flags: RegexFlags,
     num_groups: usize,
+    group_names: Vec<(usize, Vec<u8>)>, // (group_index, name)
 }
 
 /// Parse a PHP regex pattern like `/pattern/flags` or `~pattern~flags`
@@ -1593,7 +1650,7 @@ pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
             b'U' => flags.ungreedy = true,
             b'u' => {} // UTF-8 mode — we ignore for now
             b'D' => {} // Dollar end only — ignore
-            b'A' => {} // Anchored — ignore for now
+            b'A' => flags.anchored = true,
             b'S' => {} // Extra study — ignore
             b'X' => {} // Extra — ignore
             b'J' => {} // Allow duplicate names — ignore
@@ -1622,6 +1679,7 @@ pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
         ast,
         flags: final_flags,
         num_groups,
+        group_names: parser.group_names,
     })
 }
 
@@ -1673,8 +1731,10 @@ impl CompiledRegex {
     pub fn find(&self, input: &[u8], start_offset: usize) -> Option<RegexMatch> {
         let mut state = MatchState::new(input, self.num_groups, self.flags.clone());
 
-        // Check if pattern is anchored (starts with ^) — only optimize when NOT in multiline mode
-        let is_anchored = if !self.flags.multiline {
+        // Check if pattern is anchored (starts with ^ or has A flag)
+        let is_anchored = if self.flags.anchored {
+            true
+        } else if !self.flags.multiline {
             match &self.ast {
                 RegexNode::StartAnchor => true,
                 RegexNode::Sequence(nodes) => {
@@ -1712,10 +1772,12 @@ impl CompiledRegex {
         let mut offset = 0;
         while offset <= input.len() {
             if let Some(m) = self.find(input, offset) {
+                let start = m.full_match.0;
                 let end = m.full_match.1;
                 matches.push(m);
-                if end == offset {
-                    offset += 1; // Prevent infinite loop on zero-length matches
+                if start == end {
+                    // Zero-length match: advance past the match position
+                    offset = end + 1;
                 } else {
                     offset = end;
                 }
@@ -1740,6 +1802,11 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
+    if pattern.is_empty() {
+        vm.emit_warning("preg_match(): Empty regular expression");
+        return Ok(Value::False);
+    }
+
     let subject = match args.get(1) {
         Some(v) => v.to_php_string(),
         None => {
@@ -1747,7 +1814,11 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    let offset = if let Some(v) = args.get(3) {
+    let flags = args.get(3).map(|v| v.to_long()).unwrap_or(0);
+    let offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
+    let unmatched_as_null = (flags & 512) != 0; // PREG_UNMATCHED_AS_NULL
+
+    let offset = if let Some(v) = args.get(4) {
         let o = v.to_long();
         if o < 0 {
             // Negative offset counts from end
@@ -1759,6 +1830,11 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         0
     };
+
+    // If offset exceeds subject length, return false
+    if offset > subject.len() {
+        return Ok(Value::False);
+    }
 
     let compiled = match parse_php_regex(pattern.as_bytes()) {
         Ok(c) => c,
@@ -1778,17 +1854,32 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(matches_ref) = args.get(2) {
         if let Some(ref m) = result {
             let mut arr = PhpArray::new();
-            // Group 0 = full match
             for (i, capture) in m.groups.iter().enumerate() {
-                if let Some((start, end)) = capture {
+                let val = if let Some((start, end)) = capture {
                     let matched_text = &input[*start..*end];
-                    arr.set(
-                        ArrayKey::Int(i as i64),
-                        Value::String(PhpString::from_bytes(matched_text)),
-                    );
+                    if offset_capture {
+                        let mut pair = PhpArray::new();
+                        pair.push(Value::String(PhpString::from_bytes(matched_text)));
+                        pair.push(Value::Long(*start as i64));
+                        Value::Array(Rc::new(RefCell::new(pair)))
+                    } else {
+                        Value::String(PhpString::from_bytes(matched_text))
+                    }
+                } else if offset_capture {
+                    let mut pair = PhpArray::new();
+                    pair.push(if unmatched_as_null { Value::Null } else { Value::String(PhpString::empty()) });
+                    pair.push(Value::Long(-1));
+                    Value::Array(Rc::new(RefCell::new(pair)))
+                } else if unmatched_as_null {
+                    Value::Null
                 } else {
-                    arr.set(ArrayKey::Int(i as i64), Value::String(PhpString::empty()));
+                    Value::String(PhpString::empty())
+                };
+                // Add named group entry before the numeric entry
+                if let Some((_, name)) = compiled.group_names.iter().find(|(idx, _)| *idx == i) {
+                    arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
                 }
+                arr.set(ArrayKey::Int(i as i64), val);
             }
             // Try to write back to reference
             if let Value::Reference(r) = matches_ref {
@@ -1827,7 +1918,12 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    let offset = if let Some(v) = args.get(3) {
+    let flags = args.get(3).map(|v| v.to_long()).unwrap_or(0);
+    let set_order = (flags & 2) != 0; // PREG_SET_ORDER
+    let offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
+    let unmatched_as_null = (flags & 512) != 0; // PREG_UNMATCHED_AS_NULL
+
+    let offset = if let Some(v) = args.get(4) {
         let o = v.to_long();
         if o < 0 {
             let len = subject.len() as i64;
@@ -1856,10 +1952,12 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut off = offset;
         while off <= input.len() {
             if let Some(m) = compiled.find(input, off) {
+                let start = m.full_match.0;
                 let end = m.full_match.1;
                 matches.push(m);
-                if end == off {
-                    off += 1;
+                if start == end {
+                    // Zero-length match: advance past the match position
+                    off = end + 1;
                 } else {
                     off = end;
                 }
@@ -1874,20 +1972,77 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Fill matches array if provided
     if let Some(matches_ref) = args.get(2) {
-        // Default: PREG_PATTERN_ORDER — group each capture group across all matches
         let num_groups = compiled.num_groups + 1;
-        let mut result = PhpArray::new();
+        let result;
 
-        for group_idx in 0..num_groups {
-            let mut group_arr = PhpArray::new();
+        if set_order {
+            // PREG_SET_ORDER — each element is an array of all groups for that match
+            let mut set_arr = PhpArray::new();
             for m in &all_matches {
-                if let Some(Some((start, end))) = m.groups.get(group_idx) {
-                    group_arr.push(Value::String(PhpString::from_bytes(&input[*start..*end])));
-                } else {
-                    group_arr.push(Value::String(PhpString::empty()));
+                let mut match_arr = PhpArray::new();
+                for group_idx in 0..num_groups {
+                    let val = if let Some(Some((start, end))) = m.groups.get(group_idx) {
+                        if offset_capture {
+                            let mut pair = PhpArray::new();
+                            pair.push(Value::String(PhpString::from_bytes(&input[*start..*end])));
+                            pair.push(Value::Long(*start as i64));
+                            Value::Array(Rc::new(RefCell::new(pair)))
+                        } else {
+                            Value::String(PhpString::from_bytes(&input[*start..*end]))
+                        }
+                    } else if offset_capture {
+                        let mut pair = PhpArray::new();
+                        pair.push(if unmatched_as_null { Value::Null } else { Value::String(PhpString::empty()) });
+                        pair.push(Value::Long(-1));
+                        Value::Array(Rc::new(RefCell::new(pair)))
+                    } else if unmatched_as_null {
+                        Value::Null
+                    } else {
+                        Value::String(PhpString::empty())
+                    };
+                    // Add named group entry before numeric
+                    if let Some((_, name)) = compiled.group_names.iter().find(|(idx, _)| *idx == group_idx) {
+                        match_arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                    }
+                    match_arr.set(ArrayKey::Int(group_idx as i64), val);
                 }
+                set_arr.push(Value::Array(Rc::new(RefCell::new(match_arr))));
             }
-            result.push(Value::Array(Rc::new(RefCell::new(group_arr))));
+            result = set_arr;
+        } else {
+            // PREG_PATTERN_ORDER (default) — group each capture group across all matches
+            let mut pattern_arr = PhpArray::new();
+            for group_idx in 0..num_groups {
+                let mut group_arr = PhpArray::new();
+                for m in &all_matches {
+                    if let Some(Some((start, end))) = m.groups.get(group_idx) {
+                        if offset_capture {
+                            let mut pair = PhpArray::new();
+                            pair.push(Value::String(PhpString::from_bytes(&input[*start..*end])));
+                            pair.push(Value::Long(*start as i64));
+                            group_arr.push(Value::Array(Rc::new(RefCell::new(pair))));
+                        } else {
+                            group_arr.push(Value::String(PhpString::from_bytes(&input[*start..*end])));
+                        }
+                    } else if offset_capture {
+                        let mut pair = PhpArray::new();
+                        pair.push(if unmatched_as_null { Value::Null } else { Value::String(PhpString::empty()) });
+                        pair.push(Value::Long(-1));
+                        group_arr.push(Value::Array(Rc::new(RefCell::new(pair))));
+                    } else if unmatched_as_null {
+                        group_arr.push(Value::Null);
+                    } else {
+                        group_arr.push(Value::String(PhpString::empty()));
+                    }
+                }
+                // Add named group entry before numeric
+                let val = Value::Array(Rc::new(RefCell::new(group_arr.clone())));
+                if let Some((_, name)) = compiled.group_names.iter().find(|(idx, _)| *idx == group_idx) {
+                    pattern_arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                }
+                pattern_arr.set(ArrayKey::Int(group_idx as i64), val);
+            }
+            result = pattern_arr;
         }
 
         if let Value::Reference(r) = matches_ref {
@@ -1919,6 +2074,8 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|v| v.to_long())
         .unwrap_or(-1);
 
+    let mut total_count = 0i64;
+
     // Handle array pattern + array replacement
     if let Value::Array(patterns_arr) = &pattern_val {
         let patterns: Vec<Value> = patterns_arr.borrow().iter().map(|(_, v)| v.clone()).collect();
@@ -1937,9 +2094,16 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let mut current = subject_str.as_bytes().to_vec();
                 for (i, pat) in patterns.iter().enumerate() {
                     let repl = replacements.get(i).unwrap_or(&Value::String(PhpString::empty())).to_php_string();
-                    current = do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit);
+                    let (replaced, cnt) = do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit);
+                    current = replaced;
+                    total_count += cnt;
                 }
                 result.set(key.clone(), Value::String(PhpString::from_vec(current)));
+            }
+            if let Some(count_ref) = args.get(4) {
+                if let Value::Reference(r) = count_ref {
+                    *r.borrow_mut() = Value::Long(total_count);
+                }
             }
             return Ok(Value::Array(Rc::new(RefCell::new(result))));
         } else {
@@ -1948,7 +2112,14 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut current = subject_str.as_bytes().to_vec();
             for (i, pat) in patterns.iter().enumerate() {
                 let repl = replacements.get(i).unwrap_or(&Value::String(PhpString::empty())).to_php_string();
-                current = do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit);
+                let (replaced, cnt) = do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit);
+                current = replaced;
+                total_count += cnt;
+            }
+            if let Some(count_ref) = args.get(4) {
+                if let Value::Reference(r) = count_ref {
+                    *r.borrow_mut() = Value::Long(total_count);
+                }
             }
             return Ok(Value::String(PhpString::from_vec(current)));
         }
@@ -1962,36 +2133,49 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
         for (key, subject) in subjects_arr.borrow().iter() {
             let subject_str = subject.to_php_string();
-            let replaced = do_preg_replace(
+            let (replaced, cnt) = do_preg_replace(
                 vm,
                 pattern.as_bytes(),
                 replacement.as_bytes(),
                 subject_str.as_bytes(),
                 limit,
             );
+            total_count += cnt;
             result.set(key.clone(), Value::String(PhpString::from_vec(replaced)));
+        }
+        if let Some(count_ref) = args.get(4) {
+            if let Value::Reference(r) = count_ref {
+                *r.borrow_mut() = Value::Long(total_count);
+            }
         }
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
     }
 
     let subject = subject_val.to_php_string();
-    let replaced = do_preg_replace(
+    let (replaced, cnt) = do_preg_replace(
         vm,
         pattern.as_bytes(),
         replacement.as_bytes(),
         subject.as_bytes(),
         limit,
     );
+    total_count += cnt;
+
+    if let Some(count_ref) = args.get(4) {
+        if let Value::Reference(r) = count_ref {
+            *r.borrow_mut() = Value::Long(total_count);
+        }
+    }
 
     Ok(Value::String(PhpString::from_vec(replaced)))
 }
 
-fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u8], limit: i64) -> Vec<u8> {
+fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u8], limit: i64) -> (Vec<u8>, i64) {
     let compiled = match parse_php_regex(pattern) {
         Ok(c) => c,
         Err(_e) => {
             vm.emit_warning(&format!("preg_replace(): Compilation failed: {}", _e));
-            return subject.to_vec();
+            return (subject.to_vec(), 0);
         }
     };
 
@@ -2031,7 +2215,7 @@ fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u
         result.extend_from_slice(&subject[offset..]);
     }
 
-    result
+    (result, count)
 }
 
 fn apply_replacement(result: &mut Vec<u8>, replacement: &[u8], subject: &[u8], m: &RegexMatch) {
@@ -2111,6 +2295,7 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let no_empty = (flags & 1) != 0; // PREG_SPLIT_NO_EMPTY
     let delim_capture = (flags & 2) != 0; // PREG_SPLIT_DELIM_CAPTURE
+    let offset_capture = (flags & 4) != 0; // PREG_SPLIT_OFFSET_CAPTURE
 
     let compiled = match parse_php_regex(pattern.as_bytes()) {
         Ok(c) => c,
@@ -2122,27 +2307,34 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let input = subject.as_bytes();
     let mut result = PhpArray::new();
-    let mut offset = 0;
     let mut parts = 0i64;
     let effective_limit = if limit <= 0 { i64::MAX } else { limit };
 
-    while offset <= input.len() && parts < effective_limit - 1 {
-        if let Some(m) = compiled.find(input, offset) {
+    // Helper to push a value, optionally with offset capture
+    let push_value = |result: &mut PhpArray, text: &[u8], text_offset: usize, offset_capture: bool| {
+        if offset_capture {
+            let mut pair = PhpArray::new();
+            pair.push(Value::String(PhpString::from_bytes(text)));
+            pair.push(Value::Long(text_offset as i64));
+            result.push(Value::Array(Rc::new(RefCell::new(pair))));
+        } else {
+            result.push(Value::String(PhpString::from_bytes(text)));
+        }
+    };
+
+    // last_split_pos: position where the current piece started (beginning of next piece after last split)
+    // search_offset: position to search for next match from
+    let mut last_split_pos = 0usize;
+    let mut search_offset = 0usize;
+
+    while search_offset <= input.len() && parts < effective_limit - 1 {
+        if let Some(m) = compiled.find(input, search_offset) {
             let (match_start, match_end) = m.full_match;
 
-            // Don't split on zero-length match at start
-            if match_start == offset && match_end == offset {
-                if offset < input.len() {
-                    offset += 1;
-                } else {
-                    break;
-                }
-                continue;
-            }
-
-            let part = &input[offset..match_start];
+            // Emit the piece from last_split_pos to match_start
+            let part = &input[last_split_pos..match_start];
             if !no_empty || !part.is_empty() {
-                result.push(Value::String(PhpString::from_bytes(part)));
+                push_value(&mut result, part, last_split_pos, offset_capture);
                 parts += 1;
             }
 
@@ -2152,16 +2344,26 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if let Some(Some((start, end))) = m.groups.get(i) {
                         let captured = &input[*start..*end];
                         if !no_empty || !captured.is_empty() {
-                            result.push(Value::String(PhpString::from_bytes(captured)));
+                            push_value(&mut result, captured, *start, offset_capture);
                         }
+                    } else if !no_empty {
+                        push_value(&mut result, b"", match_start, offset_capture);
                     }
                 }
             }
 
-            if match_end == offset {
-                offset += 1;
+            if match_start == match_end {
+                // Zero-length match: advance search position past the match to avoid infinite loop
+                last_split_pos = match_end;
+                if match_end < input.len() {
+                    search_offset = match_end + 1;
+                } else {
+                    search_offset = match_end + 1;
+                    break;
+                }
             } else {
-                offset = match_end;
+                search_offset = match_end;
+                last_split_pos = match_end;
             }
         } else {
             break;
@@ -2169,9 +2371,9 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     // Add remaining
-    let remaining = &input[offset..];
+    let remaining = &input[last_split_pos..];
     if !no_empty || !remaining.is_empty() {
-        result.push(Value::String(PhpString::from_bytes(remaining)));
+        push_value(&mut result, remaining, last_split_pos, offset_capture);
     }
 
     Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -2196,6 +2398,13 @@ pub fn preg_quote(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = Vec::with_capacity(input.len() * 2);
     for &ch in input.as_bytes() {
         match ch {
+            0 => {
+                // Null byte: escape as \000
+                result.push(b'\\');
+                result.push(b'0');
+                result.push(b'0');
+                result.push(b'0');
+            }
             b'\\' | b'+' | b'*' | b'?' | b'[' | b'^' | b']' | b'$' | b'(' | b')' | b'{'
             | b'}' | b'=' | b'!' | b'<' | b'>' | b'|' | b':' | b'-' | b'.' | b'#' => {
                 result.push(b'\\');
@@ -2215,16 +2424,461 @@ pub fn preg_quote(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-/// preg_replace_callback($pattern, $callback, $subject [, $limit [, &$count]])
-pub fn preg_replace_callback(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // For now, just return the subject unchanged
-    // This is a complex function that requires calling PHP callbacks
-    Ok(args.get(2).cloned().unwrap_or(Value::Null))
+/// Call a PHP callback with the given arguments.
+/// Handles string function names, array callbacks [obj, method], and closure objects.
+fn call_callback(vm: &mut Vm, callback: &Value, call_args: &[Value]) -> Result<Value, VmError> {
+    let (func_name, captured) = match callback {
+        Value::String(s) => (s.as_bytes().to_vec(), vec![]),
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            let vals: Vec<Value> = arr.values().cloned().collect();
+            if vals.len() >= 2 {
+                // [class/object, method] callback
+                let first = &vals[0];
+                let method = vals[1].to_php_string();
+                match first {
+                    Value::String(class_name) => {
+                        // Static method: ["ClassName", "methodName"]
+                        let mut name = class_name.as_bytes().to_vec();
+                        name.extend_from_slice(b"::");
+                        name.extend_from_slice(method.as_bytes());
+                        (name, vec![])
+                    }
+                    Value::Object(_obj) => {
+                        // Instance method: [$obj, "methodName"]
+                        let class_name = first.to_php_string();
+                        let mut name = class_name.as_bytes().to_vec();
+                        name.extend_from_slice(b"::");
+                        name.extend_from_slice(method.as_bytes());
+                        (name, vec![first.clone()])
+                    }
+                    Value::Reference(r) => {
+                        // Reference to object
+                        let inner = r.borrow().clone();
+                        if let Value::Object(_) = &inner {
+                            let class_name = inner.to_php_string();
+                            let mut name = class_name.as_bytes().to_vec();
+                            name.extend_from_slice(b"::");
+                            name.extend_from_slice(method.as_bytes());
+                            (name, vec![inner])
+                        } else {
+                            let mut name = inner.to_php_string().as_bytes().to_vec();
+                            name.extend_from_slice(b"::");
+                            name.extend_from_slice(method.as_bytes());
+                            (name, vec![])
+                        }
+                    }
+                    _ => {
+                        let mut name = first.to_php_string().as_bytes().to_vec();
+                        name.extend_from_slice(b"::");
+                        name.extend_from_slice(method.as_bytes());
+                        (name, vec![])
+                    }
+                }
+            } else if vals.len() == 1 {
+                (vals[0].to_php_string().as_bytes().to_vec(), vec![])
+            } else {
+                return Ok(Value::Null);
+            }
+        }
+        Value::Object(obj) => {
+            // Closure object — call __invoke
+            let class_lower: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            let class_name_orig = obj.borrow().class_name.clone();
+            let has_invoke = vm
+                .classes
+                .get(&class_lower)
+                .map(|c| c.methods.contains_key(&b"__invoke".to_vec()))
+                .unwrap_or(false);
+            if has_invoke {
+                let mut func_name = class_name_orig;
+                func_name.extend_from_slice(b"::__invoke");
+                let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                    let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                    // First CV is $this
+                    if !fn_cvs.is_empty() {
+                        fn_cvs[0] = callback.clone();
+                    }
+                    let mut idx = 1;
+                    for arg in call_args {
+                        if idx < fn_cvs.len() {
+                            fn_cvs[idx] = arg.clone();
+                            idx += 1;
+                        }
+                    }
+                    return vm.execute_fn(&user_fn, fn_cvs);
+                }
+            }
+            return Ok(Value::Null);
+        }
+        _ => return Ok(Value::Null),
+    };
+
+    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    // Try builtin first
+    if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+        return builtin(vm, call_args);
+    }
+
+    // Try user function
+    if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+        let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+        let mut idx = 0;
+        for cv in &captured {
+            if idx < fn_cvs.len() {
+                fn_cvs[idx] = cv.clone();
+                idx += 1;
+            }
+        }
+        for arg in call_args {
+            if idx < fn_cvs.len() {
+                fn_cvs[idx] = arg.clone();
+                idx += 1;
+            }
+        }
+        return vm.execute_fn(&user_fn, fn_cvs);
+    }
+
+    Ok(Value::Null)
+}
+
+/// preg_replace_callback($pattern, $callback, $subject [, $limit [, &$count [, $flags]]])
+pub fn preg_replace_callback(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let pattern_val = match args.first() {
+        Some(v) => v.clone(),
+        None => return Ok(Value::Null),
+    };
+    let callback = match args.get(1) {
+        Some(v) => v.clone(),
+        None => return Ok(Value::Null),
+    };
+    let subject_val = match args.get(2) {
+        Some(v) => v.clone(),
+        None => return Ok(Value::Null),
+    };
+    let limit = args.get(3).map(|v| v.to_long()).unwrap_or(-1);
+
+    // Handle array pattern
+    let patterns: Vec<Vec<u8>> = if let Value::Array(patterns_arr) = &pattern_val {
+        patterns_arr.borrow().iter().map(|(_, v)| v.to_php_string().as_bytes().to_vec()).collect()
+    } else {
+        vec![pattern_val.to_php_string().as_bytes().to_vec()]
+    };
+
+    // Handle array subject
+    if let Value::Array(subjects_arr) = &subject_val {
+        let mut result = PhpArray::new();
+        let mut total_count = 0i64;
+        for (key, subject) in subjects_arr.borrow().iter() {
+            let subject_str = subject.to_php_string();
+            let mut current = subject_str.as_bytes().to_vec();
+            for pat in &patterns {
+                let (replaced, count) = do_preg_replace_callback(vm, pat, &callback, &current, limit)?;
+                current = replaced;
+                total_count += count;
+            }
+            result.set(key.clone(), Value::String(PhpString::from_vec(current)));
+        }
+        // Set count if provided
+        if let Some(count_ref) = args.get(4) {
+            if let Value::Reference(r) = count_ref {
+                *r.borrow_mut() = Value::Long(total_count);
+            }
+        }
+        return Ok(Value::Array(Rc::new(RefCell::new(result))));
+    }
+
+    // String subject
+    let subject = subject_val.to_php_string();
+    let mut current = subject.as_bytes().to_vec();
+    let mut total_count = 0i64;
+    for pat in &patterns {
+        let (replaced, count) = do_preg_replace_callback(vm, pat, &callback, &current, limit)?;
+        current = replaced;
+        total_count += count;
+    }
+
+    // Set count if provided
+    if let Some(count_ref) = args.get(4) {
+        if let Value::Reference(r) = count_ref {
+            *r.borrow_mut() = Value::Long(total_count);
+        }
+    }
+
+    Ok(Value::String(PhpString::from_vec(current)))
+}
+
+fn do_preg_replace_callback(
+    vm: &mut Vm,
+    pattern: &[u8],
+    callback: &Value,
+    subject: &[u8],
+    limit: i64,
+) -> Result<(Vec<u8>, i64), VmError> {
+    let compiled = match parse_php_regex(pattern) {
+        Ok(c) => c,
+        Err(_e) => {
+            vm.emit_warning(&format!("preg_replace_callback(): Compilation failed: {}", _e));
+            return Ok((subject.to_vec(), 0));
+        }
+    };
+
+    let mut result = Vec::new();
+    let mut offset = 0;
+    let mut count = 0i64;
+    let effective_limit = if limit < 0 { i64::MAX } else { limit };
+
+    while offset <= subject.len() && count < effective_limit {
+        if let Some(m) = compiled.find(subject, offset) {
+            let (match_start, match_end) = m.full_match;
+
+            // Copy everything before the match
+            result.extend_from_slice(&subject[offset..match_start]);
+
+            // Build matches array for callback
+            let mut matches_arr = PhpArray::new();
+            for (i, capture) in m.groups.iter().enumerate() {
+                if let Some((start, end)) = capture {
+                    matches_arr.set(
+                        ArrayKey::Int(i as i64),
+                        Value::String(PhpString::from_bytes(&subject[*start..*end])),
+                    );
+                } else {
+                    matches_arr.set(
+                        ArrayKey::Int(i as i64),
+                        Value::String(PhpString::empty()),
+                    );
+                }
+            }
+
+            // Call the callback
+            let matches_val = Value::Array(Rc::new(RefCell::new(matches_arr)));
+            let replacement = call_callback(vm, callback, &[matches_val])?;
+            let replacement_str = replacement.to_php_string();
+            result.extend_from_slice(replacement_str.as_bytes());
+
+            count += 1;
+
+            if match_end == offset {
+                if offset < subject.len() {
+                    result.push(subject[offset]);
+                }
+                offset += 1;
+            } else {
+                offset = match_end;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Copy remaining
+    if offset <= subject.len() {
+        result.extend_from_slice(&subject[offset..]);
+    }
+
+    Ok((result, count))
+}
+
+/// preg_replace_callback_array($patterns_and_callbacks, $subject [, $limit [, &$count [, $flags]]])
+pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let patterns_callbacks = match args.first() {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => return Ok(Value::Null),
+    };
+    let subject_val = match args.get(1) {
+        Some(v) => v.clone(),
+        None => return Ok(Value::Null),
+    };
+    let limit = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+
+    // Handle array subject
+    if let Value::Array(subjects_arr) = &subject_val {
+        let mut result = PhpArray::new();
+        let mut total_count = 0i64;
+        for (key, subject) in subjects_arr.borrow().iter() {
+            let subject_str = subject.to_php_string();
+            let mut current = subject_str.as_bytes().to_vec();
+            for (_, pair_val) in patterns_callbacks.borrow().iter() {
+                // Key is pattern, value is callback — but actually in PHP, the array is pattern => callback
+                // We need to iterate patterns_callbacks differently
+                let _ = pair_val; // handled below
+            }
+            // Re-iterate properly
+            for (pat_key, cb) in patterns_callbacks.borrow().iter() {
+                let pat_str = match pat_key {
+                    ArrayKey::String(s) => s.as_bytes().to_vec(),
+                    ArrayKey::Int(_) => continue,
+                };
+                let (replaced, count) = do_preg_replace_callback(vm, &pat_str, &cb, &current, limit)?;
+                current = replaced;
+                total_count += count;
+            }
+            result.set(key.clone(), Value::String(PhpString::from_vec(current)));
+        }
+        if let Some(count_ref) = args.get(3) {
+            if let Value::Reference(r) = count_ref {
+                *r.borrow_mut() = Value::Long(total_count);
+            }
+        }
+        return Ok(Value::Array(Rc::new(RefCell::new(result))));
+    }
+
+    // String subject
+    let subject = subject_val.to_php_string();
+    let mut current = subject.as_bytes().to_vec();
+    let mut total_count = 0i64;
+    for (pat_key, cb) in patterns_callbacks.borrow().iter() {
+        let pat_str = match pat_key {
+            ArrayKey::String(s) => s.as_bytes().to_vec(),
+            ArrayKey::Int(_) => continue,
+        };
+        let (replaced, count) = do_preg_replace_callback(vm, &pat_str, &cb, &current, limit)?;
+        current = replaced;
+        total_count += count;
+    }
+    if let Some(count_ref) = args.get(3) {
+        if let Value::Reference(r) = count_ref {
+            *r.borrow_mut() = Value::Long(total_count);
+        }
+    }
+
+    Ok(Value::String(PhpString::from_vec(current)))
+}
+
+/// preg_grep($pattern, $array [, $flags])
+pub fn preg_grep(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let pattern = match args.first() {
+        Some(v) => v.to_php_string(),
+        None => return Ok(Value::False),
+    };
+
+    let array = match args.get(1) {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => return Ok(Value::False),
+    };
+
+    let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let invert = (flags & 1) != 0; // PREG_GREP_INVERT
+
+    let compiled = match parse_php_regex(pattern.as_bytes()) {
+        Ok(c) => c,
+        Err(_e) => {
+            vm.emit_warning(&format!("preg_grep(): Compilation failed: {}", _e));
+            return Ok(Value::False);
+        }
+    };
+
+    let mut result = PhpArray::new();
+    for (key, value) in array.borrow().iter() {
+        let subject = value.to_php_string();
+        let matches = compiled.find(subject.as_bytes(), 0).is_some();
+        if matches != invert {
+            result.set(key.clone(), value.clone());
+        }
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// preg_filter($pattern, $replacement, $subject [, $limit [, &$count]])
+pub fn preg_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let pattern_val = match args.first() {
+        Some(v) => v.clone(),
+        None => return Ok(Value::Null),
+    };
+    let replacement_val = match args.get(1) {
+        Some(v) => v.clone(),
+        None => return Ok(Value::Null),
+    };
+    let subject_val = match args.get(2) {
+        Some(v) => v.clone(),
+        None => return Ok(Value::Null),
+    };
+    let limit = args.get(3).map(|v| v.to_long()).unwrap_or(-1);
+
+    // preg_filter is like preg_replace but only returns subjects where there was a match
+    // For array subject: return only elements where at least one replacement was made
+    // For string subject: return null if no match found
+
+    let patterns: Vec<(Vec<u8>, Vec<u8>)> = if let Value::Array(pat_arr) = &pattern_val {
+        let replacements: Vec<Value> = if let Value::Array(repl_arr) = &replacement_val {
+            repl_arr.borrow().iter().map(|(_, v)| v.clone()).collect()
+        } else {
+            vec![replacement_val.clone(); pat_arr.borrow().len()]
+        };
+        pat_arr.borrow().iter().enumerate().map(|(i, (_, v))| {
+            let repl = replacements.get(i).unwrap_or(&Value::String(PhpString::empty())).to_php_string();
+            (v.to_php_string().as_bytes().to_vec(), repl.as_bytes().to_vec())
+        }).collect()
+    } else {
+        vec![(
+            pattern_val.to_php_string().as_bytes().to_vec(),
+            replacement_val.to_php_string().as_bytes().to_vec(),
+        )]
+    };
+
+    if let Value::Array(subjects_arr) = &subject_val {
+        let mut result = PhpArray::new();
+        for (key, subject) in subjects_arr.borrow().iter() {
+            let subject_str = subject.to_php_string();
+            let mut current = subject_str.as_bytes().to_vec();
+            let mut had_match = false;
+            for (pat, repl) in &patterns {
+                let compiled = match parse_php_regex(pat) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                if compiled.find(&current, 0).is_some() {
+                    had_match = true;
+                    let (replaced, _cnt) = do_preg_replace(vm, pat, repl, &current, limit);
+                    current = replaced;
+                }
+            }
+            if had_match {
+                result.set(key.clone(), Value::String(PhpString::from_vec(current)));
+            }
+        }
+        return Ok(Value::Array(Rc::new(RefCell::new(result))));
+    }
+
+    // String subject
+    let subject = subject_val.to_php_string();
+    let mut current = subject.as_bytes().to_vec();
+    let mut had_match = false;
+    for (pat, repl) in &patterns {
+        let compiled = match parse_php_regex(pat) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if compiled.find(&current, 0).is_some() {
+            had_match = true;
+            let (replaced, _cnt) = do_preg_replace(vm, pat, repl, &current, limit);
+            current = replaced;
+        }
+    }
+    if had_match {
+        Ok(Value::String(PhpString::from_vec(current)))
+    } else {
+        Ok(Value::Null)
+    }
 }
 
 /// preg_last_error()
 pub fn preg_last_error(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0)) // PREG_NO_ERROR
+}
+
+/// preg_last_error_msg()
+pub fn preg_last_error_msg(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"No error")))
 }
 
 // ============================================================================
@@ -2238,7 +2892,11 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"preg_split", preg_split);
     vm.register_function(b"preg_quote", preg_quote);
     vm.register_function(b"preg_replace_callback", preg_replace_callback);
+    vm.register_function(b"preg_replace_callback_array", preg_replace_callback_array);
+    vm.register_function(b"preg_grep", preg_grep);
+    vm.register_function(b"preg_filter", preg_filter);
     vm.register_function(b"preg_last_error", preg_last_error);
+    vm.register_function(b"preg_last_error_msg", preg_last_error_msg);
 }
 
 // ============================================================================

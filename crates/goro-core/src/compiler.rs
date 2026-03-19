@@ -63,6 +63,12 @@ impl Compiler {
                     // preg_match($pattern, $subject, &$matches, $flags, $offset)
                     (b"preg_match", 2) => true,
                     (b"preg_match_all", 2) => true,
+                    // preg_replace($pattern, $replacement, $subject, $limit, &$count)
+                    (b"preg_replace", 4) => true,
+                    // preg_replace_callback($pattern, $callback, $subject, $limit, &$count)
+                    (b"preg_replace_callback", 4) => true,
+                    // preg_replace_callback_array($patterns, $subject, $limit, &$count)
+                    (b"preg_replace_callback_array", 3) => true,
                     // sscanf with output vars (positions 2+)
                     (b"sscanf", p) if p >= 2 => true,
                     _ => false,

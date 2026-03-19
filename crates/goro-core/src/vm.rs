@@ -322,6 +322,16 @@ impl Vm {
                 c.insert(b"PREG_UNMATCHED_AS_NULL".to_vec(), Value::Long(512));
                 c.insert(b"PREG_SET_ORDER".to_vec(), Value::Long(2));
                 c.insert(b"PREG_PATTERN_ORDER".to_vec(), Value::Long(1));
+                c.insert(b"PREG_GREP_INVERT".to_vec(), Value::Long(1));
+                c.insert(b"PREG_NO_ERROR".to_vec(), Value::Long(0));
+                c.insert(b"PREG_INTERNAL_ERROR".to_vec(), Value::Long(1));
+                c.insert(b"PREG_BACKTRACK_LIMIT_ERROR".to_vec(), Value::Long(2));
+                c.insert(b"PREG_RECURSION_LIMIT_ERROR".to_vec(), Value::Long(3));
+                c.insert(b"PREG_BAD_UTF8_ERROR".to_vec(), Value::Long(4));
+                c.insert(b"PREG_BAD_UTF8_OFFSET_ERROR".to_vec(), Value::Long(5));
+                c.insert(b"PREG_JIT_STACKLIMIT_ERROR".to_vec(), Value::Long(6));
+                c.insert(b"PCRE_JIT_SUPPORT".to_vec(), Value::False);
+                c.insert(b"PCRE_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"10.42 2022-12-11")));
                 // String constants
                 c.insert(b"STR_PAD_RIGHT".to_vec(), Value::Long(1));
                 c.insert(b"STR_PAD_LEFT".to_vec(), Value::Long(0));
