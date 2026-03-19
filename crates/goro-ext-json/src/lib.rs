@@ -15,20 +15,46 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"json_validate", json_validate);
 }
 
+// JSON encode option flags
+const JSON_HEX_TAG: i64 = 1;
+const JSON_HEX_AMP: i64 = 2;
+const JSON_HEX_APOS: i64 = 4;
+const JSON_HEX_QUOT: i64 = 8;
+const JSON_FORCE_OBJECT: i64 = 16;
+const JSON_NUMERIC_CHECK: i64 = 32;
+const JSON_UNESCAPED_SLASHES: i64 = 64;
+const JSON_PRETTY_PRINT: i64 = 128;
+const JSON_UNESCAPED_UNICODE: i64 = 256;
+// const JSON_PARTIAL_OUTPUT_ON_ERROR: i64 = 512;
+// const JSON_THROW_ON_ERROR: i64 = 4194304;
+
 fn json_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
-    let s = json_encode_value(val);
+    let flags = match args.get(1) {
+        Some(v) => v.to_long(),
+        None => 0,
+    };
+    let s = json_encode_value_flags(val, 0, flags);
     Ok(Value::String(PhpString::from_string(s)))
 }
 
-fn json_encode_value(val: &Value) -> String {
-    json_encode_value_depth(val, 0)
-}
-
-fn json_encode_value_depth(val: &Value, depth: usize) -> String {
+fn json_encode_value_flags(val: &Value, depth: usize, flags: i64) -> String {
     if depth > 512 {
         return "null".to_string();
     }
+    let indent = if flags & JSON_PRETTY_PRINT != 0 {
+        "    ".repeat(depth)
+    } else {
+        String::new()
+    };
+    let inner_indent = if flags & JSON_PRETTY_PRINT != 0 {
+        "    ".repeat(depth + 1)
+    } else {
+        String::new()
+    };
+    let nl = if flags & JSON_PRETTY_PRINT != 0 { "\n" } else { "" };
+    let sep = if flags & JSON_PRETTY_PRINT != 0 { ": " } else { ":" };
+
     match val {
         Value::Null | Value::Undef => "null".to_string(),
         Value::True => "true".to_string(),
@@ -38,33 +64,39 @@ fn json_encode_value_depth(val: &Value, depth: usize) -> String {
             if f.is_infinite() || f.is_nan() {
                 "null".to_string()
             } else {
-                format!("{}", f)
+                // PHP always outputs floats with a decimal point in json_encode
+                let s = format!("{}", f);
+                if s.contains('.') || s.contains('e') || s.contains('E') {
+                    s
+                } else {
+                    // Integer-valued float: PHP outputs it as "12.0" not "12"
+                    format!("{}.0", s)
+                }
             }
         }
         Value::String(s) => {
-            let mut result = String::from("\"");
-            for &b in s.as_bytes() {
-                match b {
-                    b'"' => result.push_str("\\\""),
-                    b'\\' => result.push_str("\\\\"),
-                    b'\n' => result.push_str("\\n"),
-                    b'\r' => result.push_str("\\r"),
-                    b'\t' => result.push_str("\\t"),
-                    b if b < 0x20 => result.push_str(&format!("\\u{:04x}", b)),
-                    _ => result.push(b as char),
-                }
-            }
-            result.push('"');
-            result
+            json_encode_string(s.as_bytes(), flags)
         }
         Value::Array(arr) => {
             let arr = arr.borrow();
-            let is_list = arr.iter().enumerate().all(
+            let force_object = flags & JSON_FORCE_OBJECT != 0;
+            let is_list = !force_object && arr.iter().enumerate().all(
                 |(i, (k, _))| matches!(k, goro_core::array::ArrayKey::Int(n) if *n == i as i64),
             );
+            if arr.len() == 0 {
+                if is_list {
+                    return "[]".to_string();
+                } else {
+                    return "{}".to_string();
+                }
+            }
             if is_list {
-                let parts: Vec<String> = arr.values().map(|v| json_encode_value_depth(v, depth + 1)).collect();
-                format!("[{}]", parts.join(","))
+                let parts: Vec<String> = arr.values().map(|v| json_encode_value_flags(v, depth + 1, flags)).collect();
+                if flags & JSON_PRETTY_PRINT != 0 {
+                    format!("[{nl}{}{nl}{}]", parts.iter().map(|p| format!("{}{}", inner_indent, p)).collect::<Vec<_>>().join(&format!(",{nl}")), indent)
+                } else {
+                    format!("[{}]", parts.join(","))
+                }
             } else {
                 let parts: Vec<String> = arr
                     .iter()
@@ -72,13 +104,17 @@ fn json_encode_value_depth(val: &Value, depth: usize) -> String {
                         let key_str = match k {
                             goro_core::array::ArrayKey::Int(n) => format!("\"{}\"", n),
                             goro_core::array::ArrayKey::String(s) => {
-                                format!("\"{}\"", s.to_string_lossy())
+                                json_encode_string(s.as_bytes(), flags)
                             }
                         };
-                        format!("{}:{}", key_str, json_encode_value_depth(v, depth + 1))
+                        format!("{}{}{}", key_str, sep, json_encode_value_flags(v, depth + 1, flags))
                     })
                     .collect();
-                format!("{{{}}}", parts.join(","))
+                if flags & JSON_PRETTY_PRINT != 0 {
+                    format!("{{{nl}{}{nl}{}}}", parts.iter().map(|p| format!("{}{}", inner_indent, p)).collect::<Vec<_>>().join(&format!(",{nl}")), indent)
+                } else {
+                    format!("{{{}}}", parts.join(","))
+                }
             }
         }
         Value::Object(obj) => {
@@ -87,13 +123,126 @@ fn json_encode_value_depth(val: &Value, depth: usize) -> String {
                 return "{}".to_string();
             }
             let parts: Vec<String> = obj.properties.iter().map(|(name, val)| {
-                let key = String::from_utf8_lossy(name);
-                format!("\"{}\":{}", key, json_encode_value_depth(val, depth + 1))
+                let key = json_encode_string(name, flags);
+                format!("{}{}{}", key, sep, json_encode_value_flags(val, depth + 1, flags))
             }).collect();
-            format!("{{{}}}", parts.join(","))
+            if flags & JSON_PRETTY_PRINT != 0 {
+                format!("{{{nl}{}{nl}{}}}", parts.iter().map(|p| format!("{}{}", inner_indent, p)).collect::<Vec<_>>().join(&format!(",{nl}")), indent)
+            } else {
+                format!("{{{}}}", parts.join(","))
+            }
         }
         Value::Generator(_) => "null".to_string(),
-        Value::Reference(r) => json_encode_value_depth(&r.borrow(), depth),
+        Value::Reference(r) => json_encode_value_flags(&r.borrow(), depth, flags),
+    }
+}
+
+fn json_encode_string(bytes: &[u8], flags: i64) -> String {
+    let mut result = String::from("\"");
+    let unescaped_unicode = flags & JSON_UNESCAPED_UNICODE != 0;
+    let unescaped_slashes = flags & JSON_UNESCAPED_SLASHES != 0;
+    let hex_tag = flags & JSON_HEX_TAG != 0;
+    let hex_amp = flags & JSON_HEX_AMP != 0;
+    let hex_apos = flags & JSON_HEX_APOS != 0;
+    let hex_quot = flags & JSON_HEX_QUOT != 0;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' => {
+                if hex_quot {
+                    result.push_str("\\u0022");
+                } else {
+                    result.push_str("\\\"");
+                }
+            }
+            b'\\' => result.push_str("\\\\"),
+            b'/' => {
+                if unescaped_slashes {
+                    result.push('/');
+                } else {
+                    result.push_str("\\/");
+                }
+            }
+            b'\n' => result.push_str("\\n"),
+            b'\r' => result.push_str("\\r"),
+            b'\t' => result.push_str("\\t"),
+            0x08 => result.push_str("\\b"),
+            0x0C => result.push_str("\\f"),
+            b'<' if hex_tag => result.push_str("\\u003C"),
+            b'>' if hex_tag => result.push_str("\\u003E"),
+            b'&' if hex_amp => result.push_str("\\u0026"),
+            b'\'' if hex_apos => result.push_str("\\u0027"),
+            b if b < 0x20 => result.push_str(&format!("\\u{:04x}", b)),
+            b if b < 0x80 => result.push(b as char),
+            _ => {
+                // Multi-byte UTF-8 sequence
+                let remaining = &bytes[i..];
+                let (codepoint, len) = decode_utf8_char(remaining);
+                if let Some(cp) = codepoint {
+                    if unescaped_unicode {
+                        // Output the raw UTF-8 bytes as a valid UTF-8 string
+                        if let Some(c) = char::from_u32(cp) {
+                            result.push(c);
+                        } else {
+                            for j in 0..len {
+                                result.push(bytes[i + j] as char);
+                            }
+                        }
+                    } else {
+                        // Escape as \uXXXX (or surrogate pair for > U+FFFF)
+                        if cp <= 0xFFFF {
+                            result.push_str(&format!("\\u{:04x}", cp));
+                        } else {
+                            // UTF-16 surrogate pair
+                            let cp = cp - 0x10000;
+                            let high = 0xD800 + (cp >> 10);
+                            let low = 0xDC00 + (cp & 0x3FF);
+                            result.push_str(&format!("\\u{:04x}\\u{:04x}", high, low));
+                        }
+                    }
+                    i += len;
+                    continue;
+                } else {
+                    // Invalid UTF-8: skip byte
+                    result.push_str(&format!("\\u{:04x}", b));
+                }
+            }
+        }
+        i += 1;
+    }
+    result.push('"');
+    result
+}
+
+fn decode_utf8_char(bytes: &[u8]) -> (Option<u32>, usize) {
+    if bytes.is_empty() {
+        return (None, 0);
+    }
+    let b0 = bytes[0];
+    if b0 < 0x80 {
+        (Some(b0 as u32), 1)
+    } else if b0 & 0xE0 == 0xC0 {
+        if bytes.len() < 2 || bytes[1] & 0xC0 != 0x80 {
+            return (None, 1);
+        }
+        let cp = ((b0 as u32 & 0x1F) << 6) | (bytes[1] as u32 & 0x3F);
+        (Some(cp), 2)
+    } else if b0 & 0xF0 == 0xE0 {
+        if bytes.len() < 3 || bytes[1] & 0xC0 != 0x80 || bytes[2] & 0xC0 != 0x80 {
+            return (None, 1);
+        }
+        let cp = ((b0 as u32 & 0x0F) << 12) | ((bytes[1] as u32 & 0x3F) << 6) | (bytes[2] as u32 & 0x3F);
+        (Some(cp), 3)
+    } else if b0 & 0xF8 == 0xF0 {
+        if bytes.len() < 4 || bytes[1] & 0xC0 != 0x80 || bytes[2] & 0xC0 != 0x80 || bytes[3] & 0xC0 != 0x80 {
+            return (None, 1);
+        }
+        let cp = ((b0 as u32 & 0x07) << 18) | ((bytes[1] as u32 & 0x3F) << 12) | ((bytes[2] as u32 & 0x3F) << 6) | (bytes[3] as u32 & 0x3F);
+        (Some(cp), 4)
+    } else {
+        (None, 1)
     }
 }
 

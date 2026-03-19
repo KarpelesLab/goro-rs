@@ -618,7 +618,7 @@ impl Vm {
     pub fn emit_warning(&mut self, msg: &str) {
         if self.error_reporting & 2 != 0 {
             // E_WARNING = 2
-            let warning = format!("\nWarning: {} in Unknown on line 0\n", msg);
+            let warning = format!("\nWarning: {} in Unknown.php on line 0\n", msg);
             self.output.extend_from_slice(warning.as_bytes());
         }
     }
@@ -626,7 +626,7 @@ impl Vm {
     /// Emit a PHP warning with line number
     pub fn emit_warning_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 2 != 0 {
-            let warning = format!("\nWarning: {} in Unknown on line {}\n", msg, line);
+            let warning = format!("\nWarning: {} in Unknown.php on line {}\n", msg, line);
             self.output.extend_from_slice(warning.as_bytes());
         }
     }
@@ -635,7 +635,7 @@ impl Vm {
     pub fn emit_notice_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8 != 0 {
             // E_NOTICE = 8
-            let notice = format!("\nNotice: {} in Unknown on line {}\n", msg, line);
+            let notice = format!("\nNotice: {} in Unknown.php on line {}\n", msg, line);
             self.output.extend_from_slice(notice.as_bytes());
         }
     }
@@ -644,7 +644,7 @@ impl Vm {
     pub fn emit_deprecated_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8192 != 0 {
             // E_DEPRECATED = 8192
-            let deprec = format!("\nDeprecated: {} in Unknown on line {}\n", msg, line);
+            let deprec = format!("\nDeprecated: {} in Unknown.php on line {}\n", msg, line);
             self.output.extend_from_slice(deprec.as_bytes());
         }
     }
@@ -994,7 +994,7 @@ impl Vm {
                     let arg_num = i + 1 - implicit_args;
                     return Some(format!(
                         "{}(): Argument #{} (${}) \
-                         must be of type {}, {} given, called in Unknown on line {}",
+                         must be of type {}, {} given, called in Unknown.php on line {}",
                         func_display_name, arg_num, param_name, expected, given, line
                     ));
                 }
@@ -2332,6 +2332,12 @@ impl Vm {
                 OpCode::Concat => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if matches!(&a, Value::Array(_)) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
+                    if matches!(&b, Value::Array(_)) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
                     let a_str = self.value_to_string(&a);
                     let b_str = self.value_to_string(&b);
                     let mut result = a_str.as_bytes().to_vec();
@@ -2740,6 +2746,12 @@ impl Vm {
                 OpCode::AssignConcat => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if matches!(&cv_val, Value::Array(_)) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
+                    if matches!(&rhs, Value::Array(_)) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
                     let a_str = self.value_to_string(&cv_val);
                     let b_str = self.value_to_string(&rhs);
                     let mut result = a_str.as_bytes().to_vec();
@@ -3698,11 +3710,32 @@ impl Vm {
                                 }
                             }
                             if !handled {
+                                let func_display = call.name.to_string_lossy();
+                                let err_msg = if func_display.contains("::") {
+                                    format!("Call to undefined method {}()", func_display)
+                                } else {
+                                    format!("Call to undefined function {}()", func_display)
+                                };
+                                // Throw as Error exception for method calls
+                                if func_display.contains("::") {
+                                    let err_id = self.next_object_id;
+                                    self.next_object_id += 1;
+                                    let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
+                                    err_obj.set_property(
+                                        b"message".to_vec(),
+                                        Value::String(PhpString::from_string(err_msg.clone())),
+                                    );
+                                    err_obj.set_property(b"code".to_vec(), Value::Long(0));
+                                    err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
+                                    err_obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
+                                    self.current_exception = Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                    if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                }
                                 return Err(VmError {
-                                    message: format!(
-                                        "Call to undefined function {}()",
-                                        call.name.to_string_lossy()
-                                    ),
+                                    message: err_msg,
                                     line: op.line,
                                 });
                             }
@@ -5805,7 +5838,19 @@ impl Vm {
                                         severity
                                     })
                                 }
-                                b"__tostring" => Some(obj_borrow.get_property(b"message")),
+                                b"__tostring" => {
+                                    let class_display = String::from_utf8_lossy(&obj_borrow.class_name).to_string();
+                                    let message = obj_borrow.get_property(b"message").to_php_string().to_string_lossy();
+                                    let file = obj_borrow.get_property(b"file").to_php_string().to_string_lossy();
+                                    let line = obj_borrow.get_property(b"line").to_long();
+                                    let file_str = if file.is_empty() { "Unknown.php".to_string() } else { file };
+                                    let result = if message.is_empty() {
+                                        format!("{} in {}:{}\nStack trace:\n#0 {{main}}", class_display, file_str, line)
+                                    } else {
+                                        format!("{}: {} in {}:{}\nStack trace:\n#0 {{main}}", class_display, message, file_str, line)
+                                    };
+                                    Some(Value::String(PhpString::from_string(result)))
+                                }
                                 _ => None,
                             }
                         } else if !has_user_method {
@@ -5937,9 +5982,12 @@ impl Vm {
                                     named_args: Vec::new(),
                                 });
                             } else {
-                                // Method not found - push call with $this
+                                // Method not found - push call with class-qualified name
+                                let mut func_name = class_name_orig.clone();
+                                func_name.extend_from_slice(b"::");
+                                func_name.extend_from_slice(method_name.as_bytes());
                                 self.pending_calls.push(PendingCall {
-                                    name: method_name,
+                                    name: PhpString::from_vec(func_name),
                                     args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
                                 });
@@ -6071,12 +6119,30 @@ impl Vm {
                                 });
                             }
                             _ => {
-                                // Not an object - push call without $this
-                                self.pending_calls.push(PendingCall {
-                                    name: method_name,
-                                    args: vec![],
-                                    named_args: Vec::new(),
-                                });
+                                // Not an object - throw "Call to a member function on <type>"
+                                let type_name = Vm::value_type_name(&obj_val);
+                                let method_str = method_name.to_string_lossy();
+                                let err_msg = format!("Call to a member function {}() on {}", method_str, type_name);
+                                let err_id = self.next_object_id;
+                                self.next_object_id += 1;
+                                let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
+                                err_obj.set_property(
+                                    b"message".to_vec(),
+                                    Value::String(PhpString::from_string(err_msg.clone())),
+                                );
+                                err_obj.set_property(b"code".to_vec(), Value::Long(0));
+                                err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
+                                err_obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
+                                self.current_exception = Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                    ip = *catch_target as usize;
+                                    continue;
+                                } else {
+                                    return Err(VmError {
+                                        message: err_msg,
+                                        line: op.line,
+                                    });
+                                }
                             }
                         }
                     }
@@ -6142,6 +6208,27 @@ impl Vm {
                 if let Ok(result) = self.execute_op_array(&method, method_cvs) {
                     return result.to_php_string();
                 }
+            }
+            // Built-in __toString for Throwable classes (Exception, Error, etc.)
+            let is_throwable = class_lower == b"exception"
+                || class_lower == b"error"
+                || is_builtin_subclass(&class_lower, b"exception")
+                || is_builtin_subclass(&class_lower, b"error")
+                || self.class_extends(&class_lower, b"exception")
+                || self.class_extends(&class_lower, b"error");
+            if is_throwable {
+                let obj_borrow = obj.borrow();
+                let class_display = String::from_utf8_lossy(&obj_borrow.class_name).to_string();
+                let message = obj_borrow.get_property(b"message").to_php_string().to_string_lossy();
+                let file = obj_borrow.get_property(b"file").to_php_string().to_string_lossy();
+                let line = obj_borrow.get_property(b"line").to_long();
+                let file_str = if file.is_empty() { "Unknown.php".to_string() } else { file };
+                let result = if message.is_empty() {
+                    format!("{} in {}:{}\nStack trace:\n#0 {{main}}", class_display, file_str, line)
+                } else {
+                    format!("{}: {} in {}:{}\nStack trace:\n#0 {{main}}", class_display, message, file_str, line)
+                };
+                return PhpString::from_string(result);
             }
         }
         val.to_php_string()

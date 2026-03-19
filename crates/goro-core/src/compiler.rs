@@ -1629,6 +1629,13 @@ impl Compiler {
             }
 
             ExprKind::Assign { target, value } => {
+                // Check for nullsafe in write context
+                if matches!(&target.kind, ExprKind::PropertyAccess { nullsafe: true, .. }) {
+                    return Err(CompileError {
+                        message: "Can't use nullsafe operator in write context".into(),
+                        line: target.span.line,
+                    });
+                }
                 let val = self.compile_expr(value)?;
                 match &target.kind {
                     ExprKind::Variable(name) => {
@@ -1790,6 +1797,13 @@ impl Compiler {
             }
 
             ExprKind::CompoundAssign { op, target, value } => {
+                // Check for nullsafe in write context
+                if matches!(&target.kind, ExprKind::PropertyAccess { nullsafe: true, .. }) {
+                    return Err(CompileError {
+                        message: "Can't use nullsafe operator in write context".into(),
+                        line: target.span.line,
+                    });
+                }
                 let val = self.compile_expr(value)?;
                 match &target.kind {
                     ExprKind::Variable(name) => {
@@ -2124,6 +2138,12 @@ impl Compiler {
                 // Handle increment/decrement on property access: $obj->prop++ etc.
                 if matches!(op, UnaryOp::PostIncrement | UnaryOp::PostDecrement | UnaryOp::PreIncrement | UnaryOp::PreDecrement)
                 {
+                    if matches!(&operand.kind, ExprKind::PropertyAccess { nullsafe: true, .. }) {
+                        return Err(CompileError {
+                            message: "Can't use nullsafe operator in write context".into(),
+                            line: operand.span.line,
+                        });
+                    }
                     if let ExprKind::PropertyAccess { object, property, .. } = &operand.kind {
                         let obj_op = self.compile_expr(object)?;
                         let prop_name = match &property.kind {

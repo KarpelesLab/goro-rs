@@ -216,6 +216,67 @@ fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
     settings
 }
 
+/// Parse error reporting expressions like "E_ALL&~E_DEPRECATED"
+fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
+    // PHP error level constants
+    fn resolve_constant(name: &str) -> Option<i64> {
+        match name.trim() {
+            "E_ERROR" => Some(1),
+            "E_WARNING" => Some(2),
+            "E_PARSE" => Some(4),
+            "E_NOTICE" => Some(8),
+            "E_CORE_ERROR" => Some(16),
+            "E_CORE_WARNING" => Some(32),
+            "E_COMPILE_ERROR" => Some(64),
+            "E_COMPILE_WARNING" => Some(128),
+            "E_USER_ERROR" => Some(256),
+            "E_USER_WARNING" => Some(512),
+            "E_USER_NOTICE" => Some(1024),
+            "E_STRICT" => Some(2048),
+            "E_RECOVERABLE_ERROR" => Some(4096),
+            "E_DEPRECATED" => Some(8192),
+            "E_USER_DEPRECATED" => Some(16384),
+            "E_ALL" => Some(32767),
+            _ => name.trim().parse::<i64>().ok(),
+        }
+    }
+
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return None;
+    }
+
+    // Handle simple constant
+    if let Some(v) = resolve_constant(expr) {
+        return Some(v);
+    }
+
+    // Handle "E_ALL&~E_DEPRECATED" pattern
+    if let Some(amp_pos) = expr.find('&') {
+        let left = &expr[..amp_pos];
+        let right = &expr[amp_pos + 1..];
+        let left_val = resolve_constant(left)?;
+        let right = right.trim();
+        if let Some(rest) = right.strip_prefix('~') {
+            let right_val = resolve_constant(rest)?;
+            return Some(left_val & !right_val);
+        }
+        let right_val = resolve_constant(right)?;
+        return Some(left_val & right_val);
+    }
+
+    // Handle "|" operator
+    if let Some(pipe_pos) = expr.find('|') {
+        let left = &expr[..pipe_pos];
+        let right = &expr[pipe_pos + 1..];
+        let left_val = resolve_constant(left)?;
+        let right_val = parse_error_reporting_expr(right)?;
+        return Some(left_val | right_val);
+    }
+
+    None
+}
+
 fn execute_php_with_timeout(
     source: &[u8],
     timeout_secs: u64,
@@ -291,7 +352,7 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
         Err(e) => {
             // PHP outputs parse errors to stdout
             let msg = format!(
-                "\nParse error: syntax error in Unknown on line {}\n",
+                "\nParse error: syntax error in Unknown.php on line {}\n",
                 e.span.line
             );
             return Ok(msg.into_bytes());
@@ -304,7 +365,7 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
         Ok(r) => r,
         Err(e) => {
             let msg = format!(
-                "\nFatal error: {} in Unknown on line {}\n",
+                "\nFatal error: {} in Unknown.php on line {}\n",
                 e.message, e.line
             );
             return Ok(msg.into_bytes());
@@ -323,9 +384,17 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
     for (key, value) in ini_settings {
         let val = if let Ok(n) = value.parse::<i64>() {
             Value::Long(n)
+        } else if let Some(resolved) = parse_error_reporting_expr(value) {
+            Value::Long(resolved)
         } else {
             Value::String(PhpString::from_string(value.clone()))
         };
+        // Apply error_reporting to the VM
+        if key == "error_reporting" {
+            if let Value::Long(n) = &val {
+                vm.error_reporting = *n;
+            }
+        }
         vm.constants.insert(key.as_bytes().to_vec(), val);
     }
     for class in compiled_classes {
@@ -347,24 +416,24 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
                     let msg_str = msg.to_php_string().to_string_lossy();
                     let fatal = if msg_str.is_empty() {
                         format!(
-                            "\nFatal error: Uncaught {} in Unknown:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line {}",
+                            "\nFatal error: Uncaught {} in Unknown.php:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown.php on line {}",
                             class, e.line, e.line
                         )
                     } else {
                         format!(
-                            "\nFatal error: Uncaught {}: {} in Unknown:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line {}",
+                            "\nFatal error: Uncaught {}: {} in Unknown.php:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown.php on line {}",
                             class, msg_str, e.line, e.line
                         )
                     };
                     output.extend_from_slice(fatal.as_bytes());
                 } else {
                     let fatal =
-                        format!("\nFatal error: {} in Unknown on line {}", e.message, e.line);
+                        format!("\nFatal error: {} in Unknown.php on line {}", e.message, e.line);
                     output.extend_from_slice(fatal.as_bytes());
                 }
             } else {
                 let fatal = format!(
-                    "\nFatal error: {} in Unknown on line {}\n",
+                    "\nFatal error: {} in Unknown.php on line {}\n",
                     e.message, e.line
                 );
                 output.extend_from_slice(fatal.as_bytes());

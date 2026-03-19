@@ -65,6 +65,11 @@ impl Parser {
         &self.current().kind
     }
 
+    fn peek_at(&self, offset: usize) -> &TokenKind {
+        let idx = (self.pos + offset).min(self.tokens.len() - 1);
+        &self.tokens[idx].kind
+    }
+
     fn span(&self) -> Span {
         self.current().span
     }
@@ -263,10 +268,53 @@ impl Parser {
             TokenKind::Class
             | TokenKind::Abstract
             | TokenKind::Final
-            | TokenKind::Readonly
             | TokenKind::Interface
             | TokenKind::Trait
             | TokenKind::Enum => self.parse_class_decl(),
+            TokenKind::Readonly => {
+                // readonly can be a class modifier (readonly class Foo {}) or a function call
+                // Check if followed by class/enum/abstract/final/function
+                if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function) {
+                    self.parse_class_decl()
+                } else {
+                    // Treat 'readonly' as identifier for function call etc.
+                    self.advance();
+                    let name = b"readonly".to_vec();
+                    if matches!(self.peek(), TokenKind::OpenParen) {
+                        // Function call: readonly()
+                        self.advance();
+                        let args = self.parse_arguments()?;
+                        let end_span = self.span();
+                        self.expect(&TokenKind::CloseParen)?;
+                        let expr = Expr {
+                            span: span.merge(end_span),
+                            kind: ExprKind::FunctionCall {
+                                name: Box::new(Expr {
+                                    kind: ExprKind::Identifier(name),
+                                    span,
+                                }),
+                                args,
+                            },
+                        };
+                        self.expect_semicolon()?;
+                        Ok(Statement {
+                            kind: StmtKind::Expression(expr),
+                            span,
+                        })
+                    } else {
+                        // Other readonly usage as identifier
+                        let expr = Expr {
+                            kind: ExprKind::Identifier(name),
+                            span,
+                        };
+                        self.expect_semicolon()?;
+                        Ok(Statement {
+                            kind: StmtKind::Expression(expr),
+                            span,
+                        })
+                    }
+                }
+            }
             TokenKind::Const => {
                 // const FOO = value;
                 self.advance();
@@ -561,6 +609,15 @@ impl Parser {
 
         let body = if matches!(self.peek(), TokenKind::OpenBrace) {
             self.parse_block()?
+        } else if self.eat(&TokenKind::Colon) {
+            // Alternative syntax: while (): ... endwhile;
+            let mut stmts = Vec::new();
+            while !matches!(self.peek(), TokenKind::EndWhile | TokenKind::Eof) {
+                stmts.push(self.parse_statement()?);
+            }
+            self.expect(&TokenKind::EndWhile)?;
+            self.expect_semicolon()?;
+            stmts
         } else {
             vec![self.parse_statement()?]
         };
@@ -600,6 +657,15 @@ impl Parser {
 
         let body = if matches!(self.peek(), TokenKind::OpenBrace) {
             self.parse_block()?
+        } else if self.eat(&TokenKind::Colon) {
+            // Alternative syntax: for (): ... endfor;
+            let mut stmts = Vec::new();
+            while !matches!(self.peek(), TokenKind::EndFor | TokenKind::Eof) {
+                stmts.push(self.parse_statement()?);
+            }
+            self.expect(&TokenKind::EndFor)?;
+            self.expect_semicolon()?;
+            stmts
         } else {
             vec![self.parse_statement()?]
         };
@@ -648,6 +714,15 @@ impl Parser {
         self.expect(&TokenKind::CloseParen)?;
         let body = if matches!(self.peek(), TokenKind::OpenBrace) {
             self.parse_block()?
+        } else if self.eat(&TokenKind::Colon) {
+            // Alternative syntax: foreach (): ... endforeach;
+            let mut stmts = Vec::new();
+            while !matches!(self.peek(), TokenKind::EndForeach | TokenKind::Eof) {
+                stmts.push(self.parse_statement()?);
+            }
+            self.expect(&TokenKind::EndForeach)?;
+            self.expect_semicolon()?;
+            stmts
         } else {
             vec![self.parse_statement()?]
         };
@@ -670,10 +745,26 @@ impl Parser {
         self.expect(&TokenKind::OpenParen)?;
         let expr = self.parse_expression()?;
         self.expect(&TokenKind::CloseParen)?;
-        self.expect(&TokenKind::OpenBrace)?;
+
+        // Check for alternative syntax: switch(): ... endswitch;
+        let use_alt_syntax = if matches!(self.peek(), TokenKind::Colon) {
+            self.advance();
+            true
+        } else {
+            self.expect(&TokenKind::OpenBrace)?;
+            false
+        };
+
+        let end_token = if use_alt_syntax {
+            TokenKind::EndSwitch
+        } else {
+            TokenKind::CloseBrace
+        };
 
         let mut cases = Vec::new();
-        while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+        while std::mem::discriminant(self.peek()) != std::mem::discriminant(&end_token)
+            && !matches!(self.peek(), TokenKind::Eof)
+        {
             let value = if self.eat(&TokenKind::Case) {
                 let v = self.parse_expression()?;
                 self.expect(&TokenKind::Colon)?;
@@ -691,14 +782,20 @@ impl Parser {
             let mut body = Vec::new();
             while !matches!(
                 self.peek(),
-                TokenKind::Case | TokenKind::Default | TokenKind::CloseBrace | TokenKind::Eof
-            ) {
+                TokenKind::Case | TokenKind::Default | TokenKind::Eof
+            ) && std::mem::discriminant(self.peek()) != std::mem::discriminant(&end_token)
+            {
                 body.push(self.parse_statement()?);
             }
             cases.push(SwitchCase { value, body });
         }
 
-        self.expect(&TokenKind::CloseBrace)?;
+        if use_alt_syntax {
+            self.expect(&TokenKind::EndSwitch)?;
+            self.expect_semicolon()?;
+        } else {
+            self.expect(&TokenKind::CloseBrace)?;
+        }
         Ok(Statement {
             kind: StmtKind::Switch { expr, cases },
             span,
@@ -1212,6 +1309,11 @@ impl Parser {
                     TokenKind::Identifier(name) => {
                         self.advance();
                         name
+                    }
+                    _ if self.is_semi_reserved_keyword() => {
+                        let kw = self.keyword_to_identifier();
+                        self.advance();
+                        kw
                     }
                     _ => {
                         return Err(ParseError {
@@ -2277,6 +2379,11 @@ impl Parser {
                             self.advance();
                             name
                         }
+                        _ if self.is_semi_reserved_keyword() => {
+                            let kw = self.keyword_to_identifier();
+                            self.advance();
+                            kw
+                        }
                         _ => {
                             return Err(ParseError {
                                 message: "expected property/method name".into(),
@@ -2368,6 +2475,33 @@ impl Parser {
                                     property: name,
                                 },
                             };
+                        }
+                        _ if self.is_semi_reserved_keyword() => {
+                            let name = self.keyword_to_identifier();
+                            self.advance();
+                            // Check if followed by ( for static method call
+                            if matches!(self.peek(), TokenKind::OpenParen) {
+                                self.advance();
+                                let args = self.parse_arguments()?;
+                                let end_span = self.span();
+                                self.expect(&TokenKind::CloseParen)?;
+                                expr = Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::StaticMethodCall {
+                                        class: Box::new(expr),
+                                        method: name,
+                                        args,
+                                    },
+                                };
+                            } else {
+                                expr = Expr {
+                                    span: expr.span.merge(member_span),
+                                    kind: ExprKind::ClassConstAccess {
+                                        class: Box::new(expr),
+                                        constant: name,
+                                    },
+                                };
+                            }
                         }
                         _ => {
                             return Err(ParseError {
@@ -3371,6 +3505,9 @@ impl Parser {
                 | TokenKind::Goto
                 | TokenKind::Instanceof
                 | TokenKind::Insteadof
+                | TokenKind::Null
+                | TokenKind::True
+                | TokenKind::False
         )
     }
 
@@ -3431,6 +3568,9 @@ impl Parser {
             TokenKind::Goto => b"goto".to_vec(),
             TokenKind::Instanceof => b"instanceof".to_vec(),
             TokenKind::Insteadof => b"insteadof".to_vec(),
+            TokenKind::Null => b"null".to_vec(),
+            TokenKind::True => b"true".to_vec(),
+            TokenKind::False => b"false".to_vec(),
             _ => vec![],
         }
     }
