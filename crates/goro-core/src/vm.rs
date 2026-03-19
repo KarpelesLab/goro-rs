@@ -2495,9 +2495,13 @@ impl Vm {
                 OpCode::AssignConcat => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_str = self.value_to_string(&cv_val);
+                    let b_str = self.value_to_string(&rhs);
+                    let mut result = a_str.as_bytes().to_vec();
+                    result.extend_from_slice(b_str.as_bytes());
                     self.write_operand(
                         &op.op1,
-                        cv_val.concat(&rhs),
+                        Value::String(PhpString::from_vec(result)),
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
