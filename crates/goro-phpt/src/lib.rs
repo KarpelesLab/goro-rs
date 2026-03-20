@@ -410,6 +410,7 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
             let mut output = vm.take_output();
 
             // Format the error like PHP does
+            let stack_trace = vm.format_stack_trace();
             if let Some(exc) = vm.current_exception.take() {
                 if let goro_core::value::Value::Object(obj) = &exc {
                     let obj = obj.borrow();
@@ -418,13 +419,13 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
                     let msg_str = msg.to_php_string().to_string_lossy();
                     let fatal = if msg_str.is_empty() {
                         format!(
-                            "\nFatal error: Uncaught {} in Unknown.php:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown.php on line {}",
-                            class, e.line, e.line
+                            "\nFatal error: Uncaught {} in Unknown.php:{}\nStack trace:\n{}\n  thrown in Unknown.php on line {}",
+                            class, e.line, stack_trace, e.line
                         )
                     } else {
                         format!(
-                            "\nFatal error: Uncaught {}: {} in Unknown.php:{}\nStack trace:\n#0 {{main}}\n  thrown in Unknown.php on line {}",
-                            class, msg_str, e.line, e.line
+                            "\nFatal error: Uncaught {}: {} in Unknown.php:{}\nStack trace:\n{}\n  thrown in Unknown.php on line {}",
+                            class, msg_str, e.line, stack_trace, e.line
                         )
                     };
                     output.extend_from_slice(fatal.as_bytes());

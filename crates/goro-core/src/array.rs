@@ -177,6 +177,19 @@ impl PhpArray {
         }
     }
 
+    /// Recalculate the next_int_key based on current entries.
+    /// Called after array_pop to ensure array_push uses the correct key.
+    pub fn recalculate_next_int_key(&mut self) {
+        self.next_int_key = 0;
+        for (key, _) in &self.entries {
+            if let ArrayKey::Int(n) = key {
+                if *n >= self.next_int_key {
+                    self.next_int_key = n + 1;
+                }
+            }
+        }
+    }
+
     /// Iterate over entries in order
     pub fn iter(&self) -> impl Iterator<Item = (&ArrayKey, &Value)> {
         self.entries.iter().map(|(k, v)| (k, v))

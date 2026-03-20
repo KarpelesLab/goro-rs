@@ -672,7 +672,14 @@ fn array_push(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_pop(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Array(arr)) = args.first() {
+    let arr_ref = args.first().unwrap_or(&Value::Null);
+    // Unwrap reference if needed
+    let arr_val = if let Value::Reference(r) = arr_ref {
+        r.borrow().clone()
+    } else {
+        arr_ref.clone()
+    };
+    if let Value::Array(arr) = &arr_val {
         let mut arr = arr.borrow_mut();
         // Remove last element
         let len = arr.len();
@@ -681,9 +688,14 @@ fn array_pop(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         let entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let (last_key, last_val) = entries.last().unwrap();
+        let was_int_key = matches!(last_key, goro_core::array::ArrayKey::Int(_));
         arr.remove(last_key);
         // Reset internal pointer
         arr.pointer = 0;
+        // Recalculate next_int_key after removal
+        if was_int_key {
+            arr.recalculate_next_int_key();
+        }
         Ok(last_val.clone())
     } else {
         Ok(Value::Null)
@@ -3720,7 +3732,15 @@ fn serialize_value_depth(val: &Value, depth: usize) -> String {
         Value::True => "b:1;".to_string(),
         Value::False => "b:0;".to_string(),
         Value::Long(n) => format!("i:{};", n),
-        Value::Double(f) => format!("d:{};", f),
+        Value::Double(f) => {
+            if f.is_nan() {
+                "d:NAN;".to_string()
+            } else if f.is_infinite() {
+                if *f > 0.0 { "d:INF;".to_string() } else { "d:-INF;".to_string() }
+            } else {
+                format!("d:{};", f)
+            }
+        }
         Value::String(s) => format!("s:{}:\"{}\";", s.len(), s.to_string_lossy()),
         Value::Array(arr) => {
             let arr = arr.borrow();

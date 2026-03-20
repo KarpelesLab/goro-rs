@@ -124,6 +124,8 @@ pub struct Vm {
     class_scope_stack: Vec<Vec<u8>>,
     /// Current call depth (to prevent stack overflow from infinite recursion)
     call_depth: u32,
+    /// Call stack for stack trace generation: (function_name, file, line_called_from)
+    pub call_stack: Vec<(String, String, u32)>,
     /// Stack of saved error_reporting levels (for @ operator)
     pub error_reporting_stack: Vec<i64>,
     /// Pending return value (for deferred return in finally blocks)
@@ -159,6 +161,7 @@ impl Vm {
             called_class_stack: Vec::new(),
             class_scope_stack: Vec::new(),
             call_depth: 0,
+            call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
             pending_return: None,
             error_handler: None,
@@ -998,7 +1001,7 @@ impl Vm {
                 let val = arg.deref();
                 if !self.value_matches_type(&val, &type_info.param_type) {
                     let expected = Self::param_type_display(&type_info.param_type);
-                    let given = val.type_name();
+                    let given = Self::value_type_name(&val);
                     let param_name = String::from_utf8_lossy(&type_info.param_name);
                     // Argument number is 1-based, excluding implicit args like $this
                     let arg_num = i + 1 - implicit_args;
@@ -1240,6 +1243,18 @@ impl Vm {
     }
 
     /// Get the output buffer contents
+    /// Format the current call stack as a PHP-style stack trace string
+    pub fn format_stack_trace(&self) -> String {
+        let mut lines = Vec::new();
+        // The call stack is ordered from outermost to innermost
+        // PHP shows it innermost first
+        for (i, (func_name, file, line)) in self.call_stack.iter().rev().enumerate() {
+            lines.push(format!("#{} {}({}): {}()", i, file, line, func_name));
+        }
+        lines.push(format!("#{} {{main}}", self.call_stack.len()));
+        lines.join("\n")
+    }
+
     pub fn output(&self) -> &[u8] {
         &self.output
     }
@@ -2074,11 +2089,22 @@ impl Vm {
         self.call_depth -= 1;
 
         // Check return type if declared
+        // Detect implicit return: the compiler emits `Return Null` with line=0 for implicit returns
+        // If result is Ok(Null) or Ok(Undef), and there was no explicit return, it's "none returned"
+        let implicit_return = matches!(result, Ok(Value::Undef) | Ok(Value::Null))
+            && op_array.ops.last().map_or(false, |op| op.opcode == OpCode::Return && op.line == 0)
+            && !op_array.ops.iter().any(|op| op.opcode == OpCode::Return && op.line != 0);
+        let result = result.map(|v| if matches!(v, Value::Undef) { Value::Null } else { v });
         if let Ok(ref val) = result {
             if let Some(ref ret_type) = op_array.return_type {
                 if !self.value_matches_return_type(val, ret_type) {
                     let func_name = String::from_utf8_lossy(&op_array.name);
-                    let actual_type = Self::value_type_name(val);
+                    // Use "none" when a function implicitly returns (no explicit return statement)
+                    let actual_type = if implicit_return {
+                        "none".to_string()
+                    } else {
+                        Self::value_type_name(val)
+                    };
                     let expected_type = Self::param_type_name(ret_type);
                     let msg = format!(
                         "{}(): Return value must be of type {}, {} returned",
@@ -2119,7 +2145,8 @@ impl Vm {
 
         loop {
             if ip >= op_array.ops.len() {
-                return Ok(Value::Null);
+                // Implicit return - use Undef to signal "none returned" for return type checks
+                return Ok(Value::Undef);
             }
 
             let op = &op_array.ops[ip];
@@ -3445,6 +3472,10 @@ impl Vm {
                             call.resolve_named_args(&user_fn.cv_names, implicit_args_count);
                         }
 
+                        // Push call stack frame early for proper error stack traces
+                        let early_call_display = String::from_utf8_lossy(call.name.as_bytes()).into_owned();
+                        self.call_stack.push((early_call_display, self.current_file.clone(), op.line));
+
                         // Check argument count (too few arguments)
                         {
                             let implicit_args = if user_fn.cv_names.first().map(|n| n.as_slice())
@@ -3488,6 +3519,7 @@ impl Vm {
                                 let exc_val = self.create_exception(b"ArgumentCountError", &err_msg, op.line);
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    self.call_stack.pop(); // pop early-pushed frame
                                     ip = catch_target as usize;
                                     continue;
                                 } else {
@@ -3523,6 +3555,7 @@ impl Vm {
                                 let exc_val = self.throw_type_error(err_msg.clone());
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    self.call_stack.pop(); // pop early-pushed frame
                                     ip = catch_target as usize;
                                     continue;
                                 } else {
@@ -3688,7 +3721,14 @@ impl Vm {
                         }
 
                         // Execute the function's op_array
+                        // (call stack frame was already pushed before param checks)
                         let call_result = self.execute_op_array(&user_fn, func_cvs);
+
+                        // Only pop call stack frame on success - keep it on error for stack trace
+                        let call_failed = call_result.is_err();
+                        if !call_failed {
+                            self.call_stack.pop();
+                        }
 
                         // Pop the called class stack and scope stack
                         if pushed_called_class {
@@ -3707,6 +3747,8 @@ impl Vm {
                                 // Check if we have an exception handler for uncaught exceptions
                                 if let Some(exc) = self.current_exception.take() {
                                     if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        // Exception caught - pop call stack frame
+                                        if call_failed { self.call_stack.pop(); }
                                         self.current_exception = Some(exc);
                                         ip = catch_target as usize;
                                         // Reload globals
@@ -3728,6 +3770,8 @@ impl Vm {
                                 // Check if there's a stored exception from the called function
                                 if let Some(exc) = self.current_exception.take() {
                                     if !exception_handlers.is_empty() {
+                                        // Exception caught - pop call stack frame
+                                        if call_failed { self.call_stack.pop(); }
                                         self.current_exception = Some(exc);
                                         let (catch_target, _, _) =
                                             exception_handlers.pop().unwrap();
@@ -4340,15 +4384,24 @@ impl Vm {
                         }
                     } else {
                         // Emit warning for non-iterable values (null, bool, int, etc.)
-                        match &arr_val {
-                            Value::Null | Value::False | Value::True | Value::Long(_) | Value::Double(_) | Value::String(_) => {
-                                let type_name = Vm::value_type_name(&arr_val);
-                                self.emit_warning(&format!(
-                                    "foreach() argument must be of type array|object, {} given",
-                                    type_name
-                                ));
+                        // But NOT for closure strings (which represent objects in goro)
+                        let is_closure_string = if let Value::String(s) = &arr_val {
+                            let bytes = s.as_bytes();
+                            bytes.starts_with(b"__closure_") || bytes.starts_with(b"__arrow_") || bytes.starts_with(b"__bound_closure_")
+                        } else {
+                            false
+                        };
+                        if !is_closure_string {
+                            match &arr_val {
+                                Value::Null | Value::False | Value::True | Value::Long(_) | Value::Double(_) | Value::String(_) => {
+                                    let type_name = Vm::value_type_name(&arr_val);
+                                    self.emit_warning_at(&format!(
+                                        "foreach() argument must be of type array|object, {} given",
+                                        type_name
+                                    ), op.line);
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
                         // Store value in the iterator tmp slot
                         self.write_operand(
@@ -4647,7 +4700,45 @@ impl Vm {
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
 
-                    let result = if let Value::Generator(_) = &val {
+                    let result = if class_lower == b"closure" {
+                        // Special case: closures in goro-rs may be strings/arrays, not objects
+                        match &val {
+                            Value::String(s) => {
+                                let bytes = s.as_bytes();
+                                if bytes.starts_with(b"__closure_") || bytes.starts_with(b"__arrow_") || bytes.starts_with(b"__bound_closure_") {
+                                    Value::True
+                                } else {
+                                    Value::False
+                                }
+                            }
+                            Value::Array(arr) => {
+                                let arr_borrow = arr.borrow();
+                                if let Some(first) = arr_borrow.values().next() {
+                                    if let Value::String(s) = first {
+                                        let bytes = s.as_bytes();
+                                        if bytes.starts_with(b"__closure_") || bytes.starts_with(b"__arrow_") || bytes.starts_with(b"__bound_closure_") {
+                                            Value::True
+                                        } else {
+                                            Value::False
+                                        }
+                                    } else {
+                                        Value::False
+                                    }
+                                } else {
+                                    Value::False
+                                }
+                            }
+                            Value::Object(obj) => {
+                                let obj_borrow = obj.borrow();
+                                if obj_borrow.class_name.eq_ignore_ascii_case(b"Closure") {
+                                    Value::True
+                                } else {
+                                    Value::False
+                                }
+                            }
+                            _ => Value::False,
+                        }
+                    } else if let Value::Generator(_) = &val {
                         // Generator instanceof check
                         if class_lower == b"generator"
                             || class_lower == b"iterator"

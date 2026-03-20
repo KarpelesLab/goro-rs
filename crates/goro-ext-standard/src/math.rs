@@ -67,6 +67,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"floatval", floatval_fn);
     vm.register_function(b"doubleval", floatval_fn);
     vm.register_function(b"fpow", fpow_fn);
+    vm.register_function(b"srand", srand_fn);
+    vm.register_function(b"mt_srand", srand_fn);
 }
 
 fn abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -800,4 +802,9 @@ fn fpow_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let base = args.first().unwrap_or(&Value::Null).to_double();
     let exp = args.get(1).unwrap_or(&Value::Null).to_double();
     Ok(Value::Double(base.powf(exp)))
+}
+
+fn srand_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // srand/mt_srand is a no-op in our implementation since we use the system RNG
+    Ok(Value::Null)
 }

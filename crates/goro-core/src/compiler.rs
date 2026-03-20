@@ -2943,7 +2943,7 @@ impl Compiler {
                     Ok(OperandType::Tmp(tmp))
                 } else {
                     Err(CompileError {
-                        message: "cannot read from $arr[] without index".into(),
+                        message: "Cannot use [] for reading".into(),
                         line: expr.span.line,
                     })
                 }
