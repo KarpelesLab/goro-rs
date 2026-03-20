@@ -115,6 +115,9 @@ impl PhpArray {
         None
     }
 
+    /// Maximum array size to prevent OOM (128M elements)
+    const MAX_SIZE: usize = 128 * 1024 * 1024;
+
     /// Set a value with a specific key
     pub fn set(&mut self, key: ArrayKey, value: Value) {
         // Check if key already exists
@@ -123,6 +126,9 @@ impl PhpArray {
                 *v = value;
                 return;
             }
+        }
+        if self.entries.len() >= Self::MAX_SIZE {
+            return; // Silently refuse to grow beyond limit
         }
         // Track next_int_key
         if let ArrayKey::Int(n) = &key
@@ -135,6 +141,9 @@ impl PhpArray {
 
     /// Append a value with the next integer key ($arr[] = value)
     pub fn push(&mut self, value: Value) {
+        if self.entries.len() >= Self::MAX_SIZE {
+            return;
+        }
         let key = self.next_int_key;
         self.next_int_key = key + 1;
         self.entries.push((ArrayKey::Int(key), value));

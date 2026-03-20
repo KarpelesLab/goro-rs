@@ -1452,6 +1452,9 @@ fn array_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn array_fill(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let start = args.first().map(|v| v.to_long()).unwrap_or(0);
     let num = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if num < 0 || num > 10_000_000 {
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
     let val = args.get(2).cloned().unwrap_or(Value::Null);
     let mut result = PhpArray::new();
     for i in 0..num {

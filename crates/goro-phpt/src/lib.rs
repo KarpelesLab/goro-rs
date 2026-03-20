@@ -294,6 +294,11 @@ fn execute_php_with_timeout(
     let handle = std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024) // 32MB stack
         .spawn(move || {
+            // Memory protection is handled by:
+            // - PhpArray::MAX_SIZE (128M elements)
+            // - str_repeat/str_pad 128MB limits
+            // - 5s execution timeout
+            // - call_depth limit (100)
             // Change to test directory if provided, otherwise use temp dir
             if let Some(ref dir) = dir_path {
                 let _ = std::env::set_current_dir(dir);

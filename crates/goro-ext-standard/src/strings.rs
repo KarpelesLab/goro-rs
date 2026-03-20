@@ -352,6 +352,11 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: 0 });
     }
+    let total_len = s.len().saturating_mul(times as usize);
+    if total_len > 128 * 1024 * 1024 {
+        // 128MB string limit
+        return Ok(Value::String(PhpString::empty()));
+    }
     let repeated = s.as_bytes().repeat(times as usize);
     Ok(Value::String(PhpString::from_vec(repeated)))
 }
@@ -847,7 +852,7 @@ fn str_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let pad_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // STR_PAD_RIGHT=1
 
     let bytes = input.as_bytes();
-    if bytes.len() >= length {
+    if bytes.len() >= length || length > 128 * 1024 * 1024 {
         return Ok(Value::String(input));
     }
 
