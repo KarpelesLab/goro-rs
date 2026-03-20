@@ -127,6 +127,10 @@ pub fn run_test(test: &PhptTest) -> TestResult {
 }
 
 pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult {
+    run_test_with_dir_and_filename(test, test_dir, "Unknown.php")
+}
+
+pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> TestResult {
     // Parse INI settings
     let ini_settings = parse_ini_settings(test.ini_section());
 
@@ -158,7 +162,7 @@ pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult
     };
 
     // Execute the source with a 5-second timeout
-    let output = match execute_php_with_timeout(source.as_bytes(), 5, test_dir, &ini_settings) {
+    let output = match execute_php_with_timeout_and_filename(source.as_bytes(), 5, test_dir, &ini_settings, filename) {
         Ok(output) => output,
         Err(e) => return TestResult::Error(e),
     };
@@ -171,7 +175,9 @@ pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult
     if let Some(expected) = test.expect_section() {
         let expected_trimmed = expected.trim();
         let actual_trimmed = actual_normalized.trim();
-        if actual_trimmed == expected_trimmed {
+        // Replace %0 with actual null byte for comparison (PHPT files encode null as %0)
+        let expected_with_nulls = expected_trimmed.replace("%0", "\0");
+        if actual_trimmed == expected_with_nulls || actual_trimmed == expected_trimmed {
             TestResult::Pass
         } else {
             TestResult::Fail {
@@ -285,9 +291,20 @@ fn execute_php_with_timeout(
     test_dir: Option<&Path>,
     ini_settings: &[(String, String)],
 ) -> Result<Vec<u8>, String> {
+    execute_php_with_timeout_and_filename(source, timeout_secs, test_dir, ini_settings, "Unknown.php")
+}
+
+fn execute_php_with_timeout_and_filename(
+    source: &[u8],
+    timeout_secs: u64,
+    test_dir: Option<&Path>,
+    ini_settings: &[(String, String)],
+    filename: &str,
+) -> Result<Vec<u8>, String> {
     let source = source.to_vec();
     let dir_path = test_dir.map(|p| p.to_path_buf());
     let ini = ini_settings.to_vec();
+    let fname = filename.to_string();
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out2 = timed_out.clone();
 
@@ -305,7 +322,7 @@ fn execute_php_with_timeout(
             } else {
                 let _ = std::env::set_current_dir(std::env::temp_dir());
             }
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source, &ini)))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source, &ini, &fname)))
         })
         .map_err(|e| format!("Thread error: {}", e))?;
 
@@ -331,7 +348,7 @@ fn execute_php_with_timeout(
     }
 }
 
-fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result<Vec<u8>, String> {
+fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename: &str) -> Result<Vec<u8>, String> {
     use goro_core::compiler::Compiler;
     use goro_core::vm::Vm;
     use goro_core::value::{Value, set_php_precision};
@@ -359,8 +376,8 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
         Err(e) => {
             // PHP outputs parse errors to stdout
             let msg = format!(
-                "\nParse error: syntax error in Unknown.php on line {}\n",
-                e.span.line
+                "\nParse error: syntax error in {} on line {}\n",
+                filename, e.span.line
             );
             return Ok(msg.into_bytes());
         }
@@ -372,8 +389,8 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
         Ok(r) => r,
         Err(e) => {
             let msg = format!(
-                "\nFatal error: {} in Unknown.php on line {}\n",
-                e.message, e.line
+                "\nFatal error: {} in {} on line {}\n",
+                e.message, filename, e.line
             );
             return Ok(msg.into_bytes());
         }
@@ -381,6 +398,7 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
 
     // Execute
     let mut vm = Vm::new();
+    vm.current_file = filename.to_string();
     goro_ext_standard::register_standard_functions(&mut vm);
     goro_ext_date::register(&mut vm);
     goro_ext_json::register(&mut vm);
@@ -422,27 +440,28 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)]) -> Result
                     let class = String::from_utf8_lossy(&obj.class_name);
                     let msg = obj.get_property(b"message");
                     let msg_str = msg.to_php_string().to_string_lossy();
+                    let file_str = &vm.current_file;
                     let fatal = if msg_str.is_empty() {
                         format!(
-                            "\nFatal error: Uncaught {} in Unknown.php:{}\nStack trace:\n{}\n  thrown in Unknown.php on line {}",
-                            class, e.line, stack_trace, e.line
+                            "\nFatal error: Uncaught {} in {}:{}\nStack trace:\n{}\n  thrown in {} on line {}",
+                            class, file_str, e.line, stack_trace, file_str, e.line
                         )
                     } else {
                         format!(
-                            "\nFatal error: Uncaught {}: {} in Unknown.php:{}\nStack trace:\n{}\n  thrown in Unknown.php on line {}",
-                            class, msg_str, e.line, stack_trace, e.line
+                            "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n{}\n  thrown in {} on line {}",
+                            class, msg_str, file_str, e.line, stack_trace, file_str, e.line
                         )
                     };
                     output.extend_from_slice(fatal.as_bytes());
                 } else {
                     let fatal =
-                        format!("\nFatal error: {} in Unknown.php on line {}", e.message, e.line);
+                        format!("\nFatal error: {} in {} on line {}", e.message, vm.current_file, e.line);
                     output.extend_from_slice(fatal.as_bytes());
                 }
             } else {
                 let fatal = format!(
-                    "\nFatal error: {} in Unknown.php on line {}\n",
-                    e.message, e.line
+                    "\nFatal error: {} in {} on line {}\n",
+                    e.message, vm.current_file, e.line
                 );
                 output.extend_from_slice(fatal.as_bytes());
             }
@@ -575,8 +594,11 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                 }
                 b'e' => {
                     pi += 2;
+                    // %e matches a directory separator (/ or \)
                     if ai < ab.len() && (ab[ai] == b'/' || ab[ai] == b'\\') {
                         ai += 1;
+                    } else {
+                        return false;
                     }
                 }
                 b'w' => {
@@ -596,6 +618,15 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                 b'%' => {
                     pi += 2;
                     if ai < ab.len() && ab[ai] == b'%' {
+                        ai += 1;
+                    } else {
+                        return false;
+                    }
+                }
+                b'0' => {
+                    // %0 matches a null byte in PHPT tests
+                    pi += 2;
+                    if ai < ab.len() && ab[ai] == 0 {
                         ai += 1;
                     } else {
                         return false;
@@ -639,8 +670,17 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
                 let test_dir = path.parent();
                 // Wrap in catch_unwind to prevent stack overflows from killing the runner
                 let test_name = test.name.clone();
+                let test_filename = path.file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Unknown.php".to_string());
+                // Convert .phpt to .php for the filename
+                let test_filename = if test_filename.ends_with(".phpt") {
+                    format!("{}.php", &test_filename[..test_filename.len() - 5])
+                } else {
+                    test_filename
+                };
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_test_with_dir(&test, test_dir)
+                    run_test_with_dir_and_filename(&test, test_dir, &test_filename)
                 }));
                 match result {
                     Ok(TestResult::Pass) => {

@@ -9,6 +9,7 @@ use std::rc::Rc;
 /// Register all date/time extension functions
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"date_default_timezone_set", date_default_timezone_set);
+    vm.register_function(b"date_default_timezone_get", date_default_timezone_get);
     vm.register_function(b"time", time_fn);
     vm.register_function(b"microtime", microtime);
     vm.register_function(b"date", date_fn);
@@ -26,6 +27,10 @@ pub fn register(vm: &mut Vm) {
 
 fn date_default_timezone_set(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
+}
+
+fn date_default_timezone_get(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"UTC")))
 }
 
 fn time_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -655,6 +660,12 @@ fn idate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             beat as i64
         }
         b'd' => day as i64,
+        b'g' => {
+            // 12-hour format without leading zero (1-12)
+            let h12 = hours % 12;
+            if h12 == 0 { 12 } else { h12 }
+        }
+        b'G' => hours, // 24-hour format without leading zero (0-23)
         b'h' => {
             let h12 = hours % 12;
             if h12 == 0 { 12 } else { h12 }
@@ -662,6 +673,7 @@ fn idate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         b'H' => hours,
         b'i' => minutes,
         b'I' => 0, // no DST support
+        b'j' => day as i64, // day without leading zero
         b'L' => {
             if is_leap {
                 1
@@ -670,13 +682,55 @@ fn idate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         b'm' => month as i64,
+        b'n' => month as i64, // month without leading zero
+        b'N' => {
+            // ISO-8601 day of week (Monday=1, Sunday=7)
+            if dow == 0 { 7 } else { dow }
+        }
+        b'o' => {
+            // ISO-8601 year number (for ISO week)
+            // Simplified: same as year for most cases
+            // The ISO year can differ from calendar year for dates near Jan 1
+            let iso_dow = if dow == 0 { 7 } else { dow }; // Monday=1
+            let jan1_days = ymd_to_days(year, 1, 1);
+            let jan1_dow = (((jan1_days % 7) + 4) % 7 + 7) % 7;
+            let jan1_iso_dow = if jan1_dow == 0 { 7 } else { jan1_dow };
+            // ISO week 1 starts on the Monday of the week containing Jan 4
+            let iso_week_one_start = jan1_days - (jan1_iso_dow - 1) + if jan1_iso_dow <= 4 { 0 } else { 7 };
+            let current_days = ymd_to_days(year, month, day);
+            if current_days < iso_week_one_start {
+                year - 1 // belongs to previous year's ISO week
+            } else {
+                // Check if we're in the last week that might belong to next year
+                let dec31_days = ymd_to_days(year, 12, 31);
+                let dec31_dow = (((dec31_days % 7) + 4) % 7 + 7) % 7;
+                let dec31_iso_dow = if dec31_dow == 0 { 7 } else { dec31_dow };
+                if dec31_iso_dow < 4 && (dec31_days - current_days) < dec31_iso_dow {
+                    year + 1
+                } else {
+                    year
+                }
+            }
+        }
         b's' => seconds_val,
         b't' => days_in_month,
         b'U' => secs,
         b'w' => dow,
         b'W' => {
-            // ISO week number (simplified)
-            (yday / 7 + 1) as i64
+            // ISO week number
+            let iso_dow = if dow == 0 { 7 } else { dow }; // Monday=1
+            let jan1_days = ymd_to_days(year, 1, 1);
+            let jan1_dow = (((jan1_days % 7) + 4) % 7 + 7) % 7;
+            let jan1_iso_dow = if jan1_dow == 0 { 7 } else { jan1_dow };
+            let iso_week_one_start = jan1_days - (jan1_iso_dow - 1) + if jan1_iso_dow <= 4 { 0 } else { 7 };
+            let current_days = ymd_to_days(year, month, day);
+            let diff = current_days - iso_week_one_start;
+            if diff < 0 {
+                // In last week of previous year - compute that year's last week
+                52 // simplified
+            } else {
+                (diff / 7 + 1) as i64
+            }
         }
         b'y' => year % 100,
         b'Y' => year,

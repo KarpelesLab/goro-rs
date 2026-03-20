@@ -1152,13 +1152,13 @@ impl Parser {
             return Ok(TypeHint::Nullable(Box::new(inner)));
         }
 
-        let first = self.parse_simple_type()?;
+        let first = self.parse_type_atom()?;
 
         // Check for union or intersection
         if matches!(self.peek(), TokenKind::Pipe) {
             let mut types = vec![first];
             while self.eat(&TokenKind::Pipe) {
-                types.push(self.parse_simple_type()?);
+                types.push(self.parse_type_atom()?);
             }
             return Ok(TypeHint::Union(types));
         }
@@ -1172,6 +1172,24 @@ impl Parser {
         }
 
         Ok(first)
+    }
+
+    /// Parse a type atom: either a simple type or a parenthesized intersection type (for DNF types).
+    fn parse_type_atom(&mut self) -> ParseResult<TypeHint> {
+        if self.eat(&TokenKind::OpenParen) {
+            // Parenthesized intersection type: (A&B)
+            let first = self.parse_simple_type()?;
+            let mut types = vec![first];
+            while self.eat(&TokenKind::Ampersand) {
+                types.push(self.parse_simple_type()?);
+            }
+            self.expect(&TokenKind::CloseParen)?;
+            if types.len() == 1 {
+                return Ok(types.into_iter().next().unwrap());
+            }
+            return Ok(TypeHint::Intersection(types));
+        }
+        self.parse_simple_type()
     }
 
     /// Parse a class/interface/trait name reference that may be qualified.
@@ -1352,12 +1370,19 @@ impl Parser {
         };
 
         let extends = if self.eat(&TokenKind::Extends) {
-            Some(self.parse_class_name_ref()?)
+            let first = self.parse_class_name_ref()?;
+            Some(first)
         } else {
             None
         };
 
+        // For interfaces: "extends A, B, C" - additional names after comma go into implements
         let mut implements = Vec::new();
+        if extends.is_some() && modifiers.is_interface {
+            while self.eat(&TokenKind::Comma) {
+                implements.push(self.parse_class_name_ref()?);
+            }
+        }
         if self.eat(&TokenKind::Implements) {
             loop {
                 implements.push(self.parse_class_name_ref()?);

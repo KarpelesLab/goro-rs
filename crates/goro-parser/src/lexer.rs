@@ -198,7 +198,17 @@ impl<'a> Lexer<'a> {
                         .filter(|b| **b != b'_')
                         .map(|&b| b as char)
                         .collect();
-                    return TokenKind::LongNumber(i64::from_str_radix(&s[2..], 16).unwrap_or(0));
+                    match i64::from_str_radix(&s[2..], 16) {
+                        Ok(n) => return TokenKind::LongNumber(n),
+                        Err(_) => {
+                            // Overflow: convert to float
+                            let mut val = 0.0f64;
+                            for ch in s[2..].chars() {
+                                val = val * 16.0 + ch.to_digit(16).unwrap_or(0) as f64;
+                            }
+                            return TokenKind::DoubleNumber(val);
+                        }
+                    }
                 }
                 Some(b'b' | b'B') => {
                     self.advance();
@@ -215,7 +225,17 @@ impl<'a> Lexer<'a> {
                         .filter(|b| **b != b'_')
                         .map(|&b| b as char)
                         .collect();
-                    return TokenKind::LongNumber(i64::from_str_radix(&s[2..], 2).unwrap_or(0));
+                    match i64::from_str_radix(&s[2..], 2) {
+                        Ok(n) => return TokenKind::LongNumber(n),
+                        Err(_) => {
+                            // Overflow: convert to float
+                            let mut val = 0.0f64;
+                            for ch in s[2..].chars() {
+                                val = val * 2.0 + ch.to_digit(2).unwrap_or(0) as f64;
+                            }
+                            return TokenKind::DoubleNumber(val);
+                        }
+                    }
                 }
                 Some(b'o' | b'O') => {
                     self.advance();
@@ -232,7 +252,16 @@ impl<'a> Lexer<'a> {
                         .filter(|b| **b != b'_')
                         .map(|&b| b as char)
                         .collect();
-                    return TokenKind::LongNumber(i64::from_str_radix(&s[2..], 8).unwrap_or(0));
+                    match i64::from_str_radix(&s[2..], 8) {
+                        Ok(n) => return TokenKind::LongNumber(n),
+                        Err(_) => {
+                            let mut val = 0.0f64;
+                            for ch in s[2..].chars() {
+                                val = val * 8.0 + ch.to_digit(8).unwrap_or(0) as f64;
+                            }
+                            return TokenKind::DoubleNumber(val);
+                        }
+                    }
                 }
                 _ => {
                     // Check for traditional octal: 0NNN (digits 0-7 only)

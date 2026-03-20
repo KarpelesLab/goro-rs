@@ -627,7 +627,7 @@ impl Vm {
     pub fn emit_warning(&mut self, msg: &str) {
         if self.error_reporting & 2 != 0 {
             // E_WARNING = 2
-            let warning = format!("\nWarning: {} in Unknown.php on line 0\n", msg);
+            let warning = format!("\nWarning: {} in {} on line 0\n", msg, self.current_file);
             self.output.extend_from_slice(warning.as_bytes());
         }
     }
@@ -635,7 +635,7 @@ impl Vm {
     /// Emit a PHP warning with line number
     pub fn emit_warning_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 2 != 0 {
-            let warning = format!("\nWarning: {} in Unknown.php on line {}\n", msg, line);
+            let warning = format!("\nWarning: {} in {} on line {}\n", msg, self.current_file, line);
             self.output.extend_from_slice(warning.as_bytes());
         }
     }
@@ -644,7 +644,7 @@ impl Vm {
     pub fn emit_notice_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8 != 0 {
             // E_NOTICE = 8
-            let notice = format!("\nNotice: {} in Unknown.php on line {}\n", msg, line);
+            let notice = format!("\nNotice: {} in {} on line {}\n", msg, self.current_file, line);
             self.output.extend_from_slice(notice.as_bytes());
         }
     }
@@ -653,7 +653,7 @@ impl Vm {
     pub fn emit_deprecated_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8192 != 0 {
             // E_DEPRECATED = 8192
-            let deprec = format!("\nDeprecated: {} in Unknown.php on line {}\n", msg, line);
+            let deprec = format!("\nDeprecated: {} in {} on line {}\n", msg, self.current_file, line);
             self.output.extend_from_slice(deprec.as_bytes());
         }
     }
@@ -1007,8 +1007,8 @@ impl Vm {
                     let arg_num = i + 1 - implicit_args;
                     return Some(format!(
                         "{}(): Argument #{} (${}) \
-                         must be of type {}, {} given, called in Unknown.php on line {}",
-                        func_display_name, arg_num, param_name, expected, given, line
+                         must be of type {}, {} given, called in {} on line {}",
+                        func_display_name, arg_num, param_name, expected, given, self.current_file, line
                     ));
                 }
             }
@@ -1249,7 +1249,12 @@ impl Vm {
         // The call stack is ordered from outermost to innermost
         // PHP shows it innermost first
         for (i, (func_name, file, line)) in self.call_stack.iter().rev().enumerate() {
-            lines.push(format!("#{} {}({}): {}()", i, file, line, func_name));
+            let file_display = if file == "Unknown.php" || file.is_empty() {
+                &self.current_file
+            } else {
+                file
+            };
+            lines.push(format!("#{} {}({}): {}()", i, file_display, line, func_name));
         }
         lines.push(format!("#{} {{main}}", self.call_stack.len()));
         lines.join("\n")
@@ -3502,11 +3507,8 @@ impl Vm {
                                 let total_params = user_fn.param_count - implicit_args as u32;
                                 let has_optional = total_params > required;
                                 let qualifier = if has_optional { "at least" } else { "exactly" };
-                                // Get filename from op if available
-                                let file = op_array.name.as_slice();
-                                let file_display = if file.is_empty() { "Unknown.php" } else {
-                                    std::str::from_utf8(file).unwrap_or("Unknown.php")
-                                };
+                                // Get filename
+                                let file_display = &self.current_file;
                                 let err_msg = format!(
                                     "Too few arguments to function {}(), {} passed in {} on line {} and {} {} expected",
                                     fn_display,
@@ -6125,7 +6127,7 @@ impl Vm {
                                     let message = obj_borrow.get_property(b"message").to_php_string().to_string_lossy();
                                     let file = obj_borrow.get_property(b"file").to_php_string().to_string_lossy();
                                     let line = obj_borrow.get_property(b"line").to_long();
-                                    let file_str = if file.is_empty() { "Unknown.php".to_string() } else { file };
+                                    let file_str = if file.is_empty() { self.current_file.clone() } else { file };
                                     let result = if message.is_empty() {
                                         format!("{} in {}:{}\nStack trace:\n#0 {{main}}", class_display, file_str, line)
                                     } else {
@@ -6514,7 +6516,7 @@ impl Vm {
                 let message = obj_borrow.get_property(b"message").to_php_string().to_string_lossy();
                 let file = obj_borrow.get_property(b"file").to_php_string().to_string_lossy();
                 let line = obj_borrow.get_property(b"line").to_long();
-                let file_str = if file.is_empty() { "Unknown.php".to_string() } else { file };
+                let file_str = if file.is_empty() { self.current_file.clone() } else { file };
                 let result = if message.is_empty() {
                     format!("{} in {}:{}\nStack trace:\n#0 {{main}}", class_display, file_str, line)
                 } else {

@@ -206,6 +206,16 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"http_response_code", http_response_code_fn);
     vm.register_function(b"spl_object_hash", spl_object_hash_fn);
     vm.register_function(b"spl_object_id", spl_object_id_fn);
+    vm.register_function(b"forward_static_call", call_user_func);
+    vm.register_function(b"forward_static_call_array", call_user_func_array);
+    vm.register_function(b"phpversion", phpversion_fn);
+    vm.register_function(b"php_uname", php_uname_fn);
+    vm.register_function(b"php_sapi_name", php_sapi_name_fn);
+    vm.register_function(b"defined", defined_fn);
+    vm.register_function(b"zend_version", zend_version_fn);
+    vm.register_function(b"extension_loaded", extension_loaded_fn);
+    vm.register_function(b"get_loaded_extensions", get_loaded_extensions_fn);
+    vm.register_function(b"get_extension_funcs", get_extension_funcs_fn);
     vm.register_function(b"iterator_to_array", iterator_to_array_fn);
     vm.register_function(b"iterator_count", iterator_count_fn);
     vm.register_function(b"array_map", array_map);
@@ -4120,14 +4130,33 @@ fn getenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(_) => Ok(Value::False),
     }
 }
-fn putenv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+fn putenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let setting = args.first().unwrap_or(&Value::Null).to_php_string();
+    let s = setting.to_string_lossy();
+    if let Some(eq_pos) = s.find('=') {
+        let key = &s[..eq_pos];
+        let value = &s[eq_pos + 1..];
+        unsafe { std::env::set_var(key, value); }
+        Ok(Value::True)
+    } else {
+        unsafe { std::env::remove_var(&*s); }
+        Ok(Value::True)
+    }
 }
 fn spl_autoload_register_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
-fn class_alias_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let original = args.first().unwrap_or(&Value::Null).to_php_string();
+    let alias = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let original_lower: Vec<u8> = original.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    let alias_lower: Vec<u8> = alias.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    if let Some(class) = vm.classes.get(&original_lower).cloned() {
+        vm.classes.insert(alias_lower, class);
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
 }
 fn is_a_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (class_name, check_name) = match (args.first(), args.get(1)) {
@@ -6139,4 +6168,71 @@ fn error_get_last_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn error_clear_last_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
+}
+
+fn phpversion_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(ext) = args.first() {
+        if !matches!(ext, Value::Null | Value::Undef) {
+            let ext_name = ext.to_php_string().to_string_lossy().to_ascii_lowercase();
+            match ext_name.as_str() {
+                "standard" | "core" | "date" | "pcre" | "json" | "ctype" | "hash" | "spl" => {
+                    return Ok(Value::String(PhpString::from_bytes(b"8.5.4")));
+                }
+                _ => return Ok(Value::False),
+            }
+        }
+    }
+    Ok(Value::String(PhpString::from_bytes(b"8.5.4")))
+}
+
+fn php_uname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let mode = args.first().unwrap_or(&Value::Null).to_php_string();
+    let mode_char = mode.as_bytes().first().copied().unwrap_or(b'a');
+    let result = match mode_char {
+        b's' => "Linux".to_string(),
+        b'n' => "localhost".to_string(),
+        b'r' => "6.0.0".to_string(),
+        b'v' => "#1".to_string(),
+        b'm' => "x86_64".to_string(),
+        _ => "Linux localhost 6.0.0 #1 x86_64".to_string(),
+    };
+    Ok(Value::String(PhpString::from_string(result)))
+}
+
+fn php_sapi_name_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"cli")))
+}
+
+fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name_bytes = name.as_bytes();
+    if vm.constants.contains_key(name_bytes) {
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn zend_version_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"4.5.4")))
+}
+
+fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ext = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
+    let loaded = matches!(ext.as_str(),
+        "standard" | "core" | "date" | "pcre" | "json" | "ctype" | "hash" | "spl"
+    );
+    Ok(if loaded { Value::True } else { Value::False })
+}
+
+fn get_loaded_extensions_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    for ext in &["Core", "standard", "date", "pcre", "json", "ctype", "hash", "SPL"] {
+        result.push(Value::String(PhpString::from_bytes(ext.as_bytes())));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn get_extension_funcs_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False) // stub
 }

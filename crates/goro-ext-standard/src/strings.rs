@@ -1550,8 +1550,169 @@ fn soundex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(result)))
 }
 
-fn metaphone(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty())) // stub
+fn metaphone(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let word = args.first().unwrap_or(&Value::Null).to_php_string();
+    let max_phonemes = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let word_str = word.to_string_lossy().to_uppercase();
+    let chars: Vec<char> = word_str.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    if chars.is_empty() {
+        return Ok(Value::String(PhpString::empty()));
+    }
+    let mut result = String::new();
+    let max = if max_phonemes > 0 { max_phonemes as usize } else { usize::MAX };
+    let len = chars.len();
+
+    // Helper closures
+    let at = |i: usize| -> char { if i < len { chars[i] } else { '\0' } };
+    let is_vowel = |c: char| -> bool { matches!(c, 'A' | 'E' | 'I' | 'O' | 'U') };
+
+    let mut i = 0;
+    // Skip initial silent letters
+    match (at(0), at(1)) {
+        ('A', 'E') | ('G', 'N') | ('K', 'N') | ('P', 'N') | ('W', 'R') => i = 1,
+        ('W', 'H') => i = 1,
+        _ => {}
+    }
+
+    let mut last = '\0';
+    while i < len && result.len() < max {
+        let c = at(i);
+        if c == last && c != 'C' {
+            i += 1;
+            continue;
+        }
+
+        match c {
+            'A' | 'E' | 'I' | 'O' | 'U' => {
+                if i == 0 || (i == 1 && chars[0] == 'W' && chars[1] == 'H') {
+                    result.push(c);
+                    last = c;
+                }
+            }
+            'B' => {
+                if i == 0 || at(i.wrapping_sub(1)) != 'M' {
+                    result.push('B');
+                    last = 'B';
+                }
+            }
+            'C' => {
+                if at(i + 1) == 'I' || at(i + 1) == 'E' || at(i + 1) == 'Y' {
+                    if at(i + 1) == 'I' && at(i + 2) == 'A' {
+                        result.push('X');
+                        last = 'X';
+                    } else if i > 0 && at(i - 1) == 'S' {
+                        // SC[IEY] - skip
+                        last = 'S';
+                    } else {
+                        result.push('S');
+                        last = 'S';
+                    }
+                } else {
+                    result.push('K');
+                    last = 'K';
+                }
+            }
+            'D' => {
+                if at(i + 1) == 'G' && (at(i + 2) == 'I' || at(i + 2) == 'E' || at(i + 2) == 'Y') {
+                    result.push('J');
+                    last = 'J';
+                } else {
+                    result.push('T');
+                    last = 'T';
+                }
+            }
+            'F' => { result.push('F'); last = 'F'; }
+            'G' => {
+                if i + 1 < len && at(i + 1) == 'H' && i + 2 < len && !is_vowel(at(i + 2)) {
+                    // GH not followed by vowel - skip
+                    last = 'G';
+                } else if i > 0 && ((i + 1 >= len) || (at(i + 1) == 'N' && (i + 2 >= len || at(i + 2) == 'E' && i + 3 >= len))) {
+                    // Silent G at end
+                    last = 'G';
+                } else if i > 0 && i + 1 < len && at(i - 1) == 'D' && (at(i + 1) == 'E' || at(i + 1) == 'I' || at(i + 1) == 'Y') {
+                    // DGE, DGI, DGY - already handled as J
+                    last = 'G';
+                } else {
+                    if i > 0 && at(i + 1) == 'H' && is_vowel(at(i + 2)) {
+                        // GH before vowel
+                        last = 'G';
+                    } else if at(i + 1) != 'H' || (i + 2 < len && is_vowel(at(i + 2))) {
+                        result.push('K');
+                        last = 'K';
+                    } else {
+                        last = 'G';
+                    }
+                }
+            }
+            'H' => {
+                if is_vowel(at(i + 1)) && (i == 0 || !is_vowel(at(i - 1))) {
+                    result.push('H');
+                    last = 'H';
+                }
+            }
+            'J' => { result.push('J'); last = 'J'; }
+            'K' => {
+                if i == 0 || at(i - 1) != 'C' {
+                    result.push('K');
+                    last = 'K';
+                }
+            }
+            'L' => { result.push('L'); last = 'L'; }
+            'M' => { result.push('M'); last = 'M'; }
+            'N' => { result.push('N'); last = 'N'; }
+            'P' => {
+                if at(i + 1) == 'H' {
+                    result.push('F');
+                    last = 'F';
+                    i += 1;
+                } else {
+                    result.push('P');
+                    last = 'P';
+                }
+            }
+            'Q' => { result.push('K'); last = 'K'; }
+            'R' => { result.push('R'); last = 'R'; }
+            'S' => {
+                if at(i + 1) == 'H' || (at(i + 1) == 'I' && (at(i + 2) == 'A' || at(i + 2) == 'O')) {
+                    result.push('X');
+                    last = 'X';
+                    if at(i + 1) == 'H' { i += 1; }
+                } else {
+                    result.push('S');
+                    last = 'S';
+                }
+            }
+            'T' => {
+                if at(i + 1) == 'H' {
+                    result.push('0');
+                    last = '0';
+                    i += 1;
+                } else if at(i + 1) == 'I' && (at(i + 2) == 'A' || at(i + 2) == 'O') {
+                    result.push('X');
+                    last = 'X';
+                } else {
+                    result.push('T');
+                    last = 'T';
+                }
+            }
+            'V' => { result.push('F'); last = 'F'; }
+            'W' | 'Y' => {
+                if i + 1 < len && is_vowel(at(i + 1)) {
+                    result.push(c);
+                    last = c;
+                }
+            }
+            'X' => {
+                result.push('K');
+                if result.len() < max { result.push('S'); }
+                last = 'S';
+            }
+            'Z' => { result.push('S'); last = 'S'; }
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(Value::String(PhpString::from_string(result)))
 }
 
 fn levenshtein(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2796,17 +2957,311 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 field_num += 1;
                 pos = end;
             }
-            _ => {
-                // Skip unknown format codes
-                let size = match code {
-                    b'S' | b'v' => 2,
-                    b'L' | b'V' => 4,
-                    b'Q' | b'P' | b'J' => 8,
-                    b'f' | b'g' => 4,
-                    b'd' | b'e' => 8,
-                    _ => 1,
+            b'S' | b'v' => {
+                // S = unsigned 16-bit machine byte order, v = unsigned 16-bit little-endian
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 2
+                } else {
+                    count as usize
                 };
-                pos += size * count.min(1) as usize;
+                for j in 0..repeat {
+                    if pos + 2 <= bytes.len() {
+                        let v = if code == b'v' {
+                            u16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as i64
+                        } else {
+                            u16::from_ne_bytes([bytes[pos], bytes[pos + 1]]) as i64
+                        };
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 2;
+                    }
+                }
+            }
+            b'l' | b'i' => {
+                // l = signed 32-bit machine byte order, i = signed 32-bit machine byte order
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 4
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos + 4 <= bytes.len() {
+                        let v = i32::from_ne_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as i64;
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 4;
+                    }
+                }
+            }
+            b's' => {
+                // s = signed 16-bit machine byte order
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 2
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos + 2 <= bytes.len() {
+                        let v = i16::from_ne_bytes([bytes[pos], bytes[pos + 1]]) as i64;
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 2;
+                    }
+                }
+            }
+            b'L' | b'I' => {
+                // L = unsigned 32-bit machine byte order, I = unsigned 32-bit machine byte order
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 4
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos + 4 <= bytes.len() {
+                        let v = u32::from_ne_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as i64;
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 4;
+                    }
+                }
+            }
+            b'V' => {
+                // V = unsigned 32-bit little-endian
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 4
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos + 4 <= bytes.len() {
+                        let v = u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as i64;
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 4;
+                    }
+                }
+            }
+            b'Q' | b'q' => {
+                // Q = unsigned 64-bit machine, q = signed 64-bit machine
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 8
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos + 8 <= bytes.len() {
+                        let v = if code == b'q' {
+                            i64::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+                                               bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]])
+                        } else {
+                            u64::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+                                               bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]) as i64
+                        };
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 8;
+                    }
+                }
+            }
+            b'P' => {
+                // P = unsigned 64-bit little-endian
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 8
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos + 8 <= bytes.len() {
+                        let v = u64::from_le_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+                                                   bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]) as i64;
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 8;
+                    }
+                }
+            }
+            b'J' => {
+                // J = unsigned 64-bit big-endian
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 8
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos + 8 <= bytes.len() {
+                        let v = u64::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+                                                   bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]) as i64;
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Long(v));
+                        field_num += 1;
+                        pos += 8;
+                    }
+                }
+            }
+            b'f' | b'g' => {
+                // f = float machine byte order, g = float little-endian
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 4
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos + 4 <= bytes.len() {
+                        let v = if code == b'g' {
+                            f32::from_le_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64
+                        } else {
+                            f32::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64
+                        };
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Double(v));
+                        field_num += 1;
+                        pos += 4;
+                    }
+                }
+            }
+            b'd' | b'e' | b'E' | b'G' => {
+                // d = double machine, e = double little-endian, E = double big-endian, G = double big-endian
+                let repeat = if count == u32::MAX {
+                    (bytes.len() - pos) / 8
+                } else {
+                    count as usize
+                };
+                for j in 0..repeat {
+                    if pos + 8 <= bytes.len() {
+                        let v = match code {
+                            b'e' => f64::from_le_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+                                                       bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
+                            b'E' | b'G' => f64::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+                                                              bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
+                            _ => f64::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+                                                   bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
+                        };
+                        let k = if let Some(ref n) = name {
+                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
+                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
+                        } else { ArrayKey::Int(field_num as i64) };
+                        result.set(k, Value::Double(v));
+                        field_num += 1;
+                        pos += 8;
+                    }
+                }
+            }
+            b'H' | b'h' => {
+                // H = hex string, high nibble first; h = hex string, low nibble first
+                let len = if count == u32::MAX {
+                    (bytes.len() - pos) * 2
+                } else {
+                    count as usize
+                };
+                let bytes_needed = (len + 1) / 2;
+                let end = (pos + bytes_needed).min(bytes.len());
+                let mut hex = String::with_capacity(len);
+                for idx in pos..end {
+                    let byte = bytes[idx];
+                    if code == b'H' {
+                        hex.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
+                        if hex.len() < len {
+                            hex.push(char::from(b"0123456789abcdef"[(byte & 0xf) as usize]));
+                        }
+                    } else {
+                        hex.push(char::from(b"0123456789abcdef"[(byte & 0xf) as usize]));
+                        if hex.len() < len {
+                            hex.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
+                        }
+                    }
+                }
+                let k = name
+                    .as_ref()
+                    .map(|n| ArrayKey::String(PhpString::from_string(n.clone())))
+                    .unwrap_or(ArrayKey::Int(field_num as i64));
+                result.set(k, Value::String(PhpString::from_string(hex)));
+                field_num += 1;
+                pos = end;
+            }
+            b'Z' => {
+                // Z = NUL-padded string
+                let len = if count == u32::MAX {
+                    bytes.len() - pos
+                } else {
+                    count as usize
+                };
+                let end = (pos + len).min(bytes.len());
+                let mut s = bytes[pos..end].to_vec();
+                // Truncate at first NUL
+                if let Some(nul_pos) = s.iter().position(|&b| b == 0) {
+                    s.truncate(nul_pos);
+                }
+                let k = name
+                    .as_ref()
+                    .map(|n| ArrayKey::String(PhpString::from_string(n.clone())))
+                    .unwrap_or(ArrayKey::Int(field_num as i64));
+                result.set(k, Value::String(PhpString::from_vec(s)));
+                field_num += 1;
+                pos = end;
+            }
+            b'x' => {
+                // x = NUL byte (skip forward)
+                let repeat = if count == u32::MAX {
+                    bytes.len() - pos
+                } else {
+                    count as usize
+                };
+                pos = (pos + repeat).min(bytes.len());
+            }
+            b'X' => {
+                // X = back up one byte
+                let repeat = if count == u32::MAX {
+                    pos
+                } else {
+                    count as usize
+                };
+                pos = pos.saturating_sub(repeat);
+            }
+            b'@' => {
+                // @ = NUL-fill to absolute position
+                if count == u32::MAX {
+                    pos = bytes.len();
+                } else {
+                    pos = (count as usize).min(bytes.len());
+                }
+            }
+            _ => {
+                // Truly unknown format code - skip
+                pos += 1;
             }
         }
     }
