@@ -18,7 +18,7 @@ fn main() {
                 process::exit(1);
             }
             let code = format!("<?php {}", args[2]);
-            run_code(code.as_bytes());
+            run_code(code.as_bytes(), "Command line code");
         }
         "-v" | "--version" => {
             println!("goro-rs 0.1.0 (PHP 8.5.4 compatible)");
@@ -54,7 +54,7 @@ fn main() {
                 process::exit(1);
             }
             match std::fs::read(path) {
-                Ok(source) => run_code(&source),
+                Ok(source) => run_code(&source, file_path),
                 Err(e) => {
                     eprintln!("Error reading file: {}", e);
                     process::exit(1);
@@ -64,7 +64,7 @@ fn main() {
     }
 }
 
-fn run_code(source: &[u8]) {
+fn run_code(source: &[u8], filename: &str) {
     use goro_core::compiler::Compiler;
     use goro_core::vm::Vm;
     use goro_parser::{Lexer, Parser};
@@ -95,6 +95,7 @@ fn run_code(source: &[u8]) {
 
     // Execute
     let mut vm = Vm::new();
+    vm.current_file = filename.to_string();
     goro_ext_standard::register_standard_functions(&mut vm);
     goro_ext_date::register(&mut vm);
     goro_ext_json::register(&mut vm);

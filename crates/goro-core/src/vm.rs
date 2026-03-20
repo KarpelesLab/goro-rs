@@ -134,6 +134,8 @@ pub struct Vm {
     next_bound_closure_id: u64,
     /// JSON last error code (0 = no error)
     pub json_last_error: i64,
+    /// Current executing file path
+    pub current_file: String,
 }
 
 impl Vm {
@@ -162,6 +164,7 @@ impl Vm {
             error_handler: None,
             next_bound_closure_id: 0,
             json_last_error: 0,
+            current_file: "Unknown.php".to_string(),
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -709,16 +712,20 @@ impl Vm {
     /// Create a TypeError exception object and set it as current_exception.
     /// Returns the error message for use in VmError if no exception handler is available.
     pub fn throw_type_error(&mut self, message: String) -> Value {
+        self.create_exception(b"TypeError", &message, 0)
+    }
+
+    pub fn create_exception(&mut self, class_name: &[u8], message: &str, line: u32) -> Value {
         let err_id = self.next_object_id;
         self.next_object_id += 1;
-        let mut err_obj = PhpObject::new(b"TypeError".to_vec(), err_id);
+        let mut err_obj = PhpObject::new(class_name.to_vec(), err_id);
         err_obj.set_property(
             b"message".to_vec(),
-            Value::String(PhpString::from_string(message)),
+            Value::String(PhpString::from_string(message.to_string())),
         );
         err_obj.set_property(b"code".to_vec(), Value::Long(0));
         err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
-        err_obj.set_property(b"line".to_vec(), Value::Long(0));
+        err_obj.set_property(b"line".to_vec(), Value::Long(line as i64));
         Value::Object(Rc::new(RefCell::new(err_obj)))
     }
 
@@ -3438,6 +3445,60 @@ impl Vm {
                             call.resolve_named_args(&user_fn.cv_names, implicit_args_count);
                         }
 
+                        // Check argument count (too few arguments)
+                        {
+                            let implicit_args = if user_fn.cv_names.first().map(|n| n.as_slice())
+                                == Some(b"this")
+                            {
+                                1
+                            } else {
+                                0
+                            };
+                            let provided = call.args.len() as u32 - implicit_args as u32;
+                            let required = user_fn.required_param_count;
+                            // Don't check for __call/__callStatic/constructors
+                            let is_special = func_name_lower.ends_with(b"::__call")
+                                || func_name_lower.ends_with(b"::__callstatic")
+                                || func_name_lower.ends_with(b"::__construct");
+                            if !is_special && provided < required {
+                                let display_name = call.name.to_string_lossy();
+                                // Extract just the function name for display
+                                let fn_display = if let Some(pos) = display_name.rfind("::") {
+                                    &display_name[pos + 2..]
+                                } else {
+                                    &display_name
+                                };
+                                let total_params = user_fn.param_count - implicit_args as u32;
+                                let has_optional = total_params > required;
+                                let qualifier = if has_optional { "at least" } else { "exactly" };
+                                // Get filename from op if available
+                                let file = op_array.name.as_slice();
+                                let file_display = if file.is_empty() { "Unknown.php" } else {
+                                    std::str::from_utf8(file).unwrap_or("Unknown.php")
+                                };
+                                let err_msg = format!(
+                                    "Too few arguments to function {}(), {} passed in {} on line {} and {} {} expected",
+                                    fn_display,
+                                    provided,
+                                    file_display,
+                                    op.line,
+                                    qualifier,
+                                    required,
+                                );
+                                let exc_val = self.create_exception(b"ArgumentCountError", &err_msg, op.line);
+                                self.current_exception = Some(exc_val);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                } else {
+                                    return Err(VmError {
+                                        message: format!("Uncaught ArgumentCountError: {}", err_msg),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                        }
+
                         // Check parameter types before executing
                         if !user_fn.param_types.is_empty() {
                             // Determine if this is a method call ($this is first implicit arg)
@@ -6092,6 +6153,16 @@ impl Vm {
                                         });
                                     }
                                 }
+                            } else if method_name_lower == b"__construct" {
+                                // No explicit constructor - silently succeed
+                                // (handled in DoFCall as Class::__construct fallback)
+                                let mut func_name = class_name_orig.clone();
+                                func_name.extend_from_slice(b"::__construct");
+                                self.pending_calls.push(PendingCall {
+                                    name: PhpString::from_vec(func_name),
+                                    args: vec![obj_val.clone()],
+                                    named_args: Vec::new(),
+                                });
                             } else if let Some(call_method) = class.get_method(b"__call") {
                                 // __call magic method fallback
                                 let mut func_name = class_name_orig.clone();

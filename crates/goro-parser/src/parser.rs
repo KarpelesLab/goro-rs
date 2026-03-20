@@ -26,6 +26,10 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     depth: u32,
+    /// Anonymous class declarations that need to be emitted before the current statement
+    anon_class_stmts: Vec<Statement>,
+    /// Counter for generating unique anonymous class names
+    anon_counter: u32,
 }
 
 const MAX_PARSE_DEPTH: u32 = 512;
@@ -36,6 +40,8 @@ impl Parser {
             tokens,
             pos: 0,
             depth: 0,
+            anon_class_stmts: Vec::new(),
+            anon_counter: 0,
         }
     }
 
@@ -130,7 +136,15 @@ impl Parser {
     pub fn parse(&mut self) -> ParseResult<Program> {
         let mut statements = Vec::new();
         while !self.is_at_end() {
-            statements.push(self.parse_statement()?);
+            let stmt = self.parse_statement()?;
+            // Drain any anonymous class declarations collected during expression parsing
+            if !self.anon_class_stmts.is_empty() {
+                let anon_stmts: Vec<_> = self.anon_class_stmts.drain(..).collect();
+                for anon_stmt in anon_stmts {
+                    statements.push(anon_stmt);
+                }
+            }
+            statements.push(stmt);
         }
         Ok(Program { statements })
     }
@@ -649,7 +663,36 @@ impl Parser {
                     })
                 }
             }
+            TokenKind::Goto => {
+                self.advance();
+                if let TokenKind::Identifier(label) = self.peek().clone() {
+                    self.advance();
+                    self.expect_semicolon()?;
+                    Ok(Statement {
+                        kind: StmtKind::Goto(label),
+                        span,
+                    })
+                } else {
+                    Err(ParseError {
+                        message: "expected label name after 'goto'".into(),
+                        span: self.span(),
+                    })
+                }
+            }
             _ => {
+                // Check for label: identifier followed by colon (but not ::)
+                if let TokenKind::Identifier(name) = self.peek().clone() {
+                    if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Colon) {
+                        // Make sure it's not part of a ternary or other construct
+                        // Labels appear at statement level as "label:" on their own
+                        self.advance(); // consume identifier
+                        self.advance(); // consume colon
+                        return Ok(Statement {
+                            kind: StmtKind::Label(name),
+                            span,
+                        });
+                    }
+                }
                 // Expression statement
                 let expr = self.parse_expression()?;
                 self.expect_semicolon()?;
@@ -1341,6 +1384,16 @@ impl Parser {
             },
             span,
         })
+    }
+
+    fn parse_class_body(&mut self) -> ParseResult<Vec<ClassMember>> {
+        self.expect(&TokenKind::OpenBrace)?;
+        let mut body = Vec::new();
+        while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+            body.extend(self.parse_class_members()?);
+        }
+        self.expect(&TokenKind::CloseBrace)?;
+        Ok(body)
     }
 
     fn parse_class_members(&mut self) -> ParseResult<Vec<ClassMember>> {
@@ -2922,6 +2975,19 @@ impl Parser {
                 self.advance();
                 let mut elements = Vec::new();
                 while !matches!(self.peek(), TokenKind::CloseBracket | TokenKind::Eof) {
+                    // Handle empty elements (for list destructuring like [$a, , $c])
+                    if matches!(self.peek(), TokenKind::Comma) {
+                        elements.push(ArrayElement {
+                            key: None,
+                            value: Expr {
+                                span,
+                                kind: ExprKind::Null,
+                            },
+                            unpack: false,
+                        });
+                        self.advance(); // consume comma
+                        continue;
+                    }
                     if self.eat(&TokenKind::Ellipsis) {
                         let value = self.parse_expression()?;
                         elements.push(ArrayElement {
@@ -3032,7 +3098,7 @@ impl Parser {
                         // Anonymous class: new class { ... }
                         self.advance();
                         // Parse optional constructor args
-                        let args = if matches!(self.peek(), TokenKind::OpenParen) {
+                        let ctor_args = if matches!(self.peek(), TokenKind::OpenParen) {
                             self.advance();
                             let args = self.parse_arguments()?;
                             self.expect(&TokenKind::CloseParen)?;
@@ -3040,59 +3106,82 @@ impl Parser {
                         } else {
                             Vec::new()
                         };
-                        // Parse optional extends/implements
-                        if self.eat(&TokenKind::Extends) {
-                            // Skip parent class name
+                        // Parse optional extends
+                        let extends = if self.eat(&TokenKind::Extends) {
+                            let mut name = Vec::new();
                             while matches!(
                                 self.peek(),
                                 TokenKind::Identifier(_) | TokenKind::Backslash
                             ) {
-                                self.advance();
+                                if let TokenKind::Identifier(part) = self.peek().clone() {
+                                    if !name.is_empty() {
+                                        name.push(b'\\');
+                                    }
+                                    name.extend_from_slice(&part);
+                                    self.advance();
+                                } else {
+                                    self.advance(); // backslash
+                                }
                             }
-                        }
+                            Some(name)
+                        } else {
+                            None
+                        };
+                        // Parse optional implements
+                        let mut implements = Vec::new();
                         if self.eat(&TokenKind::Implements) {
                             loop {
+                                let mut iface_name = Vec::new();
                                 while matches!(
                                     self.peek(),
                                     TokenKind::Identifier(_) | TokenKind::Backslash
                                 ) {
-                                    self.advance();
+                                    if let TokenKind::Identifier(part) = self.peek().clone() {
+                                        if !iface_name.is_empty() {
+                                            iface_name.push(b'\\');
+                                        }
+                                        iface_name.extend_from_slice(&part);
+                                        self.advance();
+                                    } else {
+                                        self.advance(); // backslash
+                                    }
+                                }
+                                if !iface_name.is_empty() {
+                                    implements.push(iface_name);
                                 }
                                 if !self.eat(&TokenKind::Comma) {
                                     break;
                                 }
                             }
                         }
-                        // Parse class body (skip it)
-                        if matches!(self.peek(), TokenKind::OpenBrace) {
-                            let mut depth = 0;
-                            loop {
-                                match self.peek() {
-                                    TokenKind::OpenBrace => {
-                                        self.advance();
-                                        depth += 1;
-                                    }
-                                    TokenKind::CloseBrace => {
-                                        self.advance();
-                                        depth -= 1;
-                                        if depth == 0 {
-                                            break;
-                                        }
-                                    }
-                                    TokenKind::Eof => break,
-                                    _ => {
-                                        self.advance();
-                                    }
-                                }
-                            }
-                        }
+                        // Parse class body
+                        let body = self.parse_class_body()?;
+                        // Generate unique anonymous class name
+                        self.anon_counter += 1;
+                        let anon_name = format!("__anonymous_class_{}", self.anon_counter);
+                        // Create the class declaration as a statement that needs to be
+                        // prepended before this expression. We embed it in the New expression.
+                        // The compiler handles this by checking for class@anonymous prefix.
+                        let class_stmt = Statement {
+                            kind: StmtKind::ClassDecl {
+                                name: anon_name.as_bytes().to_vec(),
+                                modifiers: ClassModifiers::default(),
+                                extends,
+                                implements,
+                                body,
+                            },
+                            span,
+                        };
+                        // Wrap as an expression that includes the class decl
+                        // We'll use a special pattern: emit the class decl inline
+                        self.anon_class_stmts.push(class_stmt);
                         Expr {
                             kind: ExprKind::New {
                                 class: Box::new(Expr {
-                                    kind: ExprKind::Identifier(b"anonymous".to_vec()),
+                                    kind: ExprKind::Identifier(anon_name.into_bytes()),
                                     span: class_span,
                                 }),
-                                args,
+                                args: ctor_args,
                             },
                             span,
                         }
@@ -3565,6 +3654,7 @@ impl Parser {
             }
             _ if self.is_semi_reserved_keyword() => {
                 // Allow keywords used as identifiers in expression context
+                let is_list = matches!(self.peek(), TokenKind::List);
                 let mut full_name = self.keyword_to_identifier();
                 self.advance();
                 // Check for qualified name: keyword\Identifier\...
@@ -3585,19 +3675,30 @@ impl Parser {
                 }
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
-                    let args = self.parse_arguments()?;
-                    let end_span = self.span();
-                    self.expect(&TokenKind::CloseParen)?;
-                    Ok(Expr {
-                        span: span.merge(end_span),
-                        kind: ExprKind::FunctionCall {
-                            name: Box::new(Expr {
-                                kind: ExprKind::Identifier(full_name),
-                                span,
-                            }),
-                            args,
-                        },
-                    })
+                    if is_list {
+                        // Parse list() as an Array expression (supports keyed and empty slots)
+                        let elements = self.parse_list_elements()?;
+                        let end_span = self.span();
+                        self.expect(&TokenKind::CloseParen)?;
+                        Ok(Expr {
+                            span: span.merge(end_span),
+                            kind: ExprKind::Array(elements),
+                        })
+                    } else {
+                        let args = self.parse_arguments()?;
+                        let end_span = self.span();
+                        self.expect(&TokenKind::CloseParen)?;
+                        Ok(Expr {
+                            span: span.merge(end_span),
+                            kind: ExprKind::FunctionCall {
+                                name: Box::new(Expr {
+                                    kind: ExprKind::Identifier(full_name),
+                                    span,
+                                }),
+                                args,
+                            },
+                        })
+                    }
                 } else {
                     Ok(Expr {
                         kind: ExprKind::Identifier(full_name),
@@ -3667,6 +3768,63 @@ impl Parser {
         }
 
         Ok(args)
+    }
+
+    /// Parse list() elements which allow empty slots and keyed syntax: list($a, , "key" => $c)
+    fn parse_list_elements(&mut self) -> ParseResult<Vec<ArrayElement>> {
+        let mut elements = Vec::new();
+        if matches!(self.peek(), TokenKind::CloseParen) {
+            return Ok(elements);
+        }
+
+        loop {
+            // Handle empty slots (commas without values)
+            if matches!(self.peek(), TokenKind::Comma | TokenKind::CloseParen) {
+                let span = self.span();
+                elements.push(ArrayElement {
+                    key: None,
+                    value: Expr {
+                        kind: ExprKind::Null,
+                        span,
+                    },
+                    unpack: false,
+                });
+                if self.eat(&TokenKind::Comma) {
+                    if matches!(self.peek(), TokenKind::CloseParen) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+
+            let first = self.parse_expression()?;
+            if self.eat(&TokenKind::DoubleArrow) {
+                // Keyed list: "key" => $var or "key" => list(...)
+                let value = self.parse_expression()?;
+                elements.push(ArrayElement {
+                    key: Some(first),
+                    value,
+                    unpack: false,
+                });
+            } else {
+                elements.push(ArrayElement {
+                    key: None,
+                    value: first,
+                    unpack: false,
+                });
+            }
+
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            // Allow trailing comma
+            if matches!(self.peek(), TokenKind::CloseParen) {
+                break;
+            }
+        }
+
+        Ok(elements)
     }
 
     /// Check if current token is a semi-reserved keyword that can be used as a method/function name

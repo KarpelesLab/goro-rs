@@ -275,6 +275,8 @@ pub struct OpArray {
     pub name: Vec<u8>,
     /// Number of required/declared parameters (for variadic handling)
     pub param_count: u32,
+    /// Number of required parameters (params without defaults)
+    pub required_param_count: u32,
     /// If set, the last param is variadic (...$args) at this CV index
     pub variadic_param: Option<u32>,
     /// Nested function OpArrays (for DeclareFunction)
@@ -301,6 +303,7 @@ impl OpArray {
             temp_count: 0,
             name: Vec::new(),
             param_count: 0,
+            required_param_count: 0,
             variadic_param: None,
             child_functions: Vec::new(),
             is_generator: false,

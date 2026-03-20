@@ -505,13 +505,14 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                 }
                 b's' => {
                     pi += 2;
-                    // %s: one or more non-whitespace chars, with backtracking
-                    if ai >= ab.len() || ab[ai] == b' ' || ab[ai] == b'\t' || ab[ai] == b'\n' {
+                    // %s: one or more non-newline chars, with backtracking
+                    // PHP's run-tests uses [^\r\n]+ for %s
+                    if ai >= ab.len() || ab[ai] == b'\n' || ab[ai] == b'\r' {
                         return false;
                     }
-                    // Find the extent of non-whitespace
+                    // Find the extent of non-newline chars
                     let start = ai;
-                    while ai < ab.len() && ab[ai] != b' ' && ab[ai] != b'\t' && ab[ai] != b'\n' {
+                    while ai < ab.len() && ab[ai] != b'\n' && ab[ai] != b'\r' {
                         ai += 1;
                     }
                     // Try backtracking from longest match

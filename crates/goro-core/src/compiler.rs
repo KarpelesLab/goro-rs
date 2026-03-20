@@ -55,6 +55,10 @@ pub struct Compiler {
     use_function_map: HashMap<Vec<u8>, Vec<u8>>,
     /// Use imports for constants: maps short name -> fully qualified name (case-sensitive)
     use_const_map: HashMap<Vec<u8>, Vec<u8>>,
+    /// Label offsets for goto: maps label name -> instruction offset
+    label_offsets: HashMap<Vec<u8>, u32>,
+    /// Pending gotos for forward references: maps label name -> list of jmp instruction offsets
+    pending_gotos: HashMap<Vec<u8>, Vec<u32>>,
 }
 
 impl Default for Compiler {
@@ -108,6 +112,8 @@ impl Compiler {
             use_map: HashMap::new(),
             use_function_map: HashMap::new(),
             use_const_map: HashMap::new(),
+            label_offsets: HashMap::new(),
+            pending_gotos: HashMap::new(),
         }
     }
 
@@ -288,8 +294,11 @@ impl Compiler {
         // Second pass: compile everything else
         for stmt in &program.statements {
             match &stmt.kind {
-                StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => {
+                StmtKind::FunctionDecl { .. } => {
                     // Already compiled in first pass
+                }
+                StmtKind::ClassDecl { name, .. } if !name.starts_with(b"__anonymous_class_") => {
+                    // Already compiled in first pass (skip non-anonymous classes)
                 }
                 StmtKind::NamespaceDecl { name, body } => {
                     // Set namespace state for second pass
@@ -311,7 +320,10 @@ impl Compiler {
                         // Bracketed namespace: compile body statements (except func/class decls)
                         for s in body_stmts {
                             match &s.kind {
-                                StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => {
+                                StmtKind::FunctionDecl { .. } => {
+                                    // Already compiled in first pass
+                                }
+                                StmtKind::ClassDecl { name, .. } if !name.starts_with(b"__anonymous_class_") => {
                                     // Already compiled in first pass
                                 }
                                 _ => {
@@ -377,7 +389,10 @@ impl Compiler {
                 StmtKind::UseDecl(_) => {
                     self.compile_stmt(stmt)?;
                 }
-                StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => {
+                StmtKind::FunctionDecl { .. } => {
+                    self.compile_stmt(stmt)?;
+                }
+                StmtKind::ClassDecl { name, .. } if !name.starts_with(b"__anonymous_class_") => {
                     self.compile_stmt(stmt)?;
                 }
                 _ => {}
@@ -734,6 +749,33 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: stmt.span.line,
                     });
+                } else {
+                    // Handle list/array destructuring in foreach value:
+                    // foreach ($arr as list($a, $b)) or foreach ($arr as [$a, $b])
+                    let elems: Option<Vec<ArrayElement>> = match &value.kind {
+                        ExprKind::Array(elems) => Some(elems.clone()),
+                        ExprKind::FunctionCall { name, args }
+                            if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) =>
+                        {
+                            Some(
+                                args.iter()
+                                    .map(|a| ArrayElement {
+                                        key: None,
+                                        value: a.value.clone(),
+                                        unpack: false,
+                                    })
+                                    .collect(),
+                            )
+                        }
+                        _ => None,
+                    };
+                    if let Some(elems) = elems {
+                        self.compile_list_destructure(
+                            &elems,
+                            OperandType::Tmp(val_tmp),
+                            stmt.span.line,
+                        )?;
+                    }
                 }
 
                 // Assign key if present
@@ -972,6 +1014,11 @@ impl Compiler {
 
                 // Set up parameter CVs and default values
                 func_compiler.op_array.param_count = params.len() as u32;
+                // Count required params (those without defaults and not variadic)
+                func_compiler.op_array.required_param_count = params
+                    .iter()
+                    .filter(|p| p.default.is_none() && !p.variadic)
+                    .count() as u32;
                 for param in params {
                     let cv = func_compiler.op_array.get_or_create_cv(&param.name);
                     if param.variadic {
@@ -1425,6 +1472,10 @@ impl Compiler {
                         }
                     }
 
+                    // Pop the finally target BEFORE compiling finally body
+                    // so that returns inside finally don't loop back to finally
+                    self.finally_targets.pop();
+
                     for s in finally_stmts {
                         self.compile_stmt(s)?;
                     }
@@ -1437,9 +1488,6 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: stmt.span.line,
                     });
-
-                    // Pop the finally target
-                    self.finally_targets.pop();
 
                     // Patch TryBegin's finally target
                     self.op_array.ops[try_begin as usize].op2 =
@@ -1900,8 +1948,41 @@ impl Compiler {
                 Ok(())
             }
 
-            StmtKind::Label(_) | StmtKind::Goto(_) => {
-                // Skip goto/labels for now
+            StmtKind::Label(name) => {
+                let offset = self.op_array.current_offset();
+                self.label_offsets.insert(name.clone(), offset);
+                // Patch any pending gotos that reference this label
+                if let Some(gotos) = self.pending_gotos.remove(name) {
+                    for goto_offset in gotos {
+                        self.op_array.patch_jump(goto_offset, offset);
+                    }
+                }
+                Ok(())
+            }
+            StmtKind::Goto(name) => {
+                if let Some(&target) = self.label_offsets.get(name) {
+                    // Label already seen - emit jump
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(target),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                } else {
+                    // Label not yet seen - emit placeholder jump
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    self.pending_gotos
+                        .entry(name.clone())
+                        .or_insert_with(Vec::new)
+                        .push(jmp);
+                }
                 Ok(())
             }
 
@@ -1916,6 +1997,75 @@ impl Compiler {
                 })
             }
         }
+    }
+
+    /// Compile list/array destructuring assignment from a source array operand.
+    /// Recursively handles nested list() and [] patterns.
+    fn compile_list_destructure(
+        &mut self,
+        elems: &[ArrayElement],
+        arr_op: OperandType,
+        line: u32,
+    ) -> CompileResult<()> {
+        for (i, elem) in elems.iter().enumerate() {
+            let idx_op = if let Some(key_expr) = &elem.key {
+                self.compile_expr(key_expr)?
+            } else {
+                let idx_const = self.op_array.add_literal(Value::Long(i as i64));
+                OperandType::Const(idx_const)
+            };
+
+            if let ExprKind::Variable(name) = &elem.value.kind {
+                let cv = self.op_array.get_or_create_cv(name);
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::ArrayGet,
+                    op1: arr_op,
+                    op2: idx_op,
+                    result: OperandType::Tmp(tmp),
+                    line,
+                });
+                self.op_array.emit(Op {
+                    opcode: OpCode::Assign,
+                    op1: OperandType::Cv(cv),
+                    op2: OperandType::Tmp(tmp),
+                    result: OperandType::Unused,
+                    line,
+                });
+            } else {
+                // Check for nested destructuring
+                let nested_elems = match &elem.value.kind {
+                    ExprKind::Array(elems) => Some(elems.clone()),
+                    ExprKind::FunctionCall { name, args }
+                        if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) =>
+                    {
+                        Some(
+                            args.iter()
+                                .map(|a| ArrayElement {
+                                    key: None,
+                                    value: a.value.clone(),
+                                    unpack: false,
+                                })
+                                .collect(),
+                        )
+                    }
+                    ExprKind::Null => None, // Skip empty slots
+                    _ => None,
+                };
+                if let Some(nested) = nested_elems {
+                    let sub_arr = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ArrayGet,
+                        op1: arr_op,
+                        op2: idx_op,
+                        result: OperandType::Tmp(sub_arr),
+                        line,
+                    });
+                    self.compile_list_destructure(&nested, OperandType::Tmp(sub_arr), line)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Compile an expression, returning the operand that holds the result
@@ -2085,38 +2235,7 @@ impl Compiler {
                         };
 
                         let arr_op = val;
-                        for (i, elem) in elems.iter().enumerate() {
-                            // Determine the key to use
-                            let idx_op = if let Some(key_expr) = &elem.key {
-                                self.compile_expr(key_expr)?
-                            } else {
-                                let idx_const =
-                                    self.op_array.add_literal(Value::Long(i as i64));
-                                OperandType::Const(idx_const)
-                            };
-
-                            // Determine the target variable
-                            if let ExprKind::Variable(name) = &elem.value.kind {
-                                let cv = self.op_array.get_or_create_cv(name);
-                                let tmp = self.op_array.alloc_temp();
-                                self.op_array.emit(Op {
-                                    opcode: OpCode::ArrayGet,
-                                    op1: arr_op,
-                                    op2: idx_op,
-                                    result: OperandType::Tmp(tmp),
-                                    line: expr.span.line,
-                                });
-                                self.op_array.emit(Op {
-                                    opcode: OpCode::Assign,
-                                    op1: OperandType::Cv(cv),
-                                    op2: OperandType::Tmp(tmp),
-                                    result: OperandType::Unused,
-                                    line: expr.span.line,
-                                });
-                            } else {
-                                // Skip non-variable targets (empty slots in list)
-                            }
-                        }
+                        self.compile_list_destructure(&elems, arr_op, expr.span.line)?;
                         Ok(arr_op)
                     }
                 }
