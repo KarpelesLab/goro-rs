@@ -344,6 +344,19 @@ impl Vm {
                 c.insert(b"PREG_JIT_STACKLIMIT_ERROR".to_vec(), Value::Long(6));
                 c.insert(b"PCRE_JIT_SUPPORT".to_vec(), Value::False);
                 c.insert(b"PCRE_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"10.42 2022-12-11")));
+                // Hash constants
+                c.insert(b"HASH_HMAC".to_vec(), Value::Long(1));
+                // Assert/INI defaults
+                c.insert(b"zend.assertions".to_vec(), Value::Long(1));
+                c.insert(b"assert.active".to_vec(), Value::Long(1));
+                c.insert(b"assert.exception".to_vec(), Value::Long(1));
+                // Assert option constants
+                c.insert(b"ASSERT_ACTIVE".to_vec(), Value::Long(1));
+                c.insert(b"ASSERT_WARNING".to_vec(), Value::Long(2));
+                c.insert(b"ASSERT_BAIL".to_vec(), Value::Long(3));
+                c.insert(b"ASSERT_QUIET_EVAL".to_vec(), Value::Long(4));
+                c.insert(b"ASSERT_CALLBACK".to_vec(), Value::Long(5));
+                c.insert(b"ASSERT_EXCEPTION".to_vec(), Value::Long(6));
                 // String constants
                 c.insert(b"STR_PAD_RIGHT".to_vec(), Value::Long(1));
                 c.insert(b"STR_PAD_LEFT".to_vec(), Value::Long(0));
@@ -727,7 +740,7 @@ impl Vm {
             Value::String(PhpString::from_string(message.to_string())),
         );
         err_obj.set_property(b"code".to_vec(), Value::Long(0));
-        err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
+        err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_string(self.current_file.clone())));
         err_obj.set_property(b"line".to_vec(), Value::Long(line as i64));
         Value::Object(Rc::new(RefCell::new(err_obj)))
     }
@@ -959,19 +972,30 @@ impl Vm {
 
     /// Get the display name for a ParamType (for error messages)
     fn param_type_display(param_type: &ParamType) -> String {
+        Self::param_type_display_inner(param_type, false)
+    }
+
+    fn param_type_display_inner(param_type: &ParamType, in_union: bool) -> String {
         match param_type {
             ParamType::Simple(name) => String::from_utf8_lossy(name).to_string(),
-            ParamType::Nullable(inner) => format!("?{}", Self::param_type_display(inner)),
+            ParamType::Nullable(inner) => format!("?{}", Self::param_type_display_inner(inner, false)),
             ParamType::Union(types) => types
                 .iter()
-                .map(Self::param_type_display)
+                .map(|t| Self::param_type_display_inner(t, true))
                 .collect::<Vec<_>>()
                 .join("|"),
-            ParamType::Intersection(types) => types
-                .iter()
-                .map(Self::param_type_display)
-                .collect::<Vec<_>>()
-                .join("&"),
+            ParamType::Intersection(types) => {
+                let s = types
+                    .iter()
+                    .map(|t| Self::param_type_display_inner(t, false))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                if in_union {
+                    format!("({})", s)
+                } else {
+                    s
+                }
+            }
         }
     }
 
@@ -1007,7 +1031,7 @@ impl Vm {
                     let arg_num = i + 1 - implicit_args;
                     return Some(format!(
                         "{}(): Argument #{} (${}) \
-                         must be of type {}, {} given, called in {} on line {}",
+                         must be of type {}, {} given, called in {}:{}",
                         func_display_name, arg_num, param_name, expected, given, self.current_file, line
                     ));
                 }
@@ -2103,7 +2127,16 @@ impl Vm {
         if let Ok(ref val) = result {
             if let Some(ref ret_type) = op_array.return_type {
                 if !self.value_matches_return_type(val, ret_type) {
-                    let func_name = String::from_utf8_lossy(&op_array.name);
+                    let raw_name = String::from_utf8_lossy(&op_array.name);
+                    // Include class name in the function display name for methods
+                    let func_name = if let Some(ref scope) = op_array.scope_class {
+                        let class_display = self.classes.get(scope)
+                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                            .unwrap_or_else(|| String::from_utf8_lossy(scope).to_string());
+                        format!("{}::{}", class_display, raw_name)
+                    } else {
+                        raw_name.to_string()
+                    };
                     // Use "none" when a function implicitly returns (no explicit return statement)
                     let actual_type = if implicit_return {
                         "none".to_string()
@@ -3554,7 +3587,7 @@ impl Vm {
                                 implicit_args,
                                 op.line,
                             ) {
-                                let exc_val = self.throw_type_error(err_msg.clone());
+                                let exc_val = self.create_exception(b"TypeError", &err_msg, op.line);
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _)) = exception_handlers.pop() {
                                     self.call_stack.pop(); // pop early-pushed frame
@@ -5208,7 +5241,19 @@ impl Vm {
                         return Ok(val);
                     }
                     // If there's a pending exception, re-throw it
-                    if let Some(exc) = &self.current_exception {
+                    if self.current_exception.is_some() {
+                        // Try to find an outer exception handler
+                        if let Some((catch_target, finally_target, _exc_tmp)) = exception_handlers.pop() {
+                            if catch_target > 0 {
+                                ip = catch_target as usize;
+                                continue;
+                            } else if finally_target > 0 {
+                                ip = finally_target as usize;
+                                continue;
+                            }
+                        }
+                        // No outer handler - uncaught exception
+                        let exc = self.current_exception.as_ref().unwrap();
                         let msg = if let Value::Object(obj) = exc {
                             let obj = obj.borrow();
                             let class = String::from_utf8_lossy(&obj.class_name).to_string();

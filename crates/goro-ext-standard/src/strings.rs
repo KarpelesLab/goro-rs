@@ -462,8 +462,11 @@ fn explode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = string.as_bytes();
 
     if d.is_empty() {
+        let msg = "explode(): Argument #1 ($separator) must not be empty";
+        let exc = _vm.create_exception(b"ValueError", msg, 0);
+        _vm.current_exception = Some(exc);
         return Err(VmError {
-            message: "explode(): Argument #1 ($separator) must not be empty".into(),
+            message: msg.into(),
             line: 0,
         });
     }
@@ -677,6 +680,13 @@ pub fn do_sprintf(args: &[Value]) -> String {
             if i >= format_bytes.len() {
                 break;
             }
+            // Skip length modifiers (l, ll, h, etc.) - PHP ignores them
+            while i < format_bytes.len() && matches!(format_bytes[i], b'l' | b'h' | b'L' | b'q' | b'j' | b'z' | b't') {
+                i += 1;
+            }
+            if i >= format_bytes.len() {
+                break;
+            }
             let spec = format_bytes[i];
             i += 1;
 
@@ -797,13 +807,37 @@ fn php_fix_exponent(s: &str) -> String {
 
 fn nl2br(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let is_xhtml = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
+    let br = if is_xhtml { b"<br />" as &[u8] } else { b"<br>" };
     let bytes = s.as_bytes();
     let mut result = Vec::with_capacity(bytes.len());
-    for &b in bytes {
-        if b == b'\n' {
-            result.extend_from_slice(b"<br />\n");
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' {
+            result.extend_from_slice(br);
+            // \r\n is a single newline
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                result.push(b'\r');
+                result.push(b'\n');
+                i += 2;
+            } else {
+                result.push(b'\r');
+                i += 1;
+            }
+        } else if bytes[i] == b'\n' {
+            result.extend_from_slice(br);
+            // \n\r is also a single newline (rare but PHP handles it)
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\r' {
+                result.push(b'\n');
+                result.push(b'\r');
+                i += 2;
+            } else {
+                result.push(b'\n');
+                i += 1;
+            }
         } else {
-            result.push(b);
+            result.push(bytes[i]);
+            i += 1;
         }
     }
     Ok(Value::String(PhpString::from_vec(result)))
@@ -1261,12 +1295,66 @@ fn quoted_printable_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn convert_uuencode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
+fn convert_uuencode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return Ok(Value::False);
+    }
+    let mut result = Vec::new();
+    for chunk in bytes.chunks(45) {
+        // Length byte
+        result.push((chunk.len() as u8) + 32);
+        // Encode 3 bytes -> 4 chars
+        let mut i = 0;
+        while i < chunk.len() {
+            let b0 = chunk[i];
+            let b1 = if i + 1 < chunk.len() { chunk[i + 1] } else { 0 };
+            let b2 = if i + 2 < chunk.len() { chunk[i + 2] } else { 0 };
+            result.push(((b0 >> 2) & 0x3F) + 32);
+            result.push((((b0 << 4) | (b1 >> 4)) & 0x3F) + 32);
+            result.push((((b1 << 2) | (b2 >> 6)) & 0x3F) + 32);
+            result.push((b2 & 0x3F) + 32);
+            i += 3;
+        }
+        result.push(b'\n');
+    }
+    // End marker
+    result.push(b' '); // zero-length line (32 = space = 0 + 32)
+    result.push(b'\n');
+    // Convert spaces to backticks (PHP convention)
+    for b in &mut result {
+        if *b == 32 { *b = b'`'; }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn convert_uudecode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
+fn convert_uudecode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Read length byte
+        let len_byte = if bytes[i] == b'`' { 0u8 } else { bytes[i].wrapping_sub(32) & 0x3F };
+        if len_byte == 0 { break; }
+        i += 1;
+        let mut decoded = 0usize;
+        while decoded < len_byte as usize && i + 3 < bytes.len() {
+            let c0 = if bytes[i] == b'`' { 0 } else { (bytes[i] - 32) & 0x3F };
+            let c1 = if bytes[i+1] == b'`' { 0 } else { (bytes[i+1] - 32) & 0x3F };
+            let c2 = if bytes[i+2] == b'`' { 0 } else { (bytes[i+2] - 32) & 0x3F };
+            let c3 = if bytes[i+3] == b'`' { 0 } else { (bytes[i+3] - 32) & 0x3F };
+            if decoded < len_byte as usize { result.push((c0 << 2) | (c1 >> 4)); decoded += 1; }
+            if decoded < len_byte as usize { result.push((c1 << 4) | (c2 >> 2)); decoded += 1; }
+            if decoded < len_byte as usize { result.push((c2 << 6) | c3); decoded += 1; }
+            i += 4;
+        }
+        // Skip to next line
+        while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+        if i < bytes.len() { i += 1; }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 
 fn str_getcsv(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2179,8 +2267,31 @@ fn substr_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if needle.is_empty() {
         return Ok(Value::Long(0));
     }
-    let count = haystack
-        .as_bytes()
+    let h_bytes = haystack.as_bytes();
+    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let length = args.get(3);
+
+    let start = if offset > h_bytes.len() { h_bytes.len() } else { offset };
+    let end = match length {
+        Some(len_val) => {
+            let len = len_val.to_long();
+            if len < 0 {
+                let e = h_bytes.len() as i64 + len;
+                if e < start as i64 { start } else { e as usize }
+            } else {
+                let e = start + len as usize;
+                if e > h_bytes.len() { h_bytes.len() } else { e }
+            }
+        }
+        None => h_bytes.len(),
+    };
+
+    if start >= end || needle.len() > end - start {
+        return Ok(Value::Long(0));
+    }
+
+    let search_bytes = &h_bytes[start..end];
+    let count = search_bytes
         .windows(needle.len())
         .filter(|w| *w == needle.as_bytes())
         .count();
@@ -3795,12 +3906,12 @@ fn str_word_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn convert_uuencode_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False) // stub
+fn convert_uuencode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    convert_uuencode(vm, args)
 }
 
-fn convert_uudecode_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False) // stub
+fn convert_uudecode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    convert_uudecode(vm, args)
 }
 
 fn quoted_printable_encode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

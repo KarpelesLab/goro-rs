@@ -375,10 +375,30 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
         Ok(p) => p,
         Err(e) => {
             // PHP outputs parse errors to stdout
-            let msg = format!(
-                "\nParse error: syntax error in {} on line {}\n",
-                filename, e.span.line
-            );
+            // Some parser errors should be "Fatal error" rather than "Parse error"
+            let err_msg = &e.message;
+            let is_fatal = err_msg.contains("Match expressions")
+                || err_msg.contains("Cannot use")
+                || err_msg.contains("cannot declare")
+                || err_msg.contains("cannot implement")
+                || err_msg.contains("cannot extend")
+                || err_msg.contains("is reserved")
+                || err_msg.contains("must be compatible")
+                || err_msg.contains("must be")
+                || err_msg.contains("previously implemented")
+                || err_msg.contains("already in use")
+                || err_msg.contains("is redundant");
+            let msg = if is_fatal {
+                format!(
+                    "\nFatal error: {} in {} on line {}\n",
+                    err_msg, filename, e.span.line
+                )
+            } else {
+                format!(
+                    "\nParse error: syntax error in {} on line {}\n",
+                    filename, e.span.line
+                )
+            };
             return Ok(msg.into_bytes());
         }
     };
@@ -440,16 +460,19 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
                     let class = String::from_utf8_lossy(&obj.class_name);
                     let msg = obj.get_property(b"message");
                     let msg_str = msg.to_php_string().to_string_lossy();
-                    let file_str = &vm.current_file;
+                    let exc_file = obj.get_property(b"file").to_php_string().to_string_lossy();
+                    let exc_line = obj.get_property(b"line").to_long();
+                    let file_str = if exc_file.is_empty() { vm.current_file.clone() } else { exc_file };
+                    let line_num = if exc_line > 0 { exc_line as u32 } else { e.line };
                     let fatal = if msg_str.is_empty() {
                         format!(
                             "\nFatal error: Uncaught {} in {}:{}\nStack trace:\n{}\n  thrown in {} on line {}",
-                            class, file_str, e.line, stack_trace, file_str, e.line
+                            class, file_str, line_num, stack_trace, file_str, line_num
                         )
                     } else {
                         format!(
                             "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n{}\n  thrown in {} on line {}",
-                            class, msg_str, file_str, e.line, stack_trace, file_str, e.line
+                            class, msg_str, file_str, line_num, stack_trace, file_str, line_num
                         )
                     };
                     output.extend_from_slice(fatal.as_bytes());

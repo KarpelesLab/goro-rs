@@ -1979,6 +1979,25 @@ fn set_time_limit(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Check zend.assertions setting (0 or -1 means disabled)
+    if let Some(val) = vm.constants.get(b"zend.assertions".as_ref()) {
+        let v = val.to_long();
+        if v <= 0 {
+            return Ok(Value::True);
+        }
+    }
+    // Check assert.active setting (0 means disabled)
+    if let Some(val) = vm.constants.get(b"assert.active".as_ref()) {
+        let v = val.to_long();
+        if v == 0 {
+            return Ok(Value::True);
+        }
+    }
+    // Check assert.exception setting
+    let assert_exception = vm.constants.get(b"assert.exception".as_ref())
+        .map(|v| v.to_long() != 0)
+        .unwrap_or(true); // default is true in PHP 8
+
     let val = args.first().unwrap_or(&Value::Null);
     if val.is_truthy() {
         Ok(Value::True)
@@ -2001,16 +2020,24 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
 
-        // Throw AssertionError
+        // Build message
         let msg = match description {
             Some(Value::String(s)) => s.to_string_lossy(),
             _ => "assert(false)".to_string(),
         };
+
+        if !assert_exception {
+            // When assert.exception is 0, issue a warning and return NULL
+            vm.emit_warning(&format!("assert(): {} failed", msg));
+            return Ok(Value::Null);
+        }
+
+        // Throw AssertionError
         let err_id = vm.next_object_id();
         let mut err_obj = goro_core::object::PhpObject::new(b"AssertionError".to_vec(), err_id);
         err_obj.set_property(b"message".to_vec(), Value::String(PhpString::from_string(msg.clone())));
         err_obj.set_property(b"code".to_vec(), Value::Long(0));
-        err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"Unknown")));
+        err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_string(vm.current_file.clone())));
         err_obj.set_property(b"line".to_vec(), Value::Long(0));
         err_obj.set_property(b"previous".to_vec(), Value::Null);
         let exc = Value::Object(Rc::new(RefCell::new(err_obj)));
@@ -2278,7 +2305,7 @@ fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::String(s) => ArrayKey::String(s.clone()),
                 _ => {
                     // PHP warns and skips non-int/non-string values
-                    vm.emit_warning("array_count_values(): Argument #1 ($array) can only have int or string values");
+                    vm.emit_warning("array_count_values(): Can only count string and integer values, entry skipped");
                     continue;
                 }
             };

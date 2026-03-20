@@ -903,6 +903,19 @@ impl<'a> Lexer<'a> {
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | 0x80..=0xFF => {
                 let ident = self.scan_identifier();
 
+                // Handle b"..." and b'...' binary string prefix (PHP treats them as regular strings)
+                if (ident == b"b" || ident == b"B") && self.pos < self.source.len() {
+                    if self.source[self.pos] == b'"' {
+                        self.advance();
+                        let tok = self.scan_double_quoted_string();
+                        return Token::new(tok, Span::new(self.pos as u32, self.pos as u32, start_line));
+                    } else if self.source[self.pos] == b'\'' {
+                        self.advance();
+                        let s = self.scan_single_quoted_string();
+                        return Token::new(TokenKind::ConstantString(s), Span::new(self.pos as u32, self.pos as u32, start_line));
+                    }
+                }
+
                 // Special handling: "yield from" is two words but one token
                 if ident.eq_ignore_ascii_case(b"yield") {
                     let saved = self.pos;

@@ -14,6 +14,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"hash_algos", hash_algos_fn);
     vm.register_function(b"hash_equals", hash_equals_fn);
     vm.register_function(b"hash_hmac", hash_hmac_fn);
+    vm.register_function(b"hash_init", hash_init_fn);
+    vm.register_function(b"hash_update", hash_update_fn);
+    vm.register_function(b"hash_final", hash_final_fn);
+    vm.register_function(b"hash_copy", hash_copy_fn);
+    vm.register_function(b"hash_pbkdf2", hash_pbkdf2_fn);
+    vm.register_function(b"hash_hmac_algos", hash_hmac_algos_fn);
 }
 
 fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -156,6 +162,202 @@ fn hash_hmac_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
         Ok(Value::String(PhpString::from_string(hex)))
     }
+}
+
+/// hash_init(): Create a HashContext object (we use an Object with algo + data properties)
+fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
+    let options = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let key = args.get(2).map(|v| v.to_php_string());
+
+    // Verify algorithm is valid
+    if compute_hash(&algo, b"").is_none() {
+        let exc = vm.create_exception(b"ValueError", &format!("hash_init(): Argument #1 ($algo) must be a valid hashing algorithm, \"{}\" given", algo), 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: format!("hash_init(): Unknown hashing algorithm: {}", algo), line: 0 });
+    }
+
+    let obj_id = vm.next_object_id();
+    let mut obj = goro_core::object::PhpObject::new(b"HashContext".to_vec(), obj_id);
+    obj.set_property(b"algo".to_vec(), Value::String(PhpString::from_string(algo.clone())));
+    obj.set_property(b"data".to_vec(), Value::String(PhpString::from_vec(Vec::new())));
+
+    // HASH_HMAC = 1
+    if options & 1 != 0 {
+        if let Some(k) = key {
+            let block_size = hash_block_size(&algo);
+            let mut key_bytes = k.as_bytes().to_vec();
+            if key_bytes.len() > block_size {
+                key_bytes = compute_hash(&algo, &key_bytes).unwrap_or_default();
+            }
+            while key_bytes.len() < block_size {
+                key_bytes.push(0);
+            }
+            obj.set_property(b"hmac_key".to_vec(), Value::String(PhpString::from_vec(key_bytes)));
+            obj.set_property(b"is_hmac".to_vec(), Value::True);
+        }
+    }
+
+    Ok(Value::Object(Rc::new(RefCell::new(obj))))
+}
+
+fn hash_update_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(obj)) = args.first() {
+        let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
+        let mut obj = obj.borrow_mut();
+        let existing = obj.get_property(b"data").to_php_string();
+        let mut combined = existing.as_bytes().to_vec();
+        combined.extend_from_slice(data.as_bytes());
+        obj.set_property(b"data".to_vec(), Value::String(PhpString::from_vec(combined)));
+        return Ok(Value::True);
+    }
+    Ok(Value::False)
+}
+
+fn hash_final_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(obj)) = args.first() {
+        let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+        let obj_borrow = obj.borrow();
+        let algo = obj_borrow.get_property(b"algo").to_php_string().to_string_lossy().to_ascii_lowercase();
+        let data = obj_borrow.get_property(b"data").to_php_string();
+        let is_hmac = obj_borrow.get_property(b"is_hmac").is_truthy();
+        let hmac_key_val = obj_borrow.get_property(b"hmac_key");
+        let hmac_key = hmac_key_val.to_php_string();
+        drop(obj_borrow);
+
+        let digest = if is_hmac {
+            let block_size = hash_block_size(&algo);
+            let key_bytes = hmac_key.as_bytes();
+
+            let mut i_key_pad = vec![0u8; block_size];
+            let mut o_key_pad = vec![0u8; block_size];
+            for i in 0..block_size {
+                let kb = if i < key_bytes.len() { key_bytes[i] } else { 0 };
+                i_key_pad[i] = kb ^ 0x36;
+                o_key_pad[i] = kb ^ 0x5c;
+            }
+
+            let mut inner_data = i_key_pad;
+            inner_data.extend_from_slice(data.as_bytes());
+            let inner_hash = compute_hash(&algo, &inner_data).unwrap_or_default();
+
+            let mut outer_data = o_key_pad;
+            outer_data.extend_from_slice(&inner_hash);
+            compute_hash(&algo, &outer_data).unwrap_or_default()
+        } else {
+            compute_hash(&algo, data.as_bytes()).unwrap_or_default()
+        };
+
+        if raw {
+            return Ok(Value::String(PhpString::from_vec(digest)));
+        } else {
+            let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+            return Ok(Value::String(PhpString::from_string(hex)));
+        }
+    }
+    Ok(Value::False)
+}
+
+fn hash_copy_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(obj)) = args.first() {
+        let obj_borrow = obj.borrow();
+        let algo = obj_borrow.get_property(b"algo");
+        let data = obj_borrow.get_property(b"data");
+        let is_hmac = obj_borrow.get_property(b"is_hmac");
+        let hmac_key = obj_borrow.get_property(b"hmac_key");
+        drop(obj_borrow);
+
+        let new_id = 0; // simplified
+        let mut new_obj = goro_core::object::PhpObject::new(b"HashContext".to_vec(), new_id);
+        new_obj.set_property(b"algo".to_vec(), algo);
+        new_obj.set_property(b"data".to_vec(), data);
+        new_obj.set_property(b"is_hmac".to_vec(), is_hmac);
+        new_obj.set_property(b"hmac_key".to_vec(), hmac_key);
+        return Ok(Value::Object(Rc::new(RefCell::new(new_obj))));
+    }
+    Ok(Value::False)
+}
+
+fn hash_pbkdf2_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
+    let password = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let salt = args.get(2).unwrap_or(&Value::Null).to_php_string();
+    let iterations = args.get(3).map(|v| v.to_long()).unwrap_or(1) as usize;
+    let length = args.get(4).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let raw = args.get(5).map(|v| v.is_truthy()).unwrap_or(false);
+
+    let hash_len = compute_hash(&algo, b"").map(|h| h.len()).unwrap_or(0);
+    if hash_len == 0 {
+        return Ok(Value::False);
+    }
+
+    let output_len = if length == 0 { hash_len } else if raw { length } else { length / 2 };
+
+    // PBKDF2 implementation
+    let block_size = hash_block_size(&algo);
+    let mut key_bytes = password.as_bytes().to_vec();
+    if key_bytes.len() > block_size {
+        key_bytes = compute_hash(&algo, &key_bytes).unwrap_or_default();
+    }
+    while key_bytes.len() < block_size {
+        key_bytes.push(0);
+    }
+
+    let hmac = |data: &[u8]| -> Vec<u8> {
+        let mut i_pad = vec![0u8; block_size];
+        let mut o_pad = vec![0u8; block_size];
+        for i in 0..block_size {
+            i_pad[i] = key_bytes[i] ^ 0x36;
+            o_pad[i] = key_bytes[i] ^ 0x5c;
+        }
+        let mut inner = i_pad;
+        inner.extend_from_slice(data);
+        let inner_hash = compute_hash(&algo, &inner).unwrap_or_default();
+        let mut outer = o_pad;
+        outer.extend_from_slice(&inner_hash);
+        compute_hash(&algo, &outer).unwrap_or_default()
+    };
+
+    let mut result = Vec::new();
+    let blocks = (output_len + hash_len - 1) / hash_len;
+
+    for block in 1..=blocks {
+        let mut salt_block = salt.as_bytes().to_vec();
+        salt_block.extend_from_slice(&(block as u32).to_be_bytes());
+        let mut u = hmac(&salt_block);
+        let mut t = u.clone();
+        for _ in 1..iterations {
+            u = hmac(&u);
+            for j in 0..t.len() {
+                t[j] ^= u[j];
+            }
+        }
+        result.extend_from_slice(&t);
+    }
+
+    result.truncate(output_len);
+
+    if raw {
+        Ok(Value::String(PhpString::from_vec(result)))
+    } else {
+        let hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
+        let hex = if length > 0 && hex.len() > length {
+            hex[..length].to_string()
+        } else {
+            hex
+        };
+        Ok(Value::String(PhpString::from_string(hex)))
+    }
+}
+
+fn hash_hmac_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    for algo in &[
+        "md4", "md5", "sha1", "sha224", "sha256", "sha384", "sha512",
+    ] {
+        result.push(Value::String(PhpString::from_bytes(algo.as_bytes())));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn hash_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

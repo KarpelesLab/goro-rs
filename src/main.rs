@@ -129,15 +129,19 @@ fn run_code(source: &[u8], filename: &str) {
                     let class = String::from_utf8_lossy(&obj.class_name);
                     let msg = obj.get_property(b"message");
                     let msg_str = msg.to_php_string().to_string_lossy();
+                    let file = obj.get_property(b"file").to_php_string().to_string_lossy();
+                    let line_val = obj.get_property(b"line").to_long();
+                    let file_str = if file.is_empty() { "Unknown".to_string() } else { file };
+                    let line_num = if line_val > 0 { line_val as u32 } else { e.line };
                     let fatal = if msg_str.is_empty() {
                         format!(
-                            "\nFatal error: Uncaught {} in Unknown:0\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line 0\n",
-                            class
+                            "\nFatal error: Uncaught {} in {}:{}\nStack trace:\n#0 {{main}}\n  thrown in {} on line {}\n",
+                            class, file_str, line_num, file_str, line_num
                         )
                     } else {
                         format!(
-                            "\nFatal error: Uncaught {}: {} in Unknown:0\nStack trace:\n#0 {{main}}\n  thrown in Unknown on line 0\n",
-                            class, msg_str
+                            "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n#0 {{main}}\n  thrown in {} on line {}\n",
+                            class, msg_str, file_str, line_num, file_str, line_num
                         )
                     };
                     handle.write_all(fatal.as_bytes()).ok();
