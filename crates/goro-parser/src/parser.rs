@@ -350,13 +350,19 @@ impl Parser {
             TokenKind::Namespace => {
                 self.advance();
                 // namespace Name\Space;  or  namespace Name\Space { ... }
+                // Namespace names can contain reserved keywords as parts
                 let mut name_parts = Vec::new();
-                if matches!(self.peek(), TokenKind::Identifier(_)) {
+                if matches!(self.peek(), TokenKind::Identifier(_)) || self.is_semi_reserved_keyword() || matches!(self.peek(), TokenKind::Fn | TokenKind::Match | TokenKind::Null | TokenKind::True | TokenKind::False) {
                     loop {
                         match self.peek().clone() {
                             TokenKind::Identifier(part) => {
                                 self.advance();
                                 name_parts.push(part);
+                            }
+                            _ if self.is_semi_reserved_keyword() || matches!(self.peek(), TokenKind::Fn | TokenKind::Match | TokenKind::Null | TokenKind::True | TokenKind::False) => {
+                                let kw = self.keyword_to_identifier();
+                                self.advance();
+                                name_parts.push(kw);
                             }
                             _ => break,
                         }
@@ -385,15 +391,178 @@ impl Parser {
                 })
             }
             TokenKind::Use => {
-                // use statements
                 self.advance();
-                // Skip use declarations for now
-                while !matches!(self.peek(), TokenKind::Semicolon | TokenKind::Eof) {
-                    self.advance();
+                // Check for `use function` or `use const`
+                let default_kind = match self.peek() {
+                    TokenKind::Function => {
+                        self.advance();
+                        UseKind::Function
+                    }
+                    TokenKind::Const => {
+                        self.advance();
+                        UseKind::Constant
+                    }
+                    _ => UseKind::Normal,
+                };
+
+                let mut items = Vec::new();
+
+                // Parse the first name (could be a prefix for group use)
+                let mut first_parts = Vec::new();
+                // Handle optional leading backslash
+                self.eat(&TokenKind::Backslash);
+                loop {
+                    match self.peek().clone() {
+                        TokenKind::Identifier(part) => {
+                            self.advance();
+                            first_parts.push(part);
+                        }
+                        _ if self.is_semi_reserved_keyword() => {
+                            first_parts.push(self.keyword_to_identifier());
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                    if !self.eat(&TokenKind::Backslash) {
+                        break;
+                    }
+                }
+
+                if matches!(self.peek(), TokenKind::OpenBrace) {
+                    // Group use: use Foo\Bar\{Baz, Qux as Q};
+                    // first_parts is the prefix (e.g., ["Foo", "Bar"])
+                    self.advance(); // eat {
+                    loop {
+                        if matches!(self.peek(), TokenKind::CloseBrace) {
+                            break;
+                        }
+                        // Check for `function` or `const` per-item kind
+                        let item_kind = match self.peek() {
+                            TokenKind::Function => {
+                                // `function` keyword as per-item use kind
+                                self.advance();
+                                UseKind::Function
+                            }
+                            TokenKind::Const => {
+                                // `const` keyword as per-item use kind
+                                self.advance();
+                                UseKind::Constant
+                            }
+                            _ => default_kind,
+                        };
+                        let mut name_parts = first_parts.clone();
+                        loop {
+                            match self.peek().clone() {
+                                TokenKind::Identifier(part) => {
+                                    self.advance();
+                                    name_parts.push(part);
+                                }
+                                _ if self.is_semi_reserved_keyword() => {
+                                    name_parts.push(self.keyword_to_identifier());
+                                    self.advance();
+                                }
+                                _ => break,
+                            }
+                            if !self.eat(&TokenKind::Backslash) {
+                                break;
+                            }
+                        }
+                        let alias = if self.eat(&TokenKind::As) {
+                            match self.peek().clone() {
+                                TokenKind::Identifier(a) => {
+                                    self.advance();
+                                    Some(a)
+                                }
+                                _ if self.is_semi_reserved_keyword() => {
+                                    let kw = self.keyword_to_identifier();
+                                    self.advance();
+                                    Some(kw)
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        items.push(UseItem {
+                            name: name_parts,
+                            alias,
+                            kind: item_kind,
+                        });
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&TokenKind::CloseBrace)?;
+                } else {
+                    // Simple use: use Foo\Bar\Baz as Alias;
+                    // or multiple: use Foo\Bar, Baz\Qux;
+                    let alias = if self.eat(&TokenKind::As) {
+                        match self.peek().clone() {
+                            TokenKind::Identifier(a) => {
+                                self.advance();
+                                Some(a)
+                            }
+                            _ if self.is_semi_reserved_keyword() => {
+                                let kw = self.keyword_to_identifier();
+                                self.advance();
+                                Some(kw)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    items.push(UseItem {
+                        name: first_parts,
+                        alias,
+                        kind: default_kind,
+                    });
+                    // Parse additional comma-separated use items
+                    while self.eat(&TokenKind::Comma) {
+                        let mut name_parts = Vec::new();
+                        self.eat(&TokenKind::Backslash);
+                        loop {
+                            match self.peek().clone() {
+                                TokenKind::Identifier(part) => {
+                                    self.advance();
+                                    name_parts.push(part);
+                                }
+                                _ if self.is_semi_reserved_keyword() => {
+                                    name_parts.push(self.keyword_to_identifier());
+                                    self.advance();
+                                }
+                                _ => break,
+                            }
+                            if !self.eat(&TokenKind::Backslash) {
+                                break;
+                            }
+                        }
+                        let alias = if self.eat(&TokenKind::As) {
+                            match self.peek().clone() {
+                                TokenKind::Identifier(a) => {
+                                    self.advance();
+                                    Some(a)
+                                }
+                                _ if self.is_semi_reserved_keyword() => {
+                                    let kw = self.keyword_to_identifier();
+                                    self.advance();
+                                    Some(kw)
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        items.push(UseItem {
+                            name: name_parts,
+                            alias,
+                            kind: default_kind,
+                        });
+                    }
                 }
                 self.expect_semicolon()?;
                 Ok(Statement {
-                    kind: StmtKind::Nop,
+                    kind: StmtKind::UseDecl(items),
                     span,
                 })
             }
@@ -962,16 +1131,59 @@ impl Parser {
         Ok(first)
     }
 
+    /// Parse a class/interface/trait name reference that may be qualified.
+    /// Handles: Foo, Foo\Bar, \Foo\Bar (fully qualified, prefixed with \)
+    fn parse_class_name_ref(&mut self) -> ParseResult<Vec<u8>> {
+        let has_leading_backslash = self.eat(&TokenKind::Backslash);
+        let mut name = if has_leading_backslash {
+            vec![b'\\']
+        } else {
+            Vec::new()
+        };
+        match self.peek().clone() {
+            TokenKind::Identifier(part) => {
+                self.advance();
+                name.extend_from_slice(&part);
+            }
+            _ if self.is_semi_reserved_keyword() => {
+                name.extend_from_slice(&self.keyword_to_identifier());
+                self.advance();
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "expected class name".into(),
+                    span: self.span(),
+                });
+            }
+        }
+        while self.eat(&TokenKind::Backslash) {
+            match self.peek().clone() {
+                TokenKind::Identifier(part) => {
+                    self.advance();
+                    name.push(b'\\');
+                    name.extend_from_slice(&part);
+                }
+                _ if self.is_semi_reserved_keyword() => {
+                    name.push(b'\\');
+                    name.extend_from_slice(&self.keyword_to_identifier());
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        Ok(name)
+    }
+
     fn parse_simple_type(&mut self) -> ParseResult<TypeHint> {
         // Handle leading backslash for fully qualified names
         if self.eat(&TokenKind::Backslash) {
-            // Qualified name
-            let mut name = Vec::new();
+            // Fully qualified name - prefix with \ to mark as absolute
+            let mut name = vec![b'\\'];
             loop {
                 match self.peek().clone() {
                     TokenKind::Identifier(part) => {
                         self.advance();
-                        if !name.is_empty() {
+                        if name.len() > 1 {
                             name.push(b'\\');
                         }
                         name.extend_from_slice(&part);
@@ -1097,18 +1309,7 @@ impl Parser {
         };
 
         let extends = if self.eat(&TokenKind::Extends) {
-            match self.peek().clone() {
-                TokenKind::Identifier(name) => {
-                    self.advance();
-                    Some(name)
-                }
-                _ => {
-                    return Err(ParseError {
-                        message: "expected parent class name".into(),
-                        span: self.span(),
-                    });
-                }
-            }
+            Some(self.parse_class_name_ref()?)
         } else {
             None
         };
@@ -1116,18 +1317,7 @@ impl Parser {
         let mut implements = Vec::new();
         if self.eat(&TokenKind::Implements) {
             loop {
-                match self.peek().clone() {
-                    TokenKind::Identifier(name) => {
-                        self.advance();
-                        implements.push(name);
-                    }
-                    _ => {
-                        return Err(ParseError {
-                            message: "expected interface name".into(),
-                            span: self.span(),
-                        });
-                    }
-                }
+                implements.push(self.parse_class_name_ref()?);
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -1211,12 +1401,10 @@ impl Parser {
                 self.advance();
                 let mut traits = Vec::new();
                 loop {
-                    match self.peek().clone() {
-                        TokenKind::Identifier(name) => {
-                            self.advance();
-                            traits.push(name);
-                        }
-                        _ => break,
+                    if matches!(self.peek(), TokenKind::Identifier(_) | TokenKind::Backslash) {
+                        traits.push(self.parse_class_name_ref()?);
+                    } else {
+                        break;
                     }
                     if !self.eat(&TokenKind::Comma) {
                         break;
@@ -2690,6 +2878,17 @@ impl Parser {
             }
             TokenKind::Identifier(name) => {
                 self.advance();
+                // Check for qualified name: Foo\Bar\Baz
+                let mut full_name = name;
+                while self.eat(&TokenKind::Backslash) {
+                    if let TokenKind::Identifier(part) = self.peek().clone() {
+                        self.advance();
+                        full_name.push(b'\\');
+                        full_name.extend_from_slice(&part);
+                    } else {
+                        break;
+                    }
+                }
                 // Check if this is a function call
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
@@ -2700,7 +2899,7 @@ impl Parser {
                         span: span.merge(end_span),
                         kind: ExprKind::FunctionCall {
                             name: Box::new(Expr {
-                                kind: ExprKind::Identifier(name),
+                                kind: ExprKind::Identifier(full_name),
                                 span,
                             }),
                             args,
@@ -2708,7 +2907,7 @@ impl Parser {
                     })
                 } else {
                     Ok(Expr {
-                        kind: ExprKind::Identifier(name),
+                        kind: ExprKind::Identifier(full_name),
                         span,
                     })
                 }
@@ -2900,13 +3099,14 @@ impl Parser {
                     }
                     TokenKind::Backslash => {
                         // Fully qualified: new \Foo\Bar()
+                        // Prefix with \ to mark as fully qualified
                         self.advance();
-                        let mut full_name = Vec::new();
+                        let mut full_name = vec![b'\\'];
                         loop {
                             match self.peek().clone() {
                                 TokenKind::Identifier(part) => {
                                     self.advance();
-                                    if !full_name.is_empty() {
+                                    if full_name.len() > 1 {
                                         full_name.push(b'\\');
                                     }
                                     full_name.extend_from_slice(&part);
@@ -3052,7 +3252,12 @@ impl Parser {
                     },
                 })
             }
-            TokenKind::Fn => {
+            TokenKind::Fn
+                if !matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Backslash)
+                ) =>
+            {
                 self.advance();
                 // Optional & for reference return
                 let _by_ref_return = self.eat(&TokenKind::Ampersand);
@@ -3303,19 +3508,20 @@ impl Parser {
             }
             TokenKind::Backslash => {
                 // Fully qualified name like \Exception, \Foo\Bar
+                // Prefix with \ to mark as fully qualified for the compiler
                 self.advance();
-                let mut name = Vec::new();
+                let mut name = vec![b'\\'];
                 loop {
                     match self.peek().clone() {
                         TokenKind::Identifier(part) => {
                             self.advance();
-                            if !name.is_empty() {
+                            if name.len() > 1 {
                                 name.push(b'\\');
                             }
                             name.extend_from_slice(&part);
                         }
                         _ if self.is_semi_reserved_keyword() => {
-                            if !name.is_empty() {
+                            if name.len() > 1 {
                                 name.push(b'\\');
                             }
                             name.extend_from_slice(&self.keyword_to_identifier());
@@ -3359,8 +3565,24 @@ impl Parser {
             }
             _ if self.is_semi_reserved_keyword() => {
                 // Allow keywords used as identifiers in expression context
-                let name = self.keyword_to_identifier();
+                let mut full_name = self.keyword_to_identifier();
                 self.advance();
+                // Check for qualified name: keyword\Identifier\...
+                while self.eat(&TokenKind::Backslash) {
+                    match self.peek().clone() {
+                        TokenKind::Identifier(part) => {
+                            self.advance();
+                            full_name.push(b'\\');
+                            full_name.extend_from_slice(&part);
+                        }
+                        _ if self.is_semi_reserved_keyword() => {
+                            full_name.push(b'\\');
+                            full_name.extend_from_slice(&self.keyword_to_identifier());
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
                     let args = self.parse_arguments()?;
@@ -3370,7 +3592,7 @@ impl Parser {
                         span: span.merge(end_span),
                         kind: ExprKind::FunctionCall {
                             name: Box::new(Expr {
-                                kind: ExprKind::Identifier(name),
+                                kind: ExprKind::Identifier(full_name),
                                 span,
                             }),
                             args,
@@ -3378,7 +3600,7 @@ impl Parser {
                     })
                 } else {
                     Ok(Expr {
-                        kind: ExprKind::Identifier(name),
+                        kind: ExprKind::Identifier(full_name),
                         span,
                     })
                 }

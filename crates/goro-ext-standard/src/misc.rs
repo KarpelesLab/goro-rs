@@ -1998,8 +1998,10 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let name_lower: Vec<u8> = name
-        .as_bytes()
+    // Strip leading backslash for fully qualified names
+    let raw_bytes = name.as_bytes();
+    let name_bytes = if raw_bytes.starts_with(b"\\") { &raw_bytes[1..] } else { raw_bytes };
+    let name_lower: Vec<u8> = name_bytes
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
@@ -3605,8 +3607,10 @@ fn register_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
 }
 fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let name_lower: Vec<u8> = name
-        .as_bytes()
+    // Strip leading backslash for fully qualified names
+    let raw_bytes = name.as_bytes();
+    let name_bytes = if raw_bytes.starts_with(b"\\") { &raw_bytes[1..] } else { raw_bytes };
+    let name_lower: Vec<u8> = name_bytes
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();

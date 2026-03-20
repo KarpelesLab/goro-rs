@@ -3106,12 +3106,37 @@ impl Vm {
                         }
                     }
 
-                    let func_name_lower: Vec<u8> = call
+                    let mut func_name_lower: Vec<u8> = call
                         .name
                         .as_bytes()
                         .iter()
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
+
+                    // Namespace fallback: if a namespaced function isn't found,
+                    // try the global (unqualified) name. This handles calls like
+                    // strlen() from within namespace Foo (compiled as Foo\strlen).
+                    if func_name_lower.contains(&b'\\') && !func_name_lower.contains(&b':') {
+                        // Only for plain function calls (not Class::method)
+                        let has_user = self.user_functions.contains_key(&func_name_lower);
+                        let has_builtin = self.functions.contains_key(&func_name_lower);
+                        if !has_user && !has_builtin {
+                            // Try unqualified name (after last backslash)
+                            if let Some(last_sep) = func_name_lower.iter().rposition(|&b| b == b'\\') {
+                                let global_name = func_name_lower[last_sep + 1..].to_vec();
+                                let global_has_user = self.user_functions.contains_key(&global_name);
+                                let global_has_builtin = self.functions.contains_key(&global_name);
+                                if global_has_user || global_has_builtin {
+                                    // Also update call.name to preserve original case of global name
+                                    let orig_bytes = call.name.as_bytes();
+                                    if let Some(last_sep_orig) = orig_bytes.iter().rposition(|&b| b == b'\\') {
+                                        call.name = PhpString::from_vec(orig_bytes[last_sep_orig + 1..].to_vec());
+                                    }
+                                    func_name_lower = global_name;
+                                }
+                            }
+                        }
+                    }
 
                     // Handle Closure static methods
                     if func_name_lower == b"closure::fromcallable" {
@@ -4773,10 +4798,23 @@ impl Vm {
                         .to_php_string();
                     let name_bytes = name.as_bytes();
                     // Look up in constants table
-                    let val = self.constants.get(name_bytes).cloned().unwrap_or_else(|| {
+                    let val = if let Some(v) = self.constants.get(name_bytes) {
+                        v.clone()
+                    } else if name_bytes.contains(&b'\\') {
+                        // Namespace fallback: try the unqualified (global) name
+                        if let Some(last_sep) = name_bytes.iter().rposition(|&b| b == b'\\') {
+                            let global_name = &name_bytes[last_sep + 1..];
+                            self.constants.get(global_name).cloned().unwrap_or_else(|| {
+                                // Return the unqualified name as string (PHP behavior for undefined constants)
+                                Value::String(PhpString::from_vec(global_name.to_vec()))
+                            })
+                        } else {
+                            Value::String(name.clone())
+                        }
+                    } else {
                         // If not found, return the name as a string (PHP warning: undefined constant)
                         Value::String(name.clone())
-                    });
+                    };
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 

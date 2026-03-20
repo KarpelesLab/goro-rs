@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use goro_parser::ast::*;
 
 use crate::object::{ClassEntry, MethodDef, PropertyDef, Visibility as ObjVisibility};
@@ -45,6 +47,14 @@ pub struct Compiler {
     current_parent_class: Option<Vec<u8>>,
     /// Stack of finally block targets (for deferred return)
     finally_targets: Vec<u32>,
+    /// Current namespace (e.g. b"Foo\\Bar"), empty for global namespace
+    current_namespace: Vec<u8>,
+    /// Use imports: maps lowercase short name (alias) -> fully qualified name (original case)
+    use_map: HashMap<Vec<u8>, Vec<u8>>,
+    /// Use imports for functions: maps lowercase short name -> fully qualified name
+    use_function_map: HashMap<Vec<u8>, Vec<u8>>,
+    /// Use imports for constants: maps short name -> fully qualified name (case-sensitive)
+    use_const_map: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 impl Default for Compiler {
@@ -94,6 +104,112 @@ impl Compiler {
             current_class: None,
             current_parent_class: None,
             finally_targets: Vec::new(),
+            current_namespace: Vec::new(),
+            use_map: HashMap::new(),
+            use_function_map: HashMap::new(),
+            use_const_map: HashMap::new(),
+        }
+    }
+
+    /// Prefix a name with the current namespace. E.g. if namespace is "Foo\Bar" and name is "Baz",
+    /// returns "Foo\Bar\Baz". If namespace is empty, returns name unchanged.
+    fn prefix_with_namespace(&self, name: &[u8]) -> Vec<u8> {
+        if self.current_namespace.is_empty() {
+            name.to_vec()
+        } else {
+            let mut result = self.current_namespace.clone();
+            result.push(b'\\');
+            result.extend_from_slice(name);
+            result
+        }
+    }
+
+    /// Resolve a class/interface/trait name. Rules:
+    /// 1. If the name starts with \, it's fully qualified -- strip the leading \
+    /// 2. If the name contains a backslash (qualified), check first part against use aliases
+    /// 3. If unqualified (no backslash):
+    ///    - Check use imports first
+    ///    - Otherwise prefix with current namespace
+    /// Special names like "self", "parent", "static" are not resolved.
+    fn resolve_class_name(&self, name: &[u8]) -> Vec<u8> {
+        // Special names are never resolved
+        if name.eq_ignore_ascii_case(b"self")
+            || name.eq_ignore_ascii_case(b"parent")
+            || name.eq_ignore_ascii_case(b"static")
+        {
+            return name.to_vec();
+        }
+
+        // Fully qualified name (starts with \) -- strip leading \ and use as-is
+        if name.starts_with(b"\\") {
+            return name[1..].to_vec();
+        }
+
+        if let Some(pos) = name.iter().position(|&b| b == b'\\') {
+            // Qualified name (contains backslash but doesn't start with one)
+            // Check if the first part matches a use alias
+            let first_part = &name[..pos];
+            let first_part_lower: Vec<u8> = first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(resolved) = self.use_map.get(&first_part_lower) {
+                let mut result = resolved.clone();
+                result.extend_from_slice(&name[pos..]);
+                return result;
+            }
+            // Otherwise, prefix with namespace
+            if self.current_namespace.is_empty() {
+                name.to_vec()
+            } else {
+                self.prefix_with_namespace(name)
+            }
+        } else {
+            // Unqualified name
+            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(resolved) = self.use_map.get(&name_lower) {
+                return resolved.clone();
+            }
+            // Prefix with namespace
+            self.prefix_with_namespace(name)
+        }
+    }
+
+    /// Resolve a function name. Rules similar to class names, but:
+    /// - Uses use_function_map instead of use_map
+    /// - Unqualified function calls fall back to global at RUNTIME (not compile time),
+    ///   so we still prefix with namespace, and VM handles fallback
+    fn resolve_function_name(&self, name: &[u8]) -> Vec<u8> {
+        // Fully qualified name (starts with \) -- strip leading \ and use as-is
+        if name.starts_with(b"\\") {
+            return name[1..].to_vec();
+        }
+
+        if let Some(pos) = name.iter().position(|&b| b == b'\\') {
+            // Qualified name
+            let first_part = &name[..pos];
+            let first_part_lower: Vec<u8> = first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(resolved) = self.use_function_map.get(&first_part_lower) {
+                let mut result = resolved.clone();
+                result.extend_from_slice(&name[pos..]);
+                return result;
+            }
+            // Also check regular use map for namespace aliases
+            if let Some(resolved) = self.use_map.get(&first_part_lower) {
+                let mut result = resolved.clone();
+                result.extend_from_slice(&name[pos..]);
+                return result;
+            }
+            if self.current_namespace.is_empty() {
+                name.to_vec()
+            } else {
+                self.prefix_with_namespace(name)
+            }
+        } else {
+            // Unqualified name - check function use map first
+            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(resolved) = self.use_function_map.get(&name_lower) {
+                return resolved.clone();
+            }
+            // Prefix with namespace (VM will fall back to global)
+            self.prefix_with_namespace(name)
         }
     }
 
@@ -161,21 +277,54 @@ impl Compiler {
     /// Compile a complete program
     /// Compile a program, returning the op_array and compiled classes
     pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>)> {
-        // First pass: compile all top-level function and class declarations
-        // This enables forward references (calling a function before it's declared)
-        for stmt in &program.statements {
-            match &stmt.kind {
-                StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => {
-                    self.compile_stmt(stmt)?;
-                }
-                _ => {}
-            }
-        }
+        // First pass: process namespace/use declarations and compile function/class declarations
+        // Namespace/use must be processed in order so that class/function names are prefixed correctly
+        self.compile_hoisting_pass(&program.statements)?;
+        // Reset namespace state for second pass (will be re-applied by NamespaceDecl/UseDecl)
+        self.current_namespace = Vec::new();
+        self.use_map = HashMap::new();
+        self.use_function_map = HashMap::new();
+        self.use_const_map = HashMap::new();
         // Second pass: compile everything else
         for stmt in &program.statements {
             match &stmt.kind {
                 StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => {
                     // Already compiled in first pass
+                }
+                StmtKind::NamespaceDecl { name, body } => {
+                    // Set namespace state for second pass
+                    if let Some(parts) = name {
+                        let mut ns = Vec::new();
+                        for (i, part) in parts.iter().enumerate() {
+                            if i > 0 { ns.push(b'\\'); }
+                            ns.extend_from_slice(part);
+                        }
+                        self.current_namespace = ns;
+                    } else {
+                        self.current_namespace = Vec::new();
+                    }
+                    self.use_map = HashMap::new();
+                    self.use_function_map = HashMap::new();
+                    self.use_const_map = HashMap::new();
+
+                    if let Some(body_stmts) = body {
+                        // Bracketed namespace: compile body statements (except func/class decls)
+                        for s in body_stmts {
+                            match &s.kind {
+                                StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => {
+                                    // Already compiled in first pass
+                                }
+                                _ => {
+                                    self.compile_stmt(s)?;
+                                }
+                            }
+                        }
+                        // Reset after block
+                        self.current_namespace = Vec::new();
+                        self.use_map = HashMap::new();
+                        self.use_function_map = HashMap::new();
+                        self.use_const_map = HashMap::new();
+                    }
                 }
                 _ => {
                     self.compile_stmt(stmt)?;
@@ -192,6 +341,49 @@ impl Compiler {
             line: 0,
         });
         Ok((self.op_array, self.compiled_classes))
+    }
+
+    /// First pass: process only namespace/use/function/class declarations for hoisting.
+    /// For bracketed namespaces, recurse into the body.
+    fn compile_hoisting_pass(&mut self, stmts: &[Statement]) -> CompileResult<()> {
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::NamespaceDecl { name, body } => {
+                    // Set namespace state
+                    if let Some(parts) = name {
+                        let mut ns = Vec::new();
+                        for (i, part) in parts.iter().enumerate() {
+                            if i > 0 { ns.push(b'\\'); }
+                            ns.extend_from_slice(part);
+                        }
+                        self.current_namespace = ns;
+                    } else {
+                        self.current_namespace = Vec::new();
+                    }
+                    self.use_map = HashMap::new();
+                    self.use_function_map = HashMap::new();
+                    self.use_const_map = HashMap::new();
+
+                    if let Some(body_stmts) = body {
+                        // Recurse into bracketed namespace body
+                        self.compile_hoisting_pass(body_stmts)?;
+                        // Reset after block
+                        self.current_namespace = Vec::new();
+                        self.use_map = HashMap::new();
+                        self.use_function_map = HashMap::new();
+                        self.use_const_map = HashMap::new();
+                    }
+                }
+                StmtKind::UseDecl(_) => {
+                    self.compile_stmt(stmt)?;
+                }
+                StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => {
+                    self.compile_stmt(stmt)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {
@@ -761,14 +953,21 @@ impl Compiler {
                 // Check if this function contains yield (making it a generator)
                 let is_generator = stmts_contain_yield(body);
 
+                // Prefix function name with namespace
+                let qualified_name = self.prefix_with_namespace(name);
+
                 // Compile the function body into a sub-OpArray
                 let mut func_compiler = Compiler::new();
-                func_compiler.op_array.name = name.clone();
+                func_compiler.current_namespace = self.current_namespace.clone();
+                func_compiler.use_map = self.use_map.clone();
+                func_compiler.use_function_map = self.use_function_map.clone();
+                func_compiler.use_const_map = self.use_const_map.clone();
+                func_compiler.op_array.name = qualified_name.clone();
                 func_compiler.op_array.is_generator = is_generator;
 
                 // Set return type
                 if let Some(hint) = return_type {
-                    func_compiler.op_array.return_type = Some(type_hint_to_param_type(hint));
+                    func_compiler.op_array.return_type = Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
                 }
 
                 // Set up parameter CVs and default values
@@ -781,7 +980,7 @@ impl Compiler {
 
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
-                        param_type: type_hint_to_param_type(hint),
+                        param_type: type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map),
                         param_name: param.name.clone(),
                     });
                     // Ensure param_types vec is large enough
@@ -842,7 +1041,7 @@ impl Compiler {
 
                 let name_idx = self
                     .op_array
-                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                    .add_literal(Value::String(PhpString::from_vec(qualified_name)));
                 let idx_literal = self.op_array.add_literal(Value::Long(func_idx as i64));
 
                 self.op_array.emit(Op {
@@ -856,8 +1055,63 @@ impl Compiler {
                 Ok(())
             }
 
-            StmtKind::Declare { .. } => {
-                // declare(strict_types=1) - just skip for now
+            StmtKind::Declare { directives, body } => {
+                // Handle const declarations (parsed as Declare directives)
+                for (name, value) in directives {
+                    let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    // Skip declare(strict_types=1) and similar
+                    if name_lower == b"strict_types" || name_lower == b"encoding" || name_lower == b"ticks" {
+                        continue;
+                    }
+                    // This is a const declaration: const FOO = value;
+                    // Emit it as a define() call
+                    // Build the fully-qualified constant name
+                    let fqn = self.prefix_with_namespace(name);
+                    let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(fqn)));
+                    let define_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(b"define")));
+                    let arg_count_idx = self.op_array.add_literal(Value::Long(2));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::InitFCall,
+                        op1: OperandType::Const(define_idx),
+                        op2: OperandType::Const(arg_count_idx),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    // Send const name as first arg
+                    let pos0 = self.op_array.add_literal(Value::Long(0));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SendVal,
+                        op1: OperandType::Const(name_idx),
+                        op2: OperandType::Const(pos0),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    // Send value as second arg
+                    let val_op = self.compile_expr(value)?;
+                    let pos1 = self.op_array.add_literal(Value::Long(1));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SendVal,
+                        op1: val_op,
+                        op2: OperandType::Const(pos1),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    // Call define()
+                    let tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::DoFCall,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(tmp),
+                        line: stmt.span.line,
+                    });
+                }
+                // If body exists, compile it
+                if let Some(body_stmts) = body {
+                    for s in body_stmts {
+                        self.compile_stmt(s)?;
+                    }
+                }
                 Ok(())
             }
 
@@ -1048,11 +1302,12 @@ impl Compiler {
                         let mut match_jumps = Vec::new();
                         for type_parts in &catch.types {
                             // Join qualified name parts
-                            let type_name: Vec<u8> = if type_parts.len() == 1 {
+                            let raw_type_name: Vec<u8> = if type_parts.len() == 1 {
                                 type_parts[0].clone()
                             } else {
                                 type_parts.join(&b'\\')
                             };
+                            let type_name = self.resolve_class_name(&raw_type_name);
                             let type_idx = self
                                 .op_array
                                 .add_literal(Value::String(PhpString::from_vec(type_name)));
@@ -1236,9 +1491,13 @@ impl Compiler {
                 implements,
                 body,
             } => {
-                let mut class = ClassEntry::new(name.clone());
-                class.parent = extends.clone();
-                class.interfaces = implements.clone();
+                // Prefix class name with namespace
+                let qualified_name = self.prefix_with_namespace(name);
+                let mut class = ClassEntry::new(qualified_name.clone());
+                // Resolve parent class name
+                class.parent = extends.as_ref().map(|p| self.resolve_class_name(p));
+                // Resolve interface names
+                class.interfaces = implements.iter().map(|i| self.resolve_class_name(i)).collect();
                 class.is_abstract = modifiers.is_abstract;
                 class.is_final = modifiers.is_final;
                 class.is_interface = modifiers.is_interface;
@@ -1318,7 +1577,7 @@ impl Compiler {
                                     .static_properties
                                     .insert(prop_name.clone(), default_val.clone());
                             }
-                            let declaring_class_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
                                 default: default_val,
@@ -1355,7 +1614,7 @@ impl Compiler {
                                                     crate::object::Visibility::Private
                                                 }
                                             };
-                                            let declaring_class_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                             class.properties.push(PropertyDef {
                                                 name: param.name.clone(),
                                                 default: Value::Null,
@@ -1373,15 +1632,19 @@ impl Compiler {
                                 let method_is_generator = stmts_contain_yield(body_stmts);
 
                                 let mut method_compiler = Compiler::new();
+                                method_compiler.current_namespace = self.current_namespace.clone();
+                                method_compiler.use_map = self.use_map.clone();
+                                method_compiler.use_function_map = self.use_function_map.clone();
+                                method_compiler.use_const_map = self.use_const_map.clone();
                                 method_compiler.op_array.name = method_name.clone();
                                 method_compiler.op_array.is_generator = method_is_generator;
                                 if let Some(hint) = method_return_type {
                                     method_compiler.op_array.return_type =
-                                        Some(type_hint_to_param_type(hint));
+                                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
                                 }
-                                method_compiler.current_class = Some(name.clone());
-                                method_compiler.current_parent_class = extends.clone();
-                                method_compiler.op_array.scope_class = Some(name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                method_compiler.current_class = Some(qualified_name.clone());
+                                method_compiler.current_parent_class = class.parent.clone();
+                                method_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
 
                                 // First CV is always $this (for non-static methods)
                                 if !is_static {
@@ -1395,7 +1658,7 @@ impl Compiler {
                                     // Store parameter type info
                                     let type_info =
                                         param.type_hint.as_ref().map(|hint| ParamTypeInfo {
-                                            param_type: type_hint_to_param_type(hint),
+                                            param_type: type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map),
                                             param_name: param.name.clone(),
                                         });
                                     while method_compiler.op_array.param_types.len() <= cv as usize
@@ -1487,7 +1750,7 @@ impl Compiler {
                                 let param_count = params.len();
                                 let lower_name: Vec<u8> =
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                let declaring_class_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 class.methods.insert(
                                     lower_name,
                                     MethodDef {
@@ -1510,7 +1773,7 @@ impl Compiler {
                                 let param_count = params.len();
                                 let lower_name: Vec<u8> =
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                let declaring_class_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 class.methods.insert(
                                     lower_name,
                                     MethodDef {
@@ -1545,7 +1808,7 @@ impl Compiler {
                         }
                         ClassMember::TraitUse { traits, .. } => {
                             for trait_name in traits {
-                                class.traits.push(trait_name.clone());
+                                class.traits.push(self.resolve_class_name(trait_name));
                             }
                         }
                     }
@@ -1557,7 +1820,7 @@ impl Compiler {
 
                 let name_idx = self
                     .op_array
-                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                    .add_literal(Value::String(PhpString::from_vec(qualified_name)));
                 let idx_literal = self.op_array.add_literal(Value::Long(class_idx as i64));
                 self.op_array.emit(Op {
                     opcode: OpCode::DeclareClass,
@@ -1570,8 +1833,70 @@ impl Compiler {
                 Ok(())
             }
 
-            StmtKind::NamespaceDecl { .. } | StmtKind::UseDecl(_) => {
-                // Skip namespace/use declarations for now
+            StmtKind::NamespaceDecl { name, body } => {
+                // Set current namespace
+                if let Some(parts) = name {
+                    // Join namespace parts with backslash
+                    let mut ns = Vec::new();
+                    for (i, part) in parts.iter().enumerate() {
+                        if i > 0 {
+                            ns.push(b'\\');
+                        }
+                        ns.extend_from_slice(part);
+                    }
+                    self.current_namespace = ns;
+                } else {
+                    self.current_namespace = Vec::new();
+                }
+                // Clear use maps when entering a new namespace
+                self.use_map = HashMap::new();
+                self.use_function_map = HashMap::new();
+                self.use_const_map = HashMap::new();
+
+                // If this is a block namespace { ... }, compile the body
+                if let Some(body_stmts) = body {
+                    for s in body_stmts {
+                        self.compile_stmt(s)?;
+                    }
+                    // After block namespace, reset to global
+                    self.current_namespace = Vec::new();
+                    self.use_map = HashMap::new();
+                    self.use_function_map = HashMap::new();
+                    self.use_const_map = HashMap::new();
+                }
+                Ok(())
+            }
+
+            StmtKind::UseDecl(items) => {
+                for item in items {
+                    // Build the fully qualified name from parts
+                    let mut fqn = Vec::new();
+                    for (i, part) in item.name.iter().enumerate() {
+                        if i > 0 {
+                            fqn.push(b'\\');
+                        }
+                        fqn.extend_from_slice(part);
+                    }
+                    // Determine the alias (short name)
+                    let alias = if let Some(ref a) = item.alias {
+                        a.clone()
+                    } else {
+                        // Last part of the name
+                        item.name.last().cloned().unwrap_or_default()
+                    };
+                    let alias_lower: Vec<u8> = alias.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    match item.kind {
+                        UseKind::Normal => {
+                            self.use_map.insert(alias_lower, fqn);
+                        }
+                        UseKind::Function => {
+                            self.use_function_map.insert(alias_lower, fqn);
+                        }
+                        UseKind::Constant => {
+                            self.use_const_map.insert(alias.clone(), fqn);
+                        }
+                    }
+                }
                 Ok(())
             }
 
@@ -1695,15 +2020,16 @@ impl Compiler {
                     ExprKind::StaticPropertyAccess { class, property } => {
                         let class_name = match &class.kind {
                             ExprKind::Identifier(name) => {
-                                if name.eq_ignore_ascii_case(b"self") {
-                                    self.current_class.clone().unwrap_or(name.clone())
-                                } else if name.eq_ignore_ascii_case(b"static") {
+                                let resolved = self.resolve_class_name(name);
+                                if resolved.eq_ignore_ascii_case(b"self") {
+                                    self.current_class.clone().unwrap_or(resolved)
+                                } else if resolved.eq_ignore_ascii_case(b"static") {
                                     // Late static binding: resolve at runtime
                                     b"static".to_vec()
-                                } else if name.eq_ignore_ascii_case(b"parent") {
-                                    self.current_parent_class.clone().unwrap_or(name.clone())
+                                } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                    self.current_parent_class.clone().unwrap_or(resolved)
                                 } else {
-                                    name.clone()
+                                    resolved
                                 }
                             }
                             _ => return Ok(val),
@@ -2223,14 +2549,18 @@ impl Compiler {
 
             ExprKind::FunctionCall { name, args } => {
                 // Compile the function name
-                let name_op = match &name.kind {
-                    ExprKind::Identifier(name) => {
+                let resolved_name = match &name.kind {
+                    ExprKind::Identifier(n) => Some(self.resolve_function_name(n)),
+                    _ => None,
+                };
+                let name_op = match &resolved_name {
+                    Some(resolved) => {
                         let idx = self
                             .op_array
-                            .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                            .add_literal(Value::String(PhpString::from_vec(resolved.clone())));
                         OperandType::Const(idx)
                     }
-                    _ => self.compile_expr(name)?,
+                    None => self.compile_expr(name)?,
                 };
 
                 // Init function call
@@ -2244,7 +2574,9 @@ impl Compiler {
                 });
 
                 // Send arguments (pass function name for by-ref detection)
-                let func_name_for_ref = if let ExprKind::Identifier(ref n) = name.kind {
+                let func_name_for_ref = if let Some(ref r) = resolved_name {
+                    Some(r.as_slice())
+                } else if let ExprKind::Identifier(ref n) = name.kind {
                     Some(n.as_slice())
                 } else {
                     None
@@ -2706,7 +3038,7 @@ impl Compiler {
                             Value::String(PhpString::from_vec(self.op_array.name.clone()))
                         }
                     }
-                    b"__namespace__" => Value::String(PhpString::empty()),
+                    b"__namespace__" => Value::String(PhpString::from_vec(self.current_namespace.clone())),
                     b"__trait__" => Value::String(PhpString::empty()),
                     // PHP constants
                     b"php_eol" => Value::String(PhpString::from_bytes(b"\n")),
@@ -2754,9 +3086,33 @@ impl Compiler {
                     b"array_filter_use_key" => Value::Long(2),
                     _ => {
                         // Unknown identifier - emit runtime constant lookup
+                        // Handle fully-qualified names (starting with \), use aliases, or namespace prefix
+                        let qualified = if name.starts_with(b"\\") {
+                            // Fully qualified: strip leading \
+                            name[1..].to_vec()
+                        } else if name.contains(&b'\\') {
+                            // Qualified name: check use aliases for first part
+                            let first_sep = name.iter().position(|&b| b == b'\\').unwrap();
+                            let first_part = &name[..first_sep];
+                            let first_lower: Vec<u8> = first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(resolved) = self.use_map.get(&first_lower) {
+                                let mut result = resolved.clone();
+                                result.extend_from_slice(&name[first_sep..]);
+                                result
+                            } else {
+                                self.prefix_with_namespace(name)
+                            }
+                        } else {
+                            // Unqualified: check use_const_map, then prefix with namespace
+                            if let Some(resolved) = self.use_const_map.get(name) {
+                                resolved.clone()
+                            } else {
+                                self.prefix_with_namespace(name)
+                            }
+                        };
                         let name_idx = self
                             .op_array
-                            .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                            .add_literal(Value::String(PhpString::from_vec(qualified)));
                         let tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::ConstLookup,
@@ -2780,8 +3136,9 @@ impl Compiler {
                             // Resolve self at compile time
                             self.current_class.clone().unwrap_or(name.clone())
                         } else {
-                            // "static" is kept as-is for late static binding (resolved at runtime)
-                            name.clone()
+                            // Resolve through namespace (handles "static" correctly since
+                            // resolve_class_name passes it through unchanged)
+                            self.resolve_class_name(name)
                         }
                     }
                     _ => {
@@ -2834,7 +3191,7 @@ impl Compiler {
             ExprKind::Instanceof { expr, class } => {
                 let obj = self.compile_expr(expr)?;
                 let class_name = match &class.kind {
-                    ExprKind::Identifier(name) => name.clone(),
+                    ExprKind::Identifier(name) => self.resolve_class_name(name),
                     _ => {
                         let _ = self.compile_expr(class)?;
                         let idx = self.op_array.add_literal(Value::False);
@@ -3046,7 +3403,7 @@ impl Compiler {
 
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
-                        param_type: type_hint_to_param_type(hint),
+                        param_type: type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map),
                         param_name: param.name.clone(),
                     });
                     while closure_compiler.op_array.param_types.len() <= cv as usize {
@@ -3197,7 +3554,7 @@ impl Compiler {
 
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
-                        param_type: type_hint_to_param_type(hint),
+                        param_type: type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map),
                         param_name: param.name.clone(),
                     });
                     while closure_compiler.op_array.param_types.len() <= cv as usize {
@@ -3330,7 +3687,7 @@ impl Compiler {
             ExprKind::ClassConstAccess { class, constant } => {
                 // Handle ClassName::class, ClassName::CONST, self::CONST
                 let class_name = match &class.kind {
-                    ExprKind::Identifier(name) => name.clone(),
+                    ExprKind::Identifier(name) => self.resolve_class_name(name),
                     _ => {
                         // $expr::class - emit GetClassName opcode
                         if constant == b"class" {
@@ -3422,7 +3779,7 @@ impl Compiler {
             } => {
                 // Handle ClassName::method() and parent::method()
                 let class_name = match &class.kind {
-                    ExprKind::Identifier(name) => name.clone(),
+                    ExprKind::Identifier(name) => self.resolve_class_name(name),
                     _ => {
                         let _ = self.compile_expr(class)?;
                         let idx = self.op_array.add_literal(Value::Null);
@@ -3432,6 +3789,8 @@ impl Compiler {
 
                 // Resolve self:: and parent:: to actual class names
                 // static:: is kept as literal "static" for late static binding
+                // Note: resolve_class_name already passes through self/parent/static,
+                // so we still need this resolution step
                 let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
                     self.current_class.clone().unwrap_or(class_name.clone())
                 } else if class_name.eq_ignore_ascii_case(b"static") {
@@ -3478,16 +3837,17 @@ impl Compiler {
             ExprKind::StaticPropertyAccess { class, property } => {
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => {
+                        let resolved = self.resolve_class_name(name);
                         // Resolve self/parent, keep static as literal for LSB
-                        if name.eq_ignore_ascii_case(b"self") {
-                            self.current_class.clone().unwrap_or(name.clone())
-                        } else if name.eq_ignore_ascii_case(b"static") {
+                        if resolved.eq_ignore_ascii_case(b"self") {
+                            self.current_class.clone().unwrap_or(resolved)
+                        } else if resolved.eq_ignore_ascii_case(b"static") {
                             // Late static binding: resolve at runtime
                             b"static".to_vec()
-                        } else if name.eq_ignore_ascii_case(b"parent") {
-                            self.current_parent_class.clone().unwrap_or(name.clone())
+                        } else if resolved.eq_ignore_ascii_case(b"parent") {
+                            self.current_parent_class.clone().unwrap_or(resolved)
                         } else {
-                            name.clone()
+                            resolved
                         }
                     }
                     _ => {
@@ -3782,6 +4142,11 @@ impl Compiler {
 /// For built-in types (int, string, etc.), the name is stored lowercase.
 /// For class names, the original case is preserved for error messages.
 fn type_hint_to_param_type(hint: &TypeHint) -> ParamType {
+    type_hint_to_param_type_with_ns(hint, &[], &HashMap::new())
+}
+
+/// Convert an AST TypeHint into a runtime ParamType with namespace resolution.
+fn type_hint_to_param_type_with_ns(hint: &TypeHint, namespace: &[u8], use_map: &HashMap<Vec<u8>, Vec<u8>>) -> ParamType {
     match hint {
         TypeHint::Simple(name) => {
             let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -3793,17 +4158,54 @@ fn type_hint_to_param_type(hint: &TypeHint) -> ParamType {
                     ParamType::Simple(lower)
                 }
                 _ => {
-                    // Class name: preserve original case
-                    ParamType::Simple(name.clone())
+                    // Class name: resolve through namespace
+                    // Check for fully qualified (starts with \)
+                    if name.starts_with(b"\\") {
+                        return ParamType::Simple(name[1..].to_vec());
+                    }
+                    // Check use map
+                    if let Some(pos) = name.iter().position(|&b| b == b'\\') {
+                        let first_part = &name[..pos];
+                        let first_lower: Vec<u8> = first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(resolved) = use_map.get(&first_lower) {
+                            let mut result = resolved.clone();
+                            result.extend_from_slice(&name[pos..]);
+                            return ParamType::Simple(result);
+                        }
+                        // Qualified but no use match: prefix with namespace
+                        if namespace.is_empty() {
+                            ParamType::Simple(name.clone())
+                        } else {
+                            let mut result = namespace.to_vec();
+                            result.push(b'\\');
+                            result.extend_from_slice(name);
+                            ParamType::Simple(result)
+                        }
+                    } else {
+                        // Unqualified: check use map
+                        let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(resolved) = use_map.get(&name_lower) {
+                            return ParamType::Simple(resolved.clone());
+                        }
+                        // Prefix with namespace
+                        if namespace.is_empty() {
+                            ParamType::Simple(name.clone())
+                        } else {
+                            let mut result = namespace.to_vec();
+                            result.push(b'\\');
+                            result.extend_from_slice(name);
+                            ParamType::Simple(result)
+                        }
+                    }
                 }
             }
         }
-        TypeHint::Nullable(inner) => ParamType::Nullable(Box::new(type_hint_to_param_type(inner))),
+        TypeHint::Nullable(inner) => ParamType::Nullable(Box::new(type_hint_to_param_type_with_ns(inner, namespace, use_map))),
         TypeHint::Union(types) => {
-            ParamType::Union(types.iter().map(type_hint_to_param_type).collect())
+            ParamType::Union(types.iter().map(|t| type_hint_to_param_type_with_ns(t, namespace, use_map)).collect())
         }
         TypeHint::Intersection(types) => {
-            ParamType::Intersection(types.iter().map(type_hint_to_param_type).collect())
+            ParamType::Intersection(types.iter().map(|t| type_hint_to_param_type_with_ns(t, namespace, use_map)).collect())
         }
     }
 }
