@@ -394,6 +394,11 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
+    // Prevent infinite recursion
+    if indent > 100 {
+        buf.extend_from_slice(b"NULL");
+        return;
+    }
     let prefix = " ".repeat(indent);
     match val {
         Value::Null | Value::Undef => buf.extend_from_slice(b"NULL"),

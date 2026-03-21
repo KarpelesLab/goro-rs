@@ -311,6 +311,11 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"dirname", dirname_fn);
     vm.register_function(b"basename", basename_fn);
     vm.register_function(b"pathinfo", pathinfo_fn);
+    vm.register_function(b"class_implements", class_implements_fn);
+    vm.register_function(b"class_parents", class_parents_fn);
+    vm.register_function(b"class_uses", class_uses_fn);
+    vm.register_function(b"str_increment", str_increment_fn);
+    vm.register_function(b"str_decrement", str_decrement_fn);
 
     // Regex functions are now in the regex module (regex.rs)
 }
@@ -2348,7 +2353,7 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     // Walk parent chain to check for method
-    let mut current = class_lower;
+    let mut current = class_lower.clone();
     for _ in 0..50 {
         if let Some(class) = vm.classes.get(&current) {
             if class.methods.contains_key(&method_lower) {
@@ -2360,14 +2365,46 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 break;
             }
         } else {
-            // Check built-in class methods
-            if method_lower == b"__construct" || method_lower == b"__tostring" || method_lower == b"__invoke" {
-                // Most classes support these
-            }
             break;
         }
     }
-    Ok(Value::False)
+
+    // Check built-in class methods
+    let has_builtin_method = match class_lower.as_slice() {
+        b"closure" => matches!(method_lower.as_slice(),
+            b"__invoke" | b"call" | b"bind" | b"bindto" | b"fromcallable"
+        ),
+        b"exception" | b"error" | b"runtimeexception" | b"logicexception"
+        | b"typeerror" | b"valueerror" | b"argumentcounterror" | b"rangeerror"
+        | b"arithmeticerror" | b"divisionbyzeroerror" | b"invalidargumentexception"
+        | b"badmethodcallexception" | b"overflowexception" | b"underflowexception"
+        | b"domainexception" | b"unexpectedvalueexception" | b"lengthexception"
+        | b"outofrangeexception" | b"outofboundsexception" | b"errorexception"
+        | b"assertionerror" | b"unhandledmatcherror" | b"closedgeneratorexception" => matches!(method_lower.as_slice(),
+            b"getmessage" | b"getcode" | b"getfile" | b"getline" | b"gettrace"
+            | b"gettraceAsstring" | b"gettraceasstring" | b"getprevious" | b"__tostring" | b"__construct"
+        ),
+        b"generator" => matches!(method_lower.as_slice(),
+            b"current" | b"key" | b"next" | b"rewind" | b"send" | b"throw"
+            | b"valid" | b"getreturn"
+        ),
+        b"stdclass" => method_lower == b"__construct",
+        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(method_lower.as_slice(),
+            b"__construct" | b"offsetexists" | b"offsetget" | b"offsetset" | b"offsetunset"
+            | b"count" | b"getiterator" | b"append" | b"getarraycopy" | b"getflags" | b"setflags"
+        ),
+        b"splfixedarray" => matches!(method_lower.as_slice(),
+            b"__construct" | b"count" | b"offsetexists" | b"offsetget" | b"offsetset"
+            | b"offsetunset" | b"fromarray" | b"toarray" | b"getsize" | b"setsize"
+        ),
+        b"spldoublylinkedlist" | b"splstack" | b"splqueue" => matches!(method_lower.as_slice(),
+            b"__construct" | b"count" | b"push" | b"pop" | b"shift" | b"unshift"
+            | b"top" | b"bottom" | b"isempty" | b"current" | b"key" | b"next" | b"prev"
+            | b"rewind" | b"valid" | b"offsetexists" | b"offsetget" | b"offsetset" | b"offsetunset"
+        ),
+        _ => false,
+    };
+    Ok(if has_builtin_method { Value::True } else { Value::False })
 }
 fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(match args.first() {
@@ -6520,3 +6557,185 @@ fn get_loaded_extensions_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
 fn get_extension_funcs_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False) // stub
 }
+
+fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let class_name = match args.first().unwrap_or(&Value::Null) {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Object(obj) => obj.borrow().class_name.clone(),
+        _ => return Ok(Value::False),
+    };
+    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let mut result = PhpArray::new();
+
+    // Get interfaces from the class definition
+    if let Some(class) = vm.classes.get(&class_lower) {
+        for iface in &class.interfaces {
+            let iface_str = PhpString::from_vec(iface.clone());
+            result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
+        }
+    }
+
+    // Also check built-in interface implementations
+    let builtins = goro_core::vm::get_builtin_interfaces(&class_lower);
+    for iface in builtins {
+        let iface_str = PhpString::from_vec(iface.clone());
+        result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
+    }
+
+    // Walk parent chain for inherited interfaces
+    let mut current = class_lower.clone();
+    for _ in 0..50 {
+        let parent = if let Some(class) = vm.classes.get(&current) {
+            class.parent.clone()
+        } else {
+            None
+        };
+        if let Some(parent_name) = parent {
+            let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(parent_class) = vm.classes.get(&parent_lower) {
+                for iface in &parent_class.interfaces {
+                    let iface_str = PhpString::from_vec(iface.clone());
+                    result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
+                }
+            }
+            let parent_builtins = goro_core::vm::get_builtin_interfaces(&parent_lower);
+            for iface in parent_builtins {
+                let iface_str = PhpString::from_vec(iface.clone());
+                result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
+            }
+            current = parent_lower;
+        } else {
+            break;
+        }
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn class_parents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let class_name = match args.first().unwrap_or(&Value::Null) {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Object(obj) => obj.borrow().class_name.clone(),
+        _ => return Ok(Value::False),
+    };
+    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let mut result = PhpArray::new();
+
+    let mut current = class_lower;
+    for _ in 0..50 {
+        let parent = if let Some(class) = vm.classes.get(&current) {
+            class.parent.clone()
+        } else {
+            // Check built-in parent chains
+            let bp = goro_core::vm::get_builtin_parent(&current);
+            bp.map(|p| p.to_vec())
+        };
+        if let Some(parent_name) = parent {
+            let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let display_name = if let Some(class) = vm.classes.get(&parent_lower) {
+                class.name.clone()
+            } else {
+                // Canonicalize built-in class names
+                goro_core::vm::canonicalize_class_name(&parent_lower)
+            };
+            let name_str = PhpString::from_vec(display_name);
+            result.set(ArrayKey::String(name_str.clone()), Value::String(name_str));
+            current = parent_lower;
+        } else {
+            break;
+        }
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn class_uses_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let class_name = match args.first().unwrap_or(&Value::Null) {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Object(obj) => obj.borrow().class_name.clone(),
+        _ => return Ok(Value::False),
+    };
+    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let mut result = PhpArray::new();
+
+    if let Some(class) = vm.classes.get(&class_lower) {
+        for trait_name in &class.traits {
+            let trait_str = PhpString::from_vec(trait_name.clone());
+            result.set(ArrayKey::String(trait_str.clone()), Value::String(trait_str));
+        }
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn str_increment_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return Err(VmError { message: "str_increment(): Argument #1 ($string) must not be empty".to_string(), line: 0 });
+    }
+    // PHP string increment: like spreadsheet columns
+    let mut result: Vec<u8> = bytes.to_vec();
+    let mut carry = true;
+    for i in (0..result.len()).rev() {
+        if !carry { break; }
+        match result[i] {
+            b'z' => { result[i] = b'a'; carry = true; }
+            b'Z' => { result[i] = b'A'; carry = true; }
+            b'9' => { result[i] = b'0'; carry = true; }
+            b'a'..=b'y' => { result[i] += 1; carry = false; }
+            b'A'..=b'Y' => { result[i] += 1; carry = false; }
+            b'0'..=b'8' => { result[i] += 1; carry = false; }
+            _ => {
+                return Err(VmError { message: "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters".to_string(), line: 0 });
+            }
+        }
+    }
+    if carry {
+        // Need to prepend: if first char was digit, prepend '1', if letter, prepend 'a' or 'A'
+        let prefix = match bytes[0] {
+            b'0'..=b'9' => b'1',
+            b'a'..=b'z' => b'a',
+            b'A'..=b'Z' => b'A',
+            _ => b'1',
+        };
+        let mut new_result = vec![prefix];
+        new_result.extend_from_slice(&result);
+        result = new_result;
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn str_decrement_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return Err(VmError { message: "str_decrement(): Argument #1 ($string) must not be empty".to_string(), line: 0 });
+    }
+    // Cannot decrement 'a', 'A', or '0'
+    if bytes.len() == 1 && (bytes[0] == b'a' || bytes[0] == b'A' || bytes[0] == b'0') {
+        return Err(VmError { message: "str_decrement(): Argument #1 ($string) \"".to_string() + &String::from_utf8_lossy(bytes) + "\" is out of decrement range", line: 0 });
+    }
+    let mut result: Vec<u8> = bytes.to_vec();
+    let mut borrow = true;
+    for i in (0..result.len()).rev() {
+        if !borrow { break; }
+        match result[i] {
+            b'a' => { result[i] = b'z'; borrow = true; }
+            b'A' => { result[i] = b'Z'; borrow = true; }
+            b'0' => { result[i] = b'9'; borrow = true; }
+            b'b'..=b'z' => { result[i] -= 1; borrow = false; }
+            b'B'..=b'Z' => { result[i] -= 1; borrow = false; }
+            b'1'..=b'9' => { result[i] -= 1; borrow = false; }
+            _ => {
+                return Err(VmError { message: "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters".to_string(), line: 0 });
+            }
+        }
+    }
+    // Remove leading zero/a/A if result starts with it and has more chars
+    if result.len() > 1 && (result[0] == b'0' || result[0] == b'a' || result[0] == b'A') && borrow {
+        result.remove(0);
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+

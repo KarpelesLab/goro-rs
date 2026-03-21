@@ -1348,6 +1348,14 @@ impl Parser {
             }
         }
 
+        // Check for invalid combinations
+        if modifiers.is_abstract && modifiers.is_final {
+            return Err(ParseError {
+                message: "Cannot use the final modifier on an abstract class".into(),
+                span: span.clone(),
+            });
+        }
+
         // Accept class, interface, trait, or enum
         match self.peek() {
             TokenKind::Interface => {
@@ -1385,6 +1393,16 @@ impl Parser {
                 });
             }
         };
+
+        // For enums: skip `: type` backing type declaration
+        if self.eat(&TokenKind::Colon) {
+            // Consume the backing type name (e.g., string, int)
+            match self.peek() {
+                TokenKind::Identifier(_) => { self.advance(); }
+                _ if self.is_semi_reserved_keyword() => { self.advance(); }
+                _ => { self.advance(); } // skip whatever it is
+            }
+        }
 
         let extends = if self.eat(&TokenKind::Extends) {
             let first = self.parse_class_name_ref()?;
@@ -1491,6 +1509,34 @@ impl Parser {
         }
 
         match self.peek() {
+            TokenKind::Case => {
+                // enum case
+                self.advance();
+                let name = match self.peek().clone() {
+                    TokenKind::Identifier(name) => {
+                        self.advance();
+                        name
+                    }
+                    _ if self.is_semi_reserved_keyword() => {
+                        let kw = self.keyword_to_identifier();
+                        self.advance();
+                        kw
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "expected enum case name".into(),
+                            span: self.span(),
+                        });
+                    }
+                };
+                let value = if self.eat(&TokenKind::Assign) {
+                    Some(self.parse_expression()?)
+                } else {
+                    None
+                };
+                self.expect(&TokenKind::Semicolon)?;
+                return Ok(ClassMember::EnumCase { name, value });
+            }
             TokenKind::Use => {
                 // trait use
                 self.advance();
@@ -1679,7 +1725,8 @@ impl Parser {
             }
             TokenKind::Const => {
                 self.advance();
-                let name = match self.peek().clone() {
+                // Try to parse an identifier - it might be a type hint or the constant name
+                let first_name = match self.peek().clone() {
                     TokenKind::Identifier(name) => {
                         self.advance();
                         name
@@ -1689,11 +1736,60 @@ impl Parser {
                         self.advance();
                         kw
                     }
+                    TokenKind::QuestionMark => {
+                        // Nullable type hint: ?int, ?string, etc.
+                        self.advance();
+                        // Skip the type name
+                        match self.peek() {
+                            TokenKind::Identifier(_) => { self.advance(); }
+                            _ if self.is_semi_reserved_keyword() => { self.advance(); }
+                            _ => { self.advance(); }
+                        }
+                        // Now parse the actual constant name
+                        let name = match self.peek().clone() {
+                            TokenKind::Identifier(name) => { self.advance(); name }
+                            _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
+                            _ => return Err(ParseError { message: "expected constant name".into(), span: self.span() }),
+                        };
+                        self.expect(&TokenKind::Assign)?;
+                        let value = self.parse_expression()?;
+                        self.expect_semicolon()?;
+                        return Ok(ClassMember::ClassConstant { name, value, visibility });
+                    }
                     _ => {
                         return Err(ParseError {
                             message: "expected constant name".into(),
                             span: self.span(),
                         });
+                    }
+                };
+                // Check if the next token is `=` (meaning first_name IS the constant name)
+                // or if it's an identifier (meaning first_name was a type hint)
+                let name = if matches!(self.peek(), TokenKind::Assign) {
+                    first_name
+                } else if matches!(self.peek(), TokenKind::Pipe | TokenKind::Ampersand) {
+                    // Union/intersection type hint: int|string, Foo&Bar
+                    // Skip over the type hint tokens
+                    while matches!(self.peek(), TokenKind::Pipe | TokenKind::Ampersand) {
+                        self.advance(); // skip | or &
+                        match self.peek() {
+                            TokenKind::Identifier(_) => { self.advance(); }
+                            _ if self.is_semi_reserved_keyword() => { self.advance(); }
+                            _ => { self.advance(); }
+                        }
+                    }
+                    // Now parse the actual constant name
+                    match self.peek().clone() {
+                        TokenKind::Identifier(name) => { self.advance(); name }
+                        _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
+                        _ => return Err(ParseError { message: "expected constant name".into(), span: self.span() }),
+                    }
+                } else {
+                    // first_name was a type hint, parse actual constant name
+                    match self.peek().clone() {
+                        TokenKind::Identifier(name) => { self.advance(); name }
+                        _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
+                        _ => return Err(ParseError { message: "expected constant name after type hint".into(), span: self.span() }),
                     }
                 };
                 self.expect(&TokenKind::Assign)?;

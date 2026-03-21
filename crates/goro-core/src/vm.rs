@@ -2174,6 +2174,10 @@ impl Vm {
                         }
                         b"setsize" => {
                             let size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                            if size < 0 || size > 10_000_000 {
+                                // Prevent massive allocation - just return null
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
                             ob.set_property(b"__spl_size".to_vec(), Value::Long(size));
                             let arr = ob.get_property(b"__spl_array");
@@ -4347,15 +4351,43 @@ impl Vm {
                                             obj_mut.set_property(b"__spl_size".to_vec(), Value::Long(size));
                                         }
                                         _ => {
-                                            // Default exception/error constructor
-                                            if call.args.len() > 1 {
-                                                obj_mut.set_property(b"message".to_vec(), call.args[1].clone());
-                                            }
-                                            if call.args.len() > 2 {
-                                                obj_mut.set_property(b"code".to_vec(), call.args[2].clone());
-                                            }
-                                            if call.args.len() > 3 {
-                                                obj_mut.set_property(b"previous".to_vec(), call.args[3].clone());
+                                            // Check if this is ErrorException
+                                            // ErrorException($message, $code, $severity, $filename, $line, $previous)
+                                            if class_lower.as_slice() == b"errorexception" {
+                                                // ErrorException($message, $code, $severity, $filename, $line, $previous)
+                                                if call.args.len() > 1 {
+                                                    obj_mut.set_property(b"message".to_vec(), call.args[1].clone());
+                                                }
+                                                if call.args.len() > 2 {
+                                                    obj_mut.set_property(b"code".to_vec(), call.args[2].clone());
+                                                }
+                                                if call.args.len() > 3 {
+                                                    obj_mut.set_property(b"severity".to_vec(), call.args[3].clone());
+                                                }
+                                                // Only override file if non-null
+                                                if call.args.len() > 4 && !matches!(call.args[4], Value::Null | Value::Undef) {
+                                                    obj_mut.set_property(b"file".to_vec(), call.args[4].clone());
+                                                    // When file is explicitly set, default line to 0
+                                                    obj_mut.set_property(b"line".to_vec(), Value::Long(0));
+                                                }
+                                                // Override line if explicitly provided and non-null
+                                                if call.args.len() > 5 && !matches!(call.args[5], Value::Null | Value::Undef) {
+                                                    obj_mut.set_property(b"line".to_vec(), call.args[5].clone());
+                                                }
+                                                if call.args.len() > 6 {
+                                                    obj_mut.set_property(b"previous".to_vec(), call.args[6].clone());
+                                                }
+                                            } else {
+                                                // Default exception/error constructor: ($message, $code, $previous)
+                                                if call.args.len() > 1 {
+                                                    obj_mut.set_property(b"message".to_vec(), call.args[1].clone());
+                                                }
+                                                if call.args.len() > 2 {
+                                                    obj_mut.set_property(b"code".to_vec(), call.args[2].clone());
+                                                }
+                                                if call.args.len() > 3 {
+                                                    obj_mut.set_property(b"previous".to_vec(), call.args[3].clone());
+                                                }
                                             }
                                         }
                                     }
@@ -5400,6 +5432,57 @@ impl Vm {
 
                 OpCode::Throw => {
                     let exc_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+
+                    // Check that we're throwing an object
+                    if !matches!(&exc_val, Value::Object(_)) {
+                        let err_msg = "Can only throw objects".to_string();
+                        let err_exc = self.create_exception(b"Error", &err_msg, op.line);
+                        self.current_exception = Some(err_exc);
+                        if let Some((catch_target, finally_target, _)) = exception_handlers.pop() {
+                            if catch_target > 0 {
+                                ip = catch_target as usize;
+                            } else if finally_target > 0 {
+                                ip = finally_target as usize;
+                            }
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", err_msg),
+                            line: op.line,
+                        });
+                    }
+
+                    // Check that the object implements Throwable
+                    if let Value::Object(obj) = &exc_val {
+                        let class_name = {
+                            let obj_ref = obj.borrow();
+                            obj_ref.class_name.clone()
+                        };
+                        let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let is_throwable = class_lower == b"exception"
+                            || class_lower == b"error"
+                            || is_builtin_subclass(&class_lower, b"exception")
+                            || is_builtin_subclass(&class_lower, b"error")
+                            || self.class_extends(&class_lower, b"exception")
+                            || self.class_extends(&class_lower, b"error");
+                        if !is_throwable {
+                            let err_msg = "Cannot throw objects that do not implement Throwable".to_string();
+                            let err_exc = self.create_exception(b"Error", &err_msg, op.line);
+                            self.current_exception = Some(err_exc);
+                            if let Some((catch_target, finally_target, _)) = exception_handlers.pop() {
+                                if catch_target > 0 {
+                                    ip = catch_target as usize;
+                                } else if finally_target > 0 {
+                                    ip = finally_target as usize;
+                                }
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
 
                     if let Some((catch_target, finally_target, _exc_tmp)) = exception_handlers.pop()
                     {
@@ -6453,13 +6536,29 @@ impl Vm {
                         obj.set_property(b"code".to_vec(), Value::Long(0));
                         obj.set_property(
                             b"file".to_vec(),
-                            Value::String(PhpString::from_bytes(b"Unknown")),
+                            Value::String(PhpString::from_string(self.current_file.clone())),
                         );
                         obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
                         obj.set_property(b"previous".to_vec(), Value::Null);
+                        // Build trace from call stack
+                        let mut trace_arr = PhpArray::new();
+                        for (i, (func_name, file, line)) in self.call_stack.iter().rev().enumerate() {
+                            let mut frame = PhpArray::new();
+                            frame.set(ArrayKey::String(PhpString::from_bytes(b"file")), Value::String(PhpString::from_string(file.clone())));
+                            frame.set(ArrayKey::String(PhpString::from_bytes(b"line")), Value::Long(*line as i64));
+                            frame.set(ArrayKey::String(PhpString::from_bytes(b"function")), Value::String(PhpString::from_string(func_name.clone())));
+                            // Parse class::method for class/type
+                            if let Some(pos) = func_name.find("::") {
+                                frame.set(ArrayKey::String(PhpString::from_bytes(b"class")), Value::String(PhpString::from_string(func_name[..pos].to_string())));
+                                frame.set(ArrayKey::String(PhpString::from_bytes(b"type")), Value::String(PhpString::from_bytes(b"::")));
+                                frame.set(ArrayKey::String(PhpString::from_bytes(b"function")), Value::String(PhpString::from_string(func_name[pos+2..].to_string())));
+                            }
+                            frame.set(ArrayKey::String(PhpString::from_bytes(b"args")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                            trace_arr.push(Value::Array(Rc::new(RefCell::new(frame))));
+                        }
                         obj.set_property(
                             b"trace".to_vec(),
-                            Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            Value::Array(Rc::new(RefCell::new(trace_arr))),
                         );
                     }
 
@@ -6830,7 +6929,44 @@ impl Vm {
                                 b"getline" => Some(obj_borrow.get_property(b"line")),
                                 b"gettrace" => Some(obj_borrow.get_property(b"trace")),
                                 b"gettraceasstring" => {
-                                    Some(Value::String(PhpString::from_bytes(b"")))
+                                    let trace = obj_borrow.get_property(b"trace");
+                                    let trace_str = if let Value::Array(arr) = &trace {
+                                        let arr = arr.borrow();
+                                        let mut lines = Vec::new();
+                                        let mut idx = 0;
+                                        for (_key, frame_val) in arr.iter() {
+                                            if let Value::Array(frame) = frame_val {
+                                                let frame = frame.borrow();
+                                                let file = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"file")))
+                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .unwrap_or_default();
+                                                let line = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"line")))
+                                                    .map(|v| v.to_long())
+                                                    .unwrap_or(0);
+                                                let function = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"function")))
+                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .unwrap_or_default();
+                                                let class = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"class")))
+                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .unwrap_or_default();
+                                                let type_str = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"type")))
+                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .unwrap_or_default();
+                                                let loc = if file.is_empty() {
+                                                    "[internal function]".to_string()
+                                                } else {
+                                                    format!("{}({})", file, line)
+                                                };
+                                                lines.push(format!("#{} {}: {}{}{}()", idx, loc, class, type_str, function));
+                                            }
+                                            idx += 1;
+                                        }
+                                        lines.push(format!("#{} {{main}}", idx));
+                                        lines.join("\n")
+                                    } else {
+                                        "#0 {main}".to_string()
+                                    };
+                                    Some(Value::String(PhpString::from_string(trace_str)))
                                 }
                                 b"getprevious" => Some(obj_borrow.get_property(b"previous")),
                                 b"getseverity" => {
@@ -6847,10 +6983,48 @@ impl Vm {
                                     let file = obj_borrow.get_property(b"file").to_php_string().to_string_lossy();
                                     let line = obj_borrow.get_property(b"line").to_long();
                                     let file_str = if file.is_empty() { self.current_file.clone() } else { file };
-                                    let result = if message.is_empty() {
-                                        format!("{} in {}:{}\nStack trace:\n#0 {{main}}", class_display, file_str, line)
+                                    // Build trace string from stored trace
+                                    let trace = obj_borrow.get_property(b"trace");
+                                    let trace_str = if let Value::Array(arr) = &trace {
+                                        let arr = arr.borrow();
+                                        let mut lines = Vec::new();
+                                        let mut idx = 0;
+                                        for (_key, frame_val) in arr.iter() {
+                                            if let Value::Array(frame) = frame_val {
+                                                let frame = frame.borrow();
+                                                let ff = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"file")))
+                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .unwrap_or_default();
+                                                let fl = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"line")))
+                                                    .map(|v| v.to_long())
+                                                    .unwrap_or(0);
+                                                let func = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"function")))
+                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .unwrap_or_default();
+                                                let cls = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"class")))
+                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .unwrap_or_default();
+                                                let typ = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"type")))
+                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .unwrap_or_default();
+                                                let loc = if ff.is_empty() {
+                                                    "[internal function]".to_string()
+                                                } else {
+                                                    format!("{}({})", ff, fl)
+                                                };
+                                                lines.push(format!("#{} {}: {}{}{}()", idx, loc, cls, typ, func));
+                                            }
+                                            idx += 1;
+                                        }
+                                        lines.push(format!("#{} {{main}}", idx));
+                                        lines.join("\n")
                                     } else {
-                                        format!("{}: {} in {}:{}\nStack trace:\n#0 {{main}}", class_display, message, file_str, line)
+                                        "#0 {main}".to_string()
+                                    };
+                                    let result = if message.is_empty() {
+                                        format!("{} in {}:{}\nStack trace:\n{}", class_display, file_str, line, trace_str)
+                                    } else {
+                                        format!("{}: {} in {}:{}\nStack trace:\n{}", class_display, message, file_str, line, trace_str)
                                     };
                                     Some(Value::String(PhpString::from_string(result)))
                                 }
@@ -7598,6 +7772,91 @@ pub fn is_builtin_subclass(child: &[u8], parent: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// Get all interfaces that a built-in class implements
+pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
+    let interfaces: &[&[u8]] = match class {
+        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => &[
+            b"IteratorAggregate", b"Traversable", b"ArrayAccess", b"Serializable", b"Countable",
+        ],
+        b"splfixedarray" => &[b"Iterator", b"Traversable", b"ArrayAccess", b"Countable"],
+        b"spldoublylinkedlist" => &[b"Iterator", b"Traversable", b"Countable", b"Serializable", b"ArrayAccess"],
+        b"splstack" | b"splqueue" => &[b"Iterator", b"Traversable", b"Countable", b"Serializable", b"ArrayAccess"],
+        b"splobjectstorage" => &[b"Countable", b"Iterator", b"Traversable", b"Serializable", b"ArrayAccess"],
+        b"splpriorityqueue" => &[b"Iterator", b"Traversable", b"Countable"],
+        b"splheap" | b"splminheap" | b"splmaxheap" => &[b"Iterator", b"Traversable", b"Countable"],
+        b"exception" | b"error" | b"typeerror" | b"valueerror" | b"argumentcounterror"
+        | b"rangeerror" | b"arithmeticerror" | b"divisionbyzeroerror" | b"assertionerror"
+        | b"unhandledmatcherror" | b"runtimeexception" | b"logicexception"
+        | b"invalidargumentexception" | b"badmethodcallexception" | b"badfunctioncallexception"
+        | b"overflowexception" | b"underflowexception" | b"outofboundsexception"
+        | b"domainexception" | b"unexpectedvalueexception" | b"lengthexception"
+        | b"outofrangeexception" | b"closedgeneratorexception" | b"errorexception" => &[b"Throwable"],
+        _ => &[],
+    };
+    interfaces.iter().map(|i| i.to_vec()).collect()
+}
+
+/// Get the built-in parent class name for a class (lowercase)
+pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
+    match class {
+        b"typeerror" | b"valueerror" | b"argumentcounterror" | b"rangeerror"
+        | b"unhandledmatcherror" | b"assertionerror" => Some(b"Error"),
+        b"arithmeticerror" => Some(b"Error"),
+        b"divisionbyzeroerror" => Some(b"ArithmeticError"),
+        b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"errorexception" => Some(b"Exception"),
+        b"overflowexception" | b"underflowexception" | b"outofboundsexception" => Some(b"RuntimeException"),
+        b"invalidargumentexception" | b"badmethodcallexception" | b"domainexception"
+        | b"unexpectedvalueexception" | b"lengthexception" | b"outofrangeexception" => Some(b"LogicException"),
+        b"badfunctioncallexception" => Some(b"BadMethodCallException"),
+        b"splstack" | b"splqueue" => Some(b"SplDoublyLinkedList"),
+        b"splminheap" | b"splmaxheap" => Some(b"SplHeap"),
+        _ => None,
+    }
+}
+
+/// Canonicalize a class name from lowercase to proper case
+pub fn canonicalize_class_name(name_lower: &[u8]) -> Vec<u8> {
+    match name_lower {
+        b"stdclass" => b"stdClass".to_vec(),
+        b"exception" => b"Exception".to_vec(),
+        b"error" => b"Error".to_vec(),
+        b"typeerror" => b"TypeError".to_vec(),
+        b"valueerror" => b"ValueError".to_vec(),
+        b"runtimeexception" => b"RuntimeException".to_vec(),
+        b"logicexception" => b"LogicException".to_vec(),
+        b"invalidargumentexception" => b"InvalidArgumentException".to_vec(),
+        b"badmethodcallexception" => b"BadMethodCallException".to_vec(),
+        b"badfunctioncallexception" => b"BadFunctionCallException".to_vec(),
+        b"overflowexception" => b"OverflowException".to_vec(),
+        b"underflowexception" => b"UnderflowException".to_vec(),
+        b"rangeerror" => b"RangeError".to_vec(),
+        b"arithmeticerror" => b"ArithmeticError".to_vec(),
+        b"divisionbyzeroerror" => b"DivisionByZeroError".to_vec(),
+        b"argumentcounterror" => b"ArgumentCountError".to_vec(),
+        b"errorexception" => b"ErrorException".to_vec(),
+        b"closedgeneratorexception" => b"ClosedGeneratorException".to_vec(),
+        b"unexpectedvalueexception" => b"UnexpectedValueException".to_vec(),
+        b"domainexception" => b"DomainException".to_vec(),
+        b"assertionerror" => b"AssertionError".to_vec(),
+        b"unhandledmatcherror" => b"UnhandledMatchError".to_vec(),
+        b"lengthexception" => b"LengthException".to_vec(),
+        b"outofrangeexception" => b"OutOfRangeException".to_vec(),
+        b"outofboundsexception" => b"OutOfBoundsException".to_vec(),
+        b"arrayobject" => b"ArrayObject".to_vec(),
+        b"arrayiterator" => b"ArrayIterator".to_vec(),
+        b"splfixedarray" => b"SplFixedArray".to_vec(),
+        b"spldoublylinkedlist" => b"SplDoublyLinkedList".to_vec(),
+        b"splstack" => b"SplStack".to_vec(),
+        b"splqueue" => b"SplQueue".to_vec(),
+        b"splpriorityqueue" => b"SplPriorityQueue".to_vec(),
+        b"splmaxheap" => b"SplMaxHeap".to_vec(),
+        b"splminheap" => b"SplMinHeap".to_vec(),
+        b"splheap" => b"SplHeap".to_vec(),
+        b"splobjectstorage" => b"SplObjectStorage".to_vec(),
+        _ => name_lower.to_vec(),
+    }
 }
 
 fn is_builtin_implements(class: &[u8], interface: &[u8]) -> bool {

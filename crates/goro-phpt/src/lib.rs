@@ -462,25 +462,82 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
             let stack_trace = vm.format_stack_trace();
             if let Some(exc) = vm.current_exception.take() {
                 if let goro_core::value::Value::Object(obj) = &exc {
-                    let obj = obj.borrow();
-                    let class = String::from_utf8_lossy(&obj.class_name);
-                    let msg = obj.get_property(b"message");
-                    let msg_str = msg.to_php_string().to_string_lossy();
-                    let exc_file = obj.get_property(b"file").to_php_string().to_string_lossy();
-                    let exc_line = obj.get_property(b"line").to_long();
-                    let file_str = if exc_file.is_empty() { vm.current_file.clone() } else { exc_file };
-                    let line_num = if exc_line > 0 { exc_line as u32 } else { e.line };
-                    let fatal = if msg_str.is_empty() {
-                        format!(
-                            "\nFatal error: Uncaught {} in {}:{}\nStack trace:\n{}\n  thrown in {} on line {}",
-                            class, file_str, line_num, stack_trace, file_str, line_num
-                        )
-                    } else {
-                        format!(
-                            "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n{}\n  thrown in {} on line {}",
-                            class, msg_str, file_str, line_num, stack_trace, file_str, line_num
-                        )
-                    };
+                    // Collect the exception chain (innermost first, then previous)
+                    let mut chain = Vec::new();
+                    {
+                        let obj_ref = obj.borrow();
+                        let class = String::from_utf8_lossy(&obj_ref.class_name).to_string();
+                        let msg_str = obj_ref.get_property(b"message").to_php_string().to_string_lossy();
+                        let exc_file = obj_ref.get_property(b"file").to_php_string().to_string_lossy();
+                        let exc_line = obj_ref.get_property(b"line").to_long();
+                        let file_str = if exc_file.is_empty() || exc_file == "Unknown" { vm.current_file.clone() } else { exc_file };
+                        let line_num = if exc_line > 0 { exc_line as u32 } else { e.line };
+                        // Get trace from exception object
+                        let exc_trace = obj_ref.get_property(b"trace");
+                        let trace_str = format_exception_trace(&exc_trace, &stack_trace);
+                        chain.push((class, msg_str, file_str, line_num, trace_str));
+                        // Walk previous chain
+                        let mut prev = obj_ref.get_property(b"previous").clone();
+                        for _ in 0..100 {
+                            let next_prev;
+                            if let goro_core::value::Value::Object(prev_obj) = &prev {
+                                let prev_ref = prev_obj.borrow();
+                                let pc = String::from_utf8_lossy(&prev_ref.class_name).to_string();
+                                let pm = prev_ref.get_property(b"message").to_php_string().to_string_lossy();
+                                let pf = prev_ref.get_property(b"file").to_php_string().to_string_lossy();
+                                let pl = prev_ref.get_property(b"line").to_long();
+                                let pf_str = if pf.is_empty() || pf == "Unknown" { vm.current_file.clone() } else { pf };
+                                let pl_num = if pl > 0 { pl as u32 } else { 0 };
+                                let pt = prev_ref.get_property(b"trace");
+                                let pt_str = format_exception_trace(&pt, &stack_trace);
+                                chain.push((pc, pm, pf_str, pl_num, pt_str));
+                                next_prev = prev_ref.get_property(b"previous").clone();
+                            } else {
+                                break;
+                            }
+                            prev = next_prev;
+                        }
+                    }
+
+                    // Format: first exception is "Uncaught", rest are "Next"
+                    // But PHP displays them in reverse order (innermost first, then previous)
+                    // Actually PHP shows the innermost (last thrown) first, with "Uncaught",
+                    // then shows each previous with "\n\nNext"
+                    // The "thrown in" line comes at the very end with the last exception in chain
+                    let first = &chain[0];
+                    let thrown_file = &first.2;
+                    let thrown_line = first.3;
+
+                    let mut fatal = String::new();
+                    for (i, (class, msg_str, file_str, line_num, trace_str)) in chain.iter().rev().enumerate() {
+                        if i == 0 {
+                            if msg_str.is_empty() {
+                                fatal.push_str(&format!(
+                                    "\nFatal error: Uncaught {} in {}:{}\nStack trace:\n{}",
+                                    class, file_str, line_num, trace_str
+                                ));
+                            } else {
+                                fatal.push_str(&format!(
+                                    "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n{}",
+                                    class, msg_str, file_str, line_num, trace_str
+                                ));
+                            }
+                        } else {
+                            if msg_str.is_empty() {
+                                fatal.push_str(&format!(
+                                    "\n\nNext {} in {}:{}\nStack trace:\n{}",
+                                    class, file_str, line_num, trace_str
+                                ));
+                            } else {
+                                fatal.push_str(&format!(
+                                    "\n\nNext {}: {} in {}:{}\nStack trace:\n{}",
+                                    class, msg_str, file_str, line_num, trace_str
+                                ));
+                            }
+                        }
+                    }
+                    fatal.push_str(&format!("\n  thrown in {} on line {}", thrown_file, thrown_line));
+
                     output.extend_from_slice(fatal.as_bytes());
                 } else {
                     let fatal =
@@ -498,6 +555,46 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
             Ok(output)
         }
     }
+}
+
+fn format_exception_trace(trace_val: &goro_core::value::Value, fallback_trace: &str) -> String {
+    use goro_core::value::Value;
+    use goro_core::array::ArrayKey;
+    if let Value::Array(arr) = trace_val {
+        let arr = arr.borrow();
+        let mut lines = Vec::new();
+        let mut idx = 0;
+        for (_key, frame_val) in arr.iter() {
+            if let Value::Array(frame) = frame_val {
+                let frame = frame.borrow();
+                let file = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"file")))
+                    .map(|v| v.to_php_string().to_string_lossy())
+                    .unwrap_or_default();
+                let line = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"line")))
+                    .map(|v| v.to_long())
+                    .unwrap_or(0);
+                let function = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"function")))
+                    .map(|v| v.to_php_string().to_string_lossy())
+                    .unwrap_or_default();
+                let class = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"class")))
+                    .map(|v| v.to_php_string().to_string_lossy())
+                    .unwrap_or_default();
+                let type_str = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"type")))
+                    .map(|v| v.to_php_string().to_string_lossy())
+                    .unwrap_or_default();
+                let loc = if file.is_empty() {
+                    "[internal function]".to_string()
+                } else {
+                    format!("{}({})", file, line)
+                };
+                lines.push(format!("#{} {}: {}{}{}()", idx, loc, class, type_str, function));
+            }
+            idx += 1;
+        }
+        lines.push(format!("#{} {{main}}", idx));
+        return lines.join("\n");
+    }
+    fallback_trace.to_string()
 }
 
 fn matches_expectf(pattern: &str, actual: &str) -> bool {

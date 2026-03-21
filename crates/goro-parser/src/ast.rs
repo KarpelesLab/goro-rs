@@ -482,6 +482,10 @@ pub enum ClassMember {
         traits: Vec<Vec<u8>>,
         adaptations: Vec<TraitAdaptation>,
     },
+    EnumCase {
+        name: Vec<u8>,
+        value: Option<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]

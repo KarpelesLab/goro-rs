@@ -1982,6 +1982,18 @@ impl Compiler {
                             };
                             class.constants.insert(const_name.clone(), val);
                         }
+                        ClassMember::EnumCase { name, value } => {
+                            // Enum cases are stored as class constants
+                            // For unit enums, the value is the case name as a string
+                            // For backed enums, the value is the backing value
+                            let case_value = if let Some(val_expr) = value {
+                                Self::eval_const_expr(&val_expr)
+                                    .unwrap_or_else(|| Value::String(crate::string::PhpString::from_vec(name.clone())))
+                            } else {
+                                Value::String(crate::string::PhpString::from_vec(name.clone()))
+                            };
+                            class.constants.insert(name.clone(), case_value);
+                        }
                         ClassMember::TraitUse { traits, adaptations } => {
                             for trait_name in traits {
                                 class.traits.push(self.resolve_class_name(trait_name));
@@ -3357,9 +3369,9 @@ impl Compiler {
                     b"true" => Value::True,
                     b"false" => Value::False,
                     b"null" => Value::Null,
-                    b"stdin" => Value::Long(0),
-                    b"stdout" => Value::Long(1),
-                    b"stderr" => Value::Long(2),
+                    b"stdin" => Value::Long(1),
+                    b"stdout" => Value::Long(2),
+                    b"stderr" => Value::Long(3),
                     b"e_all" => Value::Long(32767),
                     b"e_error" => Value::Long(1),
                     b"e_warning" => Value::Long(2),
