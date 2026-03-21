@@ -323,7 +323,12 @@ impl Value {
         if b == 0 {
             return Err("Modulo by zero");
         }
-        Ok(Value::Long(a % b))
+        // Handle overflow case: i64::MIN % -1 panics in Rust but PHP returns 0
+        if a == i64::MIN && b == -1 {
+            Ok(Value::Long(0))
+        } else {
+            Ok(Value::Long(a % b))
+        }
     }
 
     pub fn pow(&self, other: &Value) -> Value {
@@ -811,6 +816,34 @@ impl Value {
                     }
                 }
             }
+            // PHP 8: float vs string - compare numerically if string is numeric, else cast float to string
+            (Value::Double(f), Value::String(s)) | (Value::String(s), Value::Double(f)) => {
+                let is_left_double = matches!(self, Value::Double(_));
+                if let Some(num) = parse_numeric_string(s.as_bytes()) {
+                    if is_left_double {
+                        if *f < num { -1 } else if *f > num { 1 } else { 0 }
+                    } else {
+                        if num < *f { -1 } else if num > *f { 1 } else { 0 }
+                    }
+                } else {
+                    // PHP 8: non-numeric string - cast float to string and compare as strings
+                    let f_str = format_php_float(*f);
+                    let s_str = std::str::from_utf8(s.as_bytes()).unwrap_or("");
+                    if is_left_double {
+                        match f_str.as_bytes().cmp(s_str.as_bytes()) {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        }
+                    } else {
+                        match s_str.as_bytes().cmp(f_str.as_bytes()) {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        }
+                    }
+                }
+            }
             _ => {
                 let a = self.to_double();
                 let b = other.to_double();
@@ -921,6 +954,7 @@ fn format_php_float_with_precision(f: f64, sig_digits: usize) -> String {
 
     // PHP uses G format with `sig_digits` significant digits
     // This is equivalent to: sprintf("%.{sig_digits}G", f) but with some PHP-specific quirks
+    let sig_digits = if sig_digits == 0 { 1 } else { sig_digits };
     let s = format!("{:.width$e}", f, width = sig_digits);
 
     // Parse the scientific notation

@@ -1695,9 +1695,16 @@ impl Compiler {
                             visibility,
                             is_static,
                             is_abstract,
+                            is_final: method_is_final,
                             line: method_line,
-                            ..
                         } => {
+                            // Check: a method cannot be both abstract and final
+                            if *is_abstract && *method_is_final {
+                                return Err(CompileError {
+                                    message: "Cannot use the final modifier on an abstract method".to_string(),
+                                    line: *method_line,
+                                });
+                            }
                             // Enforce: __construct and __destruct cannot declare return types
                             {
                                 let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -1891,6 +1898,7 @@ impl Compiler {
                                         param_count,
                                         is_static: *is_static,
                                         is_abstract: *is_abstract,
+                                        is_final: *method_is_final,
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
                                     },
@@ -1914,6 +1922,7 @@ impl Compiler {
                                         param_count,
                                         is_static: *is_static,
                                         is_abstract: true,
+                                        is_final: *method_is_final,
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
                                     },
@@ -3023,18 +3032,18 @@ impl Compiler {
                 });
                 let result_tmp = self.op_array.alloc_temp();
 
-                // Check if left is null
-                let null_idx = self.op_array.add_literal(Value::Null);
+                // Check if left is set (not null and not undef)
                 let check_tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
-                    opcode: OpCode::Identical,
+                    opcode: OpCode::IssetCheck,
                     op1: left_val,
-                    op2: OperandType::Const(null_idx),
+                    op2: OperandType::Unused,
                     result: OperandType::Tmp(check_tmp),
                     line: expr.span.line,
                 });
+                // If NOT set (null/undef), jump to use right side
                 let jmp_null = self.op_array.emit(Op {
-                    opcode: OpCode::JmpNz,
+                    opcode: OpCode::JmpZ,
                     op1: OperandType::Tmp(check_tmp),
                     op2: OperandType::JmpTarget(0),
                     result: OperandType::Unused,
@@ -3569,10 +3578,16 @@ impl Compiler {
             }
 
             ExprKind::Eval(inner) => {
-                // TODO: implement eval
-                let _ = self.compile_expr(inner)?;
-                let idx = self.op_array.add_literal(Value::Null);
-                Ok(OperandType::Const(idx))
+                let code_op = self.compile_expr(inner)?;
+                let result = OperandType::Tmp(self.op_array.alloc_temp());
+                self.op_array.emit(Op {
+                    opcode: OpCode::Eval,
+                    op1: code_op,
+                    op2: OperandType::Unused,
+                    result,
+                    line: expr.span.line,
+                });
+                Ok(result)
             }
 
             ExprKind::Isset(exprs) => {

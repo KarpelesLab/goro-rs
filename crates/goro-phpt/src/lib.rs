@@ -689,7 +689,7 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                 b'f' => {
                     pi += 2;
                     let start = ai;
-                    if ai < ab.len() && ab[ai] == b'-' {
+                    if ai < ab.len() && (ab[ai] == b'-' || ab[ai] == b'+') {
                         ai += 1;
                     }
                     while ai < ab.len() && (ab[ai].is_ascii_digit() || ab[ai] == b'.') {

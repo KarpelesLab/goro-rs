@@ -33,6 +33,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"ob_clean", ob_clean);
     vm.register_function(b"ob_get_length", ob_get_length);
     vm.register_function(b"ob_implicit_flush", ob_implicit_flush);
+    vm.register_function(b"ob_get_status", ob_get_status);
+    vm.register_function(b"ob_get_flush", ob_get_flush);
+    vm.register_function(b"ob_list_handlers", ob_list_handlers);
+    vm.register_function(b"flush", flush_fn);
 
     // Function handling
     vm.register_function(b"func_num_args", func_num_args);
@@ -91,6 +95,7 @@ pub fn register(vm: &mut Vm) {
 
     // Misc
     vm.register_function(b"ini_set", ini_set);
+    vm.register_function(b"ini_alter", ini_set);
     vm.register_function(b"ini_get", ini_get);
     vm.register_function(b"ini_restore", ini_restore);
     vm.register_function(b"set_time_limit", set_time_limit);
@@ -484,6 +489,65 @@ fn ob_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     }
 }
 fn ob_implicit_flush(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
+}
+fn ob_get_status(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let full = args.first().map(|v| v.to_bool()).unwrap_or(false);
+    if full {
+        let result = PhpArray::new();
+        let result_rc = Rc::new(RefCell::new(result));
+        for (i, buf) in vm.ob_stack.iter().enumerate() {
+            let entry_rc = Rc::new(RefCell::new(PhpArray::new()));
+            {
+                let mut e = entry_rc.borrow_mut();
+                e.set(ArrayKey::String(PhpString::from_bytes(b"name")), Value::String(PhpString::from_bytes(b"default output handler")));
+                e.set(ArrayKey::String(PhpString::from_bytes(b"type")), Value::Long(1));
+                e.set(ArrayKey::String(PhpString::from_bytes(b"flags")), Value::Long(112));
+                e.set(ArrayKey::String(PhpString::from_bytes(b"level")), Value::Long(i as i64));
+                e.set(ArrayKey::String(PhpString::from_bytes(b"chunk_size")), Value::Long(0));
+                e.set(ArrayKey::String(PhpString::from_bytes(b"buffer_size")), Value::Long(buf.len() as i64));
+                e.set(ArrayKey::String(PhpString::from_bytes(b"buffer_used")), Value::Long(buf.len() as i64));
+            }
+            result_rc.borrow_mut().push(Value::Array(entry_rc));
+        }
+        Ok(Value::Array(result_rc))
+    } else if !vm.ob_stack.is_empty() {
+        let buf = vm.ob_stack.last().unwrap();
+        let entry_rc = Rc::new(RefCell::new(PhpArray::new()));
+        {
+            let mut e = entry_rc.borrow_mut();
+            e.set(ArrayKey::String(PhpString::from_bytes(b"name")), Value::String(PhpString::from_bytes(b"default output handler")));
+            e.set(ArrayKey::String(PhpString::from_bytes(b"type")), Value::Long(1));
+            e.set(ArrayKey::String(PhpString::from_bytes(b"flags")), Value::Long(112));
+            e.set(ArrayKey::String(PhpString::from_bytes(b"level")), Value::Long((vm.ob_stack.len() - 1) as i64));
+            e.set(ArrayKey::String(PhpString::from_bytes(b"chunk_size")), Value::Long(0));
+            e.set(ArrayKey::String(PhpString::from_bytes(b"buffer_size")), Value::Long(buf.len() as i64));
+            e.set(ArrayKey::String(PhpString::from_bytes(b"buffer_used")), Value::Long(buf.len() as i64));
+        }
+        Ok(Value::Array(entry_rc))
+    } else {
+        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    }
+}
+fn ob_get_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    if let Some(buf) = vm.ob_stack.pop() {
+        let contents = Value::String(PhpString::from_vec(buf.clone()));
+        vm.write_output(&buf);
+        Ok(contents)
+    } else {
+        Ok(Value::False)
+    }
+}
+fn ob_list_handlers(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let arr = PhpArray::new();
+    let arr_rc = Rc::new(RefCell::new(arr));
+    for _ in 0..vm.ob_stack.len() {
+        arr_rc.borrow_mut().push(Value::String(PhpString::from_bytes(b"default output handler")));
+    }
+    Ok(Value::Array(arr_rc))
+}
+fn flush_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // No-op in our implementation
     Ok(Value::Null)
 }
 
@@ -6257,8 +6321,9 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let key = trimmed[..eq_pos].trim().to_string();
             let val_str = trimmed[eq_pos+1..].trim();
             // Remove surrounding quotes
-            let val_str = if (val_str.starts_with('"') && val_str.ends_with('"'))
-                || (val_str.starts_with('\'') && val_str.ends_with('\''))
+            let val_str = if val_str.len() >= 2
+                && ((val_str.starts_with('"') && val_str.ends_with('"'))
+                || (val_str.starts_with('\'') && val_str.ends_with('\'')))
             {
                 &val_str[1..val_str.len()-1]
             } else {

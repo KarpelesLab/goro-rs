@@ -1303,7 +1303,7 @@ impl Vm {
                     let arg_num = i + 1 - implicit_args;
                     return Some(format!(
                         "{}(): Argument #{} (${}) \
-                         must be of type {}, {} given, called in {}:{}",
+                         must be of type {}, {} given, called in {} on line {}",
                         func_display_name, arg_num, param_name, expected, given, self.current_file, line
                     ));
                 }
@@ -1562,6 +1562,15 @@ impl Vm {
 
     /// Take the output buffer
     pub fn take_output(&mut self) -> Vec<u8> {
+        // Flush all output buffers (ob_start without matching ob_end_flush)
+        while let Some(buf) = self.ob_stack.pop() {
+            // Each buffer's content goes to the parent buffer or main output
+            if let Some(parent) = self.ob_stack.last_mut() {
+                parent.extend_from_slice(&buf);
+            } else {
+                self.output.extend_from_slice(&buf);
+            }
+        }
         std::mem::take(&mut self.output)
     }
 
@@ -1657,6 +1666,15 @@ impl Vm {
             }
             b"splpriorityqueue" => {
                 self.spl_priority_queue_method(method_lower, obj)
+            }
+            b"datetime" | b"datetimeimmutable" => {
+                match method_lower {
+                    b"gettimestamp" => {
+                        let ob = obj.borrow();
+                        Some(ob.get_property(b"timestamp"))
+                    }
+                    _ => None, // format() and others handled via __spl:: dispatch
+                }
             }
             _ => None,
         }
@@ -1926,6 +1944,7 @@ impl Vm {
                 b"attach" | b"detach" | b"contains" | b"offsetget" | b"offsetset"
             ),
             b"splpriorityqueue" => matches!(method, b"insert" | b"extract"),
+            b"datetime" | b"datetimeimmutable" => matches!(method, b"format" | b"modify" | b"settimezone" | b"settime" | b"setdate" | b"settimestamp" | b"add" | b"sub" | b"diff"),
             _ => false,
         }
     }
@@ -2280,11 +2299,167 @@ impl Vm {
                         _ => None,
                     }
                 }
+                b"datetime" | b"datetimeimmutable" => {
+                    match method {
+                        b"format" => {
+                            let format_str = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
+                            let ob = obj.borrow();
+                            let timestamp = ob.get_property(b"timestamp").to_long();
+                            // Call into the registered date_format function
+                            // We implement a basic format here directly
+                            let result = self.format_datetime_timestamp(&format_str, timestamp);
+                            Some(Value::String(PhpString::from_string(result)))
+                        }
+                        b"gettimestamp" => {
+                            let ob = obj.borrow();
+                            Some(ob.get_property(b"timestamp"))
+                        }
+                        b"settimestamp" => {
+                            let ts = args.get(1).cloned().unwrap_or(Value::Null).to_long();
+                            obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(ts));
+                            Some(this.clone())
+                        }
+                        _ => None,
+                    }
+                }
                 _ => None,
             }
         } else {
             None
         }
+    }
+
+    /// Format a timestamp using PHP date format characters
+    fn format_datetime_timestamp(&self, format: &str, secs: i64) -> String {
+        let days_since_epoch = secs / 86400;
+        let time_of_day = ((secs % 86400) + 86400) % 86400;
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+
+        // days_to_ymd helper
+        fn days_to_ymd(days: i64) -> (i64, u32, u32) {
+            let mut y = 1970i64;
+            let mut remaining = days;
+            if remaining >= 0 {
+                loop {
+                    let days_in_year = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
+                    if remaining < days_in_year { break; }
+                    remaining -= days_in_year;
+                    y += 1;
+                }
+            } else {
+                loop {
+                    y -= 1;
+                    let days_in_year = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
+                    remaining += days_in_year;
+                    if remaining >= 0 { break; }
+                }
+            }
+            let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            let month_days = [31, if is_leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            let mut m = 0;
+            for md in &month_days {
+                if remaining < *md as i64 { break; }
+                remaining -= *md as i64;
+                m += 1;
+            }
+            (y, m + 1, remaining as u32 + 1)
+        }
+
+        let (year, month, day) = days_to_ymd(days_since_epoch);
+
+        let mut result = String::new();
+        let fmt_bytes = format.as_bytes();
+        let mut i = 0;
+        while i < fmt_bytes.len() {
+            let c = fmt_bytes[i];
+            if c == b'\\' && i + 1 < fmt_bytes.len() {
+                result.push(fmt_bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            match c {
+                b'Y' => result.push_str(&format!("{:04}", year)),
+                b'y' => result.push_str(&format!("{:02}", year % 100)),
+                b'm' => result.push_str(&format!("{:02}", month)),
+                b'n' => result.push_str(&format!("{}", month)),
+                b'd' => result.push_str(&format!("{:02}", day)),
+                b'j' => result.push_str(&format!("{}", day)),
+                b'H' => result.push_str(&format!("{:02}", hours)),
+                b'G' => result.push_str(&format!("{}", hours)),
+                b'i' => result.push_str(&format!("{:02}", minutes)),
+                b's' => result.push_str(&format!("{:02}", seconds)),
+                b'A' => result.push_str(if hours >= 12 { "PM" } else { "AM" }),
+                b'a' => result.push_str(if hours >= 12 { "pm" } else { "am" }),
+                b'g' => {
+                    let h12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
+                    result.push_str(&format!("{}", h12));
+                }
+                b'h' => {
+                    let h12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
+                    result.push_str(&format!("{:02}", h12));
+                }
+                b'U' => result.push_str(&format!("{}", secs)),
+                b'N' => {
+                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as i64;
+                    result.push_str(&format!("{}", if dow == 0 { 7 } else { dow }));
+                }
+                b'w' => {
+                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as i64;
+                    result.push_str(&format!("{}", dow));
+                }
+                b'D' => {
+                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as usize;
+                    let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                    result.push_str(names[dow]);
+                }
+                b'l' => {
+                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as usize;
+                    let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+                    result.push_str(names[dow]);
+                }
+                b'F' => {
+                    let names = ["January", "February", "March", "April", "May", "June",
+                        "July", "August", "September", "October", "November", "December"];
+                    result.push_str(names[(month - 1) as usize]);
+                }
+                b'M' => {
+                    let names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                    result.push_str(names[(month - 1) as usize]);
+                }
+                b't' => {
+                    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+                    let month_days = [31u32, if is_leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+                    result.push_str(&format!("{}", month_days[(month - 1) as usize]));
+                }
+                b'L' => {
+                    let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
+                    result.push_str(&format!("{}", leap));
+                }
+                b'e' | b'T' => result.push_str("UTC"),
+                b'O' => result.push_str("+0000"),
+                b'P' => result.push_str("+00:00"),
+                b'p' => result.push_str("Z"),
+                b'Z' => result.push_str("0"),
+                b'c' => {
+                    result.push_str(&format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00",
+                        year, month, day, hours, minutes, seconds));
+                }
+                b'r' => {
+                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as usize;
+                    let day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                    let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                    result.push_str(&format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000",
+                        day_names[dow], day, month_names[(month-1) as usize], year, hours, minutes, seconds));
+                }
+                _ => result.push(c as char),
+            }
+            i += 1;
+        }
+        result
     }
 
     pub fn write_output(&mut self, data: &[u8]) {
@@ -5655,6 +5830,69 @@ impl Vm {
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::Eval => {
+                    let code_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let code_str = code_val.to_php_string().to_string_lossy();
+
+                    // PHP eval expects code without <?php opening tag typically,
+                    // but if it has one, the lexer handles it.
+                    // eval() wraps the code as if it were a file: <?php is optional
+                    let source = if code_str.trim_start().starts_with("<?") {
+                        code_str.as_bytes().to_vec()
+                    } else {
+                        format!("<?php {}", code_str).into_bytes()
+                    };
+
+                    let result = {
+                        let mut lexer = goro_parser::Lexer::new(&source);
+                        let tokens = lexer.tokenize();
+                        let mut parser = goro_parser::Parser::new(tokens);
+                        match parser.parse() {
+                            Ok(program) => {
+                                let compiler = crate::compiler::Compiler::new();
+                                match compiler.compile(&program) {
+                                    Ok((eval_op_array, eval_classes)) => {
+                                        for class in eval_classes {
+                                            self.pending_classes.push(class);
+                                        }
+                                        // Eval shares the calling scope's variables
+                                        // Create new CVs but copy global scope if we're in global scope
+                                        let eval_cvs = vec![Value::Undef; eval_op_array.cv_names.len()];
+                                        match self.execute_op_array(&eval_op_array, eval_cvs) {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                // Propagate errors from eval
+                                                if self.current_exception.is_some() {
+                                                    if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                                        ip = *catch_target as usize;
+                                                        continue;
+                                                    }
+                                                    return Err(e);
+                                                }
+                                                return Err(e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Compile error in eval - output as parse error
+                                        let msg = format!("\nParse error: {} in {} : eval()'d code on line {}\n",
+                                            e.message, self.current_file, e.line);
+                                        self.output.extend_from_slice(msg.as_bytes());
+                                        Value::False
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let msg = format!("\nParse error: syntax error in {} : eval()'d code on line {}\n",
+                                    self.current_file, e.span.line);
+                                self.output.extend_from_slice(msg.as_bytes());
+                                Value::False
+                            }
+                        }
+                    };
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
                 OpCode::CloneObj => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let cloned = match &val {
@@ -6075,9 +6313,28 @@ impl Vm {
                             let parent_lower: Vec<u8> =
                                 parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(parent) = self.classes.get(&parent_lower).cloned() {
+                                // Check if parent is final
+                                if parent.is_final {
+                                    let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                    let child_display = String::from_utf8_lossy(&name_val.to_php_string().as_bytes()).to_string();
+                                    return Err(VmError {
+                                        message: format!("Class {} cannot extend final class {}", child_display, parent_display),
+                                        line: op.line,
+                                    });
+                                }
                                 // Inherit methods (child overrides take precedence)
                                 for (method_name, method) in &parent.methods {
-                                    if !class.methods.contains_key(method_name) {
+                                    // Check if parent method is final and child overrides it
+                                    if class.methods.contains_key(method_name) {
+                                        if method.is_final {
+                                            let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                            let method_display = String::from_utf8_lossy(&method.name).to_string();
+                                            return Err(VmError {
+                                                message: format!("Cannot override final method {}::{}()", parent_display, method_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                    } else {
                                         class.methods.insert(method_name.clone(), method.clone());
                                     }
                                 }
@@ -6287,14 +6544,35 @@ impl Vm {
                                 let class_name_str =
                                     String::from_utf8_lossy(&name_val.to_php_string().as_bytes())
                                         .to_string();
+                                let class_name_lower_str: Vec<u8> = class_name_str.bytes().map(|b| b.to_ascii_lowercase()).collect();
                                 let count = abstract_methods.len();
                                 abstract_methods.sort();
                                 let methods_list = abstract_methods.join(", ");
+                                let method_word = if count == 1 { "method" } else { "methods" };
+                                // Check if the abstract method was declared by this class itself
+                                // (not inherited from parent/interface)
+                                let mut self_declared_abstract = Vec::new();
+                                for (_, method) in &class.methods {
+                                    if method.is_abstract && method.declaring_class == class_name_lower_str {
+                                        self_declared_abstract.push(
+                                            String::from_utf8_lossy(&method.name).to_string()
+                                        );
+                                    }
+                                }
+                                let msg = if !self_declared_abstract.is_empty() && self_declared_abstract.len() == count {
+                                    // All abstract methods are self-declared
+                                    format!(
+                                        "Class {} declares abstract method {}() and must therefore be declared abstract",
+                                        class_name_str, self_declared_abstract[0]
+                                    )
+                                } else {
+                                    format!(
+                                        "Class {} contains {} abstract {} and must therefore be declared abstract or implement the remaining {} ({})",
+                                        class_name_str, count, method_word, method_word, methods_list
+                                    )
+                                };
                                 return Err(VmError {
-                                    message: format!(
-                                        "Class {} contains {} abstract method(s) and must therefore be declared abstract or implement the remaining methods ({})",
-                                        class_name_str, count, methods_list
-                                    ),
+                                    message: msg,
                                     line: op.line,
                                 });
                             }

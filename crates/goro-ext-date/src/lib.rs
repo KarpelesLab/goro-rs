@@ -24,6 +24,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"localtime", localtime_fn);
     vm.register_function(b"checkdate", checkdate_fn);
     vm.register_function(b"idate", idate_fn);
+    vm.register_function(b"date_format", date_format_fn);
+    vm.register_function(b"date_create_immutable", date_create_immutable_fn);
 }
 
 fn date_default_timezone_set(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -374,9 +376,9 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    // Return a stdClass-like object with a timestamp property
+    // Return a DateTime object with a timestamp property
     let obj_id = _vm.next_object_id();
-    let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
+    let mut obj = PhpObject::new(b"DateTime".to_vec(), obj_id);
     obj.set_property(b"timestamp".to_vec(), Value::Long(timestamp));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
@@ -741,4 +743,170 @@ fn idate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     Ok(Value::Long(val))
+}
+
+/// date_format($object, $format) - format a DateTime object
+fn date_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let obj = args.first().unwrap_or(&Value::Null);
+    let format = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+
+    let timestamp = if let Value::Object(o) = obj {
+        o.borrow().get_property(b"timestamp").to_long()
+    } else {
+        0
+    };
+
+    // Reuse the date formatting logic
+    let result = format_timestamp(&format, timestamp);
+    Ok(Value::String(PhpString::from_string(result)))
+}
+
+/// date_create_immutable - same as date_create but returns DateTimeImmutable
+fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let datetime_str = args
+        .first()
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let timestamp = if datetime_str.is_empty() || datetime_str == "now" {
+        now_secs
+    } else {
+        let parts: Vec<&str> = datetime_str.split(|c: char| c == ' ' || c == 'T').collect();
+        let date_parts: Vec<&str> = parts.first().unwrap_or(&"").split('-').collect();
+        if date_parts.len() == 3 {
+            let year = date_parts[0].parse::<i64>().unwrap_or(1970);
+            let month = date_parts[1].parse::<u32>().unwrap_or(1);
+            let day = date_parts[2].parse::<u32>().unwrap_or(1);
+            let mut h = 0i64;
+            let mut m = 0i64;
+            let mut s = 0i64;
+            if let Some(time_str) = parts.get(1) {
+                let time_parts: Vec<&str> = time_str.split(':').collect();
+                h = time_parts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+                m = time_parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                s = time_parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
+            }
+            let days = ymd_to_days(year, month, day);
+            days * 86400 + h * 3600 + m * 60 + s
+        } else {
+            now_secs
+        }
+    };
+
+    let obj_id = _vm.next_object_id();
+    let mut obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
+    obj.set_property(b"timestamp".to_vec(), Value::Long(timestamp));
+    Ok(Value::Object(Rc::new(RefCell::new(obj))))
+}
+
+/// Helper: format a timestamp using a format string (like PHP's date() function)
+pub fn format_timestamp(format: &str, secs: i64) -> String {
+    let days_since_epoch = secs / 86400;
+    let time_of_day = ((secs % 86400) + 86400) % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+
+    let mut result = String::new();
+    let fmt_bytes = format.as_bytes();
+    let mut i = 0;
+    while i < fmt_bytes.len() {
+        let c = fmt_bytes[i];
+        if c == b'\\' && i + 1 < fmt_bytes.len() {
+            result.push(fmt_bytes[i + 1] as char);
+            i += 2;
+            continue;
+        }
+        match c {
+            b'Y' => result.push_str(&format!("{:04}", year)),
+            b'y' => result.push_str(&format!("{:02}", year % 100)),
+            b'm' => result.push_str(&format!("{:02}", month)),
+            b'n' => result.push_str(&format!("{}", month)),
+            b'd' => result.push_str(&format!("{:02}", day)),
+            b'j' => result.push_str(&format!("{}", day)),
+            b'H' => result.push_str(&format!("{:02}", hours)),
+            b'G' => result.push_str(&format!("{}", hours)),
+            b'i' => result.push_str(&format!("{:02}", minutes)),
+            b's' => result.push_str(&format!("{:02}", seconds)),
+            b'A' => result.push_str(if hours >= 12 { "PM" } else { "AM" }),
+            b'a' => result.push_str(if hours >= 12 { "pm" } else { "am" }),
+            b'g' => {
+                let h12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
+                result.push_str(&format!("{}", h12));
+            }
+            b'h' => {
+                let h12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
+                result.push_str(&format!("{:02}", h12));
+            }
+            b'U' => result.push_str(&format!("{}", secs)),
+            b'N' => {
+                let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as i64;
+                result.push_str(&format!("{}", if dow == 0 { 7 } else { dow }));
+            }
+            b'w' => {
+                let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as i64;
+                result.push_str(&format!("{}", dow));
+            }
+            b'D' => {
+                let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as usize;
+                let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                result.push_str(names[dow]);
+            }
+            b'l' => {
+                let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as usize;
+                let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+                result.push_str(names[dow]);
+            }
+            b'F' => {
+                let names = ["January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November", "December"];
+                result.push_str(names[(month - 1) as usize]);
+            }
+            b'M' => {
+                let names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                result.push_str(names[(month - 1) as usize]);
+            }
+            b't' => {
+                let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+                let dim = match month {
+                    1 => 31, 2 => if is_leap { 29 } else { 28 }, 3 => 31, 4 => 30,
+                    5 => 31, 6 => 30, 7 => 31, 8 => 31, 9 => 30, 10 => 31, 11 => 30, 12 => 31,
+                    _ => 30,
+                };
+                result.push_str(&format!("{}", dim));
+            }
+            b'L' => {
+                let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
+                result.push_str(&format!("{}", leap));
+            }
+            b'e' | b'T' => result.push_str("UTC"),
+            b'O' => result.push_str("+0000"),
+            b'P' => result.push_str("+00:00"),
+            b'p' => result.push_str("Z"),
+            b'Z' => result.push_str("0"),
+            b'c' => {
+                result.push_str(&format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00",
+                    year, month, day, hours, minutes, seconds));
+            }
+            b'r' => {
+                let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as usize;
+                let day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                result.push_str(&format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000",
+                    day_names[dow], day, month_names[(month-1) as usize], year, hours, minutes, seconds));
+            }
+            _ => result.push(c as char),
+        }
+        i += 1;
+    }
+    result
 }

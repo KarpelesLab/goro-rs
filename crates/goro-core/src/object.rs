@@ -56,6 +56,7 @@ pub struct MethodDef {
     pub param_count: usize,
     pub is_static: bool,
     pub is_abstract: bool,
+    pub is_final: bool,
     pub visibility: Visibility,
     /// The class that originally declared this method (lowercase)
     pub declaring_class: Vec<u8>,

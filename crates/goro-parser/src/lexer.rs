@@ -1128,6 +1128,10 @@ impl<'a> Lexer<'a> {
                             TokenKind::LessEqual
                         }
                     }
+                    Some(b'>') => {
+                        self.advance();
+                        TokenKind::NotEqual // <> is equivalent to !=
+                    }
                     _ => TokenKind::Less,
                 }
             }

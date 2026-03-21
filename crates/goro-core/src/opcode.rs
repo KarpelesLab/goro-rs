@@ -258,6 +258,8 @@ pub enum OpCode {
     ErrorSuppress,
     /// Restore error reporting (for @ operator)
     ErrorRestore,
+    /// Eval: op1 = code string, result = return value
+    Eval,
 }
 
 /// A compiled function / script
