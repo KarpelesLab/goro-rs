@@ -1625,6 +1625,7 @@ impl Parser {
                 })
             }
             TokenKind::Function => {
+                let method_line = self.span().line;
                 self.advance();
                 // Optional & for return-by-reference
                 self.eat(&TokenKind::Ampersand);
@@ -1673,6 +1674,7 @@ impl Parser {
                     is_static,
                     is_abstract,
                     is_final,
+                    line: method_line,
                 })
             }
             TokenKind::Const => {

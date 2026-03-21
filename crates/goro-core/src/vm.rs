@@ -138,6 +138,8 @@ pub struct Vm {
     pub json_last_error: i64,
     /// Current executing file path
     pub current_file: String,
+    /// Line number of the last return statement (for return type error messages)
+    last_return_line: u32,
 }
 
 impl Vm {
@@ -168,6 +170,7 @@ impl Vm {
             next_bound_closure_id: 0,
             json_last_error: 0,
             current_file: "Unknown.php".to_string(),
+            last_return_line: 0,
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -820,6 +823,57 @@ impl Vm {
         } else {
             // For sub, mul, div, mod, pow, **: arrays are never valid
             if a_is_array || b_is_array {
+                return Some(format!(
+                    "Unsupported operand types: {} {} {}",
+                    Self::value_type_name(&a_deref),
+                    op_symbol,
+                    Self::value_type_name(&b_deref)
+                ));
+            }
+        }
+
+        // PHP 8: bitwise ops on fully non-numeric strings with non-strings throw TypeError
+        // Leading-numeric strings (like "45some") produce a Warning but NOT a TypeError
+        // Note: arithmetic ops (+, -, *, /, **) produce a Warning, not TypeError
+        if matches!(op_symbol, "&" | "|" | "^" | "%" | "<<" | ">>") {
+            // Helper: check if string is fully non-numeric (not even leading numeric)
+            let is_fully_non_numeric = |s: &crate::string::PhpString| -> bool {
+                let bytes = s.as_bytes();
+                if bytes.is_empty() {
+                    return true; // empty string is non-numeric
+                }
+                // Check if it starts with optional whitespace then a digit or sign
+                let trimmed = std::str::from_utf8(bytes).unwrap_or("").trim();
+                if trimmed.is_empty() {
+                    return true;
+                }
+                let first = trimmed.as_bytes()[0];
+                !(first.is_ascii_digit() || ((first == b'+' || first == b'-') && trimmed.len() > 1 && trimmed.as_bytes()[1].is_ascii_digit()))
+            };
+
+            let a_is_non_numeric_string = if let Value::String(s) = &a_deref {
+                is_fully_non_numeric(s)
+            } else {
+                false
+            };
+            let b_is_non_numeric_string = if let Value::String(s) = &b_deref {
+                is_fully_non_numeric(s)
+            } else {
+                false
+            };
+
+            // For bitwise ops (&, |, ^): string & string is valid (bitwise on bytes)
+            // Only error when mixing non-numeric string with a non-string type
+            if matches!(op_symbol, "&" | "|" | "^") {
+                // Both strings: handled separately (bitwise on strings)
+                if matches!(a_deref, Value::String(_)) && matches!(b_deref, Value::String(_)) {
+                    return None;
+                }
+            }
+
+            if (a_is_non_numeric_string && !matches!(b_deref, Value::String(_)))
+                || (b_is_non_numeric_string && !matches!(a_deref, Value::String(_)))
+            {
                 return Some(format!(
                     "Unsupported operand types: {} {} {}",
                     Self::value_type_name(&a_deref),
@@ -2254,11 +2308,12 @@ impl Vm {
                         "{}(): Return value must be of type {}, {} returned",
                         func_name, expected_type, actual_type
                     );
+                    let ret_line = self.last_return_line;
                     let exc_val = self.throw_type_error(msg.clone());
                     self.current_exception = Some(exc_val);
                     return Err(VmError {
                         message: msg,
-                        line: 0,
+                        line: ret_line,
                     });
                 }
             }
@@ -2488,6 +2543,16 @@ impl Vm {
                             });
                         }
                     }
+                    // Emit warning for leading-numeric strings
+                    for val in [&a, &b] {
+                        if let Value::String(s) = val.deref() {
+                            if crate::value::parse_numeric_string(s.as_bytes()).is_none()
+                                && !s.as_bytes().is_empty()
+                            {
+                                self.emit_warning_at("A non-numeric value encountered", op.line);
+                            }
+                        }
+                    }
                     match a.modulo(&b) {
                         Ok(result) => self.write_operand(
                             &op.result,
@@ -2573,6 +2638,19 @@ impl Vm {
                 OpCode::BitwiseAnd => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "&") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     let result = if matches!(a.deref(), Value::String(_)) && matches!(b.deref(), Value::String(_)) {
                         let sa = a.to_php_string();
                         let sb = b.to_php_string();
@@ -2595,6 +2673,19 @@ impl Vm {
                 OpCode::BitwiseOr => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "|") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     let result = if matches!(a.deref(), Value::String(_)) && matches!(b.deref(), Value::String(_)) {
                         let sa = a.to_php_string();
                         let sb = b.to_php_string();
@@ -2621,6 +2712,19 @@ impl Vm {
                 OpCode::BitwiseXor => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "^") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     let result = if matches!(a.deref(), Value::String(_)) && matches!(b.deref(), Value::String(_)) {
                         let sa = a.to_php_string();
                         let sb = b.to_php_string();
@@ -2955,6 +3059,16 @@ impl Vm {
                             });
                         }
                     }
+                    // Emit warning for leading-numeric strings
+                    for val in [&cv_val, &rhs] {
+                        if let Value::String(s) = val.deref() {
+                            if crate::value::parse_numeric_string(s.as_bytes()).is_none()
+                                && !s.as_bytes().is_empty()
+                            {
+                                self.emit_warning_at("A non-numeric value encountered", op.line);
+                            }
+                        }
+                    }
                     match cv_val.modulo(&rhs) {
                         Ok(result) => self.write_operand(
                             &op.op1,
@@ -3021,6 +3135,31 @@ impl Vm {
                 OpCode::AssignBitwiseAnd => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "&") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
+                    // Emit warning for leading-numeric strings used in mixed-type bitwise ops
+                    if !(matches!(cv_val.deref(), Value::String(_)) && matches!(rhs.deref(), Value::String(_))) {
+                        for val in [&cv_val, &rhs] {
+                            if let Value::String(s) = val.deref() {
+                                if crate::value::parse_numeric_string(s.as_bytes()).is_none()
+                                    && !s.as_bytes().is_empty()
+                                {
+                                    self.emit_warning_at("A non-numeric value encountered", op.line);
+                                }
+                            }
+                        }
+                    }
                     let result = if matches!(cv_val.deref(), Value::String(_)) && matches!(rhs.deref(), Value::String(_)) {
                         let sa = cv_val.to_php_string();
                         let sb = rhs.to_php_string();
@@ -3043,6 +3182,31 @@ impl Vm {
                 OpCode::AssignBitwiseOr => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "|") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
+                    // Emit warning for leading-numeric strings used in mixed-type bitwise ops
+                    if !(matches!(cv_val.deref(), Value::String(_)) && matches!(rhs.deref(), Value::String(_))) {
+                        for val in [&cv_val, &rhs] {
+                            if let Value::String(s) = val.deref() {
+                                if crate::value::parse_numeric_string(s.as_bytes()).is_none()
+                                    && !s.as_bytes().is_empty()
+                                {
+                                    self.emit_warning_at("A non-numeric value encountered", op.line);
+                                }
+                            }
+                        }
+                    }
                     let result = if matches!(cv_val.deref(), Value::String(_)) && matches!(rhs.deref(), Value::String(_)) {
                         let sa = cv_val.to_php_string();
                         let sb = rhs.to_php_string();
@@ -3069,6 +3233,31 @@ impl Vm {
                 OpCode::AssignBitwiseXor => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "^") {
+                        let exc_val = self.throw_type_error(err_msg.clone());
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                    }
+                    // Emit warning for leading-numeric strings used in mixed-type bitwise ops
+                    if !(matches!(cv_val.deref(), Value::String(_)) && matches!(rhs.deref(), Value::String(_))) {
+                        for val in [&cv_val, &rhs] {
+                            if let Value::String(s) = val.deref() {
+                                if crate::value::parse_numeric_string(s.as_bytes()).is_none()
+                                    && !s.as_bytes().is_empty()
+                                {
+                                    self.emit_warning_at("A non-numeric value encountered", op.line);
+                                }
+                            }
+                        }
+                    }
                     let result = if matches!(cv_val.deref(), Value::String(_)) && matches!(rhs.deref(), Value::String(_)) {
                         let sa = cv_val.to_php_string();
                         let sb = rhs.to_php_string();
@@ -4131,6 +4320,7 @@ impl Vm {
 
                 OpCode::Return => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.last_return_line = op.line;
                     // Save global-bound CVs back to globals
                     for (cv_idx, name) in &global_cv_keys {
                         if let Some(cv_val) = cvs.get(*cv_idx as usize) {
@@ -4438,6 +4628,17 @@ impl Vm {
                                     .unwrap_or(Value::Null)
                             })
                     } else {
+                        // Emit "Cannot use X as array" warning for non-array types
+                        let type_name = match &arr_val {
+                            Value::True | Value::False => "bool",
+                            Value::Long(_) => "int",
+                            Value::Double(_) => "float",
+                            Value::Null | Value::Undef => "", // null silently returns null
+                            _ => "",
+                        };
+                        if !type_name.is_empty() {
+                            self.emit_warning_at(&format!("Cannot use {} as array", type_name), op.line);
+                        }
                         Value::Null
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);

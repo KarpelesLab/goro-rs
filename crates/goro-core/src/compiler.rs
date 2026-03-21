@@ -874,6 +874,16 @@ impl Compiler {
                         });
                         case_body_jumps.push((jmp, i));
                     } else {
+                        if default_index.is_some() {
+                            // Report error at the duplicate default clause
+                            let err_line = case.body.first()
+                                .map(|s| s.span.line.saturating_sub(1))
+                                .unwrap_or(stmt.span.line);
+                            return Err(CompileError {
+                                message: "Switch statements may only contain one default clause".into(),
+                                line: err_line,
+                            });
+                        }
                         default_index = Some(i);
                     }
                 }
@@ -1642,8 +1652,39 @@ impl Compiler {
                             visibility,
                             is_static,
                             is_abstract,
+                            line: method_line,
                             ..
                         } => {
+                            // Enforce: __construct and __destruct cannot declare return types
+                            {
+                                let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if method_return_type.is_some() {
+                                    if mn_lower == b"__construct" || mn_lower == b"__destruct" {
+                                        return Err(CompileError {
+                                            message: format!("Method {}::{}() cannot declare a return type", String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                            line: *method_line,
+                                        });
+                                    }
+                                    // __clone can only declare void return type
+                                    if mn_lower == b"__clone" {
+                                        let is_void = match method_return_type {
+                                            Some(th) => {
+                                                match th {
+                                                    TypeHint::Simple(n) => n.eq_ignore_ascii_case(b"void"),
+                                                    _ => false,
+                                                }
+                                            }
+                                            None => false,
+                                        };
+                                        if !is_void {
+                                            return Err(CompileError {
+                                                message: format!("{}::__clone(): Return type must be void when declared", String::from_utf8_lossy(name)),
+                                                line: *method_line,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                             // Add promoted properties from constructor params
                             {
                                 let mn_lower: Vec<u8> =

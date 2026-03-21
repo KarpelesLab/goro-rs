@@ -471,6 +471,7 @@ pub enum ClassMember {
         is_static: bool,
         is_abstract: bool,
         is_final: bool,
+        line: u32,
     },
     ClassConstant {
         name: Vec<u8>,

@@ -423,6 +423,10 @@ impl Value {
             | (Value::String(s), Value::Null | Value::Undef) => s.as_bytes().is_empty(),
             (Value::Null | Value::Undef, Value::Long(0))
             | (Value::Long(0), Value::Null | Value::Undef) => true,
+            (Value::Null | Value::Undef, Value::Double(f))
+            | (Value::Double(f), Value::Null | Value::Undef) => *f == 0.0,
+            (Value::Null | Value::Undef, Value::Array(a))
+            | (Value::Array(a), Value::Null | Value::Undef) => a.borrow().len() == 0,
             (Value::Null | Value::Undef, _) | (_, Value::Null | Value::Undef) => false,
             (Value::True, other) | (other, Value::True) => other.is_truthy(),
             (Value::False, other) | (other, Value::False) => !other.is_truthy(),
@@ -464,8 +468,22 @@ impl Value {
                     a_bytes == b_bytes
                 }
             }
-            (Value::String(_), Value::Long(_)) | (Value::Long(_), Value::String(_)) => {
-                self.to_double() == other.to_double()
+            (Value::String(s), Value::Long(n)) | (Value::Long(n), Value::String(s)) => {
+                // PHP 8: if string is numeric, compare numerically; otherwise false
+                let s_bytes = s.as_bytes();
+                if let Some(num) = parse_numeric_string(s_bytes) {
+                    num == *n as f64
+                } else {
+                    false
+                }
+            }
+            (Value::String(s), Value::Double(f)) | (Value::Double(f), Value::String(s)) => {
+                let s_bytes = s.as_bytes();
+                if let Some(num) = parse_numeric_string(s_bytes) {
+                    num == *f
+                } else {
+                    false
+                }
             }
             (Value::Array(a), Value::Array(b)) => {
                 let a = a.borrow();
@@ -484,6 +502,40 @@ impl Value {
                     }
                 }
                 true
+            }
+            (Value::Object(a), Value::Object(b)) => {
+                // Same object reference
+                if std::ptr::eq(a.as_ptr(), b.as_ptr()) {
+                    return true;
+                }
+                // Depth guard to prevent stack overflow on self-referencing objects
+                thread_local! { static CMP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+                let depth = CMP_DEPTH.with(|d| d.get());
+                if depth > 20 {
+                    return true; // Assume equal at depth limit
+                }
+                CMP_DEPTH.with(|d| d.set(depth + 1));
+                let result = {
+                    let a = a.borrow();
+                    let b = b.borrow();
+                    if a.class_name.eq_ignore_ascii_case(&b.class_name)
+                        && a.properties.len() == b.properties.len()
+                    {
+                        let mut eq = true;
+                        for (name, a_val) in &a.properties {
+                            let b_val = b.get_property(name);
+                            if !a_val.equals(&b_val) {
+                                eq = false;
+                                break;
+                            }
+                        }
+                        eq
+                    } else {
+                        false
+                    }
+                };
+                CMP_DEPTH.with(|d| d.set(depth));
+                result
             }
             _ => false,
         }
@@ -521,6 +573,10 @@ impl Value {
                     }
                 }
                 true
+            }
+            (Value::Object(a), Value::Object(b)) => {
+                // === for objects means same instance
+                std::ptr::eq(a.as_ptr(), b.as_ptr())
             }
             _ => false,
         }
@@ -648,6 +704,12 @@ impl Value {
                     1
                 }
             }
+            (Value::Null | Value::Undef, Value::Array(a)) => {
+                if a.borrow().len() == 0 { 0 } else { -1 }
+            }
+            (Value::Array(a), Value::Null | Value::Undef) => {
+                if a.borrow().len() == 0 { 0 } else { 1 }
+            }
             (Value::Null | Value::Undef, _) => -1,
             (_, Value::Null | Value::Undef) => 1,
             // Bool comparisons: convert other side to bool
@@ -714,6 +776,38 @@ impl Value {
                         std::cmp::Ordering::Less => -1,
                         std::cmp::Ordering::Equal => 0,
                         std::cmp::Ordering::Greater => 1,
+                    }
+                }
+            }
+            // PHP 8: int vs string - compare numerically if string is numeric, else string > int
+            (Value::Long(n), Value::String(s)) | (Value::String(s), Value::Long(n)) => {
+                let is_left_long = matches!(self, Value::Long(_));
+                if let Some(num) = parse_numeric_string(s.as_bytes()) {
+                    let n_f = *n as f64;
+                    if is_left_long {
+                        if n_f < num { -1 } else if n_f > num { 1 } else { 0 }
+                    } else {
+                        if num < n_f { -1 } else if num > n_f { 1 } else { 0 }
+                    }
+                } else {
+                    // PHP 8: non-numeric string always > int in comparison
+                    // Actually: cast both to their natural comparison type
+                    // In PHP 8, comparing int with non-numeric string:
+                    // the int is cast to string and then compared as strings
+                    let n_str = format!("{}", n);
+                    let s_str = std::str::from_utf8(s.as_bytes()).unwrap_or("");
+                    if is_left_long {
+                        match n_str.as_bytes().cmp(s_str.as_bytes()) {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        }
+                    } else {
+                        match s_str.as_bytes().cmp(n_str.as_bytes()) {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        }
                     }
                 }
             }
