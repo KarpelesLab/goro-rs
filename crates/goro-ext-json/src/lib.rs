@@ -25,8 +25,9 @@ const JSON_NUMERIC_CHECK: i64 = 32;
 const JSON_UNESCAPED_SLASHES: i64 = 64;
 const JSON_PRETTY_PRINT: i64 = 128;
 const JSON_UNESCAPED_UNICODE: i64 = 256;
-// const JSON_PARTIAL_OUTPUT_ON_ERROR: i64 = 512;
-// const JSON_THROW_ON_ERROR: i64 = 4194304;
+const JSON_PARTIAL_OUTPUT_ON_ERROR: i64 = 512;
+const JSON_THROW_ON_ERROR: i64 = 4194304;
+const JSON_OBJECT_AS_ARRAY: i64 = 1; // for json_decode
 
 fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
@@ -34,20 +35,28 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.to_long(),
         None => 0,
     };
+    let throw_on_error = flags & JSON_THROW_ON_ERROR != 0;
 
     // Check for NAN/INF at top level
     if let Value::Double(f) = val {
         if f.is_nan() || f.is_infinite() {
+            if throw_on_error {
+                let exc = vm.create_exception(b"ValueError", "Inf and NaN cannot be JSON encoded", 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: "Uncaught ValueError: Inf and NaN cannot be JSON encoded".to_string(), line: 0 });
+            }
             vm.json_last_error = 7; // JSON_ERROR_INF_OR_NAN
             // JSON_PARTIAL_OUTPUT_ON_ERROR flag
-            if flags & 512 != 0 {
+            if flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
                 return Ok(Value::String(PhpString::from_bytes(b"0")));
             }
             return Ok(Value::False);
         }
     }
 
-    vm.json_last_error = 0;
+    if !throw_on_error {
+        vm.json_last_error = 0;
+    }
     let s = json_encode_value_flags(val, 0, flags);
     Ok(Value::String(PhpString::from_string(s)))
 }
@@ -268,7 +277,7 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let json_bytes = json_str.as_bytes();
 
     // $associative parameter: null (default) means objects become stdClass, true means arrays
-    let associative = match args.get(1) {
+    let mut associative = match args.get(1) {
         Some(Value::True) => true,
         Some(Value::Null) | Some(Value::Undef) | None => false,
         Some(Value::False) => false,
@@ -289,6 +298,12 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None => 0,
     };
     let bigint_as_string = (flags & 2) != 0; // JSON_BIGINT_AS_STRING = 2
+    let throw_on_error = (flags & JSON_THROW_ON_ERROR) != 0;
+
+    // JSON_OBJECT_AS_ARRAY flag
+    if (flags & JSON_OBJECT_AS_ARRAY) != 0 {
+        associative = true;
+    }
 
     let mut parser = JsonParser {
         input: json_bytes,
@@ -305,22 +320,40 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             parser.skip_whitespace();
             if parser.pos < parser.input.len() {
                 // Trailing data after valid JSON
+                if throw_on_error {
+                    let exc = vm.create_exception(b"JsonException", "Syntax error", 0);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: "Uncaught JsonException: Syntax error".to_string(), line: 0 });
+                }
                 vm.json_last_error = 4; // JSON_ERROR_SYNTAX
                 Ok(Value::Null)
             } else {
-                vm.json_last_error = 0;
+                if !throw_on_error {
+                    vm.json_last_error = 0;
+                }
                 Ok(val)
             }
         }
         None => {
             // Determine error type
+            let error_code;
+            let error_msg;
             if json_bytes.is_empty() {
-                vm.json_last_error = 4; // JSON_ERROR_SYNTAX
+                error_code = 4;
+                error_msg = "Syntax error";
             } else if parser.depth > parser.max_depth {
-                vm.json_last_error = 6; // JSON_ERROR_DEPTH
+                error_code = 6;
+                error_msg = "Maximum stack depth exceeded";
             } else {
-                vm.json_last_error = 4; // JSON_ERROR_SYNTAX
+                error_code = 4;
+                error_msg = "Syntax error";
             }
+            if throw_on_error {
+                let exc = vm.create_exception(b"JsonException", error_msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: format!("Uncaught JsonException: {}", error_msg), line: 0 });
+            }
+            vm.json_last_error = error_code;
             Ok(Value::Null)
         }
     }

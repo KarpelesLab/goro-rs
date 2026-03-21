@@ -637,9 +637,92 @@ impl Vm {
     }
 
     /// Emit a PHP warning message to output
+    /// Call the user error handler if set. Returns true if the handler was called and handled the error.
+    pub fn call_user_error_handler(&mut self, errno: i64, errstr: &str, line: u32) -> bool {
+        if let Some(handler) = self.error_handler.clone() {
+            let errno_val = Value::Long(errno);
+            let errstr_val = Value::String(PhpString::from_string(errstr.to_string()));
+            let file_val = Value::String(PhpString::from_string(self.current_file.clone()));
+            let line_val = Value::Long(line as i64);
+            let args = vec![errno_val, errstr_val, file_val, line_val];
+            match &handler {
+                Value::String(s) => {
+                    let func_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                        let mut cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                        for (i, arg) in args.iter().enumerate() {
+                            if i < cvs.len() {
+                                cvs[i] = arg.clone();
+                            }
+                        }
+                        let _ = self.execute_op_array(&user_fn, cvs);
+                        return true;
+                    } else if let Some(builtin) = self.functions.get(&func_lower).copied() {
+                        let _ = builtin(self, &args);
+                        return true;
+                    }
+                }
+                Value::Array(arr) => {
+                    let arr_b = arr.borrow();
+                    let vals: Vec<Value> = arr_b.values().cloned().collect();
+                    drop(arr_b);
+                    if vals.len() >= 2 {
+                        let method_name = vals[1].to_php_string();
+                        let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Value::Object(obj) = &vals[0] {
+                            let class_name_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(class) = self.classes.get(&class_name_lower).cloned() {
+                                if let Some(method) = class.get_method(&method_lower) {
+                                    let op = method.op_array.clone();
+                                    let mut cvs = vec![Value::Undef; op.cv_names.len()];
+                                    // $this is CV 0 for instance methods
+                                    cvs[0] = Value::Object(obj.clone());
+                                    for (i, arg) in args.iter().enumerate() {
+                                        if i + 1 < cvs.len() {
+                                            cvs[i + 1] = arg.clone();
+                                        }
+                                    }
+                                    let _ = self.execute_op_array(&op, cvs);
+                                    return true;
+                                }
+                            }
+                        } else if let Value::String(class_name) = &vals[0] {
+                            let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(class) = self.classes.get(&class_lower).cloned() {
+                                if let Some(method) = class.get_method(&method_lower) {
+                                    let op = method.op_array.clone();
+                                    let mut cvs = vec![Value::Undef; op.cv_names.len()];
+                                    for (i, arg) in args.iter().enumerate() {
+                                        if i < cvs.len() {
+                                            cvs[i] = arg.clone();
+                                        }
+                                    }
+                                    let _ = self.execute_op_array(&op, cvs);
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     pub fn emit_warning(&mut self, msg: &str) {
         if self.error_reporting & 2 != 0 {
             // E_WARNING = 2
+            if self.call_user_error_handler(2, msg, 0) {
+                return;
+            }
+            self.emit_warning_raw(msg);
+        }
+    }
+
+    /// Emit a raw warning (no user error handler)
+    pub fn emit_warning_raw(&mut self, msg: &str) {
+        if self.error_reporting & 2 != 0 {
             let warning = format!("\nWarning: {} in {} on line 0\n", msg, self.current_file);
             self.output.extend_from_slice(warning.as_bytes());
         }
@@ -648,6 +731,9 @@ impl Vm {
     /// Emit a PHP warning with line number
     pub fn emit_warning_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 2 != 0 {
+            if self.call_user_error_handler(2, msg, line) {
+                return;
+            }
             let warning = format!("\nWarning: {} in {} on line {}\n", msg, self.current_file, line);
             self.output.extend_from_slice(warning.as_bytes());
         }
@@ -657,6 +743,16 @@ impl Vm {
     pub fn emit_notice_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8 != 0 {
             // E_NOTICE = 8
+            if self.call_user_error_handler(8, msg, line) {
+                return;
+            }
+            self.emit_notice_raw(msg, line);
+        }
+    }
+
+    /// Emit a raw notice (no user error handler)
+    pub fn emit_notice_raw(&mut self, msg: &str, line: u32) {
+        if self.error_reporting & 8 != 0 {
             let notice = format!("\nNotice: {} in {} on line {}\n", msg, self.current_file, line);
             self.output.extend_from_slice(notice.as_bytes());
         }
@@ -666,6 +762,16 @@ impl Vm {
     pub fn emit_deprecated_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8192 != 0 {
             // E_DEPRECATED = 8192
+            if self.call_user_error_handler(8192, msg, line) {
+                return;
+            }
+            self.emit_deprecated_raw(msg, line);
+        }
+    }
+
+    /// Emit a raw deprecated warning (no user error handler)
+    pub fn emit_deprecated_raw(&mut self, msg: &str, line: u32) {
+        if self.error_reporting & 8192 != 0 {
             let deprec = format!("\nDeprecated: {} in {} on line {}\n", msg, self.current_file, line);
             self.output.extend_from_slice(deprec.as_bytes());
         }
@@ -2181,6 +2287,24 @@ impl Vm {
         // Maps CV index -> global var name (for saving back on write)
         let mut global_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
 
+        // Initialize $GLOBALS superglobal if referenced
+        for (i, cv_name) in op_array.cv_names.iter().enumerate() {
+            if cv_name == b"GLOBALS" {
+                // Build an array from current globals
+                let mut globals_arr = PhpArray::new();
+                for (k, v) in &self.globals {
+                    globals_arr.set(
+                        ArrayKey::String(PhpString::from_vec(k.clone())),
+                        v.clone(),
+                    );
+                }
+                if i < cvs.len() {
+                    cvs[i] = Value::Array(Rc::new(RefCell::new(globals_arr)));
+                }
+                break;
+            }
+        }
+
         loop {
             if ip >= op_array.ops.len() {
                 // Implicit return - use Undef to signal "none returned" for return type checks
@@ -3587,7 +3711,9 @@ impl Vm {
                                 implicit_args,
                                 op.line,
                             ) {
-                                let exc_val = self.create_exception(b"TypeError", &err_msg, op.line);
+                                // Use the function definition line for the exception, not the call site
+                                let def_line = user_fn.ops.first().map(|o| o.line).unwrap_or(op.line);
+                                let exc_val = self.create_exception(b"TypeError", &err_msg, def_line);
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _)) = exception_handlers.pop() {
                                     self.call_stack.pop(); // pop early-pushed frame
@@ -3596,7 +3722,7 @@ impl Vm {
                                 } else {
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", err_msg),
-                                        line: op.line,
+                                        line: def_line,
                                     });
                                 }
                             }
@@ -5524,13 +5650,39 @@ impl Vm {
 
                         // Resolve traits: copy trait methods/properties/constants into the class
                         let trait_names = class.traits.clone();
+                        let trait_adaptations = class.trait_adaptations.clone();
+                        let class_name_lower: Vec<u8> = class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
                         for trait_name in &trait_names {
                             let trait_lower: Vec<u8> =
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
                                 // Copy trait methods (class's own methods take precedence)
-                                let class_name_lower: Vec<u8> = class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 for (method_name, method) in &trait_def.methods {
+                                    // Check if this method is excluded by an insteadof rule
+                                    let mut excluded = false;
+                                    for adapt in &trait_adaptations {
+                                        if let crate::object::TraitAdaptation::Precedence {
+                                            trait_name: prec_trait,
+                                            method: prec_method,
+                                            instead_of,
+                                        } = adapt
+                                        {
+                                            let prec_method_lower: Vec<u8> = prec_method.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            let prec_trait_lower: Vec<u8> = prec_trait.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            if *method_name == prec_method_lower && prec_trait_lower != trait_lower {
+                                                // This trait's method is being overridden
+                                                let io_lower: Vec<Vec<u8>> = instead_of.iter().map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect()).collect();
+                                                if io_lower.contains(&trait_lower) {
+                                                    excluded = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if excluded {
+                                        continue;
+                                    }
                                     if !class.methods.contains_key(method_name) {
                                         let mut m = method.clone();
                                         // Trait methods should have scope of the using class
@@ -5563,6 +5715,48 @@ impl Vm {
                                         class
                                             .static_properties
                                             .insert(prop_name.clone(), prop_val.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        // Apply trait aliases
+                        for adapt in &trait_adaptations {
+                            if let crate::object::TraitAdaptation::Alias {
+                                trait_name: alias_trait,
+                                method: alias_method,
+                                new_name,
+                                new_visibility,
+                            } = adapt
+                            {
+                                let method_lower: Vec<u8> = alias_method.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                                // Find the source method (from specified trait or any trait)
+                                let source_method = if let Some(tn) = alias_trait {
+                                    let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    self.classes.get(&tn_lower).and_then(|t| t.methods.get(&method_lower).cloned())
+                                } else {
+                                    // Look in the class's already-imported methods
+                                    class.methods.get(&method_lower).cloned()
+                                };
+
+                                if let Some(mut m) = source_method {
+                                    m.declaring_class = class_name_lower.clone();
+                                    m.op_array.scope_class = Some(class_name_lower.clone());
+                                    if let Some(vis) = new_visibility {
+                                        m.visibility = *vis;
+                                    }
+                                    if let Some(nn) = new_name {
+                                        let nn_lower: Vec<u8> = nn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        m.name = nn.clone();
+                                        class.methods.insert(nn_lower, m);
+                                    } else {
+                                        // Just change visibility on existing method
+                                        if let Some(existing) = class.methods.get_mut(&method_lower) {
+                                            if let Some(vis) = new_visibility {
+                                                existing.visibility = *vis;
+                                            }
+                                        }
                                     }
                                 }
                             }

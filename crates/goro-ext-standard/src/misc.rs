@@ -357,6 +357,10 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match error_type {
         256 => {
             // E_USER_ERROR - fatal error
+            // Try user error handler first
+            if vm.call_user_error_handler(256, &message, 0) {
+                return Ok(Value::True);
+            }
             return Err(VmError {
                 message: message.to_string(),
                 line: 0,
@@ -364,15 +368,21 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         512 => {
             // E_USER_WARNING
-            vm.emit_warning(&message);
+            if !vm.call_user_error_handler(512, &message, 0) {
+                vm.emit_warning_raw(&message);
+            }
         }
         1024 => {
             // E_USER_NOTICE
-            vm.emit_notice_at(&message, 0);
+            if !vm.call_user_error_handler(1024, &message, 0) {
+                vm.emit_notice_raw(&message, 0);
+            }
         }
         16384 => {
             // E_USER_DEPRECATED
-            vm.emit_deprecated_at(&message, 0);
+            if !vm.call_user_error_handler(16384, &message, 0) {
+                vm.emit_deprecated_raw(&message, 0);
+            }
         }
         _ => {
             vm.emit_warning(&message);
@@ -518,11 +528,60 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Ok(Value::False)
             }
         }
-        Value::Object(_) => Ok(Value::True), // Objects with __invoke
+        Value::Object(obj) => {
+            // Check if the object has __invoke method
+            let class_name_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if class_name_lower == b"closure" {
+                Ok(Value::True)
+            } else if let Some(class) = vm.classes.get(&class_name_lower) {
+                Ok(if class.methods.contains_key(&b"__invoke".to_vec()) {
+                    Value::True
+                } else {
+                    Value::False
+                })
+            } else {
+                Ok(Value::True) // default to true for built-in objects
+            }
+        }
         Value::Array(arr) => {
             let arr = arr.borrow();
             Ok(if arr.len() == 2 {
-                Value::True
+                // Validate that the callback is actually callable
+                let vals: Vec<Value> = arr.values().cloned().collect();
+                let method_name = vals[1].to_php_string();
+                let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                match &vals[0] {
+                    Value::Object(obj) => {
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let mut current = class_lower;
+                        let mut found = false;
+                        for _ in 0..50 {
+                            if let Some(class) = vm.classes.get(&current) {
+                                if class.methods.contains_key(&method_lower) {
+                                    found = true;
+                                    break;
+                                }
+                                if let Some(ref parent) = class.parent {
+                                    current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if found { Value::True } else { Value::False }
+                    }
+                    Value::String(class_name) => {
+                        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(class) = vm.classes.get(&class_lower) {
+                            if class.methods.contains_key(&method_lower) { Value::True } else { Value::False }
+                        } else {
+                            Value::False
+                        }
+                    }
+                    _ => Value::False,
+                }
             } else {
                 Value::False
             })
@@ -1619,29 +1678,109 @@ fn type_priority(v: &Value) -> u8 {
 
 /// Compare two PHP values for sorting, ensuring total ordering
 fn php_sort_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
-    // First try PHP comparison
-    let cmp = a.compare(b);
-    if cmp < 0 {
-        std::cmp::Ordering::Less
-    } else if cmp > 0 {
-        std::cmp::Ordering::Greater
-    } else {
-        // For equal comparison results, use a type-based tiebreaker to ensure total ordering
-        let tp_a = type_priority(a);
-        let tp_b = type_priority(b);
-        tp_a.cmp(&tp_b)
+    php_sort_cmp_flags(a, b, 0)
+}
+
+// Sort flag constants
+const SORT_REGULAR: i64 = 0;
+const SORT_NUMERIC: i64 = 1;
+const SORT_STRING: i64 = 2;
+const SORT_LOCALE_STRING: i64 = 5;
+const SORT_NATURAL: i64 = 6;
+const SORT_FLAG_CASE: i64 = 8;
+
+fn php_sort_cmp_flags(a: &Value, b: &Value, flags: i64) -> std::cmp::Ordering {
+    let base_flag = flags & !SORT_FLAG_CASE;
+    let case_insensitive = (flags & SORT_FLAG_CASE) != 0;
+
+    match base_flag {
+        SORT_STRING | SORT_LOCALE_STRING => {
+            let sa = a.to_php_string();
+            let sb = b.to_php_string();
+            if case_insensitive {
+                let la = sa.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>();
+                let lb = sb.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>();
+                la.cmp(&lb)
+            } else {
+                sa.as_bytes().cmp(sb.as_bytes())
+            }
+        }
+        SORT_NUMERIC => {
+            let fa = a.to_double();
+            let fb = b.to_double();
+            fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        SORT_NATURAL => {
+            let sa = a.to_php_string();
+            let sb = b.to_php_string();
+            if case_insensitive {
+                let la = sa.to_string_lossy().to_lowercase();
+                let lb = sb.to_string_lossy().to_lowercase();
+                natcmp(&la, &lb)
+            } else {
+                natcmp(&sa.to_string_lossy(), &sb.to_string_lossy())
+            }
+        }
+        _ => {
+            // SORT_REGULAR (default)
+            let cmp = a.compare(b);
+            if cmp < 0 {
+                std::cmp::Ordering::Less
+            } else if cmp > 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                let tp_a = type_priority(a);
+                let tp_b = type_priority(b);
+                tp_a.cmp(&tp_b)
+            }
+        }
+    }
+}
+
+fn php_key_sort_cmp_flags(a: &ArrayKey, b: &ArrayKey, flags: i64) -> std::cmp::Ordering {
+    let base_flag = flags & !SORT_FLAG_CASE;
+    let case_insensitive = (flags & SORT_FLAG_CASE) != 0;
+
+    match base_flag {
+        SORT_STRING | SORT_LOCALE_STRING => {
+            let sa = match a { ArrayKey::Int(n) => n.to_string().into_bytes(), ArrayKey::String(s) => s.as_bytes().to_vec() };
+            let sb = match b { ArrayKey::Int(n) => n.to_string().into_bytes(), ArrayKey::String(s) => s.as_bytes().to_vec() };
+            if case_insensitive {
+                let la: Vec<u8> = sa.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let lb: Vec<u8> = sb.iter().map(|b| b.to_ascii_lowercase()).collect();
+                la.cmp(&lb)
+            } else {
+                sa.cmp(&sb)
+            }
+        }
+        SORT_NUMERIC => {
+            let na = match a { ArrayKey::Int(n) => *n as f64, ArrayKey::String(s) => s.to_string_lossy().parse::<f64>().unwrap_or(0.0) };
+            let nb = match b { ArrayKey::Int(n) => *n as f64, ArrayKey::String(s) => s.to_string_lossy().parse::<f64>().unwrap_or(0.0) };
+            na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        SORT_NATURAL => {
+            let sa = match a { ArrayKey::Int(n) => n.to_string(), ArrayKey::String(s) => s.to_string_lossy() };
+            let sb = match b { ArrayKey::Int(n) => n.to_string(), ArrayKey::String(s) => s.to_string_lossy() };
+            if case_insensitive {
+                let la = sa.to_lowercase();
+                let lb = sb.to_lowercase();
+                natcmp(&la, &lb)
+            } else {
+                natcmp(&sa, &sb)
+            }
+        }
+        _ => a.cmp(b),
     }
 }
 
 fn sort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<Value> = arr.values().cloned().collect();
-        // Use sort_unstable_by which is more tolerant of comparison inconsistencies
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            entries.sort_by(php_sort_cmp);
+            entries.sort_by(|a, b| php_sort_cmp_flags(a, b, flags));
         }));
-        // Rebuild array with sequential integer keys
         let mut new_arr = PhpArray::new();
         for val in entries {
             new_arr.push(val);
@@ -1652,10 +1791,11 @@ fn sort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn rsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<Value> = arr.values().cloned().collect();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            entries.sort_by(|a, b| php_sort_cmp(b, a));
+            entries.sort_by(|a, b| php_sort_cmp_flags(b, a, flags));
         }));
         let mut new_arr = PhpArray::new();
         for val in entries {
@@ -1667,10 +1807,11 @@ fn rsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn asort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            entries.sort_by(|a, b| php_sort_cmp(&a.1, &b.1));
+            entries.sort_by(|a, b| php_sort_cmp_flags(&a.1, &b.1, flags));
         }));
         *arr = goro_core::array::PhpArray::new();
         for (k, v) in entries {
@@ -1681,10 +1822,11 @@ fn asort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn arsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            entries.sort_by(|a, b| php_sort_cmp(&b.1, &a.1));
+            entries.sort_by(|a, b| php_sort_cmp_flags(&b.1, &a.1, flags));
         }));
         *arr = goro_core::array::PhpArray::new();
         for (k, v) in entries {
@@ -1695,9 +1837,10 @@ fn arsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn ksort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.sort_by(|a, b| php_key_sort_cmp_flags(&a.0, &b.0, flags));
         *arr = goro_core::array::PhpArray::new();
         for (k, v) in entries {
             arr.set(k, v);
@@ -1707,9 +1850,10 @@ fn ksort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn krsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
         let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        entries.sort_by(|a, b| php_key_sort_cmp_flags(&b.0, &a.0, flags));
         *arr = goro_core::array::PhpArray::new();
         for (k, v) in entries {
             arr.set(k, v);
@@ -2163,15 +2307,27 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => return Ok(Value::False),
     };
 
-    Ok(if let Some(class) = vm.classes.get(&class_lower) {
-        if class.methods.contains_key(&method_lower) {
-            Value::True
+    // Walk parent chain to check for method
+    let mut current = class_lower;
+    for _ in 0..50 {
+        if let Some(class) = vm.classes.get(&current) {
+            if class.methods.contains_key(&method_lower) {
+                return Ok(Value::True);
+            }
+            if let Some(ref parent) = class.parent {
+                current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+            } else {
+                break;
+            }
         } else {
-            Value::False
+            // Check built-in class methods
+            if method_lower == b"__construct" || method_lower == b"__tostring" || method_lower == b"__invoke" {
+                // Most classes support these
+            }
+            break;
         }
-    } else {
-        Value::False
-    })
+    }
+    Ok(Value::False)
 }
 fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(match args.first() {

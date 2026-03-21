@@ -1164,11 +1164,28 @@ impl Parser {
         }
 
         if matches!(self.peek(), TokenKind::Ampersand) {
+            // Check if this is an intersection type or a by-ref parameter marker.
+            // If the token after & is a Variable or Ellipsis, it's by-ref, not intersection.
+            if let Some(after_amp) = self.tokens.get(self.pos + 1) {
+                if matches!(after_amp.kind, TokenKind::Variable(_) | TokenKind::Ellipsis) {
+                    return Ok(first);
+                }
+            }
             let mut types = vec![first];
             while self.eat(&TokenKind::Ampersand) {
+                // Check again if the next token after & is a variable (by-ref marker for next param)
+                if matches!(self.peek(), TokenKind::Variable(_) | TokenKind::Ellipsis) {
+                    // We already consumed the &, but it was by-ref, not intersection.
+                    // We need to put it back - but we can't easily. Instead, just break.
+                    // Actually this case shouldn't happen since we checked above.
+                    break;
+                }
                 types.push(self.parse_simple_type()?);
             }
-            return Ok(TypeHint::Intersection(types));
+            if types.len() > 1 {
+                return Ok(TypeHint::Intersection(types));
+            }
+            return Ok(types.into_iter().next().unwrap());
         }
 
         Ok(first)
@@ -1489,33 +1506,122 @@ impl Parser {
                     }
                 }
                 // Handle trait conflict resolution block
+                let mut adaptations = Vec::new();
                 if matches!(self.peek(), TokenKind::OpenBrace) {
-                    let mut depth = 0;
-                    loop {
-                        match self.peek() {
-                            TokenKind::OpenBrace => {
+                    self.advance(); // consume {
+                    while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+                        // Parse: TraitName::method insteadof OtherTrait;
+                        //    or: TraitName::method as [visibility] [newName];
+                        //    or: method as [visibility] [newName];
+                        let first_name = match self.peek().clone() {
+                            TokenKind::Identifier(name) => {
                                 self.advance();
-                                depth += 1;
+                                name
                             }
-                            TokenKind::CloseBrace => {
-                                self.advance();
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            TokenKind::Eof => break,
                             _ => {
+                                self.advance(); // skip unexpected
+                                continue;
+                            }
+                        };
+
+                        if self.eat(&TokenKind::DoubleColon) {
+                            // TraitName::method
+                            let method_name = match self.peek().clone() {
+                                TokenKind::Identifier(name) => {
+                                    self.advance();
+                                    name
+                                }
+                                _ => {
+                                    self.advance();
+                                    continue;
+                                }
+                            };
+
+                            if matches!(self.peek(), TokenKind::Insteadof) {
+                                self.advance(); // consume insteadof
+                                let mut instead_of = Vec::new();
+                                loop {
+                                    let iname = self.parse_class_name_ref()?;
+                                    instead_of.push(iname);
+                                    if !self.eat(&TokenKind::Comma) {
+                                        break;
+                                    }
+                                }
+                                adaptations.push(TraitAdaptation::Precedence {
+                                    trait_name: first_name,
+                                    method: method_name,
+                                    instead_of,
+                                });
+                            } else if matches!(self.peek(), TokenKind::As) {
+                                self.advance(); // consume as
+                                let mut new_visibility = None;
+                                let mut new_name = None;
+                                match self.peek() {
+                                    TokenKind::Public => {
+                                        new_visibility = Some(Visibility::Public);
+                                        self.advance();
+                                    }
+                                    TokenKind::Protected => {
+                                        new_visibility = Some(Visibility::Protected);
+                                        self.advance();
+                                    }
+                                    TokenKind::Private => {
+                                        new_visibility = Some(Visibility::Private);
+                                        self.advance();
+                                    }
+                                    _ => {}
+                                }
+                                if let TokenKind::Identifier(name) = self.peek().clone() {
+                                    new_name = Some(name);
+                                    self.advance();
+                                }
+                                adaptations.push(TraitAdaptation::Alias {
+                                    trait_name: Some(first_name),
+                                    method: method_name,
+                                    new_name,
+                                    new_visibility,
+                                });
+                            }
+                        } else if matches!(self.peek(), TokenKind::As) {
+                            // method as [visibility] [newName]
+                            self.advance(); // consume as
+                            let mut new_visibility = None;
+                            let mut new_name = None;
+                            match self.peek() {
+                                TokenKind::Public => {
+                                    new_visibility = Some(Visibility::Public);
+                                    self.advance();
+                                }
+                                TokenKind::Protected => {
+                                    new_visibility = Some(Visibility::Protected);
+                                    self.advance();
+                                }
+                                TokenKind::Private => {
+                                    new_visibility = Some(Visibility::Private);
+                                    self.advance();
+                                }
+                                _ => {}
+                            }
+                            if let TokenKind::Identifier(name) = self.peek().clone() {
+                                new_name = Some(name);
                                 self.advance();
                             }
+                            adaptations.push(TraitAdaptation::Alias {
+                                trait_name: None,
+                                method: first_name,
+                                new_name,
+                                new_visibility,
+                            });
                         }
+                        self.eat(&TokenKind::Semicolon);
                     }
+                    self.eat(&TokenKind::CloseBrace);
                 } else {
                     self.expect_semicolon()?;
                 }
                 Ok(ClassMember::TraitUse {
                     traits,
-                    adaptations: vec![],
+                    adaptations,
                 })
             }
             TokenKind::Function => {

@@ -477,6 +477,10 @@ fn format_php_float_serialize(f: f64) -> String {
     if f.is_nan() {
         return "NAN".to_string();
     }
+    // Handle negative zero
+    if f == 0.0 && f.is_sign_negative() {
+        return "-0".to_string();
+    }
     // PHP serialize_precision=-1: shortest exact representation
     // Use scientific notation for very large/small numbers
     let abs = f.abs();

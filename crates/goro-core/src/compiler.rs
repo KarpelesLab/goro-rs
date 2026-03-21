@@ -1854,9 +1854,45 @@ impl Compiler {
                             };
                             class.constants.insert(const_name.clone(), val);
                         }
-                        ClassMember::TraitUse { traits, .. } => {
+                        ClassMember::TraitUse { traits, adaptations } => {
                             for trait_name in traits {
                                 class.traits.push(self.resolve_class_name(trait_name));
+                            }
+                            for adaptation in adaptations {
+                                match adaptation {
+                                    goro_parser::ast::TraitAdaptation::Alias {
+                                        trait_name,
+                                        method,
+                                        new_name,
+                                        new_visibility,
+                                    } => {
+                                        class.trait_adaptations.push(
+                                            crate::object::TraitAdaptation::Alias {
+                                                trait_name: trait_name.as_ref().map(|n| self.resolve_class_name(n)),
+                                                method: method.clone(),
+                                                new_name: new_name.clone(),
+                                                new_visibility: new_visibility.as_ref().map(|v| match v {
+                                                    goro_parser::ast::Visibility::Public => crate::object::Visibility::Public,
+                                                    goro_parser::ast::Visibility::Protected => crate::object::Visibility::Protected,
+                                                    goro_parser::ast::Visibility::Private => crate::object::Visibility::Private,
+                                                }),
+                                            },
+                                        );
+                                    }
+                                    goro_parser::ast::TraitAdaptation::Precedence {
+                                        trait_name,
+                                        method,
+                                        instead_of,
+                                    } => {
+                                        class.trait_adaptations.push(
+                                            crate::object::TraitAdaptation::Precedence {
+                                                trait_name: self.resolve_class_name(trait_name),
+                                                method: method.clone(),
+                                                instead_of: instead_of.iter().map(|n| self.resolve_class_name(n)).collect(),
+                                            },
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -3261,9 +3297,42 @@ impl Compiler {
                         }
                     }
                     _ => {
-                        let _ = self.compile_expr(class)?;
-                        let idx = self.op_array.add_literal(Value::Null);
-                        return Ok(OperandType::Const(idx));
+                        let class_operand = self.compile_expr(class)?;
+                        let tmp = self.op_array.alloc_temp();
+
+                        // Create the object with dynamic class name
+                        self.op_array.emit(Op {
+                            opcode: OpCode::NewObject,
+                            op1: class_operand,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+
+                        // Call constructor
+                        {
+                            let constructor_name = self
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_bytes(b"__construct")));
+                            self.op_array.emit(Op {
+                                opcode: OpCode::InitMethodCall,
+                                op1: OperandType::Tmp(tmp),
+                                op2: OperandType::Const(constructor_name),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                            self.compile_send_args(args, expr.span.line)?;
+                            let discard_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::DoFCall,
+                                op1: OperandType::Unused,
+                                op2: OperandType::Unused,
+                                result: OperandType::Tmp(discard_tmp),
+                                line: expr.span.line,
+                            });
+                        }
+
+                        return Ok(OperandType::Tmp(tmp));
                     }
                 };
 

@@ -693,14 +693,14 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
                 let test_dir = path.parent();
                 // Wrap in catch_unwind to prevent stack overflows from killing the runner
                 let test_name = test.name.clone();
-                let test_filename = path.file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Unknown.php".to_string());
-                // Convert .phpt to .php for the filename
-                let test_filename = if test_filename.ends_with(".phpt") {
-                    format!("{}.php", &test_filename[..test_filename.len() - 5])
-                } else {
-                    test_filename
+                // Use full path for filename, converting .phpt to .php
+                let test_filename = {
+                    let full = path.to_string_lossy().to_string();
+                    if full.ends_with(".phpt") {
+                        format!("{}.php", &full[..full.len() - 5])
+                    } else {
+                        full
+                    }
                 };
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_test_with_dir_and_filename(&test, test_dir, &test_filename)

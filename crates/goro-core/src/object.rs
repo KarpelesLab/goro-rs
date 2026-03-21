@@ -3,6 +3,24 @@ use std::collections::HashMap;
 use crate::opcode::OpArray;
 use crate::value::Value;
 
+/// A trait adaptation rule
+#[derive(Debug, Clone)]
+pub enum TraitAdaptation {
+    /// Alias: trait_name::method as [visibility] new_name
+    Alias {
+        trait_name: Option<Vec<u8>>,
+        method: Vec<u8>,
+        new_name: Option<Vec<u8>>,
+        new_visibility: Option<Visibility>,
+    },
+    /// Precedence: trait_name::method insteadof other_trait(s)
+    Precedence {
+        trait_name: Vec<u8>,
+        method: Vec<u8>,
+        instead_of: Vec<Vec<u8>>,
+    },
+}
+
 /// A PHP class entry (class definition)
 #[derive(Debug, Clone)]
 pub struct ClassEntry {
@@ -10,6 +28,7 @@ pub struct ClassEntry {
     pub parent: Option<Vec<u8>>,
     pub interfaces: Vec<Vec<u8>>,
     pub traits: Vec<Vec<u8>>,
+    pub trait_adaptations: Vec<TraitAdaptation>,
     pub properties: Vec<PropertyDef>,
     pub methods: HashMap<Vec<u8>, MethodDef>,
     pub constants: HashMap<Vec<u8>, Value>,
@@ -56,6 +75,7 @@ impl ClassEntry {
             parent: None,
             interfaces: Vec::new(),
             traits: Vec::new(),
+            trait_adaptations: Vec::new(),
             properties: Vec::new(),
             methods: HashMap::new(),
             constants: HashMap::new(),
