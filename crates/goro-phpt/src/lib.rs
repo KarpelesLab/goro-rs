@@ -351,16 +351,22 @@ fn execute_php_with_timeout_and_filename(
 fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename: &str) -> Result<Vec<u8>, String> {
     use goro_core::compiler::Compiler;
     use goro_core::vm::Vm;
-    use goro_core::value::{Value, set_php_precision};
+    use goro_core::value::{Value, set_php_precision, set_php_serialize_precision};
     use goro_core::string::PhpString;
     use goro_parser::{Lexer, Parser};
 
     // Apply precision from INI settings (reset to default first)
     set_php_precision(14);
+    set_php_serialize_precision(-1);
     for (key, value) in ini_settings {
         if key == "precision" {
             if let Ok(p) = value.parse::<i32>() {
                 set_php_precision(p);
+            }
+        }
+        if key == "serialize_precision" {
+            if let Ok(p) = value.parse::<i32>() {
+                set_php_serialize_precision(p);
             }
         }
     }

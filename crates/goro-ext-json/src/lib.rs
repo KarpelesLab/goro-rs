@@ -87,8 +87,24 @@ fn json_encode_value_flags(val: &Value, depth: usize, flags: i64) -> String {
             if f.is_infinite() || f.is_nan() {
                 "null".to_string()
             } else {
-                // PHP always outputs floats with a decimal point in json_encode
-                let s = format!("{}", f);
+                // PHP uses serialize_precision for json_encode
+                let sp = goro_core::value::get_php_serialize_precision();
+                let s = if sp < 0 {
+                    // Shortest roundtrip
+                    let mut best = format!("{}", f);
+                    for prec in 0..20 {
+                        let candidate = format!("{:.prec$}", f, prec = prec);
+                        if let Ok(parsed) = candidate.parse::<f64>() {
+                            if parsed == *f {
+                                best = candidate;
+                                break;
+                            }
+                        }
+                    }
+                    best
+                } else {
+                    goro_core::value::format_php_float_with_precision_pub(*f, sp as usize)
+                };
                 if s.contains('.') || s.contains('e') || s.contains('E') {
                     s
                 } else {

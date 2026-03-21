@@ -37,8 +37,14 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
         }
         Value::Double(f) => {
             // var_dump uses serialize_precision (-1 in PHP 8 = shortest representation)
+            let sp = goro_core::value::get_php_serialize_precision();
+            let formatted = if sp < 0 {
+                format_php_float_serialize(*f)
+            } else {
+                goro_core::value::format_php_float_with_precision_pub(*f, sp as usize)
+            };
             vm.write_output(
-                format!("{}float({})\n", prefix, format_php_float_serialize(*f)).as_bytes(),
+                format!("{}float({})\n", prefix, formatted).as_bytes(),
             );
         }
         Value::String(s) => {
@@ -539,23 +545,5 @@ fn ryu_format(f: f64) -> String {
 }
 
 fn format_float(f: f64) -> String {
-    if f.is_infinite() {
-        if f.is_sign_positive() {
-            "INF".to_string()
-        } else {
-            "-INF".to_string()
-        }
-    } else if f.is_nan() {
-        "NAN".to_string()
-    } else {
-        // PHP default precision is 14
-        let s = format!("{:.14}", f);
-        // Trim trailing zeros but keep at least one decimal
-        let trimmed = s.trim_end_matches('0');
-        if trimmed.ends_with('.') {
-            trimmed.to_string()
-        } else {
-            trimmed.to_string()
-        }
-    }
+    goro_core::value::format_php_float(f)
 }

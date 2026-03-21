@@ -2319,12 +2319,18 @@ impl Vm {
 
                 OpCode::Echo => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if matches!(val, Value::Array(_)) || matches!(&val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_))) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
                     let s = self.value_to_string(&val);
                     self.write_output(s.as_bytes());
                 }
 
                 OpCode::Print => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if matches!(val, Value::Array(_)) || matches!(&val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_))) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
                     let s = self.value_to_string(&val);
                     self.write_output(s.as_bytes());
                     self.write_operand(
@@ -7230,17 +7236,20 @@ fn php_increment(val: &Value) -> Value {
         Value::Double(f) => Value::Double(f + 1.0),
         Value::String(s) => {
             let bytes = s.as_bytes();
+            // Check if it's a numeric string first (before alphanumeric check)
+            if let Some(n) = crate::value::parse_numeric_string(bytes) {
+                if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+                    return match (n as i64).checked_add(1) {
+                        Some(r) => Value::Long(r),
+                        None => Value::Double(n + 1.0),
+                    };
+                }
+                return Value::Double(n + 1.0);
+            }
             // Only increment alphanumeric strings
             if bytes.is_empty() || !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
                 // Non-alphanumeric: convert to number and increment
                 return Value::Long(val.to_long() + 1);
-            }
-            // Check if it's a numeric string
-            if let Some(n) = crate::value::parse_numeric_string(bytes) {
-                if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-                    return Value::Long(n as i64 + 1);
-                }
-                return Value::Double(n + 1.0);
             }
             // Alphabetic increment: "a" -> "b", "z" -> "aa", "Az" -> "Ba"
             let mut result: Vec<u8> = bytes.to_vec();
@@ -7289,7 +7298,7 @@ fn php_increment(val: &Value) -> Value {
     }
 }
 
-/// PHP decrement: strings are NOT decremented (only numeric types)
+/// PHP decrement: numeric strings are decremented, non-numeric stay the same
 fn php_decrement(val: &Value) -> Value {
     match val {
         Value::Long(n) => match n.checked_sub(1) {
@@ -7297,8 +7306,21 @@ fn php_decrement(val: &Value) -> Value {
             None => Value::Double(*n as f64 - 1.0),
         },
         Value::Double(f) => Value::Double(f - 1.0),
-        // PHP: string decrement is not supported, stays the same
-        Value::String(_) => val.clone(),
+        Value::String(s) => {
+            let bytes = s.as_bytes();
+            // Check if it's a numeric string
+            if let Some(n) = crate::value::parse_numeric_string(bytes) {
+                if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+                    match (n as i64).checked_sub(1) {
+                        Some(r) => return Value::Long(r),
+                        None => return Value::Double(n - 1.0),
+                    }
+                }
+                return Value::Double(n - 1.0);
+            }
+            // Non-numeric string: decrement has no effect
+            val.clone()
+        }
         Value::Null | Value::Undef => Value::Null, // null-- stays null
         _ => val.sub(&Value::Long(1)),
     }

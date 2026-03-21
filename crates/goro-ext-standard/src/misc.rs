@@ -30,6 +30,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"ob_get_clean", ob_get_clean);
     vm.register_function(b"ob_get_level", ob_get_level);
     vm.register_function(b"ob_flush", ob_flush);
+    vm.register_function(b"ob_clean", ob_clean);
+    vm.register_function(b"ob_get_length", ob_get_length);
     vm.register_function(b"ob_implicit_flush", ob_implicit_flush);
 
     // Function handling
@@ -447,6 +449,21 @@ fn ob_get_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 fn ob_get_level(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(vm.ob_stack.len() as i64))
+}
+fn ob_get_length(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    if let Some(buf) = vm.ob_stack.last() {
+        Ok(Value::Long(buf.len() as i64))
+    } else {
+        Ok(Value::False)
+    }
+}
+fn ob_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    if let Some(buf) = vm.ob_stack.last_mut() {
+        buf.clear();
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
 }
 fn ob_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     if let Some(buf) = vm.ob_stack.last_mut() {
@@ -893,15 +910,30 @@ fn array_reverse(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_flip(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_flip(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
         let mut result = PhpArray::new();
         for (key, val) in arr.iter() {
             let new_key = match val {
                 Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
-                Value::String(s) => goro_core::array::ArrayKey::String(s.clone()),
-                _ => continue,
+                Value::String(s) => {
+                    // Convert numeric strings to integer keys
+                    let s_str = s.to_string_lossy();
+                    if let Ok(n) = s_str.parse::<i64>() {
+                        if n.to_string() == s_str.as_ref() {
+                            goro_core::array::ArrayKey::Int(n)
+                        } else {
+                            goro_core::array::ArrayKey::String(s.clone())
+                        }
+                    } else {
+                        goro_core::array::ArrayKey::String(s.clone())
+                    }
+                }
+                _ => {
+                    vm.emit_warning("array_flip(): Can only flip string and integer values, entry skipped");
+                    continue;
+                }
             };
             let new_val = match key {
                 goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
@@ -1411,26 +1443,19 @@ fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let keys_vec: Vec<_> = keys.values().cloned().collect();
     let vals_vec: Vec<_> = vals.values().cloned().collect();
     for (k, v) in keys_vec.iter().zip(vals_vec.iter()) {
-        let key = match k {
-            Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
-            Value::String(s) => {
-                // PHP coerces numeric string keys to integers
-                let s_str = s.to_string_lossy();
-                if let Ok(n) = s_str.parse::<i64>() {
-                    if n.to_string() == s_str {
-                        goro_core::array::ArrayKey::Int(n)
-                    } else {
-                        goro_core::array::ArrayKey::String(s.clone())
-                    }
+        // PHP array_combine converts values to strings first, then to array keys
+        let key_str = k.to_php_string();
+        let key = {
+            let s_str = key_str.to_string_lossy();
+            if let Ok(n) = s_str.parse::<i64>() {
+                if n.to_string() == s_str.as_ref() {
+                    goro_core::array::ArrayKey::Int(n)
                 } else {
-                    goro_core::array::ArrayKey::String(s.clone())
+                    goro_core::array::ArrayKey::String(key_str)
                 }
+            } else {
+                goro_core::array::ArrayKey::String(key_str)
             }
-            Value::True => goro_core::array::ArrayKey::Int(1),
-            Value::False => goro_core::array::ArrayKey::Int(0),
-            Value::Null | Value::Undef => goro_core::array::ArrayKey::String(PhpString::empty()),
-            Value::Double(f) => goro_core::array::ArrayKey::Int(*f as i64),
-            _ => goro_core::array::ArrayKey::String(k.to_php_string()),
         };
         result.set(key, v.clone());
     }
@@ -1518,11 +1543,26 @@ fn array_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_fill(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let start = args.first().map(|v| v.to_long()).unwrap_or(0);
     let num = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    if num < 0 || num > 10_000_000 {
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    if num < 0 {
+        let msg = "array_fill(): Argument #2 ($count) must be greater than or equal to 0".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
+    if num > 10_000_000 {
+        let msg = "array_fill(): Argument #2 ($count) is too large".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
     }
     let val = args.get(2).cloned().unwrap_or(Value::Null);
     let mut result = PhpArray::new();
@@ -1539,8 +1579,8 @@ fn array_fill_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Value::Array(arr) = keys {
         let arr = arr.borrow();
         for (_key, val) in arr.iter() {
-            let k = val.to_php_string();
-            result.set(goro_core::array::ArrayKey::String(k), fill_val.clone());
+            let k = value_to_array_key(val);
+            result.set(k, fill_val.clone());
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -3934,7 +3974,24 @@ fn serialize_value_depth(val: &Value, depth: usize) -> String {
             } else if f.is_infinite() {
                 if *f > 0.0 { "d:INF;".to_string() } else { "d:-INF;".to_string() }
             } else {
-                format!("d:{};", f)
+                let sp = goro_core::value::get_php_serialize_precision();
+                let formatted = if sp < 0 {
+                    // Shortest roundtrip representation
+                    let mut best = format!("{}", f);
+                    for prec in 0..20 {
+                        let candidate = format!("{:.prec$}", f, prec = prec);
+                        if let Ok(parsed) = candidate.parse::<f64>() {
+                            if parsed == *f {
+                                best = candidate;
+                                break;
+                            }
+                        }
+                    }
+                    best
+                } else {
+                    goro_core::value::format_php_float_with_precision_pub(*f, sp as usize)
+                };
+                format!("d:{};", formatted)
             }
         }
         Value::String(s) => format!("s:{}:\"{}\";", s.len(), s.to_string_lossy()),
@@ -4659,7 +4716,22 @@ fn http_response_code_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
     Ok(Value::Long(200))
 }
 
-fn array_diff_key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Type check all arguments
+    for (i, arg) in args.iter().enumerate() {
+        let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
+        if !matches!(a, Value::Array(_)) {
+            let type_name = Vm::value_type_name(&a);
+            let msg = if i == 0 {
+                format!("array_diff_key(): Argument #1 ($array) must be of type array, {} given", type_name)
+            } else {
+                format!("array_diff_key(): Argument #{} must be of type array, {} given", i + 1, type_name)
+            };
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+    }
     if args.len() < 2 {
         if let Some(Value::Array(a)) = args.first() {
             return Ok(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))));
@@ -4668,7 +4740,6 @@ fn array_diff_key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     if let Some(Value::Array(a)) = args.first() {
         let a = a.borrow();
-        // Collect all keys from arrays at index 1+
         let mut other_keys: Vec<ArrayKey> = Vec::new();
         for arg in &args[1..] {
             if let Value::Array(b) = arg {
@@ -4690,7 +4761,17 @@ fn array_diff_key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_diff_assoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_diff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    for (i, arg) in args.iter().enumerate() {
+        let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
+        if !matches!(a, Value::Array(_)) {
+            let type_name = Vm::value_type_name(&a);
+            let msg = format!("array_diff_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name);
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+    }
     if args.len() < 2 {
         if let Some(Value::Array(a)) = args.first() {
             return Ok(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))));
@@ -4724,7 +4805,17 @@ fn array_diff_assoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_intersect_key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    for (i, arg) in args.iter().enumerate() {
+        let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
+        if !matches!(a, Value::Array(_)) {
+            let type_name = Vm::value_type_name(&a);
+            let msg = format!("array_intersect_key(): Argument #{} must be of type array, {} given", i + 1, type_name);
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+    }
     if args.len() < 2 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
@@ -4744,7 +4835,17 @@ fn array_intersect_key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     }
 }
 
-fn array_intersect_assoc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    for (i, arg) in args.iter().enumerate() {
+        let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
+        if !matches!(a, Value::Array(_)) {
+            let type_name = Vm::value_type_name(&a);
+            let msg = format!("array_intersect_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name);
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+    }
     if args.len() < 2 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }

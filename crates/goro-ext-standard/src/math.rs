@@ -414,18 +414,74 @@ fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let from_base = args.get(1).map(|v| v.to_long()).unwrap_or(10) as u32;
     let to_base = args.get(2).map(|v| v.to_long()).unwrap_or(10) as u32;
     if from_base < 2 || from_base > 36 {
-        vm.emit_warning_at("base_convert(): Invalid `from_base` (2 <= from_base <= 36)", 0);
-        return Ok(Value::False);
+        let msg = "base_convert(): Argument #2 ($from_base) must be between 2 and 36 (inclusive)".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
     }
     if to_base < 2 || to_base > 36 {
-        vm.emit_warning_at("base_convert(): Invalid `to_base` (2 <= to_base <= 36)", 0);
-        return Ok(Value::False);
+        let msg = "base_convert(): Argument #3 ($to_base) must be between 2 and 36 (inclusive)".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
     }
-    let val = i64::from_str_radix(&num_str.to_string_lossy(), from_base).unwrap_or(0);
-    let result = int_to_base(val as u64, to_base);
+    let input = num_str.to_string_lossy().to_lowercase();
+    // Strip invalid characters for the given base, emit deprecation if any were removed
+    let mut cleaned = String::new();
+    let mut had_invalid = false;
+    for c in input.chars() {
+        let digit_val = match c {
+            '0'..='9' => c as u32 - '0' as u32,
+            'a'..='z' => c as u32 - 'a' as u32 + 10,
+            _ => from_base, // invalid
+        };
+        if digit_val < from_base {
+            cleaned.push(c);
+        } else {
+            had_invalid = true;
+        }
+    }
+    if had_invalid {
+        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", 0);
+    }
+    if cleaned.is_empty() {
+        return Ok(Value::String(goro_core::string::PhpString::from_string("0".to_string())));
+    }
+    // Parse cleaned string in from_base, convert to to_base
+    // Use u128 for larger range
+    let mut val: u128 = 0;
+    for c in cleaned.chars() {
+        let digit_val = match c {
+            '0'..='9' => c as u32 - '0' as u32,
+            'a'..='z' => c as u32 - 'a' as u32 + 10,
+            _ => 0,
+        };
+        val = val.wrapping_mul(from_base as u128).wrapping_add(digit_val as u128);
+    }
+    let result = int_to_base_u128(val, to_base);
     Ok(Value::String(goro_core::string::PhpString::from_string(
         result,
     )))
+}
+
+fn int_to_base_u128(mut val: u128, base: u32) -> String {
+    if val == 0 {
+        return "0".to_string();
+    }
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut result = Vec::new();
+    while val > 0 {
+        result.push(digits[(val % base as u128) as usize]);
+        val /= base as u128;
+    }
+    result.reverse();
+    String::from_utf8(result).unwrap_or_default()
 }
 
 fn int_to_base(mut val: u64, base: u32) -> String {
@@ -441,17 +497,69 @@ fn int_to_base(mut val: u64, base: u32) -> String {
     result.reverse();
     String::from_utf8(result).unwrap_or_default()
 }
-fn bindec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn bindec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(parse_base_string(&s.to_string_lossy(), 2))
+    let input = s.to_string_lossy();
+    // Strip 0b/0B prefix
+    let trimmed = input.trim();
+    let stripped = if trimmed.starts_with("0b") || trimmed.starts_with("0B") {
+        &trimmed[2..]
+    } else {
+        trimmed
+    };
+    Ok(parse_base_string_strip(vm, stripped, 2))
 }
-fn octdec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn octdec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(parse_base_string(&s.to_string_lossy(), 8))
+    let input = s.to_string_lossy();
+    // Strip 0o/0O prefix
+    let trimmed = input.trim();
+    let stripped = if trimmed.starts_with("0o") || trimmed.starts_with("0O") {
+        &trimmed[2..]
+    } else {
+        trimmed
+    };
+    Ok(parse_base_string_strip(vm, stripped, 8))
 }
-fn hexdec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn hexdec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(parse_base_string(&s.to_string_lossy(), 16))
+    let input = s.to_string_lossy();
+    // Strip 0x/0X prefix
+    let trimmed = input.trim();
+    let stripped = if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+        &trimmed[2..]
+    } else {
+        trimmed
+    };
+    Ok(parse_base_string_strip(vm, stripped, 16))
+}
+
+/// Parse a string in the given base, stripping invalid chars with deprecation warning
+fn parse_base_string_strip(vm: &mut Vm, s: &str, base: u32) -> Value {
+    let trimmed = s.trim();
+    // Strip invalid characters
+    let mut cleaned = String::new();
+    let mut had_invalid = false;
+    for c in trimmed.chars() {
+        let digit_val = match c {
+            '0'..='9' => c as u32 - '0' as u32,
+            'a'..='z' => c as u32 - 'a' as u32 + 10,
+            'A'..='Z' => c as u32 - 'A' as u32 + 10,
+            _ => base, // invalid
+        };
+        if digit_val < base {
+            cleaned.push(c);
+        } else {
+            had_invalid = true;
+        }
+    }
+    if had_invalid {
+        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", 0);
+    }
+    if cleaned.is_empty() {
+        return Value::Long(0);
+    }
+    parse_base_string(&cleaned, base)
 }
 
 /// Parse a string in the given base, returning Long if it fits, Double otherwise
@@ -623,7 +731,6 @@ fn mt_getrandmax_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     let decimals_raw = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    let decimals = if decimals_raw < 0 { 0usize } else { decimals_raw.min(100000) as usize };
     let dec_point = match args.get(2).map(|v| v.deref()) {
         Some(Value::Null) | Some(Value::Undef) | None => ".".to_string(),
         Some(v) => v.to_php_string().to_string_lossy(),
@@ -633,23 +740,38 @@ fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.to_php_string().to_string_lossy(),
     };
 
-    // For integer values, format without going through float
-    let formatted = if let Value::Long(n) = val {
+    let num = val.to_double();
+
+    // Handle negative decimals: round to nearest 10^(-decimals)
+    let (num_to_format, decimals) = if decimals_raw < 0 {
+        let neg_dec = (-decimals_raw) as u32;
+        if neg_dec >= 20 {
+            (0.0f64, 0usize)
+        } else {
+            let factor = 10f64.powi(neg_dec as i32);
+            let rounded = (num / factor).round() * factor;
+            (rounded, 0usize)
+        }
+    } else {
+        (num, decimals_raw.min(100000) as usize)
+    };
+
+    // For integer values with no decimals, format without going through float
+    let formatted = if decimals_raw >= 0 && let Value::Long(n) = val {
         if decimals > 0 {
             format!("{}.{}", n, "0".repeat(decimals))
         } else {
             format!("{}", n)
         }
     } else {
-        let num = val.to_double();
-        if num.is_nan() {
+        if num_to_format.is_nan() {
             if decimals > 0 {
                 format!("NAN{}{}", dec_point, "0".repeat(decimals))
             } else {
                 "NAN".to_string()
             }
-        } else if num.is_infinite() {
-            if num > 0.0 {
+        } else if num_to_format.is_infinite() {
+            if num_to_format > 0.0 {
                 if decimals > 0 {
                     format!("INF{}{}", dec_point, "0".repeat(decimals))
                 } else {
@@ -663,7 +785,7 @@ fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
         } else {
-            format!("{:.prec$}", num, prec = decimals)
+            format!("{:.prec$}", num_to_format, prec = decimals)
         }
     };
 

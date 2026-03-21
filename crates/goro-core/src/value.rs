@@ -10,6 +10,8 @@ use crate::string::PhpString;
 thread_local! {
     /// PHP `precision` ini setting. Default 14. -1 means shortest roundtrip.
     static PHP_PRECISION: Cell<i32> = const { Cell::new(14) };
+    /// PHP `serialize_precision` ini setting. Default -1 (shortest roundtrip).
+    static PHP_SERIALIZE_PRECISION: Cell<i32> = const { Cell::new(-1) };
 }
 
 /// Set the PHP `precision` ini value (used by float-to-string conversion).
@@ -20,6 +22,16 @@ pub fn set_php_precision(p: i32) {
 /// Get the current PHP `precision` ini value.
 pub fn get_php_precision() -> i32 {
     PHP_PRECISION.with(|c| c.get())
+}
+
+/// Set the PHP `serialize_precision` ini value (used by var_dump, json_encode, etc.).
+pub fn set_php_serialize_precision(p: i32) {
+    PHP_SERIALIZE_PRECISION.with(|c| c.set(p));
+}
+
+/// Get the current PHP `serialize_precision` ini value.
+pub fn get_php_serialize_precision() -> i32 {
+    PHP_SERIALIZE_PRECISION.with(|c| c.get())
 }
 
 /// The core value type (equivalent to zval in PHP)
@@ -786,6 +798,11 @@ fn format_php_float_shortest(f: f64) -> String {
         }
     }
     format!("{}", f)
+}
+
+/// Public wrapper for format_php_float_with_precision
+pub fn format_php_float_with_precision_pub(f: f64, sig_digits: usize) -> String {
+    format_php_float_with_precision(f, sig_digits)
 }
 
 /// Format a float with a specific number of significant digits.

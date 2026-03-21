@@ -265,7 +265,11 @@ impl<'a> Lexer<'a> {
                 }
                 _ => {
                     // Check for traditional octal: 0NNN (digits 0-7 only)
-                    if self.peek_at(1).is_some_and(|c| (b'0'..=b'7').contains(&c)) {
+                    // Also handle 0_NNN (with numeric separator)
+                    let after_zero = self.peek_at(1);
+                    let is_traditional_octal = after_zero.is_some_and(|c| (b'0'..=b'7').contains(&c))
+                        || (after_zero == Some(b'_') && self.peek_at(2).is_some_and(|c| (b'0'..=b'7').contains(&c)));
+                    if is_traditional_octal {
                         // Could be octal - scan digits
                         let oct_start = self.pos;
                         self.advance(); // skip leading 0

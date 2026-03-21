@@ -17,6 +17,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mktime", mktime);
     vm.register_function(b"gmmktime", gmmktime_fn);
     vm.register_function(b"strftime", strftime_fn);
+    vm.register_function(b"gmstrftime", strftime_fn); // Same as strftime for now (UTC not separately handled)
     vm.register_function(b"strtotime", strtotime);
     vm.register_function(b"date_create", date_create_fn);
     vm.register_function(b"getdate", getdate_fn);
