@@ -260,10 +260,10 @@ impl Vm {
                     b"PHP_BINARY".to_vec(),
                     Value::String(PhpString::from_bytes(b"goro")),
                 );
-                // File handles - use Long as resource placeholders
-                c.insert(b"STDIN".to_vec(), Value::Long(0));
-                c.insert(b"STDOUT".to_vec(), Value::Long(1));
-                c.insert(b"STDERR".to_vec(), Value::Long(2));
+                // File handles - use Long as resource placeholders (non-zero so they are truthy)
+                c.insert(b"STDIN".to_vec(), Value::Long(1));
+                c.insert(b"STDOUT".to_vec(), Value::Long(2));
+                c.insert(b"STDERR".to_vec(), Value::Long(3));
                 c.insert(
                     b"DIRECTORY_SEPARATOR".to_vec(),
                     Value::String(PhpString::from_bytes(b"/")),
@@ -927,18 +927,55 @@ impl Vm {
     }
 
     /// Get a human-readable name for a ParamType
-    fn param_type_name(pt: &ParamType) -> String {
+    fn param_type_name(&self, pt: &ParamType) -> String {
         match pt {
-            ParamType::Simple(name) => String::from_utf8_lossy(name).to_string(),
-            ParamType::Nullable(inner) => format!("?{}", Self::param_type_name(inner)),
+            ParamType::Simple(name) => {
+                match name.as_slice() {
+                    b"self" => {
+                        if let Some(scope) = self.class_scope_stack.last() {
+                            // Look up original case class name
+                            if let Some(class_entry) = self.classes.get(scope) {
+                                return String::from_utf8_lossy(&class_entry.name).to_string();
+                            }
+                            return String::from_utf8_lossy(scope).to_string();
+                        }
+                    }
+                    b"parent" => {
+                        if let Some(scope) = self.class_scope_stack.last() {
+                            if let Some(class_entry) = self.classes.get(scope) {
+                                if let Some(parent_name) = &class_entry.parent {
+                                    // Look up original case of parent
+                                    let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if let Some(parent_entry) = self.classes.get(&parent_lower) {
+                                        return String::from_utf8_lossy(&parent_entry.name).to_string();
+                                    }
+                                    return String::from_utf8_lossy(parent_name).to_string();
+                                }
+                            }
+                        }
+                    }
+                    b"static" => {
+                        if let Some(called) = self.called_class_stack.last() {
+                            let called_lower: Vec<u8> = called.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(class_entry) = self.classes.get(&called_lower) {
+                                return String::from_utf8_lossy(&class_entry.name).to_string();
+                            }
+                            return String::from_utf8_lossy(called).to_string();
+                        }
+                    }
+                    _ => {}
+                }
+                String::from_utf8_lossy(name).to_string()
+            }
+            ParamType::Nullable(inner) => format!("?{}", self.param_type_name(inner)),
             ParamType::Union(types) => types
                 .iter()
-                .map(|t| Self::param_type_name(t))
+                .map(|t| self.param_type_name(t))
                 .collect::<Vec<_>>()
                 .join("|"),
             ParamType::Intersection(types) => types
                 .iter()
-                .map(|t| Self::param_type_name(t))
+                .map(|t| self.param_type_name(t))
                 .collect::<Vec<_>>()
                 .join("&"),
         }
@@ -1009,9 +1046,75 @@ impl Vm {
                     b"mixed" => true,
                     b"null" => matches!(value, Value::Null),
                     b"void" => true, // void is for return types, skip checking
-                    b"self" | b"parent" | b"static" => {
-                        // These need class context, skip for now
-                        true
+                    b"self" => {
+                        // self type: value must be an object of the declaring class
+                        if let Value::Object(obj) = value {
+                            let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(scope) = self.class_scope_stack.last() {
+                                let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                obj_class_lower == scope_lower || {
+                                    // Check if the object's class extends the scope class
+                                    if let Some(class_entry) = self.classes.get(&obj_class_lower) {
+                                        self.class_is_a(class_entry, &scope_lower)
+                                    } else {
+                                        false
+                                    }
+                                }
+                            } else {
+                                true // no class context, skip checking
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    b"parent" => {
+                        // parent type: value must be an object of the parent class
+                        if let Value::Object(obj) = value {
+                            let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(scope) = self.class_scope_stack.last() {
+                                let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(class_entry) = self.classes.get(&scope_lower) {
+                                    if let Some(parent_name) = &class_entry.parent {
+                                        let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        obj_class_lower == parent_lower || {
+                                            if let Some(obj_entry) = self.classes.get(&obj_class_lower) {
+                                                self.class_is_a(obj_entry, &parent_lower)
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    true
+                                }
+                            } else {
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    b"static" => {
+                        // static type: value must be an object of the called class (LSB)
+                        if let Value::Object(obj) = value {
+                            let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(called) = self.called_class_stack.last() {
+                                let called_lower: Vec<u8> = called.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                obj_class_lower == called_lower || {
+                                    if let Some(class_entry) = self.classes.get(&obj_class_lower) {
+                                        self.class_is_a(class_entry, &called_lower)
+                                    } else {
+                                        false
+                                    }
+                                }
+                            } else {
+                                true // no called class context, skip checking
+                            }
+                        } else {
+                            false
+                        }
                     }
                     b"false" => matches!(value, Value::False),
                     b"true" => matches!(value, Value::True),
@@ -1131,23 +1234,32 @@ impl Vm {
     }
 
     /// Get the display name for a ParamType (for error messages)
-    fn param_type_display(param_type: &ParamType) -> String {
-        Self::param_type_display_inner(param_type, false)
+    fn param_type_display(&self, param_type: &ParamType) -> String {
+        self.param_type_display_inner(param_type, false)
     }
 
-    fn param_type_display_inner(param_type: &ParamType, in_union: bool) -> String {
+    fn param_type_display_inner(&self, param_type: &ParamType, in_union: bool) -> String {
         match param_type {
-            ParamType::Simple(name) => String::from_utf8_lossy(name).to_string(),
-            ParamType::Nullable(inner) => format!("?{}", Self::param_type_display_inner(inner, false)),
+            ParamType::Simple(name) => {
+                // Resolve self/parent/static to actual class names
+                match name.as_slice() {
+                    b"self" | b"parent" | b"static" => {
+                        return self.param_type_name(param_type);
+                    }
+                    _ => {}
+                }
+                String::from_utf8_lossy(name).to_string()
+            }
+            ParamType::Nullable(inner) => format!("?{}", self.param_type_display_inner(inner, false)),
             ParamType::Union(types) => types
                 .iter()
-                .map(|t| Self::param_type_display_inner(t, true))
+                .map(|t| self.param_type_display_inner(t, true))
                 .collect::<Vec<_>>()
                 .join("|"),
             ParamType::Intersection(types) => {
                 let s = types
                     .iter()
-                    .map(|t| Self::param_type_display_inner(t, false))
+                    .map(|t| self.param_type_display_inner(t, false))
                     .collect::<Vec<_>>()
                     .join("&");
                 if in_union {
@@ -1184,7 +1296,7 @@ impl Vm {
             if let Some(type_info) = &user_fn.param_types[i] {
                 let val = arg.deref();
                 if !self.value_matches_type(&val, &type_info.param_type) {
-                    let expected = Self::param_type_display(&type_info.param_type);
+                    let expected = self.param_type_display(&type_info.param_type);
                     let given = Self::value_type_name(&val);
                     let param_name = String::from_utf8_lossy(&type_info.param_name);
                     // Argument number is 1-based, excluding implicit args like $this
@@ -2303,7 +2415,7 @@ impl Vm {
                     } else {
                         Self::value_type_name(val)
                     };
-                    let expected_type = Self::param_type_name(ret_type);
+                    let expected_type = self.param_type_name(ret_type);
                     let msg = format!(
                         "{}(): Return value must be of type {}, {} returned",
                         func_name, expected_type, actual_type
@@ -3887,6 +3999,22 @@ impl Vm {
 
                         // Check parameter types before executing
                         if !user_fn.param_types.is_empty() {
+                            // Push class scope temporarily for self/parent/static type checking
+                            let temp_scope_pushed = if let Some(pos) = func_name_lower.iter().position(|&b| b == b':') {
+                                if pos + 1 < func_name_lower.len() && func_name_lower[pos + 1] == b':' {
+                                    let class_part_lower = &func_name_lower[..pos];
+                                    let method_part_lower = &func_name_lower[pos + 2..];
+                                    let defining_class = self.classes.get(class_part_lower)
+                                        .and_then(|c| c.get_method(method_part_lower))
+                                        .map(|m| m.declaring_class.clone())
+                                        .unwrap_or_else(|| class_part_lower.to_vec());
+                                    self.class_scope_stack.push(defining_class);
+                                    true
+                                } else { false }
+                            } else if let Some(ref scope) = user_fn.scope_class {
+                                self.class_scope_stack.push(scope.clone());
+                                true
+                            } else { false };
                             // Determine if this is a method call ($this is first implicit arg)
                             let implicit_args = if user_fn.cv_names.first().map(|n| n.as_slice())
                                 == Some(b"this")
@@ -3899,13 +4027,18 @@ impl Vm {
                             let display_name = call.name.to_string_lossy();
                             // For method calls like ClassName::method, format as ClassName::method
                             // For regular functions, just the function name
-                            if let Some(err_msg) = self.check_param_types(
+                            let param_err = self.check_param_types(
                                 &user_fn,
                                 &call.args,
                                 &display_name,
                                 implicit_args,
                                 op.line,
-                            ) {
+                            );
+                            // Pop temp scope
+                            if temp_scope_pushed {
+                                self.class_scope_stack.pop();
+                            }
+                            if let Some(err_msg) = param_err {
                                 // Use the function definition line for the exception, not the call site
                                 let def_line = user_fn.ops.first().map(|o| o.line).unwrap_or(op.line);
                                 let exc_val = self.create_exception(b"TypeError", &err_msg, def_line);
@@ -4236,7 +4369,7 @@ impl Vm {
                                 &static_cv_keys,
                             );
                         } else {
-                            // Check for __callStatic on ClassName::method calls
+                            // Check for __callStatic/__call on ClassName::method calls
                             let name_bytes = call.name.as_bytes();
                             let mut handled = false;
                             if let Some(pos) = name_bytes.iter().position(|&b| b == b':') {
@@ -4245,41 +4378,88 @@ impl Vm {
                                     let method_part = &name_bytes[pos + 2..];
                                     let class_lower: Vec<u8> =
                                         class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    if let Some(class_def) = self.classes.get(&class_lower) {
-                                        if let Some(call_static) =
-                                            class_def.get_method(b"__callstatic")
-                                        {
-                                            let call_static_op = call_static.op_array.clone();
-                                            let mut fn_cvs =
-                                                vec![Value::Undef; call_static_op.cv_names.len()];
-                                            // __callStatic($name, $arguments)
-                                            if fn_cvs.len() > 0 {
-                                                fn_cvs[0] = Value::String(PhpString::from_vec(
-                                                    method_part.to_vec(),
-                                                ));
-                                            }
-                                            if fn_cvs.len() > 1 {
-                                                let mut args_arr = crate::array::PhpArray::new();
-                                                for arg in &call.args {
-                                                    args_arr.push(arg.clone());
+                                    // Extract magic method op_arrays upfront to avoid borrow conflicts
+                                    let magic_call = self.classes.get(&class_lower).and_then(|cd| {
+                                        cd.get_method(b"__call").map(|m| (m.op_array.clone(), m.declaring_class.clone()))
+                                    });
+                                    let magic_callstatic = self.classes.get(&class_lower).and_then(|cd| {
+                                        cd.get_method(b"__callstatic").map(|m| (m.op_array.clone(), m.declaring_class.clone()))
+                                    });
+                                    let class_found = self.classes.contains_key(&class_lower);
+                                    if class_found {
+                                        // Check if we're in an instance context (cvs[0] is $this object)
+                                        // If so, try __call first (parent::method() from instance method)
+                                        let in_instance_context = matches!(cvs.first(), Some(Value::Object(_)));
+                                        if in_instance_context {
+                                            if let Some((call_op, declaring_class)) = magic_call {
+                                                let mut fn_cvs =
+                                                    vec![Value::Undef; call_op.cv_names.len()];
+                                                // __call($name, $arguments): CV[0]=$this, CV[1]=$name, CV[2]=$args
+                                                if fn_cvs.len() > 0 {
+                                                    fn_cvs[0] = cvs[0].clone(); // $this
                                                 }
-                                                fn_cvs[1] =
-                                                    Value::Array(Rc::new(RefCell::new(args_arr)));
+                                                if fn_cvs.len() > 1 {
+                                                    fn_cvs[1] = Value::String(PhpString::from_vec(
+                                                        method_part.to_vec(),
+                                                    ));
+                                                }
+                                                if fn_cvs.len() > 2 {
+                                                    let mut args_arr = crate::array::PhpArray::new();
+                                                    for arg in &call.args {
+                                                        args_arr.push(arg.clone());
+                                                    }
+                                                    fn_cvs[2] =
+                                                        Value::Array(Rc::new(RefCell::new(args_arr)));
+                                                }
+                                                self.called_class_stack.push(class_part.to_vec());
+                                                self.class_scope_stack.push(declaring_class);
+                                                let result =
+                                                    self.execute_op_array(&call_op, fn_cvs)?;
+                                                self.called_class_stack.pop();
+                                                self.class_scope_stack.pop();
+                                                self.write_operand(
+                                                    &op.result,
+                                                    result,
+                                                    &mut cvs,
+                                                    &mut tmps,
+                                                    &static_cv_keys,
+                                                );
+                                                handled = true;
                                             }
-                                            self.called_class_stack.push(class_part.to_vec());
-                                            self.class_scope_stack.push(call_static.declaring_class.clone());
-                                            let result =
-                                                self.execute_op_array(&call_static_op, fn_cvs)?;
-                                            self.called_class_stack.pop();
-                                            self.class_scope_stack.pop();
-                                            self.write_operand(
-                                                &op.result,
-                                                result,
-                                                &mut cvs,
-                                                &mut tmps,
-                                                &static_cv_keys,
-                                            );
-                                            handled = true;
+                                        }
+                                        if !handled {
+                                            if let Some((call_static_op, declaring_class)) = magic_callstatic {
+                                                let mut fn_cvs =
+                                                    vec![Value::Undef; call_static_op.cv_names.len()];
+                                                // __callStatic($name, $arguments)
+                                                if fn_cvs.len() > 0 {
+                                                    fn_cvs[0] = Value::String(PhpString::from_vec(
+                                                        method_part.to_vec(),
+                                                    ));
+                                                }
+                                                if fn_cvs.len() > 1 {
+                                                    let mut args_arr = crate::array::PhpArray::new();
+                                                    for arg in &call.args {
+                                                        args_arr.push(arg.clone());
+                                                    }
+                                                    fn_cvs[1] =
+                                                        Value::Array(Rc::new(RefCell::new(args_arr)));
+                                                }
+                                                self.called_class_stack.push(class_part.to_vec());
+                                                self.class_scope_stack.push(declaring_class);
+                                                let result =
+                                                    self.execute_op_array(&call_static_op, fn_cvs)?;
+                                                self.called_class_stack.pop();
+                                                self.class_scope_stack.pop();
+                                                self.write_operand(
+                                                    &op.result,
+                                                    result,
+                                                    &mut cvs,
+                                                    &mut tmps,
+                                                    &static_cv_keys,
+                                                );
+                                                handled = true;
+                                            }
                                         }
                                     }
                                 }
@@ -4597,7 +4777,21 @@ impl Vm {
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val.clone());
-                        arr.borrow().get(&key).cloned().unwrap_or(Value::Null)
+                        match arr.borrow().get(&key).cloned() {
+                            Some(v) => v,
+                            None => {
+                                // Emit "Undefined array key" warning
+                                match &key {
+                                    crate::array::ArrayKey::Int(i) => {
+                                        self.emit_warning_at(&format!("Undefined array key {}", i), op.line);
+                                    }
+                                    crate::array::ArrayKey::String(s) => {
+                                        self.emit_warning_at(&format!("Undefined array key \"{}\"", s.to_string_lossy()), op.line);
+                                    }
+                                }
+                                Value::Null
+                            }
+                        }
                     } else if let Value::String(s) = &arr_val {
                         // String offset access (supports negative indices)
                         let idx = key_val.to_long();
@@ -6040,6 +6234,85 @@ impl Vm {
                                 .insert(func_name.to_ascii_lowercase(), method.op_array.clone());
                         }
 
+                        // Resolve deferred constant references (self::CONST, ClassName::CONST)
+                        // in class constants
+                        let const_keys: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
+                        for const_name in const_keys {
+                            if let Some(Value::String(s)) = class.constants.get(&const_name) {
+                                let s_bytes = s.as_bytes();
+                                if s_bytes.starts_with(b"__deferred_const__::") {
+                                    let rest = &s_bytes[b"__deferred_const__::".len()..];
+                                    // Parse ClassName::CONSTANT_NAME
+                                    if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                        let ref_class_name = &rest[..sep_pos];
+                                        let ref_const_name = &rest[sep_pos + 2..];
+                                        let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        // Look up the constant in the referenced class or current class
+                                        let resolved = if ref_class_lower == name_lower.as_slice() {
+                                            // self:: reference to same class
+                                            class.constants.get(ref_const_name).cloned()
+                                        } else if let Some(ref_class) = self.classes.get(&ref_class_lower) {
+                                            ref_class.constants.get(ref_const_name).cloned()
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(val) = resolved {
+                                            class.constants.insert(const_name, val);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Resolve deferred constant references in property defaults
+                        for prop in &mut class.properties {
+                            if let Value::String(s) = &prop.default {
+                                let s_bytes = s.as_bytes();
+                                if s_bytes.starts_with(b"__deferred_const__::") {
+                                    let rest = &s_bytes[b"__deferred_const__::".len()..];
+                                    if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                        let ref_class_name = &rest[..sep_pos];
+                                        let ref_const_name = &rest[sep_pos + 2..];
+                                        let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let resolved = if ref_class_lower == name_lower.as_slice() {
+                                            class.constants.get(ref_const_name).cloned()
+                                        } else if let Some(ref_class) = self.classes.get(&ref_class_lower) {
+                                            ref_class.constants.get(ref_const_name).cloned()
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(val) = resolved {
+                                            prop.default = val;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Resolve deferred constant references in static properties
+                        let static_keys: Vec<Vec<u8>> = class.static_properties.keys().cloned().collect();
+                        for prop_name in static_keys {
+                            if let Some(Value::String(s)) = class.static_properties.get(&prop_name) {
+                                let s_bytes = s.as_bytes();
+                                if s_bytes.starts_with(b"__deferred_const__::") {
+                                    let rest = &s_bytes[b"__deferred_const__::".len()..];
+                                    if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                        let ref_class_name = &rest[..sep_pos];
+                                        let ref_const_name = &rest[sep_pos + 2..];
+                                        let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let resolved = if ref_class_lower == name_lower.as_slice() {
+                                            class.constants.get(ref_const_name).cloned()
+                                        } else if let Some(ref_class) = self.classes.get(&ref_class_lower) {
+                                            ref_class.constants.get(ref_const_name).cloned()
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(val) = resolved {
+                                            class.static_properties.insert(prop_name, val);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         self.classes.insert(name_lower, class);
                     }
                 }
@@ -7447,17 +7720,27 @@ fn php_increment(val: &Value) -> Value {
                 }
                 return Value::Double(n + 1.0);
             }
-            // Only increment alphanumeric strings
-            if bytes.is_empty() || !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
-                // Non-alphanumeric: convert to number and increment
-                return Value::Long(val.to_long() + 1);
+            // Empty string: becomes "1" (PHP 8.3+ emits Deprecated)
+            if bytes.is_empty() {
+                return Value::Long(1);
+            }
+            // Check if string has any alphanumeric characters
+            let has_alnum = bytes.iter().any(|b| b.is_ascii_alphanumeric());
+            if !has_alnum {
+                // No alphanumeric characters (e.g. " ", "!", "🐘"): no change
+                return val.clone();
             }
             // Alphabetic increment: "a" -> "b", "z" -> "aa", "Az" -> "Ba"
+            // For mixed strings like "Hello world", only increment alphanumeric chars
             let mut result: Vec<u8> = bytes.to_vec();
             let mut carry = true;
             for i in (0..result.len()).rev() {
                 if !carry {
                     break;
+                }
+                // Skip non-alphanumeric characters
+                if !result[i].is_ascii_alphanumeric() {
+                    continue;
                 }
                 carry = false;
                 match result[i] {
@@ -7493,8 +7776,8 @@ fn php_increment(val: &Value) -> Value {
             Value::String(PhpString::from_vec(result))
         }
         Value::Null | Value::Undef => Value::Long(1),
-        Value::False => Value::Long(1), // false++ = 1
-        Value::True => Value::True,     // true++ stays true
+        Value::False => Value::False, // false++ has no effect (stays false) in PHP 8.3+
+        Value::True => Value::True,   // true++ stays true
         _ => val.add(&Value::Long(1)),
     }
 }
@@ -7523,6 +7806,8 @@ fn php_decrement(val: &Value) -> Value {
             val.clone()
         }
         Value::Null | Value::Undef => Value::Null, // null-- stays null
+        Value::True => Value::True,   // true-- has no effect in PHP 8.3+
+        Value::False => Value::False, // false-- has no effect in PHP 8.3+
         _ => val.sub(&Value::Long(1)),
     }
 }

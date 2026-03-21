@@ -1620,6 +1620,49 @@ impl Compiler {
                                             _ => Value::Null,
                                         }
                                     }
+                                    ExprKind::ClassConstAccess { class, constant } => {
+                                        // Handle self::CONST, ClassName::CONST in property defaults
+                                        let class_name = match &class.kind {
+                                            ExprKind::Identifier(name) => {
+                                                let resolved = self.resolve_class_name(name);
+                                                if resolved.eq_ignore_ascii_case(b"self") {
+                                                    qualified_name.clone()
+                                                } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                                    extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                } else {
+                                                    resolved
+                                                }
+                                            }
+                                            _ => qualified_name.clone(),
+                                        };
+                                        let mut marker = b"__deferred_const__::".to_vec();
+                                        marker.extend_from_slice(&class_name);
+                                        marker.push(b':');
+                                        marker.push(b':');
+                                        marker.extend_from_slice(constant);
+                                        Value::String(PhpString::from_vec(marker))
+                                    }
+                                    ExprKind::BinaryOp { op, left, right, .. } => {
+                                        let l = Self::eval_const_expr(left);
+                                        let r = Self::eval_const_expr(right);
+                                        if let (Some(lv), Some(rv)) = (l, r) {
+                                            match op {
+                                                BinaryOp::Add => lv.add(&rv),
+                                                BinaryOp::Sub => lv.sub(&rv),
+                                                BinaryOp::Mul => lv.mul(&rv),
+                                                BinaryOp::Concat => {
+                                                    let mut result = lv.to_php_string().as_bytes().to_vec();
+                                                    result.extend_from_slice(rv.to_php_string().as_bytes());
+                                                    Value::String(PhpString::from_vec(result))
+                                                }
+                                                BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
+                                                BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
+                                                _ => Value::Null,
+                                            }
+                                        } else {
+                                            Value::Null
+                                        }
+                                    }
                                     _ => Value::Null,
                                 }
                             } else {
@@ -1882,16 +1925,60 @@ impl Compiler {
                             value: const_expr,
                             ..
                         } => {
-                            let val = match &const_expr.kind {
-                                ExprKind::Int(n) => Value::Long(*n),
-                                ExprKind::Float(f) => Value::Double(*f),
-                                ExprKind::String(s) => {
-                                    Value::String(PhpString::from_vec(s.clone()))
+                            let val = if let Some(v) = Self::eval_const_expr(const_expr) {
+                                v
+                            } else {
+                                // Handle class constant references like self::B, ClassName::CONST
+                                match &const_expr.kind {
+                                    ExprKind::ClassConstAccess { class, constant } => {
+                                        // Store as a deferred constant reference marker
+                                        // Format: __deferred_const__::ClassName::CONSTANT_NAME
+                                        let class_name = match &class.kind {
+                                            ExprKind::Identifier(name) => {
+                                                let resolved = self.resolve_class_name(name);
+                                                if resolved.eq_ignore_ascii_case(b"self") {
+                                                    qualified_name.clone()
+                                                } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                                    extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                } else {
+                                                    resolved
+                                                }
+                                            }
+                                            _ => qualified_name.clone(),
+                                        };
+                                        let mut marker = b"__deferred_const__::".to_vec();
+                                        marker.extend_from_slice(&class_name);
+                                        marker.push(b':');
+                                        marker.push(b':');
+                                        marker.extend_from_slice(constant);
+                                        Value::String(PhpString::from_vec(marker))
+                                    }
+                                    ExprKind::BinaryOp { op, left, right, .. } => {
+                                        // Handle simple binary ops on constants
+                                        let l = Self::eval_const_expr(left);
+                                        let r = Self::eval_const_expr(right);
+                                        if let (Some(lv), Some(rv)) = (l, r) {
+                                            match op {
+                                                BinaryOp::Add => lv.add(&rv),
+                                                BinaryOp::Sub => lv.sub(&rv),
+                                                BinaryOp::Mul => lv.mul(&rv),
+                                                BinaryOp::Concat => {
+                                                    let mut result = lv.to_php_string().as_bytes().to_vec();
+                                                    result.extend_from_slice(rv.to_php_string().as_bytes());
+                                                    Value::String(PhpString::from_vec(result))
+                                                }
+                                                BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
+                                                BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
+                                                BinaryOp::ShiftLeft => Value::Long(lv.to_long() << rv.to_long()),
+                                                BinaryOp::ShiftRight => Value::Long(lv.to_long() >> rv.to_long()),
+                                                _ => Value::Null,
+                                            }
+                                        } else {
+                                            Value::Null
+                                        }
+                                    }
+                                    _ => Value::Null,
                                 }
-                                ExprKind::True => Value::True,
-                                ExprKind::False => Value::False,
-                                ExprKind::Null => Value::Null,
-                                _ => Value::Null,
                             };
                             class.constants.insert(const_name.clone(), val);
                         }
@@ -2906,7 +2993,22 @@ impl Compiler {
 
             ExprKind::NullCoalesce { left, right } => {
                 // $a ?? $b: if $a is not null, use $a, else use $b
+                // Suppress warnings for the left side (undefined keys, undefined vars, etc.)
+                self.op_array.emit(Op {
+                    opcode: OpCode::ErrorSuppress,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
                 let left_val = self.compile_expr(left)?;
+                self.op_array.emit(Op {
+                    opcode: OpCode::ErrorRestore,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
                 let result_tmp = self.op_array.alloc_temp();
 
                 // Check if left is null
