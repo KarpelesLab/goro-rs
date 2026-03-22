@@ -20,6 +20,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"hash_copy", hash_copy_fn);
     vm.register_function(b"hash_pbkdf2", hash_pbkdf2_fn);
     vm.register_function(b"hash_hmac_algos", hash_hmac_algos_fn);
+    vm.register_function(b"hash_file", hash_file_fn);
+    vm.register_function(b"hash_hkdf", hash_hkdf_fn);
+    vm.register_function(b"md5_file", md5_file_fn);
+    vm.register_function(b"sha1_file", sha1_file_fn);
 }
 
 fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -940,4 +944,151 @@ fn sha512_core(data: &[u8], init: &[u64; 8], output_len: usize) -> Vec<u8> {
     }
     result.truncate(output_len);
     result
+}
+
+fn hash_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
+    let filename = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let raw = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+
+    match std::fs::read(&filename) {
+        Ok(data) => {
+            match compute_hash(&algo, &data) {
+                Some(digest) => {
+                    if raw {
+                        Ok(Value::String(PhpString::from_vec(digest)))
+                    } else {
+                        let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+                        Ok(Value::String(PhpString::from_string(hex)))
+                    }
+                }
+                None => Ok(Value::False),
+            }
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn hash_hkdf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
+    let ikm = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let length = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let info = args.get(3).unwrap_or(&Value::Null).to_php_string();
+    let salt = args.get(4).unwrap_or(&Value::Null).to_php_string();
+
+    let hash_len = match algo.as_str() {
+        "md5" | "md4" => 16,
+        "sha1" => 20,
+        "sha224" => 28,
+        "sha256" => 32,
+        "sha384" => 48,
+        "sha512" => 64,
+        _ => {
+            let msg = format!("hash_hkdf(): Argument #1 ($algo) must be a valid hashing algorithm, \"{}\" given", algo);
+            let exc = vm.create_exception(b"ValueError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+    };
+
+    let output_len = if length == 0 { hash_len } else { length as usize };
+    if output_len > 255 * hash_len {
+        let msg = "hash_hkdf(): Argument #3 ($length) must be greater than or equal to 0 and less than or equal to 255 * HashLen";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: 0 });
+    }
+
+    if ikm.as_bytes().is_empty() {
+        let msg = "hash_hkdf(): Argument #2 ($key) must not be empty";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: 0 });
+    }
+
+    // HKDF-Extract: PRK = HMAC-Hash(salt, IKM)
+    let salt_bytes = if salt.as_bytes().is_empty() {
+        vec![0u8; hash_len]
+    } else {
+        salt.as_bytes().to_vec()
+    };
+    let prk = compute_hmac(&algo, &salt_bytes, ikm.as_bytes());
+
+    // HKDF-Expand
+    let mut okm = Vec::with_capacity(output_len);
+    let mut t = Vec::new();
+    let mut counter: u8 = 1;
+    while okm.len() < output_len {
+        let mut input = t.clone();
+        input.extend_from_slice(info.as_bytes());
+        input.push(counter);
+        t = compute_hmac(&algo, &prk, &input);
+        okm.extend_from_slice(&t);
+        counter += 1;
+    }
+    okm.truncate(output_len);
+
+    Ok(Value::String(PhpString::from_vec(okm)))
+}
+
+fn compute_hmac(algo: &str, key: &[u8], data: &[u8]) -> Vec<u8> {
+    let block_size = hash_block_size(algo);
+    let key_block = if key.len() > block_size {
+        let mut k = compute_hash(algo, key).unwrap_or_default();
+        k.resize(block_size, 0);
+        k
+    } else {
+        let mut k = key.to_vec();
+        k.resize(block_size, 0);
+        k
+    };
+
+    let mut ipad = vec![0x36u8; block_size];
+    let mut opad = vec![0x5cu8; block_size];
+    for i in 0..block_size {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+
+    let mut inner_data = ipad;
+    inner_data.extend_from_slice(data);
+    let inner_hash = compute_hash(algo, &inner_data).unwrap_or_default();
+
+    let mut outer_data = opad;
+    outer_data.extend_from_slice(&inner_hash);
+    compute_hash(algo, &outer_data).unwrap_or_default()
+}
+
+fn md5_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    match std::fs::read(&filename) {
+        Ok(data) => {
+            let digest = md5_hash(&data);
+            if raw {
+                Ok(Value::String(PhpString::from_vec(digest.to_vec())))
+            } else {
+                let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+                Ok(Value::String(PhpString::from_string(hex)))
+            }
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn sha1_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    match std::fs::read(&filename) {
+        Ok(data) => {
+            let digest = sha1_hash(&data);
+            if raw {
+                Ok(Value::String(PhpString::from_vec(digest.to_vec())))
+            } else {
+                let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+                Ok(Value::String(PhpString::from_string(hex)))
+            }
+        }
+        Err(_) => Ok(Value::False),
+    }
 }

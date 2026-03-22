@@ -185,10 +185,24 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
             seen.remove(&oid);
         }
-        Value::Generator(_) => {
+        Value::Generator(generator) => {
+            let gen_ref = generator.borrow();
+            let func_name = String::from_utf8_lossy(&gen_ref.op_array.name);
+            let prop_count = 1; // function property
+            // Use a hash-based ID since generators don't have object_id
+            let gen_ptr = generator.as_ptr() as u64;
+            let gen_id = (gen_ptr >> 4) % 10000 + 1;
             vm.write_output(
-                format!("{}object(Generator)#0 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
+                format!("{}object(Generator)#{} ({}) {{\n", prefix, gen_id, prop_count).as_bytes(),
             );
+            vm.write_output(
+                format!("{}  [\"function\"]=>\n", prefix).as_bytes(),
+            );
+            let name_str = func_name.to_string();
+            vm.write_output(
+                format!("{}  string({}) \"{}\"\n", prefix, name_str.len(), name_str).as_bytes(),
+            );
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
         Value::Reference(r) => {
             // Show the inner value with & prefix (PHP shows &int(42), &string(...), etc.)

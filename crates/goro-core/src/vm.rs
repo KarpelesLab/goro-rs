@@ -669,6 +669,93 @@ impl Vm {
                 c.insert(b"GMP_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"6.2.1")));
                 // Array constants
                 c.insert(b"ARRAY_FILTER_USE_VALUE".to_vec(), Value::Long(0));
+                // Stream constants
+                c.insert(b"STREAM_SERVER_BIND".to_vec(), Value::Long(4));
+                c.insert(b"STREAM_SERVER_LISTEN".to_vec(), Value::Long(8));
+                c.insert(b"STREAM_CLIENT_CONNECT".to_vec(), Value::Long(4));
+                c.insert(b"STREAM_CLIENT_ASYNC_CONNECT".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_CLIENT_PERSISTENT".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_NOTIFY_CONNECT".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_NOTIFY_AUTH_REQUIRED".to_vec(), Value::Long(3));
+                c.insert(b"STREAM_IS_URL".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_URL_STAT_LINK".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_URL_STAT_QUIET".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_MKDIR_RECURSIVE".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_META_TOUCH".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_META_OWNER".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_META_OWNER_NAME".to_vec(), Value::Long(3));
+                c.insert(b"STREAM_META_GROUP".to_vec(), Value::Long(4));
+                c.insert(b"STREAM_META_GROUP_NAME".to_vec(), Value::Long(5));
+                c.insert(b"STREAM_META_ACCESS".to_vec(), Value::Long(6));
+                c.insert(b"STREAM_BUFFER_NONE".to_vec(), Value::Long(0));
+                c.insert(b"STREAM_BUFFER_LINE".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_BUFFER_FULL".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_CAST_FOR_SELECT".to_vec(), Value::Long(3));
+                c.insert(b"STREAM_CAST_AS_STREAM".to_vec(), Value::Long(0));
+                c.insert(b"STREAM_OPTION_BLOCKING".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_OPTION_READ_TIMEOUT".to_vec(), Value::Long(4));
+                c.insert(b"STREAM_OPTION_READ_BUFFER".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_OPTION_WRITE_BUFFER".to_vec(), Value::Long(3));
+                c.insert(b"STREAM_SHUT_RD".to_vec(), Value::Long(0));
+                c.insert(b"STREAM_SHUT_WR".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_SHUT_RDWR".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_PF_INET".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_PF_UNIX".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_IPPROTO_TCP".to_vec(), Value::Long(6));
+                c.insert(b"STREAM_IPPROTO_UDP".to_vec(), Value::Long(17));
+                c.insert(b"STREAM_IPPROTO_ICMP".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_SOCK_STREAM".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_SOCK_DGRAM".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_SOCK_RAW".to_vec(), Value::Long(3));
+                c.insert(b"STREAM_PEEK".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_OOB".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_USE_PATH".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_REPORT_ERRORS".to_vec(), Value::Long(8));
+                c.insert(b"STREAM_CRYPTO_METHOD_SSLv23_CLIENT".to_vec(), Value::Long(57));
+                c.insert(b"STREAM_CRYPTO_METHOD_TLS_CLIENT".to_vec(), Value::Long(57));
+                c.insert(b"STREAM_CRYPTO_METHOD_ANY_CLIENT".to_vec(), Value::Long(63));
+                // Image type constants
+                c.insert(b"IMAGETYPE_GIF".to_vec(), Value::Long(1));
+                c.insert(b"IMAGETYPE_JPEG".to_vec(), Value::Long(2));
+                c.insert(b"IMAGETYPE_PNG".to_vec(), Value::Long(3));
+                c.insert(b"IMAGETYPE_SWF".to_vec(), Value::Long(4));
+                c.insert(b"IMAGETYPE_PSD".to_vec(), Value::Long(5));
+                c.insert(b"IMAGETYPE_BMP".to_vec(), Value::Long(6));
+                c.insert(b"IMAGETYPE_TIFF_II".to_vec(), Value::Long(7));
+                c.insert(b"IMAGETYPE_TIFF_MM".to_vec(), Value::Long(8));
+                c.insert(b"IMAGETYPE_JPC".to_vec(), Value::Long(9));
+                c.insert(b"IMAGETYPE_JP2".to_vec(), Value::Long(10));
+                c.insert(b"IMAGETYPE_JPX".to_vec(), Value::Long(11));
+                c.insert(b"IMAGETYPE_JB2".to_vec(), Value::Long(12));
+                c.insert(b"IMAGETYPE_SWC".to_vec(), Value::Long(13));
+                c.insert(b"IMAGETYPE_IFF".to_vec(), Value::Long(14));
+                c.insert(b"IMAGETYPE_WBMP".to_vec(), Value::Long(15));
+                c.insert(b"IMAGETYPE_XBM".to_vec(), Value::Long(16));
+                c.insert(b"IMAGETYPE_ICO".to_vec(), Value::Long(17));
+                c.insert(b"IMAGETYPE_WEBP".to_vec(), Value::Long(18));
+                c.insert(b"IMAGETYPE_AVIF".to_vec(), Value::Long(19));
+                c.insert(b"IMAGETYPE_UNKNOWN".to_vec(), Value::Long(0));
+                c.insert(b"IMAGETYPE_COUNT".to_vec(), Value::Long(20));
+                // Token constants
+                c.insert(b"T_LNUMBER".to_vec(), Value::Long(260));
+                c.insert(b"T_DNUMBER".to_vec(), Value::Long(261));
+                c.insert(b"T_CONSTANT_ENCAPSED_STRING".to_vec(), Value::Long(318));
+                c.insert(b"T_ENCAPSED_AND_WHITESPACE".to_vec(), Value::Long(322));
+                c.insert(b"T_VARIABLE".to_vec(), Value::Long(320));
+                c.insert(b"T_OPEN_TAG".to_vec(), Value::Long(392));
+                c.insert(b"T_CLOSE_TAG".to_vec(), Value::Long(393));
+                c.insert(b"T_INLINE_HTML".to_vec(), Value::Long(321));
+                c.insert(b"T_WHITESPACE".to_vec(), Value::Long(394));
+                c.insert(b"T_COMMENT".to_vec(), Value::Long(395));
+                c.insert(b"T_DOC_COMMENT".to_vec(), Value::Long(396));
+                // Boolean constants
+                c.insert(b"TRUE".to_vec(), Value::True);
+                c.insert(b"FALSE".to_vec(), Value::False);
+                c.insert(b"NULL".to_vec(), Value::Null);
+                // Additional type-checking constants
+                c.insert(b"STDIN".to_vec(), Value::Long(1));
+                c.insert(b"STDOUT".to_vec(), Value::Long(2));
+                c.insert(b"STDERR".to_vec(), Value::Long(3));
                 c
 
 

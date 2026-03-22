@@ -57,11 +57,26 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !throw_on_error {
         vm.json_last_error = 0;
     }
-    let s = json_encode_value_flags(val, 0, flags);
+    let mut seen = std::collections::HashSet::new();
+    let mut recursion_detected = false;
+    let s = json_encode_value_flags_tracked(val, 0, flags, &mut seen, &mut recursion_detected);
+    if recursion_detected {
+        vm.json_last_error = 6; // JSON_ERROR_RECURSION
+        if flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
+            return Ok(Value::String(PhpString::from_string(s)));
+        }
+        return Ok(Value::False);
+    }
     Ok(Value::String(PhpString::from_string(s)))
 }
 
 fn json_encode_value_flags(val: &Value, depth: usize, flags: i64) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut recursion_detected = false;
+    json_encode_value_flags_tracked(val, depth, flags, &mut seen, &mut recursion_detected)
+}
+
+fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: &mut std::collections::HashSet<usize>, recursion_detected: &mut bool) -> String {
     if depth > 512 {
         return "null".to_string();
     }
@@ -117,27 +132,35 @@ fn json_encode_value_flags(val: &Value, depth: usize, flags: i64) -> String {
             json_encode_string(s.as_bytes(), flags)
         }
         Value::Array(arr) => {
-            let arr = arr.borrow();
+            // Recursion detection for arrays
+            let arr_ptr = Rc::as_ptr(arr) as usize;
+            if !seen.insert(arr_ptr) {
+                *recursion_detected = true;
+                seen.remove(&arr_ptr);
+                return "null".to_string();
+            }
+            let arr_ref = arr.borrow();
             let force_object = flags & JSON_FORCE_OBJECT != 0;
-            let is_list = !force_object && arr.iter().enumerate().all(
+            let is_list = !force_object && arr_ref.iter().enumerate().all(
                 |(i, (k, _))| matches!(k, goro_core::array::ArrayKey::Int(n) if *n == i as i64),
             );
-            if arr.len() == 0 {
+            if arr_ref.len() == 0 {
+                seen.remove(&arr_ptr);
                 if is_list {
                     return "[]".to_string();
                 } else {
                     return "{}".to_string();
                 }
             }
-            if is_list {
-                let parts: Vec<String> = arr.values().map(|v| json_encode_value_flags(v, depth + 1, flags)).collect();
+            let result = if is_list {
+                let parts: Vec<String> = arr_ref.values().map(|v| json_encode_value_flags_tracked(v, depth + 1, flags, seen, recursion_detected)).collect();
                 if flags & JSON_PRETTY_PRINT != 0 {
                     format!("[{nl}{}{nl}{}]", parts.iter().map(|p| format!("{}{}", inner_indent, p)).collect::<Vec<_>>().join(&format!(",{nl}")), indent)
                 } else {
                     format!("[{}]", parts.join(","))
                 }
             } else {
-                let parts: Vec<String> = arr
+                let parts: Vec<String> = arr_ref
                     .iter()
                     .map(|(k, v)| {
                         let key_str = match k {
@@ -146,7 +169,7 @@ fn json_encode_value_flags(val: &Value, depth: usize, flags: i64) -> String {
                                 json_encode_string(s.as_bytes(), flags)
                             }
                         };
-                        format!("{}{}{}", key_str, sep, json_encode_value_flags(v, depth + 1, flags))
+                        format!("{}{}{}", key_str, sep, json_encode_value_flags_tracked(v, depth + 1, flags, seen, recursion_detected))
                     })
                     .collect();
                 if flags & JSON_PRETTY_PRINT != 0 {
@@ -154,25 +177,37 @@ fn json_encode_value_flags(val: &Value, depth: usize, flags: i64) -> String {
                 } else {
                     format!("{{{}}}", parts.join(","))
                 }
-            }
+            };
+            seen.remove(&arr_ptr);
+            result
         }
         Value::Object(obj) => {
-            let obj = obj.borrow();
-            if obj.properties.is_empty() {
+            // Recursion detection for objects
+            let obj_ptr = Rc::as_ptr(obj) as usize;
+            if !seen.insert(obj_ptr) {
+                *recursion_detected = true;
+                seen.remove(&obj_ptr);
+                return "null".to_string();
+            }
+            let obj_ref = obj.borrow();
+            if obj_ref.properties.is_empty() {
+                seen.remove(&obj_ptr);
                 return "{}".to_string();
             }
-            let parts: Vec<String> = obj.properties.iter().map(|(name, val)| {
+            let parts: Vec<String> = obj_ref.properties.iter().map(|(name, val)| {
                 let key = json_encode_string(name, flags);
-                format!("{}{}{}", key, sep, json_encode_value_flags(val, depth + 1, flags))
+                format!("{}{}{}", key, sep, json_encode_value_flags_tracked(val, depth + 1, flags, seen, recursion_detected))
             }).collect();
-            if flags & JSON_PRETTY_PRINT != 0 {
+            let result = if flags & JSON_PRETTY_PRINT != 0 {
                 format!("{{{nl}{}{nl}{}}}", parts.iter().map(|p| format!("{}{}", inner_indent, p)).collect::<Vec<_>>().join(&format!(",{nl}")), indent)
             } else {
                 format!("{{{}}}", parts.join(","))
-            }
+            };
+            seen.remove(&obj_ptr);
+            result
         }
         Value::Generator(_) => "null".to_string(),
-        Value::Reference(r) => json_encode_value_flags(&r.borrow(), depth, flags),
+        Value::Reference(r) => json_encode_value_flags_tracked(&r.borrow(), depth, flags, seen, recursion_detected),
     }
 }
 
@@ -286,6 +321,11 @@ fn decode_utf8_char(bytes: &[u8]) -> (Option<u32>, usize) {
 }
 
 fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Emit deprecation warning for null argument
+    let is_null_arg = matches!(args.first(), Some(Value::Null) | Some(Value::Undef) | None);
+    if is_null_arg {
+        vm.emit_deprecated_at("json_decode(): Passing null to parameter #1 ($json) of type string is deprecated", 0);
+    }
     let json_str = match args.first() {
         Some(v) => v.to_php_string(),
         None => return Ok(Value::Null),

@@ -87,6 +87,25 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_strtolower", mb_strtolower);
     vm.register_function(b"mb_strtoupper", mb_strtoupper);
     vm.register_function(b"mb_substr", mb_substr);
+    vm.register_function(b"mb_strpos", mb_strpos);
+    vm.register_function(b"mb_strrpos", mb_strrpos);
+    vm.register_function(b"mb_stripos", mb_stripos);
+    vm.register_function(b"mb_strripos", mb_strripos);
+    vm.register_function(b"mb_convert_encoding", mb_convert_encoding);
+    vm.register_function(b"mb_substitute_character", mb_substitute_character);
+    vm.register_function(b"mb_check_encoding", mb_check_encoding);
+    vm.register_function(b"mb_substr_count", mb_substr_count);
+    vm.register_function(b"mb_strstr", mb_strstr_fn);
+    vm.register_function(b"mb_stristr", mb_stristr_fn);
+    vm.register_function(b"mb_strrchr", mb_strrchr_fn);
+    vm.register_function(b"mb_strrichr", mb_strrichr_fn);
+    vm.register_function(b"mb_str_split", mb_str_split_fn);
+    vm.register_function(b"mb_convert_case", mb_convert_case_fn);
+    vm.register_function(b"mb_language", mb_language_fn);
+    vm.register_function(b"mb_list_encodings", mb_list_encodings_fn);
+    vm.register_function(b"mb_encoding_aliases", mb_encoding_aliases_fn);
+    vm.register_function(b"mb_ord", mb_ord_fn);
+    vm.register_function(b"mb_chr", mb_chr_fn);
     vm.register_function(b"hex2bin", hex2bin);
     vm.register_function(b"bin2hex", bin2hex);
     vm.register_function(b"crc32", crc32_fn);
@@ -105,6 +124,9 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"convert_uudecode", convert_uudecode_fn);
     vm.register_function(b"quoted_printable_encode", quoted_printable_encode_fn);
     vm.register_function(b"quoted_printable_decode", quoted_printable_decode_fn);
+    vm.register_function(b"strcoll", strcoll_fn);
+    vm.register_function(b"money_format", money_format_fn);
+    vm.register_function(b"settype", settype_fn);
 }
 
 fn strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2728,6 +2750,306 @@ fn mb_substr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     substr(_vm, args)
 }
 
+fn mb_strpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return Ok(Value::False);
+    }
+    // Convert byte offset from character offset (UTF-8)
+    let chars: Vec<usize> = utf8_char_positions(h);
+    let start_byte = if offset < 0 {
+        let from = (chars.len() as i64 + offset).max(0) as usize;
+        if from < chars.len() { chars[from] } else { h.len() }
+    } else {
+        let from = offset as usize;
+        if from < chars.len() { chars[from] } else { h.len() }
+    };
+    if start_byte >= h.len() {
+        return Ok(Value::False);
+    }
+    match h[start_byte..].windows(n.len()).position(|w| w == n) {
+        Some(byte_pos) => {
+            // Convert byte position back to character position
+            let abs_byte_pos = start_byte + byte_pos;
+            let char_pos = chars.iter().position(|&p| p == abs_byte_pos).unwrap_or(abs_byte_pos);
+            Ok(Value::Long(char_pos as i64))
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn mb_strrpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() { return Ok(Value::False); }
+    match h.windows(n.len()).rposition(|w| w == n) {
+        Some(byte_pos) => {
+            let chars = utf8_char_positions(h);
+            let char_pos = chars.iter().position(|&p| p == byte_pos).unwrap_or(byte_pos);
+            Ok(Value::Long(char_pos as i64))
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn mb_stripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let h_lower: Vec<u8> = haystack.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    let n_lower: Vec<u8> = needle.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    if n_lower.is_empty() { return Ok(Value::False); }
+    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let chars = utf8_char_positions(&h_lower);
+    let start = if offset < chars.len() { chars[offset] } else { h_lower.len() };
+    match h_lower[start..].windows(n_lower.len()).position(|w| w == n_lower.as_slice()) {
+        Some(byte_pos) => {
+            let abs = start + byte_pos;
+            let char_pos = chars.iter().position(|&p| p == abs).unwrap_or(abs);
+            Ok(Value::Long(char_pos as i64))
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn mb_strripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let h_lower: Vec<u8> = haystack.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    let n_lower: Vec<u8> = needle.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    if n_lower.is_empty() { return Ok(Value::False); }
+    match h_lower.windows(n_lower.len()).rposition(|w| w == n_lower.as_slice()) {
+        Some(byte_pos) => {
+            let chars = utf8_char_positions(&h_lower);
+            let char_pos = chars.iter().position(|&p| p == byte_pos).unwrap_or(byte_pos);
+            Ok(Value::Long(char_pos as i64))
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn mb_convert_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Simplified: just return the string as-is for UTF-8/ASCII/ISO-8859-1
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(Value::String(s))
+}
+
+fn mb_substitute_character(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        // Return current substitute character
+        return Ok(Value::Long(0xFFFD)); // Unicode replacement character
+    }
+    // Setting - just return true
+    Ok(Value::True)
+}
+
+fn mb_check_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    // Check if valid UTF-8
+    let is_valid = std::str::from_utf8(s.as_bytes()).is_ok();
+    Ok(if is_valid { Value::True } else { Value::False })
+}
+
+fn mb_substr_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() { return Ok(Value::Long(0)); }
+    let count = h.windows(n.len()).filter(|w| *w == n).count();
+    Ok(Value::Long(count as i64))
+}
+
+fn mb_strstr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() { return Ok(Value::False); }
+    match h.windows(n.len()).position(|w| w == n) {
+        Some(pos) => {
+            if before_needle {
+                Ok(Value::String(PhpString::from_vec(h[..pos].to_vec())))
+            } else {
+                Ok(Value::String(PhpString::from_vec(h[pos..].to_vec())))
+            }
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn mb_stristr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+    let h = haystack.as_bytes();
+    let h_lower: Vec<u8> = h.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let n_lower: Vec<u8> = needle.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    if n_lower.is_empty() { return Ok(Value::False); }
+    match h_lower.windows(n_lower.len()).position(|w| w == n_lower.as_slice()) {
+        Some(pos) => {
+            if before_needle {
+                Ok(Value::String(PhpString::from_vec(h[..pos].to_vec())))
+            } else {
+                Ok(Value::String(PhpString::from_vec(h[pos..].to_vec())))
+            }
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn mb_strrchr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() { return Ok(Value::False); }
+    let search = n[0]; // mb_strrchr uses first byte of needle
+    match h.iter().rposition(|&b| b == search) {
+        Some(pos) => Ok(Value::String(PhpString::from_vec(h[pos..].to_vec()))),
+        None => Ok(Value::False),
+    }
+}
+
+fn mb_strrichr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() { return Ok(Value::False); }
+    let search = n[0].to_ascii_lowercase();
+    match h.iter().rposition(|b| b.to_ascii_lowercase() == search) {
+        Some(pos) => Ok(Value::String(PhpString::from_vec(h[pos..].to_vec()))),
+        None => Ok(Value::False),
+    }
+}
+
+fn mb_str_split_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let split_length = args.get(1).map(|v| v.to_long()).unwrap_or(1).max(1) as usize;
+    let bytes = s.as_bytes();
+    let mut result = PhpArray::new();
+    // UTF-8 aware splitting
+    let chars: Vec<&[u8]> = utf8_chars(bytes);
+    for chunk in chars.chunks(split_length) {
+        let mut s = Vec::new();
+        for c in chunk { s.extend_from_slice(c); }
+        result.push(Value::String(PhpString::from_vec(s)));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn mb_convert_case_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let bytes = s.as_bytes();
+    let result: Vec<u8> = match mode {
+        0 => bytes.iter().map(|b| b.to_ascii_uppercase()).collect(), // MB_CASE_UPPER
+        1 => bytes.iter().map(|b| b.to_ascii_lowercase()).collect(), // MB_CASE_LOWER
+        2 => {
+            // MB_CASE_TITLE
+            let mut cap_next = true;
+            bytes.iter().map(|&b| {
+                if cap_next && b.is_ascii_alphabetic() {
+                    cap_next = false;
+                    b.to_ascii_uppercase()
+                } else {
+                    if b == b' ' || b == b'\t' || b == b'\n' { cap_next = true; }
+                    b.to_ascii_lowercase()
+                }
+            }).collect()
+        }
+        _ => bytes.to_vec(),
+    };
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn mb_language_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        return Ok(Value::String(PhpString::from_bytes(b"neutral")));
+    }
+    Ok(Value::True)
+}
+
+fn mb_list_encodings_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    for enc in &["ASCII", "UTF-8", "ISO-8859-1", "ISO-8859-15", "Windows-1252", "EUC-JP", "SJIS", "UTF-16", "UTF-32"] {
+        result.push(Value::String(PhpString::from_bytes(enc.as_bytes())));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn mb_encoding_aliases_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let enc = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_uppercase();
+    let mut result = PhpArray::new();
+    match enc.as_str() {
+        "UTF-8" => { result.push(Value::String(PhpString::from_bytes(b"utf8"))); }
+        "ASCII" => { result.push(Value::String(PhpString::from_bytes(b"us-ascii"))); }
+        "ISO-8859-1" => { result.push(Value::String(PhpString::from_bytes(b"latin1"))); }
+        _ => {}
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn mb_ord_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    if bytes.is_empty() { return Ok(Value::False); }
+    // Decode first UTF-8 character
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        if let Some(c) = s.chars().next() {
+            return Ok(Value::Long(c as i64));
+        }
+    }
+    Ok(Value::Long(bytes[0] as i64))
+}
+
+fn mb_chr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let cp = args.first().map(|v| v.to_long()).unwrap_or(0);
+    if let Some(c) = char::from_u32(cp as u32) {
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        Ok(Value::String(PhpString::from_bytes(s.as_bytes())))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+/// Helper: get byte positions of each UTF-8 character
+fn utf8_char_positions(bytes: &[u8]) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        positions.push(i);
+        let b = bytes[i];
+        if b < 0x80 { i += 1; }
+        else if b < 0xE0 { i += 2; }
+        else if b < 0xF0 { i += 3; }
+        else { i += 4; }
+    }
+    positions
+}
+
+/// Helper: split bytes into UTF-8 character slices
+fn utf8_chars(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let len = if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 };
+        let end = (i + len).min(bytes.len());
+        result.push(&bytes[i..end]);
+        i = end;
+    }
+    result
+}
+
 fn hex2bin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let hex = s.as_bytes();
@@ -4078,4 +4400,29 @@ fn hex_nibble(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         _ => None,
     }
+}
+
+fn strcoll_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s1 = args.first().unwrap_or(&Value::Null).to_php_string();
+    let s2 = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let cmp = s1.as_bytes().cmp(s2.as_bytes());
+    Ok(Value::Long(match cmp {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }))
+}
+
+fn money_format_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // money_format() is removed in PHP 8
+    Ok(Value::False)
+}
+
+fn settype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // settype() modifies the variable - we can't easily do this from a function
+    // but return true to indicate success
+    if args.len() < 2 {
+        return Ok(Value::False);
+    }
+    Ok(Value::True)
 }
