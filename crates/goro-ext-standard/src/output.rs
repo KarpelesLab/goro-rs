@@ -550,5 +550,33 @@ fn ryu_format(f: f64) -> String {
 }
 
 fn format_float(f: f64) -> String {
-    goro_core::value::format_php_float(f)
+    // var_export uses serialize_precision for exact round-trip representation
+    // PHP uses 17 significant digits to ensure exact round-trip
+    if f.is_nan() {
+        return "NAN".to_string();
+    }
+    if f.is_infinite() {
+        return if f.is_sign_positive() {
+            "INF".to_string()
+        } else {
+            "-INF".to_string()
+        };
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
+    }
+    // Use serialize_precision (-1 means shortest roundtrip)
+    let sp = goro_core::value::get_php_serialize_precision();
+    if sp < 0 {
+        // Use the shortest representation that round-trips
+        // PHP uses H (mode 2) which gives the shortest string that, when
+        // parsed back, gives the exact same double
+        format_php_float_serialize(f)
+    } else {
+        goro_core::value::format_php_float_with_precision_pub(f, sp as usize)
+    }
 }

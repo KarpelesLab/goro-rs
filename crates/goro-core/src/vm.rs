@@ -124,8 +124,8 @@ pub struct Vm {
     class_scope_stack: Vec<Vec<u8>>,
     /// Current call depth (to prevent stack overflow from infinite recursion)
     call_depth: u32,
-    /// Call stack for stack trace generation: (function_name, file, line_called_from)
-    pub call_stack: Vec<(String, String, u32)>,
+    /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
+    pub call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
     /// Stack of saved error_reporting levels (for @ operator)
     pub error_reporting_stack: Vec<i64>,
     /// Pending return value (for deferred return in finally blocks)
@@ -1544,13 +1544,20 @@ impl Vm {
         let mut lines = Vec::new();
         // The call stack is ordered from outermost to innermost
         // PHP shows it innermost first
-        for (i, (func_name, file, line)) in self.call_stack.iter().rev().enumerate() {
+        for (i, (func_name, file, line, args, is_instance)) in self.call_stack.iter().rev().enumerate() {
             let file_display = if file == "Unknown.php" || file.is_empty() {
                 &self.current_file
             } else {
                 file
             };
-            lines.push(format!("#{} {}({}): {}()", i, file_display, line, func_name));
+            let args_str = format_trace_args(args);
+            // For instance methods, replace :: with ->
+            let display_name = if *is_instance {
+                func_name.replacen("::", "->", 1)
+            } else {
+                func_name.clone()
+            };
+            lines.push(format!("#{} {}({}): {}({})", i, file_display, line, display_name, args_str));
         }
         lines.push(format!("#{} {{main}}", self.call_stack.len()));
         lines.join("\n")
@@ -1558,6 +1565,44 @@ impl Vm {
 
     pub fn output(&self) -> &[u8] {
         &self.output
+    }
+
+    /// Format a single argument value for a stack trace
+    pub fn format_trace_arg(val: &Value) -> String {
+        match val {
+            Value::Null | Value::Undef => "NULL".to_string(),
+            Value::True => "true".to_string(),
+            Value::False => "false".to_string(),
+            Value::Long(n) => n.to_string(),
+            Value::Double(f) => {
+                if f.is_infinite() {
+                    if *f > 0.0 { "INF".to_string() } else { "-INF".to_string() }
+                } else if f.is_nan() {
+                    "NAN".to_string()
+                } else {
+                    crate::value::format_php_float(*f)
+                }
+            }
+            Value::String(s) => {
+                let lossy = s.to_string_lossy();
+                // PHP truncates to 15 chars with "..." suffix by default
+                if lossy.len() > 15 {
+                    format!("'{:.15}...'", lossy)
+                } else {
+                    format!("'{}'", lossy)
+                }
+            }
+            Value::Array(_) => "Array".to_string(),
+            Value::Object(obj) => {
+                let obj_ref = obj.borrow();
+                format!("Object({})", String::from_utf8_lossy(&obj_ref.class_name))
+            }
+            Value::Reference(r) => {
+                let inner = r.borrow();
+                Self::format_trace_arg(&inner)
+            }
+            Value::Generator(_) => "Object(Generator)".to_string(),
+        }
     }
 
     /// Take the output buffer
@@ -4122,7 +4167,13 @@ impl Vm {
 
                         // Push call stack frame early for proper error stack traces
                         let early_call_display = String::from_utf8_lossy(call.name.as_bytes()).into_owned();
-                        self.call_stack.push((early_call_display, self.current_file.clone(), op.line));
+                        let is_instance = user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+                        // Capture args for stack trace (skip $this for methods)
+                        let trace_args = {
+                            let skip = if is_instance { 1 } else { 0 };
+                            call.args.iter().skip(skip).cloned().collect::<Vec<_>>()
+                        };
+                        self.call_stack.push((early_call_display, self.current_file.clone(), op.line, trace_args, is_instance));
 
                         // Check argument count (too few arguments)
                         {
@@ -6820,7 +6871,7 @@ impl Vm {
                         obj.set_property(b"previous".to_vec(), Value::Null);
                         // Build trace from call stack
                         let mut trace_arr = PhpArray::new();
-                        for (i, (func_name, file, line)) in self.call_stack.iter().rev().enumerate() {
+                        for (_i, (func_name, file, line, args, is_instance)) in self.call_stack.iter().rev().enumerate() {
                             let mut frame = PhpArray::new();
                             frame.set(ArrayKey::String(PhpString::from_bytes(b"file")), Value::String(PhpString::from_string(file.clone())));
                             frame.set(ArrayKey::String(PhpString::from_bytes(b"line")), Value::Long(*line as i64));
@@ -6828,10 +6879,16 @@ impl Vm {
                             // Parse class::method for class/type
                             if let Some(pos) = func_name.find("::") {
                                 frame.set(ArrayKey::String(PhpString::from_bytes(b"class")), Value::String(PhpString::from_string(func_name[..pos].to_string())));
-                                frame.set(ArrayKey::String(PhpString::from_bytes(b"type")), Value::String(PhpString::from_bytes(b"::")));
+                                let type_str = if *is_instance { b"->" as &[u8] } else { b"::" };
+                                frame.set(ArrayKey::String(PhpString::from_bytes(b"type")), Value::String(PhpString::from_bytes(type_str)));
                                 frame.set(ArrayKey::String(PhpString::from_bytes(b"function")), Value::String(PhpString::from_string(func_name[pos+2..].to_string())));
                             }
-                            frame.set(ArrayKey::String(PhpString::from_bytes(b"args")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                            // Include actual arguments in trace
+                            let mut args_arr = PhpArray::new();
+                            for arg in args {
+                                args_arr.push(arg.clone());
+                            }
+                            frame.set(ArrayKey::String(PhpString::from_bytes(b"args")), Value::Array(Rc::new(RefCell::new(args_arr))));
                             trace_arr.push(Value::Array(Rc::new(RefCell::new(frame))));
                         }
                         obj.set_property(
@@ -7285,12 +7342,26 @@ impl Vm {
                                                 let typ = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"type")))
                                                     .map(|v| v.to_php_string().to_string_lossy())
                                                     .unwrap_or_default();
+                                                // Format args
+                                                let args_str = if let Some(args_val) = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"args"))) {
+                                                    if let Value::Array(args_arr) = args_val {
+                                                        let args_arr = args_arr.borrow();
+                                                        let formatted: Vec<String> = args_arr.iter().map(|(_k, v)| {
+                                                            Self::format_trace_arg(v)
+                                                        }).collect();
+                                                        formatted.join(", ")
+                                                    } else {
+                                                        String::new()
+                                                    }
+                                                } else {
+                                                    String::new()
+                                                };
                                                 let loc = if ff.is_empty() {
                                                     "[internal function]".to_string()
                                                 } else {
                                                     format!("{}({})", ff, fl)
                                                 };
-                                                lines.push(format!("#{} {}: {}{}{}()", idx, loc, cls, typ, func));
+                                                lines.push(format!("#{} {}: {}{}{}({})", idx, loc, cls, typ, func, args_str));
                                             }
                                             idx += 1;
                                         }
@@ -8347,4 +8418,12 @@ fn php_decrement(val: &Value) -> Value {
         Value::False => Value::False, // false-- has no effect in PHP 8.3+
         _ => val.sub(&Value::Long(1)),
     }
+}
+
+/// Format arguments for stack trace display
+pub fn format_trace_args(args: &[Value]) -> String {
+    args.iter()
+        .map(|v| Vm::format_trace_arg(v))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

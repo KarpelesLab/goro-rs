@@ -218,20 +218,20 @@ fn pow(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(base.pow(exp))
 }
 
-fn intdiv(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn intdiv(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args.first().unwrap_or(&Value::Null).to_long();
     let b = args.get(1).unwrap_or(&Value::Null).to_long();
     if b == 0 {
-        return Err(VmError {
-            message: "Division by zero".into(),
-            line: 0,
-        });
+        let msg = "Division by zero";
+        let exc = vm.create_exception(b"DivisionByZeroError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: 0 });
     }
     if a == i64::MIN && b == -1 {
-        return Err(VmError {
-            message: "Division of PHP_INT_MIN by -1 is not an integer".into(),
-            line: 0,
-        });
+        let msg = "Division of PHP_INT_MIN by -1 is not an integer";
+        let exc = vm.create_exception(b"ArithmeticError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: 0 });
     }
     Ok(Value::Long(a / b))
 }
@@ -362,13 +362,24 @@ fn atan2_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let x = args.get(1).unwrap_or(&Value::Null).to_double();
     Ok(Value::Double(y.atan2(x)))
 }
-fn log_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null).to_double();
     let base = args.get(1).map(|v| v.to_double());
-    Ok(Value::Double(match base {
-        Some(b) => val.log(b),
-        None => val.ln(),
-    }))
+    match base {
+        Some(b) if b <= 0.0 => {
+            let msg = "log(): Argument #2 ($base) must be greater than 0";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg.into(), line: 0 })
+        }
+        Some(b) if b == 1.0 => {
+            // Division by zero in log would return NaN/Inf, but PHP throws ValueError
+            vm.emit_warning("log(): Base must not be 1");
+            Ok(Value::Double(f64::NAN))
+        }
+        Some(b) => Ok(Value::Double(val.log(b))),
+        None => Ok(Value::Double(val.ln())),
+    }
 }
 fn log10_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double(

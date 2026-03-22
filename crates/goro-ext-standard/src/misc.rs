@@ -406,19 +406,63 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 // === Constants ===
 
 fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name_val = args.first().unwrap_or(&Value::Null);
+    // Check type of first argument
+    match name_val {
+        Value::Array(_) | Value::Object(_) => {
+            let type_name = match name_val {
+                Value::Array(_) => "array",
+                Value::Object(obj) => {
+                    let _ = obj;
+                    "object" // simplified
+                }
+                _ => "unknown",
+            };
+            let msg = format!("define(): Argument #1 ($constant_name) must be of type string, {} given", type_name);
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+        _ => {}
+    }
+    let name = name_val.to_php_string();
     let value = args.get(1).cloned().unwrap_or(Value::Null);
-    vm.constants.insert(name.as_bytes().to_vec(), value);
+    let name_bytes = name.as_bytes().to_vec();
+    // Check if constant is already defined
+    if vm.constants.contains_key(&name_bytes) {
+        let name_str = name.to_string_lossy();
+        vm.emit_warning(&format!("Constant {} already defined, this will be an error in PHP 9", name_str));
+        return Ok(Value::False);
+    }
+    vm.constants.insert(name_bytes, value);
     Ok(Value::True)
 }
 
 fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(vm
-        .constants
-        .get(name.as_bytes())
-        .cloned()
-        .unwrap_or(Value::Null))
+    let name_str = name.to_string_lossy();
+    // Check for class constants (Class::CONST)
+    if let Some(pos) = name_str.find("::") {
+        let class_name = &name_str[..pos];
+        let const_name = &name_str[pos+2..];
+        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        if let Some(class) = vm.classes.get(&class_lower) {
+            if let Some(val) = class.constants.get(const_name.as_bytes()) {
+                return Ok(val.clone());
+            }
+        }
+        let msg = format!("Undefined constant \"{}\"", name_str);
+        let exc = vm.create_exception(b"Error", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
+    if let Some(val) = vm.constants.get(name.as_bytes()) {
+        return Ok(val.clone());
+    }
+    let msg = format!("Undefined constant \"{}\"", name_str);
+    let exc = vm.create_exception(b"Error", &msg, 0);
+    vm.current_exception = Some(exc);
+    Err(VmError { message: msg, line: 0 })
 }
 
 // === Output buffering ===
@@ -1188,7 +1232,12 @@ fn in_array(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let callback = args.first().cloned().unwrap_or(Value::Null);
+    let callback_raw = args.first().cloned().unwrap_or(Value::Null);
+    // Treat Undef as Null for callback
+    let callback = match &callback_raw {
+        Value::Undef => Value::Null,
+        _ => callback_raw,
+    };
     let array = args.get(1);
 
     // Multi-array support: array_map($callback, $arr1, $arr2, ...)
@@ -1648,7 +1697,14 @@ fn array_fill_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Value::Array(arr) = keys {
         let arr = arr.borrow();
         for (_key, val) in arr.iter() {
-            let k = value_to_array_key(val);
+            // For array_fill_keys, float values should become string keys
+            let k = match val {
+                Value::Double(_f) => {
+                    let s = val.to_php_string();
+                    ArrayKey::String(s)
+                }
+                _ => value_to_array_key(val),
+            };
             result.set(k, fill_val.clone());
         }
     }
@@ -2331,8 +2387,27 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::False
     })
 }
-fn get_class(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn get_class(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    match val.deref() {
+        Value::Object(obj) => {
+            let obj_ref = obj.borrow();
+            Ok(Value::String(PhpString::from_vec(obj_ref.class_name.clone())))
+        }
+        Value::Null | Value::Undef => {
+            // No argument: try to get class from current scope
+            // Return false if not in a class context
+            Ok(Value::False)
+        }
+        _ => {
+            // PHP 8: throw TypeError for non-objects
+            let type_name = Vm::value_type_name(val);
+            let msg = format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name);
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: 0 })
+        }
+    }
 }
 fn get_declared_classes(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
@@ -2629,11 +2704,11 @@ fn str_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let len = args.get(1).map(|v| v.to_long()).unwrap_or(1).max(1) as usize;
     let bytes = s.as_bytes();
     let mut result = PhpArray::new();
-    for chunk in bytes.chunks(len) {
-        result.push(Value::String(PhpString::from_vec(chunk.to_vec())));
-    }
-    if result.is_empty() {
-        result.push(Value::String(PhpString::empty()));
+    // PHP 8.3+: empty string returns empty array
+    if !bytes.is_empty() {
+        for chunk in bytes.chunks(len) {
+            result.push(Value::String(PhpString::from_vec(chunk.to_vec())));
+        }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }

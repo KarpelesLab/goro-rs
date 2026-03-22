@@ -2261,29 +2261,64 @@ fn vsprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     sprintf(vm, &all_args)
 }
 
-fn substr_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     if needle.is_empty() {
-        return Ok(Value::Long(0));
+        // PHP 8: throw ValueError for empty needle
+        let msg = "substr_count(): Argument #2 ($needle) must not be empty";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: 0 });
     }
     let h_bytes = haystack.as_bytes();
-    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let length = args.get(3);
+    let h_len = h_bytes.len() as i64;
+    let raw_offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
 
-    let start = if offset > h_bytes.len() { h_bytes.len() } else { offset };
-    let end = match length {
-        Some(len_val) => {
+    // Resolve offset (support negative)
+    let start = if raw_offset < 0 {
+        let s = h_len + raw_offset;
+        if s < 0 {
+            let msg = "substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: 0 });
+        }
+        s as usize
+    } else {
+        if raw_offset > h_len {
+            let msg = "substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: 0 });
+        }
+        raw_offset as usize
+    };
+
+    let end = match args.get(3) {
+        Some(len_val) if !matches!(len_val, Value::Null) => {
             let len = len_val.to_long();
             if len < 0 {
-                let e = h_bytes.len() as i64 + len;
-                if e < start as i64 { start } else { e as usize }
+                let e = h_len + len;
+                if e < start as i64 {
+                    let msg = "substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)";
+                    let exc = vm.create_exception(b"ValueError", msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg.into(), line: 0 });
+                }
+                e as usize
             } else {
                 let e = start + len as usize;
-                if e > h_bytes.len() { h_bytes.len() } else { e }
+                if e > h_bytes.len() {
+                    let msg = "substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)";
+                    let exc = vm.create_exception(b"ValueError", msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg.into(), line: 0 });
+                }
+                e
             }
         }
-        None => h_bytes.len(),
+        _ => h_bytes.len(),
     };
 
     if start >= end || needle.len() > end - start {

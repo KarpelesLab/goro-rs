@@ -582,12 +582,26 @@ fn format_exception_trace(trace_val: &goro_core::value::Value, fallback_trace: &
                 let type_str = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"type")))
                     .map(|v| v.to_php_string().to_string_lossy())
                     .unwrap_or_default();
+                // Format args
+                let args_str = if let Some(args_val) = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"args"))) {
+                    if let Value::Array(args_arr) = args_val {
+                        let args_arr = args_arr.borrow();
+                        let formatted: Vec<String> = args_arr.iter().map(|(_k, v)| {
+                            goro_core::vm::Vm::format_trace_arg(v)
+                        }).collect();
+                        formatted.join(", ")
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
                 let loc = if file.is_empty() {
                     "[internal function]".to_string()
                 } else {
                     format!("{}({})", file, line)
                 };
-                lines.push(format!("#{} {}: {}{}{}()", idx, loc, class, type_str, function));
+                lines.push(format!("#{} {}: {}{}{}({})", idx, loc, class, type_str, function, args_str));
             }
             idx += 1;
         }
@@ -598,7 +612,14 @@ fn format_exception_trace(trace_val: &goro_core::value::Value, fallback_trace: &
 }
 
 fn matches_expectf(pattern: &str, actual: &str) -> bool {
-    // Line-by-line EXPECTF matching
+    // Check if the pattern contains %a or %A which can match across lines
+    // In that case we need whole-string matching, not line-by-line
+    if pattern.contains("%a") || pattern.contains("%A") {
+        // Whole-string matching (supports cross-line %a/%A)
+        return match_expectf_at(pattern.as_bytes(), 0, actual.as_bytes(), 0);
+    }
+
+    // Line-by-line EXPECTF matching (more efficient for patterns without %a/%A)
     let pattern_lines: Vec<&str> = pattern.lines().collect();
     let actual_lines: Vec<&str> = actual.lines().collect();
 
