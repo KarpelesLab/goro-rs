@@ -1,5 +1,5 @@
 use crate::string::PhpString;
-use crate::value::Value;
+use crate::value::{Value, memory_alloc, memory_free};
 
 /// Array key - either integer or string
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -115,8 +115,8 @@ impl PhpArray {
         None
     }
 
-    /// Maximum array size to prevent OOM (128M elements)
-    const MAX_SIZE: usize = 128 * 1024 * 1024;
+    /// Approximate bytes per entry (key + value overhead)
+    const ENTRY_SIZE: usize = 80;
 
     /// Set a value with a specific key
     pub fn set(&mut self, key: ArrayKey, value: Value) {
@@ -127,8 +127,9 @@ impl PhpArray {
                 return;
             }
         }
-        if self.entries.len() >= Self::MAX_SIZE {
-            return; // Silently refuse to grow beyond limit
+        // Check memory limit before adding
+        if !memory_alloc(Self::ENTRY_SIZE) {
+            return; // Memory limit exceeded
         }
         // Track next_int_key
         if let ArrayKey::Int(n) = &key
@@ -141,8 +142,8 @@ impl PhpArray {
 
     /// Append a value with the next integer key ($arr[] = value)
     pub fn push(&mut self, value: Value) {
-        if self.entries.len() >= Self::MAX_SIZE {
-            return;
+        if !memory_alloc(Self::ENTRY_SIZE) {
+            return; // Memory limit exceeded
         }
         let key = self.next_int_key;
         self.next_int_key = key + 1;
@@ -228,5 +229,15 @@ impl PhpArray {
 impl Default for PhpArray {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for PhpArray {
+    fn drop(&mut self) {
+        // Release tracked memory for all entries
+        let bytes = self.entries.len() * Self::ENTRY_SIZE;
+        if bytes > 0 {
+            memory_free(bytes);
+        }
     }
 }

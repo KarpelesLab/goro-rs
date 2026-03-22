@@ -2292,6 +2292,11 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
+    // Handle memory_limit
+    if key == b"memory_limit" {
+        let limit = parse_memory_value(&value);
+        goro_core::value::set_memory_limit(limit);
+    }
     // Actually update the value
     vm.constants.insert(key, value);
     // Return old value or false if not previously set
@@ -4573,10 +4578,11 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
     }
 }
 fn memory_get_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(1024 * 1024)) // stub: 1MB
+    Ok(Value::Long(goro_core::value::memory_get_usage() as i64))
 }
 fn memory_get_peak_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(2 * 1024 * 1024)) // stub: 2MB
+    // We don't track peak separately yet, return current
+    Ok(Value::Long(goro_core::value::memory_get_usage() as i64))
 }
 fn sleep_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
@@ -7090,3 +7096,22 @@ fn str_decrement_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
+
+/// Parse PHP memory_limit value (e.g., "128M", "256K", "1G", "-1")
+fn parse_memory_value(val: &Value) -> i64 {
+    let s = val.to_php_string().to_string_lossy();
+    let s = s.trim();
+    if s == "-1" {
+        return -1; // unlimited
+    }
+    let (num_str, multiplier) = if s.ends_with('G') || s.ends_with('g') {
+        (&s[..s.len()-1], 1024 * 1024 * 1024i64)
+    } else if s.ends_with('M') || s.ends_with('m') {
+        (&s[..s.len()-1], 1024 * 1024i64)
+    } else if s.ends_with('K') || s.ends_with('k') {
+        (&s[..s.len()-1], 1024i64)
+    } else {
+        (s, 1i64)
+    };
+    num_str.parse::<i64>().unwrap_or(128 * 1024 * 1024) * multiplier
+}

@@ -12,6 +12,53 @@ thread_local! {
     static PHP_PRECISION: Cell<i32> = const { Cell::new(14) };
     /// PHP `serialize_precision` ini setting. Default -1 (shortest roundtrip).
     static PHP_SERIALIZE_PRECISION: Cell<i32> = const { Cell::new(-1) };
+    /// Current memory usage in bytes (approximate tracking)
+    static MEMORY_USAGE: Cell<usize> = const { Cell::new(0) };
+    /// Memory limit in bytes (default 128MB, 0 = unlimited)
+    static MEMORY_LIMIT: Cell<usize> = const { Cell::new(128 * 1024 * 1024) };
+}
+
+/// Track a memory allocation. Returns false if over limit.
+pub fn memory_alloc(bytes: usize) -> bool {
+    MEMORY_USAGE.with(|m| {
+        let current = m.get();
+        let limit = MEMORY_LIMIT.with(|l| l.get());
+        let new_total = current.saturating_add(bytes);
+        if limit > 0 && new_total > limit {
+            return false;
+        }
+        m.set(new_total);
+        true
+    })
+}
+
+/// Track a memory deallocation.
+pub fn memory_free(bytes: usize) {
+    MEMORY_USAGE.with(|m| {
+        let current = m.get();
+        m.set(current.saturating_sub(bytes));
+    });
+}
+
+/// Get current memory usage.
+pub fn memory_get_usage() -> usize {
+    MEMORY_USAGE.with(|m| m.get())
+}
+
+/// Get memory limit.
+pub fn memory_get_limit() -> usize {
+    MEMORY_LIMIT.with(|l| l.get())
+}
+
+/// Set memory limit. 0 = unlimited, -1 = unlimited.
+pub fn set_memory_limit(bytes: i64) {
+    let limit = if bytes <= 0 { 0 } else { bytes as usize };
+    MEMORY_LIMIT.with(|l| l.set(limit));
+}
+
+/// Reset memory tracking (for test isolation).
+pub fn memory_reset() {
+    MEMORY_USAGE.with(|m| m.set(0));
 }
 
 /// Set the PHP `precision` ini value (used by float-to-string conversion).

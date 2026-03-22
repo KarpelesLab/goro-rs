@@ -351,9 +351,13 @@ fn execute_php_with_timeout_and_filename(
 fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename: &str) -> Result<Vec<u8>, String> {
     use goro_core::compiler::Compiler;
     use goro_core::vm::Vm;
-    use goro_core::value::{Value, set_php_precision, set_php_serialize_precision};
+    use goro_core::value::{Value, set_php_precision, set_php_serialize_precision, memory_reset, set_memory_limit};
     use goro_core::string::PhpString;
     use goro_parser::{Lexer, Parser};
+
+    // Reset memory tracking and limits for this test
+    memory_reset();
+    set_memory_limit(128 * 1024 * 1024); // 128MB default
 
     // Apply precision from INI settings (reset to default first)
     set_php_precision(14);
@@ -368,6 +372,11 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
             if let Ok(p) = value.parse::<i32>() {
                 set_php_serialize_precision(p);
             }
+        }
+        if key == "memory_limit" {
+            let v = Value::String(PhpString::from_string(value.clone()));
+            let limit = parse_memory_limit_value(&v);
+            set_memory_limit(limit);
         }
     }
 
@@ -872,4 +881,20 @@ fn collect_phpt_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
             }
         }
     }
+}
+
+fn parse_memory_limit_value(val: &goro_core::value::Value) -> i64 {
+    let s = val.to_php_string().to_string_lossy();
+    let s = s.trim();
+    if s == "-1" { return -1; }
+    let (num_str, multiplier) = if s.ends_with('G') || s.ends_with('g') {
+        (&s[..s.len()-1], 1024 * 1024 * 1024i64)
+    } else if s.ends_with('M') || s.ends_with('m') {
+        (&s[..s.len()-1], 1024 * 1024i64)
+    } else if s.ends_with('K') || s.ends_with('k') {
+        (&s[..s.len()-1], 1024i64)
+    } else {
+        (s, 1i64)
+    };
+    num_str.parse::<i64>().unwrap_or(128 * 1024 * 1024) * multiplier
 }
