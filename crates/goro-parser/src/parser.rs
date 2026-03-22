@@ -30,6 +30,8 @@ pub struct Parser {
     anon_class_stmts: Vec<Statement>,
     /// Counter for generating unique anonymous class names
     anon_counter: u32,
+    /// Set to true by parse_arguments() when it detects first-class callable syntax (...)
+    first_class_callable_flag: bool,
 }
 
 const MAX_PARSE_DEPTH: u32 = 512;
@@ -42,6 +44,7 @@ impl Parser {
             depth: 0,
             anon_class_stmts: Vec::new(),
             anon_counter: 0,
+            first_class_callable_flag: false,
         }
     }
 
@@ -298,17 +301,26 @@ impl Parser {
                         // Function call: readonly()
                         self.advance();
                         let args = self.parse_arguments()?;
+                        let is_fcc = self.first_class_callable_flag;
                         let end_span = self.span();
                         self.expect(&TokenKind::CloseParen)?;
-                        let expr = Expr {
-                            span: span.merge(end_span),
-                            kind: ExprKind::FunctionCall {
-                                name: Box::new(Expr {
-                                    kind: ExprKind::Identifier(name),
-                                    span,
-                                }),
-                                args,
-                            },
+                        let name_expr = Expr {
+                            kind: ExprKind::Identifier(name),
+                            span,
+                        };
+                        let expr = if is_fcc {
+                            Expr {
+                                span: span.merge(end_span),
+                                kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(name_expr))),
+                            }
+                        } else {
+                            Expr {
+                                span: span.merge(end_span),
+                                kind: ExprKind::FunctionCall {
+                                    name: Box::new(name_expr),
+                                    args,
+                                },
+                            }
                         };
                         self.expect_semicolon()?;
                         Ok(Statement {
@@ -2772,16 +2784,28 @@ impl Parser {
                         if matches!(self.peek(), TokenKind::OpenParen) {
                             self.advance();
                             let args = self.parse_arguments()?;
+                            let is_fcc = self.first_class_callable_flag;
                             let end_span = self.span();
                             self.expect(&TokenKind::CloseParen)?;
-                            expr = Expr {
-                                span: expr.span.merge(end_span),
-                                kind: ExprKind::MethodCall {
-                                    object: Box::new(expr),
-                                    method: Box::new(prop),
-                                    args,
-                                    nullsafe: false,
-                                },
+                            expr = if is_fcc {
+                                Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::FirstClassCallable(CallableTarget::Method {
+                                        object: Box::new(expr),
+                                        method: Box::new(prop),
+                                        nullsafe: false,
+                                    }),
+                                }
+                            } else {
+                                Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::MethodCall {
+                                        object: Box::new(expr),
+                                        method: Box::new(prop),
+                                        args,
+                                        nullsafe: false,
+                                    },
+                                }
                             };
                         } else {
                             expr = Expr {
@@ -2810,16 +2834,28 @@ impl Parser {
                         if matches!(self.peek(), TokenKind::OpenParen) {
                             self.advance();
                             let args = self.parse_arguments()?;
+                            let is_fcc = self.first_class_callable_flag;
                             let end_span = self.span();
                             self.expect(&TokenKind::CloseParen)?;
-                            expr = Expr {
-                                span: expr.span.merge(end_span),
-                                kind: ExprKind::MethodCall {
-                                    object: Box::new(expr),
-                                    method: Box::new(prop_expr),
-                                    args,
-                                    nullsafe: false,
-                                },
+                            expr = if is_fcc {
+                                Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::FirstClassCallable(CallableTarget::Method {
+                                        object: Box::new(expr),
+                                        method: Box::new(prop_expr),
+                                        nullsafe: false,
+                                    }),
+                                }
+                            } else {
+                                Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::MethodCall {
+                                        object: Box::new(expr),
+                                        method: Box::new(prop_expr),
+                                        args,
+                                        nullsafe: false,
+                                    },
+                                }
                             };
                         } else {
                             expr = Expr {
@@ -2853,19 +2889,32 @@ impl Parser {
                         if matches!(self.peek(), TokenKind::OpenParen) {
                             self.advance();
                             let args = self.parse_arguments()?;
+                            let is_fcc = self.first_class_callable_flag;
                             let end_span = self.span();
                             self.expect(&TokenKind::CloseParen)?;
-                            expr = Expr {
-                                span: expr.span.merge(end_span),
-                                kind: ExprKind::MethodCall {
-                                    object: Box::new(expr),
-                                    method: Box::new(Expr {
-                                        kind: ExprKind::Identifier(name),
-                                        span: prop_span,
+                            let method_expr = Expr {
+                                kind: ExprKind::Identifier(name),
+                                span: prop_span,
+                            };
+                            expr = if is_fcc {
+                                Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::FirstClassCallable(CallableTarget::Method {
+                                        object: Box::new(expr),
+                                        method: Box::new(method_expr),
+                                        nullsafe: false,
                                     }),
-                                    args,
-                                    nullsafe: false,
-                                },
+                                }
+                            } else {
+                                Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::MethodCall {
+                                        object: Box::new(expr),
+                                        method: Box::new(method_expr),
+                                        args,
+                                        nullsafe: false,
+                                    },
+                                }
                             };
                         } else {
                             expr = Expr {
@@ -2905,19 +2954,32 @@ impl Parser {
                     if matches!(self.peek(), TokenKind::OpenParen) {
                         self.advance();
                         let args = self.parse_arguments()?;
+                        let is_fcc = self.first_class_callable_flag;
                         let end_span = self.span();
                         self.expect(&TokenKind::CloseParen)?;
-                        expr = Expr {
-                            span: expr.span.merge(end_span),
-                            kind: ExprKind::MethodCall {
-                                object: Box::new(expr),
-                                method: Box::new(Expr {
-                                    kind: ExprKind::Identifier(name),
-                                    span: prop_span,
+                        let method_expr = Expr {
+                            kind: ExprKind::Identifier(name),
+                            span: prop_span,
+                        };
+                        expr = if is_fcc {
+                            Expr {
+                                span: expr.span.merge(end_span),
+                                kind: ExprKind::FirstClassCallable(CallableTarget::Method {
+                                    object: Box::new(expr),
+                                    method: Box::new(method_expr),
+                                    nullsafe: true,
                                 }),
-                                args,
-                                nullsafe: true,
-                            },
+                            }
+                        } else {
+                            Expr {
+                                span: expr.span.merge(end_span),
+                                kind: ExprKind::MethodCall {
+                                    object: Box::new(expr),
+                                    method: Box::new(method_expr),
+                                    args,
+                                    nullsafe: true,
+                                },
+                            }
                         };
                     } else {
                         expr = Expr {
@@ -2946,15 +3008,26 @@ impl Parser {
                             self.advance(); // name
                             self.advance(); // (
                             let args = self.parse_arguments()?;
+                            let is_fcc = self.first_class_callable_flag;
                             let end_span = self.span();
                             self.expect(&TokenKind::CloseParen)?;
-                            expr = Expr {
-                                span: expr.span.merge(end_span),
-                                kind: ExprKind::StaticMethodCall {
-                                    class: Box::new(expr),
-                                    method: name,
-                                    args,
-                                },
+                            expr = if is_fcc {
+                                Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::FirstClassCallable(CallableTarget::StaticMethod {
+                                        class: Box::new(expr),
+                                        method: name,
+                                    }),
+                                }
+                            } else {
+                                Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::StaticMethodCall {
+                                        class: Box::new(expr),
+                                        method: name,
+                                        args,
+                                    },
+                                }
                             };
                         }
                         TokenKind::Identifier(name) => {
@@ -2994,15 +3067,26 @@ impl Parser {
                             if matches!(self.peek(), TokenKind::OpenParen) {
                                 self.advance();
                                 let args = self.parse_arguments()?;
+                                let is_fcc = self.first_class_callable_flag;
                                 let end_span = self.span();
                                 self.expect(&TokenKind::CloseParen)?;
-                                expr = Expr {
-                                    span: expr.span.merge(end_span),
-                                    kind: ExprKind::StaticMethodCall {
-                                        class: Box::new(expr),
-                                        method: name,
-                                        args,
-                                    },
+                                expr = if is_fcc {
+                                    Expr {
+                                        span: expr.span.merge(end_span),
+                                        kind: ExprKind::FirstClassCallable(CallableTarget::StaticMethod {
+                                            class: Box::new(expr),
+                                            method: name,
+                                        }),
+                                    }
+                                } else {
+                                    Expr {
+                                        span: expr.span.merge(end_span),
+                                        kind: ExprKind::StaticMethodCall {
+                                            class: Box::new(expr),
+                                            method: name,
+                                            args,
+                                        },
+                                    }
                                 };
                             } else {
                                 expr = Expr {
@@ -3026,14 +3110,22 @@ impl Parser {
                     // Function call (for variable functions: $func())
                     self.advance();
                     let args = self.parse_arguments()?;
+                    let is_fcc = self.first_class_callable_flag;
                     let end_span = self.span();
                     self.expect(&TokenKind::CloseParen)?;
-                    expr = Expr {
-                        span: expr.span.merge(end_span),
-                        kind: ExprKind::FunctionCall {
-                            name: Box::new(expr),
-                            args,
-                        },
+                    expr = if is_fcc {
+                        Expr {
+                            span: expr.span.merge(end_span),
+                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(expr))),
+                        }
+                    } else {
+                        Expr {
+                            span: expr.span.merge(end_span),
+                            kind: ExprKind::FunctionCall {
+                                name: Box::new(expr),
+                                args,
+                            },
+                        }
                     };
                 }
                 _ => break,
@@ -3216,18 +3308,27 @@ impl Parser {
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
                     let args = self.parse_arguments()?;
+                    let is_fcc = self.first_class_callable_flag;
                     let end_span = self.span();
                     self.expect(&TokenKind::CloseParen)?;
-                    Ok(Expr {
-                        span: span.merge(end_span),
-                        kind: ExprKind::FunctionCall {
-                            name: Box::new(Expr {
-                                kind: ExprKind::Identifier(full_name),
-                                span,
-                            }),
-                            args,
-                        },
-                    })
+                    let name_expr = Expr {
+                        kind: ExprKind::Identifier(full_name),
+                        span,
+                    };
+                    if is_fcc {
+                        Ok(Expr {
+                            span: span.merge(end_span),
+                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(name_expr))),
+                        })
+                    } else {
+                        Ok(Expr {
+                            span: span.merge(end_span),
+                            kind: ExprKind::FunctionCall {
+                                name: Box::new(name_expr),
+                                args,
+                            },
+                        })
+                    }
                 } else {
                     Ok(Expr {
                         kind: ExprKind::Identifier(full_name),
@@ -3896,18 +3997,27 @@ impl Parser {
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
                     let args = self.parse_arguments()?;
+                    let is_fcc = self.first_class_callable_flag;
                     let end_span = self.span();
                     self.expect(&TokenKind::CloseParen)?;
-                    Ok(Expr {
-                        span: span.merge(end_span),
-                        kind: ExprKind::FunctionCall {
-                            name: Box::new(Expr {
-                                kind: ExprKind::Identifier(name),
-                                span,
-                            }),
-                            args,
-                        },
-                    })
+                    let name_expr = Expr {
+                        kind: ExprKind::Identifier(name),
+                        span,
+                    };
+                    if is_fcc {
+                        Ok(Expr {
+                            span: span.merge(end_span),
+                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(name_expr))),
+                        })
+                    } else {
+                        Ok(Expr {
+                            span: span.merge(end_span),
+                            kind: ExprKind::FunctionCall {
+                                name: Box::new(name_expr),
+                                args,
+                            },
+                        })
+                    }
                 } else {
                     Ok(Expr {
                         kind: ExprKind::Identifier(name),
@@ -3956,18 +4066,27 @@ impl Parser {
                         })
                     } else {
                         let args = self.parse_arguments()?;
+                        let is_fcc = self.first_class_callable_flag;
                         let end_span = self.span();
                         self.expect(&TokenKind::CloseParen)?;
-                        Ok(Expr {
-                            span: span.merge(end_span),
-                            kind: ExprKind::FunctionCall {
-                                name: Box::new(Expr {
-                                    kind: ExprKind::Identifier(full_name),
-                                    span,
-                                }),
-                                args,
-                            },
-                        })
+                        let name_expr = Expr {
+                            kind: ExprKind::Identifier(full_name),
+                            span,
+                        };
+                        if is_fcc {
+                            Ok(Expr {
+                                span: span.merge(end_span),
+                                kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(name_expr))),
+                            })
+                        } else {
+                            Ok(Expr {
+                                span: span.merge(end_span),
+                                kind: ExprKind::FunctionCall {
+                                    name: Box::new(name_expr),
+                                    args,
+                                },
+                            })
+                        }
                     }
                 } else {
                     Ok(Expr {
@@ -3984,6 +4103,7 @@ impl Parser {
     }
 
     fn parse_arguments(&mut self) -> ParseResult<Vec<Argument>> {
+        self.first_class_callable_flag = false;
         let mut args = Vec::new();
         if matches!(self.peek(), TokenKind::CloseParen) {
             return Ok(args);
@@ -3997,6 +4117,7 @@ impl Parser {
                 .is_some_and(|t| matches!(t.kind, TokenKind::CloseParen))
         {
             self.advance(); // consume ...
+            self.first_class_callable_flag = true;
             // Return empty args - the caller should interpret this as a callable reference
             return Ok(args);
         }

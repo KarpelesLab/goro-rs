@@ -35,6 +35,7 @@ pub struct ClassEntry {
     pub static_properties: HashMap<Vec<u8>, Value>,
     pub is_abstract: bool,
     pub is_final: bool,
+    pub is_readonly: bool,
     pub is_interface: bool,
     pub is_trait: bool,
     pub is_enum: bool,
@@ -45,6 +46,7 @@ pub struct PropertyDef {
     pub name: Vec<u8>,
     pub default: Value,
     pub is_static: bool,
+    pub is_readonly: bool,
     pub visibility: Visibility,
     /// The class that originally declared this property (lowercase)
     pub declaring_class: Vec<u8>,
@@ -84,6 +86,7 @@ impl ClassEntry {
             static_properties: HashMap::new(),
             is_abstract: false,
             is_final: false,
+            is_readonly: false,
             is_interface: false,
             is_trait: false,
             is_enum: false,

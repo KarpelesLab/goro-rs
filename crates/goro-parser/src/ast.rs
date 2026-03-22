@@ -307,6 +307,27 @@ pub enum ExprKind {
 
     // Pre-resolved identifier (used internally during compilation)
     Identifier(Vec<u8>),
+
+    // First-class callable syntax: strlen(...), $obj->method(...), Foo::method(...)
+    FirstClassCallable(CallableTarget),
+}
+
+/// The target of a first-class callable expression
+#[derive(Debug, Clone)]
+pub enum CallableTarget {
+    /// Function call: strlen(...)
+    Function(Box<Expr>),
+    /// Method call: $obj->method(...)
+    Method {
+        object: Box<Expr>,
+        method: Box<Expr>,
+        nullsafe: bool,
+    },
+    /// Static method call: Foo::method(...)
+    StaticMethod {
+        class: Box<Expr>,
+        method: Vec<u8>,
+    },
 }
 
 // Supporting types

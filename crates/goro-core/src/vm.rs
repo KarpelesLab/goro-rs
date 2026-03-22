@@ -7772,9 +7772,15 @@ impl Vm {
                                     );
 
                                     // Push the pending call with $this as the first implicit arg
+                                    // For static methods, don't pass $this
+                                    let args = if method.is_static {
+                                        vec![]
+                                    } else {
+                                        vec![obj_val.clone()] // $this is first arg, mapped to CV 0
+                                    };
                                     self.pending_calls.push(PendingCall {
                                         name: call_name,
-                                        args: vec![obj_val.clone()], // $this is first arg, mapped to CV 0
+                                        args,
                                         named_args: Vec::new(),
                                     });
                                 } else if let Some(call_method) = class.get_method(b"__call") {

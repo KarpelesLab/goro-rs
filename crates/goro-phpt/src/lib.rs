@@ -409,6 +409,11 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
                     "\nFatal error: {} in {} on line {}\n",
                     err_msg, filename, e.span.line
                 )
+            } else if err_msg.starts_with("syntax error") {
+                format!(
+                    "\nParse error: {} in {} on line {}\n",
+                    err_msg, filename, e.span.line
+                )
             } else {
                 format!(
                     "\nParse error: syntax error in {} on line {}\n",

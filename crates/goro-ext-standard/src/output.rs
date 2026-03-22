@@ -132,7 +132,10 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 }
             }
 
-            let prop_count = obj_borrow.properties.len();
+            // Don't count uninitialized (Undef) properties or internal __spl_ properties
+            let prop_count = obj_borrow.properties.iter()
+                .filter(|(name, val)| !name.starts_with(b"__spl_") && !matches!(val, Value::Undef))
+                .count();
             vm.write_output(
                 format!(
                     "{}object({})#{} ({}) {{\n",
@@ -157,8 +160,8 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             let obj_class_name = obj_borrow.class_name.clone();
             drop(obj_borrow);
             for (name, value) in &props {
-                // Skip internal SPL properties
-                if name.starts_with(b"__spl_") {
+                // Skip internal SPL properties and uninitialized (Undef) properties
+                if name.starts_with(b"__spl_") || matches!(value, Value::Undef) {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);

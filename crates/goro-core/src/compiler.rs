@@ -1698,6 +1698,7 @@ impl Compiler {
                                 is_static: *is_static,
                                 visibility: vis,
                                 declaring_class: declaring_class_lower,
+                                is_readonly: false, // TODO: carry from parser
                             });
                         }
                         ClassMember::Method {
@@ -1845,6 +1846,7 @@ impl Compiler {
                                                 is_static: false,
                                                 visibility: prop_vis,
                                                 declaring_class: declaring_class_lower,
+                                                is_readonly: false, // TODO: carry from parser
                                             });
                                         }
                                     }
@@ -4574,6 +4576,10 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
+            ExprKind::FirstClassCallable(target) => {
+                return self.compile_first_class_callable(target, expr.span.line);
+            }
+
             ExprKind::ConstantAccess(parts) => {
                 // Qualified constant - just return the last part as a string
                 let empty = vec![];
@@ -4591,6 +4597,250 @@ impl Compiler {
                 ),
                 line: expr.span.line,
             }),
+        }
+    }
+
+    /// Compile first-class callable syntax: strlen(...), $obj->method(...), Foo::method(...)
+    /// Creates a synthetic closure that wraps the call and forwards arguments via ...$args.
+    fn compile_first_class_callable(
+        &mut self,
+        target: &CallableTarget,
+        line: u32,
+    ) -> CompileResult<OperandType> {
+        // Check for nullsafe operator which cannot be combined with closure creation
+        if let CallableTarget::Method { nullsafe: true, .. } = target {
+            return Err(CompileError {
+                message: "Cannot combine nullsafe operator with Closure creation".into(),
+                line,
+            });
+        }
+
+        let closure_id = self.op_array.child_functions.len();
+        let closure_name = format!("__closure_fcc_{}", closure_id).into_bytes();
+
+        let mut cc = Compiler::new();
+        cc.op_array.name = closure_name.clone();
+        cc.current_class = self.current_class.clone();
+        cc.current_parent_class = self.current_parent_class.clone();
+        cc.op_array.scope_class = self.op_array.scope_class.clone()
+            .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
+
+        // Determine what needs to be captured.
+        // - Function with Identifier: no capture needed (resolved at compile time)
+        // - Function with dynamic expr (Variable, etc.): capture the callable value
+        // - Method call: capture the object
+        // - Static method: no capture needed (resolved at compile time)
+        let needs_capture = match target {
+            CallableTarget::Function(name_expr) => !matches!(name_expr.kind, ExprKind::Identifier(_)),
+            CallableTarget::Method { .. } => true,
+            CallableTarget::StaticMethod { .. } => false,
+        };
+
+        if needs_capture {
+            // Reserve cv0 for the captured value (object or callable)
+            cc.op_array.get_or_create_cv(b"__fcc_captured");
+        }
+
+        // Set up variadic ...$args parameter
+        let args_cv = cc.op_array.get_or_create_cv(b"args");
+        cc.op_array.param_count = 1;
+        cc.op_array.required_param_count = 0;
+        cc.op_array.variadic_param = Some(args_cv);
+
+        // Now emit the call inside the closure body
+        match target {
+            CallableTarget::Function(name_expr) => {
+                let call_op = if let ExprKind::Identifier(n) = &name_expr.kind {
+                    // Static function name - resolve at compile time
+                    let resolved_name = self.resolve_function_name(n);
+                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(resolved_name)));
+                    OperandType::Const(name_idx)
+                } else {
+                    // Dynamic callable - use captured value from cv0
+                    OperandType::Cv(0) // __fcc_captured
+                };
+                let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
+                cc.op_array.emit(Op {
+                    opcode: OpCode::InitFCall,
+                    op1: call_op,
+                    op2: OperandType::Const(arg_count_idx),
+                    result: OperandType::Unused,
+                    line,
+                });
+                cc.op_array.emit(Op {
+                    opcode: OpCode::SendUnpack,
+                    op1: OperandType::Cv(args_cv),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                });
+                let result_tmp = cc.op_array.alloc_temp();
+                cc.op_array.emit(Op {
+                    opcode: OpCode::DoFCall,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(result_tmp),
+                    line,
+                });
+                cc.op_array.emit(Op {
+                    opcode: OpCode::Return,
+                    op1: OperandType::Tmp(result_tmp),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                });
+            }
+            CallableTarget::Method { method, .. } => {
+                // Object is captured in cv0 (__fcc_captured)
+                let obj_cv = 0u32;
+                let method_name = match &method.kind {
+                    ExprKind::Identifier(name) => name.clone(),
+                    _ => b"__invoke".to_vec(),
+                };
+                let method_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(method_name)));
+                cc.op_array.emit(Op {
+                    opcode: OpCode::InitMethodCall,
+                    op1: OperandType::Cv(obj_cv),
+                    op2: OperandType::Const(method_idx),
+                    result: OperandType::Unused,
+                    line,
+                });
+                cc.op_array.emit(Op {
+                    opcode: OpCode::SendUnpack,
+                    op1: OperandType::Cv(args_cv),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                });
+                let result_tmp = cc.op_array.alloc_temp();
+                cc.op_array.emit(Op {
+                    opcode: OpCode::DoFCall,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(result_tmp),
+                    line,
+                });
+                cc.op_array.emit(Op {
+                    opcode: OpCode::Return,
+                    op1: OperandType::Tmp(result_tmp),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                });
+            }
+            CallableTarget::StaticMethod { class, method } => {
+                let class_name = match &class.kind {
+                    ExprKind::Identifier(name) => self.resolve_class_name(name),
+                    _ => {
+                        return Err(CompileError {
+                            message: "unsupported static method callable target".into(),
+                            line,
+                        });
+                    }
+                };
+                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
+                    self.current_class.clone().unwrap_or(class_name.clone())
+                } else if class_name.eq_ignore_ascii_case(b"static") {
+                    b"static".to_vec()
+                } else if class_name.eq_ignore_ascii_case(b"parent") {
+                    self.current_parent_class.clone().unwrap_or(class_name.clone())
+                } else {
+                    class_name.clone()
+                };
+                let mut func_name = resolved_class;
+                func_name.extend_from_slice(b"::");
+                func_name.extend_from_slice(method);
+                let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(func_name)));
+                let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
+                cc.op_array.emit(Op {
+                    opcode: OpCode::InitFCall,
+                    op1: OperandType::Const(name_idx),
+                    op2: OperandType::Const(arg_count_idx),
+                    result: OperandType::Unused,
+                    line,
+                });
+                cc.op_array.emit(Op {
+                    opcode: OpCode::SendUnpack,
+                    op1: OperandType::Cv(args_cv),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                });
+                let result_tmp = cc.op_array.alloc_temp();
+                cc.op_array.emit(Op {
+                    opcode: OpCode::DoFCall,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(result_tmp),
+                    line,
+                });
+                cc.op_array.emit(Op {
+                    opcode: OpCode::Return,
+                    op1: OperandType::Tmp(result_tmp),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                });
+            }
+        }
+
+        self.op_array.child_functions.push(cc.op_array);
+
+        // Emit DeclareFunction for the closure
+        let name_idx = self
+            .op_array
+            .add_literal(Value::String(PhpString::from_vec(closure_name.clone())));
+        let func_idx = self.op_array.add_literal(Value::Long(
+            (self.op_array.child_functions.len() - 1) as i64,
+        ));
+        self.op_array.emit(Op {
+            opcode: OpCode::DeclareFunction,
+            op1: OperandType::Const(name_idx),
+            op2: OperandType::Const(func_idx),
+            result: OperandType::Unused,
+            line,
+        });
+
+        if needs_capture {
+            // Compile the captured value in the outer scope
+            let captured_op = match target {
+                CallableTarget::Method { object, .. } => self.compile_expr(object)?,
+                CallableTarget::Function(name_expr) => self.compile_expr(name_expr)?,
+                _ => unreachable!(),
+            };
+
+            let arr_tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::ArrayNew,
+                op1: OperandType::Unused,
+                op2: OperandType::Unused,
+                result: OperandType::Tmp(arr_tmp),
+                line,
+            });
+            let name_val = self
+                .op_array
+                .add_literal(Value::String(PhpString::from_vec(closure_name)));
+            self.op_array.emit(Op {
+                opcode: OpCode::ArrayAppend,
+                op1: OperandType::Tmp(arr_tmp),
+                op2: OperandType::Const(name_val),
+                result: OperandType::Unused,
+                line,
+            });
+            self.op_array.emit(Op {
+                opcode: OpCode::ArrayAppend,
+                op1: OperandType::Tmp(arr_tmp),
+                op2: captured_op,
+                result: OperandType::Unused,
+                line,
+            });
+            Ok(OperandType::Tmp(arr_tmp))
+        } else {
+            // No captures - just return the closure name
+            let name_val_idx = self
+                .op_array
+                .add_literal(Value::String(PhpString::from_vec(closure_name)));
+            Ok(OperandType::Const(name_val_idx))
         }
     }
 
