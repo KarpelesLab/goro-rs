@@ -918,13 +918,14 @@ impl Vm {
 
     /// Find the PropertyDef for a given property name in a class (by lowercase class name).
     /// Walks up the parent chain to find the property definition.
-    fn find_property_def(&self, class_name_lower: &[u8], prop_name: &[u8]) -> Option<(Visibility, Vec<u8>)> {
+    /// Returns (visibility, declaring_class, is_readonly).
+    fn find_property_def(&self, class_name_lower: &[u8], prop_name: &[u8]) -> Option<(Visibility, Vec<u8>, bool)> {
         let mut current = class_name_lower.to_vec();
         for _ in 0..50 {
             if let Some(class) = self.classes.get(&current) {
                 for prop in &class.properties {
                     if prop.name == prop_name {
-                        return Some((prop.visibility, prop.declaring_class.clone()));
+                        return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly));
                     }
                 }
                 if let Some(parent) = &class.parent {
@@ -7261,7 +7262,12 @@ impl Vm {
                     if let Some(class) = self.classes.get(&name_lower) {
                         for prop in &class.properties {
                             if !prop.is_static {
-                                obj.set_property(prop.name.clone(), prop.default.clone());
+                                if prop.is_readonly {
+                                    // Readonly properties start as Undef to allow first assignment
+                                    obj.set_property(prop.name.clone(), Value::Undef);
+                                } else {
+                                    obj.set_property(prop.name.clone(), prop.default.clone());
+                                }
                             }
                         }
                     }
@@ -7296,7 +7302,7 @@ impl Vm {
 
                         // Check visibility before accessing the property
                         let mut visibility_error: Option<String> = None;
-                        if let Some((vis, declaring_class)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
+                        if let Some((vis, declaring_class, _is_readonly)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
                             if vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -7431,9 +7437,10 @@ impl Vm {
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
 
-                        // Check visibility before setting the property
+                        // Check visibility and readonly before setting the property
                         let mut visibility_error: Option<String> = None;
-                        if let Some((vis, declaring_class)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
+                        let mut readonly_error: Option<String> = None;
+                        if let Some((vis, declaring_class, prop_is_readonly)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
                             if vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -7446,9 +7453,41 @@ impl Vm {
                                     caller_scope.as_deref(),
                                 );
                             }
+                            // Enforce readonly: if property is readonly and already initialized (not Undef), reject
+                            if prop_is_readonly {
+                                let current_val = obj.borrow().get_property(prop_name.as_bytes());
+                                // A readonly property can be set once (from Undef/Null initial state)
+                                // but cannot be modified after initialization
+                                if obj.borrow().has_property(prop_name.as_bytes()) && !matches!(current_val, Value::Undef) {
+                                    let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
+                                    let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                    readonly_error = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_display));
+                                }
+                            }
                         }
 
-                        if let Some(err_msg) = visibility_error {
+                        if let Some(err_msg) = readonly_error {
+                            // Readonly violation - throw Error
+                            let err_id = self.next_object_id;
+                            self.next_object_id += 1;
+                            let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
+                            err_obj.set_property(
+                                b"message".to_vec(),
+                                Value::String(PhpString::from_string(err_msg.clone())),
+                            );
+                            err_obj.set_property(b"code".to_vec(), Value::Long(0));
+                            self.current_exception =
+                                Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", err_msg),
+                                    line: op.line,
+                                });
+                            }
+                        } else if let Some(err_msg) = visibility_error {
                             // Property is inaccessible - try __set magic method first
                             let has_set = self
                                 .classes

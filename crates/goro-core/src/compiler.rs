@@ -1570,6 +1570,7 @@ impl Compiler {
                 class.interfaces = implements.iter().map(|i| self.resolve_class_name(i)).collect();
                 class.is_abstract = modifiers.is_abstract;
                 class.is_final = modifiers.is_final;
+                class.is_readonly = modifiers.is_readonly;
                 class.is_interface = modifiers.is_interface;
                 class.is_trait = modifiers.is_trait;
                 class.is_enum = modifiers.is_enum;
@@ -1578,11 +1579,37 @@ impl Compiler {
                     match member {
                         ClassMember::Property {
                             name: prop_name,
+                            type_hint,
                             default,
                             visibility,
                             is_static,
-                            ..
+                            is_readonly,
                         } => {
+                            // Readonly property validations
+                            let prop_is_readonly = *is_readonly || modifiers.is_readonly;
+                            if prop_is_readonly {
+                                // Readonly properties must have a type declaration
+                                if type_hint.is_none() {
+                                    return Err(CompileError {
+                                        message: format!("Readonly property {}::${} must have type", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                                // Readonly properties cannot be static
+                                if *is_static {
+                                    return Err(CompileError {
+                                        message: format!("Static property {}::${} cannot be readonly", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                                // Readonly properties cannot have a default value
+                                if default.is_some() {
+                                    return Err(CompileError {
+                                        message: format!("Readonly property {}::${} cannot have default value", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                            }
                             let default_val = if let Some(expr) = default {
                                 // Compile the default value expression (constants only)
                                 match &expr.kind {
@@ -1698,7 +1725,7 @@ impl Compiler {
                                 is_static: *is_static,
                                 visibility: vis,
                                 declaring_class: declaring_class_lower,
-                                is_readonly: false, // TODO: carry from parser
+                                is_readonly: prop_is_readonly,
                             });
                         }
                         ClassMember::Method {
@@ -1846,7 +1873,7 @@ impl Compiler {
                                                 is_static: false,
                                                 visibility: prop_vis,
                                                 declaring_class: declaring_class_lower,
-                                                is_readonly: false, // TODO: carry from parser
+                                                is_readonly: param.readonly || modifiers.is_readonly,
                                             });
                                         }
                                     }
