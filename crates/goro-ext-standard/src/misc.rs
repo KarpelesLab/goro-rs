@@ -428,6 +428,12 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = name_val.to_php_string();
     let value = args.get(1).cloned().unwrap_or(Value::Null);
     let name_bytes = name.as_bytes().to_vec();
+    // Check if :: is in the name (not allowed)
+    let name_str_check = name.to_string_lossy();
+    if name_str_check.contains("::") {
+        vm.emit_warning("define(): Argument #1 ($constant_name) cannot be a class constant");
+        return Ok(Value::False);
+    }
     // Check if it's a built-in keyword constant (TRUE, FALSE, NULL)
     let name_upper: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
     if name_upper == b"TRUE" || name_upper == b"FALSE" || name_upper == b"NULL" {
@@ -458,7 +464,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Ok(val.clone());
             }
         }
-        let msg = format!("Undefined constant {}", name_str);
+        let msg = format!("Undefined constant \"{}\"", name_str);
         let exc = vm.create_exception(b"Error", &msg, 0);
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: 0 });
@@ -466,7 +472,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(val) = vm.constants.get(name.as_bytes()) {
         return Ok(val.clone());
     }
-    let msg = format!("Undefined constant {}", name_str);
+    let msg = format!("Undefined constant \"{}\"", name_str);
     let exc = vm.create_exception(b"Error", &msg, 0);
     vm.current_exception = Some(exc);
     Err(VmError { message: msg, line: 0 })
@@ -6674,9 +6680,28 @@ fn php_sapi_name_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let name_bytes = name.as_bytes();
+    let name_str = name.to_string_lossy();
+    // Check for class constants
+    if let Some(pos) = name_str.find("::") {
+        let class_name = &name_str[..pos];
+        let const_name = &name_str[pos+2..];
+        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        if let Some(class) = vm.classes.get(&class_lower) {
+            if class.constants.contains_key(const_name.as_bytes()) {
+                return Ok(Value::True);
+            }
+        }
+        return Ok(Value::False);
+    }
     if vm.constants.contains_key(name_bytes) {
         Ok(Value::True)
     } else {
+        // Also check with stripped leading backslash for FQN
+        if name_bytes.starts_with(b"\\") {
+            if vm.constants.contains_key(&name_bytes[1..]) {
+                return Ok(Value::True);
+            }
+        }
         Ok(Value::False)
     }
 }

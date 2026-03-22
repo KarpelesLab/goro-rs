@@ -457,7 +457,9 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
             let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
-            buf.extend_from_slice(format!("{}::__set_state(array(\n", class_name).as_bytes());
+            // PHP prefixes class names with \ in var_export unless they already contain \
+            let prefix_backslash = if class_name.contains('\\') { "" } else { "\\" };
+            buf.extend_from_slice(format!("{}{}::__set_state(array(\n", prefix_backslash, class_name).as_bytes());
             for (name, value) in &obj_borrow.properties {
                 let name_str = String::from_utf8_lossy(name);
                 buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());

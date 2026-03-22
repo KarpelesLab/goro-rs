@@ -117,6 +117,18 @@ impl Compiler {
         }
     }
 
+    /// Compile a property name expression, treating bare identifiers as string literals
+    /// (not as constant lookups). This is important for $obj->property syntax.
+    fn compile_property_name(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        if let ExprKind::Identifier(name) = &expr.kind {
+            // Bare identifier in property context is always a string literal
+            let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name.clone())));
+            Ok(OperandType::Const(idx))
+        } else {
+            self.compile_expr(expr)
+        }
+    }
+
     /// Prefix a name with the current namespace. E.g. if namespace is "Foo\Bar" and name is "Baz",
     /// returns "Foo\Bar\Baz". If namespace is empty, returns name unchanged.
     fn prefix_with_namespace(&self, name: &[u8]) -> Vec<u8> {
@@ -1238,7 +1250,7 @@ impl Compiler {
                         } => {
                             // unset($obj->prop) - remove property
                             let obj_operand = self.compile_expr(object)?;
-                            let prop_operand = self.compile_expr(property)?;
+                            let prop_operand = self.compile_property_name(property)?;
                             self.op_array.emit(Op {
                                 opcode: OpCode::PropertyUnset,
                                 op1: obj_operand,
@@ -3474,14 +3486,66 @@ impl Compiler {
                     b"sort_numeric" => Value::Long(1),
                     b"sort_string" => Value::Long(2),
                     b"sort_flag_case" => Value::Long(8),
+                    b"sort_natural" => Value::Long(6),
+                    b"sort_locale_string" => Value::Long(5),
+                    b"sort_asc" => Value::Long(4),
+                    b"sort_desc" => Value::Long(3),
                     b"array_filter_use_both" => Value::Long(1),
                     b"array_filter_use_key" => Value::Long(2),
+                    b"array_unique_regular" => Value::Long(0),
+                    b"count_normal" => Value::Long(0),
+                    b"count_recursive" => Value::Long(1),
+                    // Rounding mode constants
+                    b"php_round_half_up" => Value::Long(0),
+                    b"php_round_half_down" => Value::Long(1),
+                    b"php_round_half_even" => Value::Long(2),
+                    b"php_round_half_odd" => Value::Long(3),
+                    b"php_round_ceiling" => Value::Long(4),
+                    b"php_round_floor" => Value::Long(5),
+                    b"php_round_toward_zero" => Value::Long(6),
+                    b"php_round_away_from_zero" => Value::Long(7),
+                    // INI
+                    b"ini_user" => Value::Long(1),
+                    b"ini_perdir" => Value::Long(2),
+                    b"ini_system" => Value::Long(4),
+                    b"ini_all" => Value::Long(7),
+                    // HTML entity constants
+                    b"ent_compat" => Value::Long(2),
+                    b"ent_quotes" => Value::Long(3),
+                    b"ent_noquotes" => Value::Long(0),
+                    b"ent_html401" => Value::Long(0),
+                    b"ent_xml1" => Value::Long(16),
+                    b"ent_xhtml" => Value::Long(32),
+                    b"ent_html5" => Value::Long(48),
+                    b"ent_substitute" => Value::Long(8),
+                    b"ent_disallowed" => Value::Long(128),
+                    // EXTR_ constants
+                    b"extr_overwrite" => Value::Long(0),
+                    b"extr_skip" => Value::Long(1),
+                    b"extr_prefix_same" => Value::Long(2),
+                    b"extr_prefix_all" => Value::Long(3),
+                    b"extr_prefix_invalid" => Value::Long(4),
+                    b"extr_if_exists" => Value::Long(6),
+                    b"extr_prefix_if_exists" => Value::Long(7),
+                    b"extr_refs" => Value::Long(256),
                     _ => {
                         // Unknown identifier - emit runtime constant lookup
                         // Handle fully-qualified names (starting with \), use aliases, or namespace prefix
                         let qualified = if name.starts_with(b"\\") {
                             // Fully qualified: strip leading \
                             name[1..].to_vec()
+                        } else if lower.starts_with(b"namespace\\") {
+                            // namespace\foo is a namespace-relative name
+                            // Replace "namespace\" with the current namespace
+                            let rest = &name[b"namespace\\".len()..];
+                            if self.current_namespace.is_empty() {
+                                rest.to_vec()
+                            } else {
+                                let mut result = self.current_namespace.clone();
+                                result.push(b'\\');
+                                result.extend_from_slice(rest);
+                                result
+                            }
                         } else if name.contains(&b'\\') {
                             // Qualified name: check use aliases for first part
                             let first_sep = name.iter().position(|&b| b == b'\\').unwrap();
@@ -3683,7 +3747,7 @@ impl Compiler {
                     if is_prop_access {
                         if let ExprKind::PropertyAccess { object, property, .. } = &exprs[0].kind {
                             let obj_operand = self.compile_expr(object)?;
-                            let prop_operand = self.compile_expr(property)?;
+                            let prop_operand = self.compile_property_name(property)?;
                             let tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
                                 opcode: OpCode::PropertyIsset,

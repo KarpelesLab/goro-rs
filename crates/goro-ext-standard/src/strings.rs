@@ -715,10 +715,11 @@ pub fn do_sprintf(args: &[Value]) -> String {
                 b'f' | b'F' => {
                     let f = arg.to_double();
                     let prec = precision.unwrap_or(6);
-                    if show_sign && f >= 0.0 {
-                        format!("+{:.prec$}", f)
+                    let s = format!("{:.prec$}", f);
+                    if show_sign && !s.starts_with('-') && !f.is_nan() {
+                        format!("+{}", s)
                     } else {
-                        format!("{:.prec$}", f)
+                        s
                     }
                 }
                 b'e' => {
@@ -726,21 +727,81 @@ pub fn do_sprintf(args: &[Value]) -> String {
                     let prec = precision.unwrap_or(6);
                     let s = format!("{:.prec$e}", f);
                     // PHP always shows +/- in exponent, Rust doesn't show +
-                    php_fix_exponent(&s)
+                    let s = php_fix_exponent(&s);
+                    if show_sign && !s.starts_with('-') && !f.is_nan() {
+                        format!("+{}", s)
+                    } else {
+                        s
+                    }
                 }
                 b'E' => {
                     let f = arg.to_double();
                     let prec = precision.unwrap_or(6);
                     let s = format!("{:.prec$E}", f);
-                    php_fix_exponent(&s)
+                    let s = php_fix_exponent(&s);
+                    if show_sign && !s.starts_with('-') && !f.is_nan() {
+                        format!("+{}", s)
+                    } else {
+                        s
+                    }
                 }
                 b'g' | b'G' => {
                     let f = arg.to_double();
-                    let prec = precision.unwrap_or(6);
-                    // Use shorter of %e and %f
-                    let ef = format!("{:.prec$e}", f);
-                    let ff = format!("{:.prec$}", f);
-                    if ef.len() < ff.len() { ef } else { ff }
+                    let prec = if precision == Some(0) { 1 } else { precision.unwrap_or(6) };
+                    // PHP %g: use shorter of %e and %f, with significant digits
+                    // The precision specifies number of significant digits
+                    let s = if f == 0.0 {
+                        if f.is_sign_negative() {
+                            "-0".to_string()
+                        } else {
+                            "0".to_string()
+                        }
+                    } else if f.is_nan() {
+                        "NAN".to_string()
+                    } else if f.is_infinite() {
+                        if f > 0.0 { "INF".to_string() } else { "-INF".to_string() }
+                    } else {
+                        // Use Rust's formatting with significant digits
+                        let abs = f.abs();
+                        let exp = abs.log10().floor() as i32;
+                        if exp >= -(1 as i32) && exp < prec as i32 {
+                            // Use fixed notation
+                            let decimal_digits = if prec as i32 > exp + 1 { (prec as i32 - exp - 1) as usize } else { 0 };
+                            let s = format!("{:.decimal_digits$}", f);
+                            // Remove trailing zeros after decimal point (PHP %g behavior)
+                            if s.contains('.') {
+                                let s = s.trim_end_matches('0');
+                                let s = s.trim_end_matches('.');
+                                s.to_string()
+                            } else {
+                                s
+                            }
+                        } else {
+                            // Use scientific notation
+                            let decimal_digits = if prec > 1 { prec - 1 } else { 0 };
+                            let s = format!("{:.decimal_digits$e}", f);
+                            let s = php_fix_exponent(&s);
+                            // Remove trailing zeros in mantissa
+                            if let Some(e_pos) = s.find(|c: char| c == 'e' || c == 'E') {
+                                let mantissa = &s[..e_pos];
+                                let exponent = &s[e_pos..];
+                                if mantissa.contains('.') {
+                                    let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+                                    format!("{}{}", mantissa, exponent)
+                                } else {
+                                    s
+                                }
+                            } else {
+                                s
+                            }
+                        }
+                    };
+                    let s = if spec == b'G' { s.to_uppercase() } else { s };
+                    if show_sign && !s.starts_with('-') && !f.is_nan() {
+                        format!("+{}", s)
+                    } else {
+                        s
+                    }
                 }
                 b'x' => format!("{:x}", arg.to_long()),
                 b'X' => format!("{:X}", arg.to_long()),

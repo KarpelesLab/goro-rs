@@ -428,6 +428,7 @@ impl Vm {
                     Value::Long(2097152),
                 );
                 c.insert(b"JSON_THROW_ON_ERROR".to_vec(), Value::Long(4194304));
+                c.insert(b"JSON_OBJECT_AS_ARRAY".to_vec(), Value::Long(1));
                 // JSON error constants
                 c.insert(b"JSON_ERROR_NONE".to_vec(), Value::Long(0));
                 c.insert(b"JSON_ERROR_DEPTH".to_vec(), Value::Long(1));
@@ -458,7 +459,219 @@ impl Vm {
                 c.insert(b"PREG_SPLIT_NO_EMPTY".to_vec(), Value::Long(1));
                 c.insert(b"PREG_SPLIT_DELIM_CAPTURE".to_vec(), Value::Long(2));
                 c.insert(b"T_STRING".to_vec(), Value::Long(319));
+                // Rounding mode constants
+                c.insert(b"PHP_ROUND_HALF_UP".to_vec(), Value::Long(0));
+                c.insert(b"PHP_ROUND_HALF_DOWN".to_vec(), Value::Long(1));
+                c.insert(b"PHP_ROUND_HALF_EVEN".to_vec(), Value::Long(2));
+                c.insert(b"PHP_ROUND_HALF_ODD".to_vec(), Value::Long(3));
+                c.insert(b"PHP_ROUND_CEILING".to_vec(), Value::Long(4));
+                c.insert(b"PHP_ROUND_FLOOR".to_vec(), Value::Long(5));
+                c.insert(b"PHP_ROUND_TOWARD_ZERO".to_vec(), Value::Long(6));
+                c.insert(b"PHP_ROUND_AWAY_FROM_ZERO".to_vec(), Value::Long(7));
+                // INI constants
+                c.insert(b"INI_USER".to_vec(), Value::Long(1));
+                c.insert(b"INI_PERDIR".to_vec(), Value::Long(2));
+                c.insert(b"INI_SYSTEM".to_vec(), Value::Long(4));
+                c.insert(b"INI_ALL".to_vec(), Value::Long(7));
+                c.insert(b"INI_SCANNER_NORMAL".to_vec(), Value::Long(0));
+                c.insert(b"INI_SCANNER_RAW".to_vec(), Value::Long(1));
+                c.insert(b"INI_SCANNER_TYPED".to_vec(), Value::Long(2));
+                // Date format constants
+                c.insert(b"DATE_ATOM".to_vec(), Value::String(PhpString::from_bytes(b"Y-m-d\\TH:i:sP")));
+                c.insert(b"DATE_ISO8601".to_vec(), Value::String(PhpString::from_bytes(b"Y-m-d\\TH:i:sO")));
+                c.insert(b"DATE_ISO8601_EXPANDED".to_vec(), Value::String(PhpString::from_bytes(b"X-m-d\\TH:i:sP")));
+                c.insert(b"DATE_RFC822".to_vec(), Value::String(PhpString::from_bytes(b"D, d M y H:i:s O")));
+                c.insert(b"DATE_RFC850".to_vec(), Value::String(PhpString::from_bytes(b"l, d-M-y H:i:s T")));
+                c.insert(b"DATE_RFC1036".to_vec(), Value::String(PhpString::from_bytes(b"D, d M y H:i:s O")));
+                c.insert(b"DATE_RFC1123".to_vec(), Value::String(PhpString::from_bytes(b"D, d M Y H:i:s O")));
+                c.insert(b"DATE_RFC2822".to_vec(), Value::String(PhpString::from_bytes(b"D, d M Y H:i:s O")));
+                c.insert(b"DATE_RFC3339".to_vec(), Value::String(PhpString::from_bytes(b"Y-m-d\\TH:i:sP")));
+                c.insert(b"DATE_RFC3339_EXTENDED".to_vec(), Value::String(PhpString::from_bytes(b"Y-m-d\\TH:i:s.vP")));
+                c.insert(b"DATE_RFC7231".to_vec(), Value::String(PhpString::from_bytes(b"D, d M Y H:i:s \\G\\M\\T")));
+                c.insert(b"DATE_RSS".to_vec(), Value::String(PhpString::from_bytes(b"D, d M Y H:i:s O")));
+                c.insert(b"DATE_W3C".to_vec(), Value::String(PhpString::from_bytes(b"Y-m-d\\TH:i:sP")));
+                c.insert(b"DATE_COOKIE".to_vec(), Value::String(PhpString::from_bytes(b"l, d-M-Y H:i:s T")));
+                // HTML entity constants
+                c.insert(b"ENT_COMPAT".to_vec(), Value::Long(2));
+                c.insert(b"ENT_QUOTES".to_vec(), Value::Long(3));
+                c.insert(b"ENT_NOQUOTES".to_vec(), Value::Long(0));
+                c.insert(b"ENT_HTML401".to_vec(), Value::Long(0));
+                c.insert(b"ENT_XML1".to_vec(), Value::Long(16));
+                c.insert(b"ENT_XHTML".to_vec(), Value::Long(32));
+                c.insert(b"ENT_HTML5".to_vec(), Value::Long(48));
+                c.insert(b"ENT_SUBSTITUTE".to_vec(), Value::Long(8));
+                c.insert(b"ENT_DISALLOWED".to_vec(), Value::Long(128));
+                c.insert(b"HTML_SPECIALCHARS".to_vec(), Value::Long(0));
+                c.insert(b"HTML_ENTITIES".to_vec(), Value::Long(1));
+                // Misc PHP constants
+                c.insert(b"PHP_OUTPUT_HANDLER_START".to_vec(), Value::Long(1));
+                c.insert(b"PHP_OUTPUT_HANDLER_WRITE".to_vec(), Value::Long(0));
+                c.insert(b"PHP_OUTPUT_HANDLER_FLUSH".to_vec(), Value::Long(4));
+                c.insert(b"PHP_OUTPUT_HANDLER_CLEAN".to_vec(), Value::Long(2));
+                c.insert(b"PHP_OUTPUT_HANDLER_FINAL".to_vec(), Value::Long(8));
+                c.insert(b"PHP_OUTPUT_HANDLER_CONT".to_vec(), Value::Long(0));
+                c.insert(b"PHP_OUTPUT_HANDLER_END".to_vec(), Value::Long(8));
+                c.insert(b"UPLOAD_ERR_OK".to_vec(), Value::Long(0));
+                c.insert(b"UPLOAD_ERR_INI_SIZE".to_vec(), Value::Long(1));
+                c.insert(b"UPLOAD_ERR_FORM_SIZE".to_vec(), Value::Long(2));
+                c.insert(b"UPLOAD_ERR_PARTIAL".to_vec(), Value::Long(3));
+                c.insert(b"UPLOAD_ERR_NO_FILE".to_vec(), Value::Long(4));
+                c.insert(b"UPLOAD_ERR_NO_TMP_DIR".to_vec(), Value::Long(6));
+                c.insert(b"UPLOAD_ERR_CANT_WRITE".to_vec(), Value::Long(7));
+                c.insert(b"UPLOAD_ERR_EXTENSION".to_vec(), Value::Long(8));
+                // Ctype constants
+                c.insert(b"CTYPE_ALPHA".to_vec(), Value::Long(1));
+                // Additional misc constants
+                c.insert(b"ARRAY_UNIQUE_REGULAR".to_vec(), Value::Long(0));
+                c.insert(b"LC_ALL".to_vec(), Value::Long(6));
+                c.insert(b"LC_COLLATE".to_vec(), Value::Long(3));
+                c.insert(b"LC_CTYPE".to_vec(), Value::Long(0));
+                c.insert(b"LC_MONETARY".to_vec(), Value::Long(4));
+                c.insert(b"LC_NUMERIC".to_vec(), Value::Long(1));
+                c.insert(b"LC_TIME".to_vec(), Value::Long(2));
+                c.insert(b"LC_MESSAGES".to_vec(), Value::Long(5));
+                // EXTR_ constants
+                c.insert(b"EXTR_OVERWRITE".to_vec(), Value::Long(0));
+                c.insert(b"EXTR_SKIP".to_vec(), Value::Long(1));
+                c.insert(b"EXTR_PREFIX_SAME".to_vec(), Value::Long(2));
+                c.insert(b"EXTR_PREFIX_ALL".to_vec(), Value::Long(3));
+                c.insert(b"EXTR_PREFIX_INVALID".to_vec(), Value::Long(4));
+                c.insert(b"EXTR_IF_EXISTS".to_vec(), Value::Long(6));
+                c.insert(b"EXTR_PREFIX_IF_EXISTS".to_vec(), Value::Long(7));
+                c.insert(b"EXTR_REFS".to_vec(), Value::Long(256));
+                // String comparison constants
+                c.insert(b"CHAR_MAX".to_vec(), Value::Long(127));
+                // PHP int constants for sizes
+                c.insert(b"PHP_INT_MAX".to_vec(), Value::Long(i64::MAX));
+                c.insert(b"PHP_INT_MIN".to_vec(), Value::Long(i64::MIN));
+                // FILTER constants
+                c.insert(b"FILTER_DEFAULT".to_vec(), Value::Long(516));
+                c.insert(b"FILTER_VALIDATE_INT".to_vec(), Value::Long(257));
+                c.insert(b"FILTER_VALIDATE_FLOAT".to_vec(), Value::Long(259));
+                c.insert(b"FILTER_VALIDATE_BOOLEAN".to_vec(), Value::Long(258));
+                c.insert(b"FILTER_VALIDATE_EMAIL".to_vec(), Value::Long(274));
+                c.insert(b"FILTER_VALIDATE_URL".to_vec(), Value::Long(273));
+                c.insert(b"FILTER_VALIDATE_IP".to_vec(), Value::Long(275));
+                c.insert(b"FILTER_SANITIZE_STRING".to_vec(), Value::Long(513));
+                c.insert(b"FILTER_SANITIZE_EMAIL".to_vec(), Value::Long(517));
+                c.insert(b"FILTER_SANITIZE_URL".to_vec(), Value::Long(518));
+                c.insert(b"FILTER_SANITIZE_NUMBER_INT".to_vec(), Value::Long(519));
+                c.insert(b"FILTER_SANITIZE_NUMBER_FLOAT".to_vec(), Value::Long(520));
+                c.insert(b"FILTER_SANITIZE_SPECIAL_CHARS".to_vec(), Value::Long(515));
+                c.insert(b"FILTER_SANITIZE_ENCODED".to_vec(), Value::Long(514));
+                c.insert(b"FILTER_SANITIZE_ADD_SLASHES".to_vec(), Value::Long(523));
+                c.insert(b"FILTER_CALLBACK".to_vec(), Value::Long(1024));
+                // DNS constants
+                c.insert(b"DNS_A".to_vec(), Value::Long(1));
+                c.insert(b"DNS_NS".to_vec(), Value::Long(2));
+                c.insert(b"DNS_CNAME".to_vec(), Value::Long(16));
+                c.insert(b"DNS_SOA".to_vec(), Value::Long(32));
+                c.insert(b"DNS_MX".to_vec(), Value::Long(16384));
+                c.insert(b"DNS_TXT".to_vec(), Value::Long(32768));
+                c.insert(b"DNS_AAAA".to_vec(), Value::Long(134217728));
+                c.insert(b"DNS_ALL".to_vec(), Value::Long(251713587));
+                c.insert(b"DNS_ANY".to_vec(), Value::Long(268435456));
+                // STR constants
+                c.insert(b"CRYPT_BLOWFISH".to_vec(), Value::Long(1));
+                c.insert(b"CRYPT_MD5".to_vec(), Value::Long(1));
+                c.insert(b"CRYPT_SHA256".to_vec(), Value::Long(1));
+                c.insert(b"CRYPT_SHA512".to_vec(), Value::Long(1));
+                c.insert(b"CRYPT_SALT_LENGTH".to_vec(), Value::Long(123));
+                // Miscellaneous
+                c.insert(b"CONNECTION_NORMAL".to_vec(), Value::Long(0));
+                c.insert(b"CONNECTION_ABORTED".to_vec(), Value::Long(1));
+                c.insert(b"CONNECTION_TIMEOUT".to_vec(), Value::Long(2));
+                c.insert(b"CREDITS_GROUP".to_vec(), Value::Long(1));
+                c.insert(b"CREDITS_GENERAL".to_vec(), Value::Long(2));
+                c.insert(b"CREDITS_SAPI".to_vec(), Value::Long(4));
+                c.insert(b"CREDITS_MODULES".to_vec(), Value::Long(8));
+                c.insert(b"CREDITS_DOCS".to_vec(), Value::Long(16));
+                c.insert(b"CREDITS_FULLPAGE".to_vec(), Value::Long(32));
+                c.insert(b"CREDITS_QA".to_vec(), Value::Long(64));
+                c.insert(b"CREDITS_ALL".to_vec(), Value::Long(0xFFFF));
+                c.insert(b"INFO_GENERAL".to_vec(), Value::Long(1));
+                c.insert(b"INFO_CREDITS".to_vec(), Value::Long(2));
+                c.insert(b"INFO_CONFIGURATION".to_vec(), Value::Long(4));
+                c.insert(b"INFO_MODULES".to_vec(), Value::Long(8));
+                c.insert(b"INFO_ENVIRONMENT".to_vec(), Value::Long(16));
+                c.insert(b"INFO_VARIABLES".to_vec(), Value::Long(32));
+                c.insert(b"INFO_LICENSE".to_vec(), Value::Long(64));
+                c.insert(b"INFO_ALL".to_vec(), Value::Long(0xFFFF));
+                // SCANDIR constants
+                c.insert(b"SCANDIR_SORT_ASCENDING".to_vec(), Value::Long(0));
+                c.insert(b"SCANDIR_SORT_DESCENDING".to_vec(), Value::Long(1));
+                c.insert(b"SCANDIR_SORT_NONE".to_vec(), Value::Long(2));
+                // PASSWORD constants
+                c.insert(b"PASSWORD_DEFAULT".to_vec(), Value::String(PhpString::from_bytes(b"2y")));
+                c.insert(b"PASSWORD_BCRYPT".to_vec(), Value::String(PhpString::from_bytes(b"2y")));
+                c.insert(b"PASSWORD_BCRYPT_DEFAULT_COST".to_vec(), Value::Long(10));
+                // GLOB constants
+                c.insert(b"GLOB_ERR".to_vec(), Value::Long(4));
+                c.insert(b"GLOB_AVAILABLE_FLAGS".to_vec(), Value::Long(1073741951));
+                // CRYPT constants
+                c.insert(b"CRYPT_STD_DES".to_vec(), Value::Long(1));
+                c.insert(b"CRYPT_EXT_DES".to_vec(), Value::Long(1));
+                // Stream constants
+                c.insert(b"STREAM_FILTER_READ".to_vec(), Value::Long(1));
+                c.insert(b"STREAM_FILTER_WRITE".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_FILTER_ALL".to_vec(), Value::Long(3));
+                // ENT_IGNORE
+                c.insert(b"ENT_IGNORE".to_vec(), Value::Long(4));
+                // File mode constants
+                c.insert(b"FILE_BINARY".to_vec(), Value::Long(0));
+                c.insert(b"FILE_TEXT".to_vec(), Value::Long(0));
+                // Sun functions constants
+                c.insert(b"SUNFUNCS_RET_TIMESTAMP".to_vec(), Value::Long(0));
+                c.insert(b"SUNFUNCS_RET_STRING".to_vec(), Value::Long(1));
+                c.insert(b"SUNFUNCS_RET_DOUBLE".to_vec(), Value::Long(2));
+                // Debug backtrace
+                c.insert(b"DEBUG_BACKTRACE_PROVIDE_OBJECT".to_vec(), Value::Long(1));
+                c.insert(b"DEBUG_BACKTRACE_IGNORE_ARGS".to_vec(), Value::Long(2));
+                // PHP_QUERY constants
+                c.insert(b"PHP_QUERY_RFC1738".to_vec(), Value::Long(1));
+                c.insert(b"PHP_QUERY_RFC3986".to_vec(), Value::Long(2));
+                // MB constants
+                c.insert(b"MB_CASE_UPPER".to_vec(), Value::Long(0));
+                c.insert(b"MB_CASE_LOWER".to_vec(), Value::Long(1));
+                c.insert(b"MB_CASE_TITLE".to_vec(), Value::Long(2));
+                c.insert(b"MB_CASE_FOLD".to_vec(), Value::Long(0));
+                c.insert(b"MB_CASE_UPPER_SIMPLE".to_vec(), Value::Long(3));
+                c.insert(b"MB_CASE_LOWER_SIMPLE".to_vec(), Value::Long(4));
+                c.insert(b"MB_CASE_FOLD_SIMPLE".to_vec(), Value::Long(5));
+                // LOG constants
+                c.insert(b"LOG_EMERG".to_vec(), Value::Long(0));
+                c.insert(b"LOG_ALERT".to_vec(), Value::Long(1));
+                c.insert(b"LOG_CRIT".to_vec(), Value::Long(2));
+                c.insert(b"LOG_ERR".to_vec(), Value::Long(3));
+                c.insert(b"LOG_WARNING".to_vec(), Value::Long(4));
+                c.insert(b"LOG_NOTICE".to_vec(), Value::Long(5));
+                c.insert(b"LOG_INFO".to_vec(), Value::Long(6));
+                c.insert(b"LOG_DEBUG".to_vec(), Value::Long(7));
+                c.insert(b"LOG_KERN".to_vec(), Value::Long(0));
+                c.insert(b"LOG_USER".to_vec(), Value::Long(8));
+                c.insert(b"LOG_LOCAL0".to_vec(), Value::Long(128));
+                c.insert(b"LOG_PID".to_vec(), Value::Long(1));
+                c.insert(b"LOG_CONS".to_vec(), Value::Long(2));
+                c.insert(b"LOG_NDELAY".to_vec(), Value::Long(8));
+                c.insert(b"LOG_ODELAY".to_vec(), Value::Long(4));
+                c.insert(b"LOG_PERROR".to_vec(), Value::Long(32));
+                // FILTER_VALIDATE_REGEXP
+                c.insert(b"FILTER_VALIDATE_REGEXP".to_vec(), Value::Long(272));
+                // GMP constants
+                c.insert(b"GMP_BIG_ENDIAN".to_vec(), Value::Long(2));
+                c.insert(b"GMP_LITTLE_ENDIAN".to_vec(), Value::Long(4));
+                c.insert(b"GMP_NATIVE_ENDIAN".to_vec(), Value::Long(16));
+                c.insert(b"GMP_MSW_FIRST".to_vec(), Value::Long(1));
+                c.insert(b"GMP_LSW_FIRST".to_vec(), Value::Long(8));
+                c.insert(b"GMP_ROUND_ZERO".to_vec(), Value::Long(0));
+                c.insert(b"GMP_ROUND_PLUSINF".to_vec(), Value::Long(1));
+                c.insert(b"GMP_ROUND_MINUSINF".to_vec(), Value::Long(2));
+                c.insert(b"GMP_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"6.2.1")));
+                // Array constants
+                c.insert(b"ARRAY_FILTER_USE_VALUE".to_vec(), Value::Long(0));
                 c
+
+
             },
         }
     }
@@ -5833,23 +6046,40 @@ impl Vm {
                     let name_bytes = name.as_bytes();
                     // Look up in constants table
                     let val = if let Some(v) = self.constants.get(name_bytes) {
-                        v.clone()
+                        Some(v.clone())
                     } else if name_bytes.contains(&b'\\') {
                         // Namespace fallback: try the unqualified (global) name
                         if let Some(last_sep) = name_bytes.iter().rposition(|&b| b == b'\\') {
                             let global_name = &name_bytes[last_sep + 1..];
-                            self.constants.get(global_name).cloned().unwrap_or_else(|| {
-                                // Return the unqualified name as string (PHP behavior for undefined constants)
-                                Value::String(PhpString::from_vec(global_name.to_vec()))
-                            })
+                            self.constants.get(global_name).cloned()
                         } else {
-                            Value::String(name.clone())
+                            None
                         }
                     } else {
-                        // If not found, return the name as a string (PHP warning: undefined constant)
-                        Value::String(name.clone())
+                        None
                     };
-                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                    if let Some(val) = val {
+                        self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else {
+                        // PHP 8: undefined constants are fatal errors
+                        let name_str = name.to_string_lossy();
+                        let msg = format!("Undefined constant \"{}\"", name_str);
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, finally_target, _)) = exception_handlers.last().copied() {
+                            if catch_target > 0 {
+                                exception_handlers.pop();
+                                ip = catch_target as usize;
+                            } else if finally_target > 0 {
+                                ip = finally_target as usize;
+                            }
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: msg,
+                            line: op.line,
+                        });
+                    }
                 }
 
                 OpCode::IncludeFile => {
