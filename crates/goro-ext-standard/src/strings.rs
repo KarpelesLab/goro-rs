@@ -962,10 +962,10 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn str_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null).to_php_string();
     let length = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let pad_string = args
-        .get(2)
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::from_bytes(b" "));
+    let pad_string = match args.get(2) {
+        Some(Value::Null) | None => PhpString::from_bytes(b" "),
+        Some(v) => v.to_php_string(),
+    };
     let pad_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // STR_PAD_RIGHT=1
 
     let bytes = input.as_bytes();

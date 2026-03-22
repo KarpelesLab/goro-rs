@@ -242,9 +242,19 @@ impl Compiler {
         line: u32,
         func_name: Option<&[u8]>,
     ) -> CompileResult<()> {
+        let mut has_named = false;
+        let mut has_unpack = false;
         for (i, arg) in args.iter().enumerate() {
-            let val = self.compile_expr(&arg.value)?;
             if arg.unpack {
+                // Cannot use argument unpacking after named arguments
+                if has_named {
+                    return Err(CompileError {
+                        message: "Cannot use argument unpacking after named arguments".into(),
+                        line,
+                    });
+                }
+                has_unpack = true;
+                let val = self.compile_expr(&arg.value)?;
                 self.op_array.emit(Op {
                     opcode: OpCode::SendUnpack,
                     op1: val,
@@ -253,6 +263,8 @@ impl Compiler {
                     line,
                 });
             } else if let Some(name) = &arg.name {
+                has_named = true;
+                let val = self.compile_expr(&arg.value)?;
                 let name_idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(name.clone())));
@@ -264,6 +276,14 @@ impl Compiler {
                     line,
                 });
             } else {
+                // Cannot use positional argument after named argument
+                if has_named {
+                    return Err(CompileError {
+                        message: "Cannot use positional argument after named argument".into(),
+                        line,
+                    });
+                }
+                let val = self.compile_expr(&arg.value)?;
                 // Check if this argument position is by-ref for known builtins
                 let is_byref = Self::is_builtin_byref_param(func_name, i);
                 let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
@@ -1905,8 +1925,21 @@ impl Compiler {
                                 }
 
                                 // Set up parameter CVs with default values
+                                // Set param_count and required_param_count for the method
+                                method_compiler.op_array.param_count = params.len() as u32
+                                    + if *is_static { 0 } else { 1 }; // +1 for $this
+                                method_compiler.op_array.required_param_count = params
+                                    .iter()
+                                    .filter(|p| p.default.is_none() && !p.variadic)
+                                    .count() as u32;
+
                                 for param in params {
                                     let cv = method_compiler.op_array.get_or_create_cv(&param.name);
+
+                                    // Handle variadic parameter
+                                    if param.variadic {
+                                        method_compiler.op_array.variadic_param = Some(cv);
+                                    }
 
                                     // Store parameter type info
                                     let type_info =
@@ -3921,9 +3954,23 @@ impl Compiler {
                         .op_array
                         .get_or_create_cv(&use_var.variable);
                 }
+                // Count required params and set param_count
+                closure_compiler.op_array.param_count = params.len() as u32
+                    + use_vars.len() as u32
+                    + if !*is_static && self.current_class.is_some() { 1 } else { 0 };
+                closure_compiler.op_array.required_param_count = params
+                    .iter()
+                    .filter(|p| p.default.is_none() && !p.variadic)
+                    .count() as u32;
+
                 // Set up parameter CVs
                 for param in params {
                     let cv = closure_compiler.op_array.get_or_create_cv(&param.name);
+
+                    // Handle variadic parameter
+                    if param.variadic {
+                        closure_compiler.op_array.variadic_param = Some(cv);
+                    }
 
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
@@ -3934,6 +3981,36 @@ impl Compiler {
                         closure_compiler.op_array.param_types.push(None);
                     }
                     closure_compiler.op_array.param_types[cv as usize] = type_info;
+
+                    // Compile default value
+                    if let Some(default_expr) = &param.default {
+                        let default_val = closure_compiler.compile_expr(default_expr)?;
+                        let undef_idx = closure_compiler.op_array.add_literal(Value::Undef);
+                        let check_tmp = closure_compiler.op_array.alloc_temp();
+                        closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::Identical,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Const(undef_idx),
+                            result: OperandType::Tmp(check_tmp),
+                            line: 0,
+                        });
+                        let jmp_skip = closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: OperandType::Tmp(check_tmp),
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: 0,
+                        });
+                        closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Cv(cv),
+                            op2: default_val,
+                            result: OperandType::Unused,
+                            line: 0,
+                        });
+                        let after = closure_compiler.op_array.current_offset();
+                        closure_compiler.op_array.patch_jump(jmp_skip, after);
+                    }
                 }
 
                 for s in body {

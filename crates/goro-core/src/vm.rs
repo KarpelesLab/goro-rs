@@ -38,48 +38,142 @@ impl PendingCall {
     /// Resolve named arguments by matching them to parameter positions.
     /// Named args are placed at the correct index based on cv_names.
     /// Positional args keep their order; named args fill in remaining slots.
-    fn resolve_named_args(&mut self, cv_names: &[Vec<u8>], implicit_args: usize) {
+    /// Returns an error message if there's a problem (unknown param, duplicate, etc.)
+    /// variadic_param: if Some(idx), extra named args are collected into the variadic.
+    fn resolve_named_args(
+        &mut self,
+        cv_names: &[Vec<u8>],
+        implicit_args: usize,
+        variadic_param: Option<u32>,
+    ) -> Result<(), String> {
         if self.named_args.is_empty() {
-            return;
+            return Ok(());
         }
 
-        // Build the final args list:
-        // Start with positional args, then overlay named args at their correct positions.
-        let total_params = cv_names.len();
-        let mut resolved = vec![None; total_params];
+        // Determine the number of regular (non-variadic) parameters
+        let regular_param_count = variadic_param
+            .map(|v| v as usize)
+            .unwrap_or(cv_names.len());
 
-        // Place positional args first (these come after any implicit args like $this)
+        // Build resolved slots for regular parameters only
+        let mut resolved = vec![None; regular_param_count];
+
+        // Place positional args into regular param slots starting from index 0
+        // (this includes $this for methods - it's already at args[0])
+        let positional_count = self.args.len();
         for (i, arg) in self.args.iter().enumerate() {
-            let target = implicit_args + i;
-            if target < total_params {
-                resolved[target] = Some(arg.clone());
+            if i < regular_param_count {
+                resolved[i] = Some(arg.clone());
             }
         }
 
+        // Collect extra positional args (those beyond regular params) for variadics
+        let extra_positional: Vec<Value> = if positional_count > regular_param_count {
+            self.args[regular_param_count..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        // Extra named args that don't match any parameter go here (for variadics)
+        let mut extra_named: Vec<(Vec<u8>, Value)> = Vec::new();
+
         // Place named args by matching against cv_names
+        // Skip implicit params (like $this) when matching by name
         for (name, val) in self.named_args.drain(..) {
             let mut found = false;
             for (idx, cv_name) in cv_names.iter().enumerate() {
-                if *cv_name == name {
+                // Skip implicit params ($this) - they can't be set by name
+                if idx < implicit_args {
+                    continue;
+                }
+                // Skip the variadic param itself when matching by name
+                if variadic_param == Some(idx as u32) {
+                    continue;
+                }
+                if idx < regular_param_count && *cv_name == name {
+                    // Check for duplicate: named arg overwrites a previously set position
+                    if resolved[idx].is_some() {
+                        return Err(format!(
+                            "Named parameter ${} overwrites previous argument",
+                            String::from_utf8_lossy(&name)
+                        ));
+                    }
                     resolved[idx] = Some(val.clone());
                     found = true;
                     break;
                 }
             }
             if !found {
-                // Unknown named arg - append as positional (PHP would error,
-                // but for now just add it to the end)
-                self.args.push(val);
+                if variadic_param.is_some() {
+                    // Collect extra named args for the variadic parameter
+                    extra_named.push((name, val));
+                } else {
+                    // Unknown named parameter - error
+                    return Err(format!(
+                        "Unknown named parameter ${}",
+                        String::from_utf8_lossy(&name)
+                    ));
+                }
             }
         }
 
-        // Rebuild self.args from resolved, stripping implicit args prefix
-        // We need to produce a flat args vec where index 0 maps to CV[0]
-        // (since the caller code maps args[i] -> func_cvs[i])
+        // Rebuild self.args: resolved regular params + extra positional args
         self.args.clear();
         for slot in resolved {
             self.args.push(slot.unwrap_or(Value::Undef));
         }
+        // Append extra positional args (for variadic)
+        self.args.extend(extra_positional);
+
+        // Store extra named args back into named_args for variadic collection
+        self.named_args = extra_named;
+
+        Ok(())
+    }
+
+    /// Resolve named arguments for builtin functions by matching against parameter names.
+    /// Returns an error (exception_class, message) if there's a problem.
+    fn resolve_named_args_builtin(
+        &mut self,
+        param_names: &[&[u8]],
+    ) -> Result<(), String> {
+        if self.named_args.is_empty() {
+            return Ok(());
+        }
+
+        // Track which positions were explicitly set by positional args
+        let positional_count = self.args.len();
+
+        // Process named args
+        for (name, val) in self.named_args.drain(..) {
+            let mut found = false;
+            for (idx, pname) in param_names.iter().enumerate() {
+                if *pname == name.as_slice() {
+                    // Check for duplicate: only error if a positional arg was at this position
+                    if idx < positional_count {
+                        return Err(format!(
+                            "Named parameter ${} overwrites previous argument",
+                            String::from_utf8_lossy(&name)
+                        ));
+                    }
+                    // Extend args if needed, using Null for skipped positions
+                    while self.args.len() <= idx {
+                        self.args.push(Value::Null);
+                    }
+                    self.args[idx] = val.clone();
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(format!(
+                    "Unknown named parameter ${}",
+                    String::from_utf8_lossy(&name)
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -91,6 +185,8 @@ pub struct Vm {
     pub ob_stack: Vec<Vec<u8>>,
     /// Registered built-in functions
     pub functions: HashMap<Vec<u8>, BuiltinFn>,
+    /// Parameter names for built-in functions (lowercase fn name -> list of param names)
+    pub builtin_param_names: HashMap<Vec<u8>, Vec<Vec<u8>>>,
     /// User-defined functions (compiled op arrays)
     pub user_functions: HashMap<Vec<u8>, OpArray>,
     /// Stack of pending function calls (supports nested calls)
@@ -136,6 +232,8 @@ pub struct Vm {
     next_bound_closure_id: u64,
     /// JSON last error code (0 = no error)
     pub json_last_error: i64,
+    /// Named args being forwarded to a builtin function call (for call_user_func etc.)
+    pub pending_named_args: Vec<(Vec<u8>, Value)>,
     /// Current executing file path
     pub current_file: String,
     /// Line number of the last return statement (for return type error messages)
@@ -148,6 +246,7 @@ impl Vm {
             output: Vec::new(),
                 ob_stack: Vec::new(),
             functions: HashMap::new(),
+            builtin_param_names: HashMap::new(),
             user_functions: HashMap::new(),
             pending_calls: Vec::new(),
             static_vars: HashMap::new(),
@@ -169,6 +268,7 @@ impl Vm {
             error_handler: None,
             next_bound_closure_id: 0,
             json_last_error: 0,
+            pending_named_args: Vec::new(),
             current_file: "Unknown.php".to_string(),
             last_return_line: 0,
             constants: {
@@ -1629,6 +1729,80 @@ impl Vm {
         self.execute_op_array(op_array, cvs)
     }
 
+    /// Execute a user function with named argument resolution.
+    /// Takes positional args and named args, resolves them against the function's parameters,
+    /// then calls the function.
+    pub fn execute_fn_with_named_args(
+        &mut self,
+        op_array: &OpArray,
+        positional_args: Vec<Value>,
+        named_args: Vec<(Vec<u8>, Value)>,
+        this_val: Option<Value>,
+    ) -> Result<Value, VmError> {
+        let implicit_args = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+            1
+        } else {
+            0
+        };
+
+        // Build a PendingCall to resolve named args
+        let mut call = PendingCall {
+            name: PhpString::from_bytes(b""),
+            args: if let Some(this) = this_val {
+                let mut a = vec![this];
+                a.extend(positional_args);
+                a
+            } else {
+                positional_args
+            },
+            named_args,
+        };
+
+        if !call.named_args.is_empty() {
+            if let Err(err_msg) = call.resolve_named_args(&op_array.cv_names, implicit_args, op_array.variadic_param) {
+                let exc_val = self.create_exception(b"Error", &err_msg, 0);
+                self.current_exception = Some(exc_val);
+                return Err(VmError {
+                    message: format!("Uncaught Error: {}", err_msg),
+                    line: 0,
+                });
+            }
+        }
+
+        // Set up CVs
+        let mut func_cvs = vec![Value::Undef; op_array.cv_names.len()];
+        if let Some(variadic_idx) = op_array.variadic_param {
+            let vi = variadic_idx as usize;
+            for (i, arg) in call.args.iter().enumerate() {
+                if i < vi && i < func_cvs.len() {
+                    func_cvs[i] = arg.clone();
+                }
+            }
+            let mut variadic_arr = crate::array::PhpArray::new();
+            for arg in call.args.iter().skip(vi) {
+                variadic_arr.push(arg.clone());
+            }
+            // Add extra named args with string keys
+            for (name, val) in call.named_args.drain(..) {
+                variadic_arr.set(
+                    ArrayKey::String(PhpString::from_vec(name)),
+                    val,
+                );
+            }
+            if vi < func_cvs.len() {
+                func_cvs[vi] = Value::Array(Rc::new(RefCell::new(variadic_arr)));
+            }
+        } else {
+            for (i, arg) in call.args.iter().enumerate() {
+                if i < func_cvs.len() {
+                    func_cvs[i] = arg.clone();
+                }
+            }
+        }
+
+        self.execute_op_array(op_array, func_cvs)
+    }
+
     /// Register a class (from the compiler's compiled_classes list)
     pub fn register_class(&mut self, class: ClassEntry) {
         self.pending_classes.push(class);
@@ -1848,6 +2022,13 @@ impl Vm {
     /// Register a built-in function
     pub fn register_function(&mut self, name: &[u8], func: BuiltinFn) {
         self.functions.insert(name.to_ascii_lowercase(), func);
+    }
+
+    /// Register a built-in function with parameter names (for named argument support)
+    pub fn register_function_with_params(&mut self, name: &[u8], func: BuiltinFn, params: &[&[u8]]) {
+        let lower = name.to_ascii_lowercase();
+        self.functions.insert(lower.clone(), func);
+        self.builtin_param_names.insert(lower, params.iter().map(|p| p.to_vec()).collect());
     }
 
     /// Get the output buffer contents
@@ -4048,6 +4229,15 @@ impl Vm {
                         if has_invoke {
                             let mut func_name = class_name_orig;
                             func_name.extend_from_slice(b"::__invoke");
+                            // Register the __invoke method in user_functions so DoFCall can find it
+                            if let Some(class) = self.classes.get(&class_lower) {
+                                if let Some(method) = class.get_method(b"__invoke") {
+                                    self.user_functions.insert(
+                                        func_name.to_ascii_lowercase(),
+                                        method.op_array.clone(),
+                                    );
+                                }
+                            }
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::from_vec(func_name),
                                 args: vec![name_val.clone()], // $this
@@ -4077,7 +4267,7 @@ impl Vm {
                     }
                 }
                 OpCode::SendNamedVal => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name = name_val.to_php_string().as_bytes().to_vec();
                     if let Some(call) = self.pending_calls.last_mut() {
@@ -4106,19 +4296,100 @@ impl Vm {
                     }
                 }
                 OpCode::SendUnpack => {
-                    // Unpack an array into individual arguments
+                    // Unpack an array/traversable into individual arguments
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     if let Some(call) = self.pending_calls.last_mut() {
-                        match val {
+                        // Helper: unpack from an iterator of (key, value) pairs
+                        let unpack_result: Result<(), String> = match &val {
                             Value::Array(arr) => {
                                 let arr = arr.borrow();
-                                for (_, v) in arr.iter() {
-                                    call.args.push(v.clone());
+                                let mut had_named = false;
+                                let mut result = Ok(());
+                                for (k, v) in arr.iter() {
+                                    match k {
+                                        ArrayKey::String(s) => {
+                                            had_named = true;
+                                            // Check for duplicate with existing named args
+                                            let name_bytes = s.as_bytes().to_vec();
+                                            if call.named_args.iter().any(|(n, _)| *n == name_bytes) {
+                                                result = Err(format!(
+                                                    "Named parameter ${} overwrites previous argument",
+                                                    String::from_utf8_lossy(&name_bytes)
+                                                ));
+                                                break;
+                                            }
+                                            call.named_args.push((name_bytes, v.clone()));
+                                        }
+                                        ArrayKey::Int(_) => {
+                                            if had_named {
+                                                result = Err("Cannot use positional argument after named argument during unpacking".into());
+                                                break;
+                                            }
+                                            call.args.push(v.clone());
+                                        }
+                                    }
+                                }
+                                result
+                            }
+                            Value::Object(obj_rc) => {
+                                // Check if it's a Traversable (e.g. ArrayIterator)
+                                // Extract the underlying array from ArrayIterator-like objects
+                                let obj = obj_rc.borrow();
+                                let inner_arr = {
+                                    let prop = obj.get_property(b"__spl_array");
+                                    if matches!(prop, Value::Array(_)) { Some(prop) } else { None }
+                                };
+                                drop(obj);
+                                if let Some(Value::Array(arr)) = inner_arr {
+                                    let arr = arr.borrow();
+                                    let mut had_named = false;
+                                    let mut result = Ok(());
+                                    for (k, v) in arr.iter() {
+                                        match k {
+                                            ArrayKey::String(s) => {
+                                                had_named = true;
+                                                let name_bytes = s.as_bytes().to_vec();
+                                                if call.named_args.iter().any(|(n, _)| *n == name_bytes) {
+                                                    result = Err(format!(
+                                                        "Named parameter ${} overwrites previous argument",
+                                                        String::from_utf8_lossy(&name_bytes)
+                                                    ));
+                                                    break;
+                                                }
+                                                call.named_args.push((name_bytes, v.clone()));
+                                            }
+                                            ArrayKey::Int(_) => {
+                                                if had_named {
+                                                    result = Err("Cannot use positional argument after named argument during unpacking".into());
+                                                    break;
+                                                }
+                                                call.args.push(v.clone());
+                                            }
+                                        }
+                                    }
+                                    result
+                                } else {
+                                    call.args.push(val.clone());
+                                    Ok(())
                                 }
                             }
                             _ => {
                                 // Non-array, just push as single arg
-                                call.args.push(val);
+                                call.args.push(val.clone());
+                                Ok(())
+                            }
+                        };
+                        if let Err(err_msg) = unpack_result {
+                            let exc_val = self.create_exception(b"Error", &err_msg, op.line);
+                            self.current_exception = Some(exc_val);
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", err_msg),
+                                    line: op.line,
+                                });
                             }
                         }
                     }
@@ -4382,7 +4653,55 @@ impl Vm {
                             );
                         }
                     } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
-                        // Built-in function
+                        // Built-in function - resolve named args if present
+                        if !call.named_args.is_empty() {
+                            // Special functions that forward named args to their callbacks
+                            let forwards_named = func_name_lower == b"call_user_func"
+                                || func_name_lower == b"call_user_func_array"
+                                || func_name_lower == b"forward_static_call"
+                                || func_name_lower == b"forward_static_call_array";
+                            if forwards_named {
+                                // Store named args on VM for forwarding
+                                self.pending_named_args = call.named_args.drain(..).collect();
+                            } else if let Some(param_names) = self.builtin_param_names.get(&func_name_lower).cloned() {
+                                let param_refs: Vec<&[u8]> = param_names.iter().map(|p| p.as_slice()).collect();
+                                if let Err(err_msg) = call.resolve_named_args_builtin(&param_refs) {
+                                    // For variadic builtins, use a different error format
+                                    let (exc_class, final_msg) = if err_msg.starts_with("Unknown named parameter") {
+                                        let display = call.name.to_string_lossy();
+                                        (b"ArgumentCountError" as &[u8], format!("{}() does not accept unknown named parameters", display))
+                                    } else {
+                                        (b"Error" as &[u8], err_msg)
+                                    };
+                                    let exc_val = self.create_exception(exc_class, &final_msg, op.line);
+                                    self.current_exception = Some(exc_val);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        return Err(VmError {
+                                            message: format!("Uncaught {}: {}", String::from_utf8_lossy(exc_class), final_msg),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
+                            } else {
+                                // No param names registered for this builtin - error on unknown named params
+                                let first_name = String::from_utf8_lossy(&call.named_args[0].0).into_owned();
+                                let err_msg = format!("Unknown named parameter ${}", first_name);
+                                let exc_val = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc_val);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                } else {
+                                    return Err(VmError {
+                                        message: format!("Uncaught Error: {}", err_msg),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                        }
                         match func(self, &call.args) {
                             Ok(result) => {
                                 self.write_operand(
@@ -4464,17 +4783,38 @@ impl Vm {
 
                         // Resolve named arguments by reordering to match parameter positions
                         if !call.named_args.is_empty() {
-                            let implicit_args_count = if user_fn
-                                .cv_names
-                                .first()
-                                .map(|n| n.as_slice())
-                                == Some(b"this")
-                            {
-                                1
+                            // For __call/__callStatic, pack named args into the args for the $args array
+                            let is_magic_call = func_name_lower.ends_with(b"::__call")
+                                || func_name_lower.ends_with(b"::__callstatic");
+                            if is_magic_call {
+                                // Named args become part of the args array with string keys
+                                // They'll be packed by the __call handler later
+                                // For now, leave them in named_args and handle in the __call packing code
                             } else {
-                                0
-                            };
-                            call.resolve_named_args(&user_fn.cv_names, implicit_args_count);
+                                let implicit_args_count = if user_fn
+                                    .cv_names
+                                    .first()
+                                    .map(|n| n.as_slice())
+                                    == Some(b"this")
+                                {
+                                    1
+                                } else {
+                                    0
+                                };
+                                if let Err(err_msg) = call.resolve_named_args(&user_fn.cv_names, implicit_args_count, user_fn.variadic_param) {
+                                    let exc_val = self.create_exception(b"Error", &err_msg, op.line);
+                                    self.current_exception = Some(exc_val);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        return Err(VmError {
+                                            message: format!("Uncaught Error: {}", err_msg),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
+                            }
                         }
 
                         // Push call stack frame early for proper error stack traces
@@ -4535,6 +4875,46 @@ impl Vm {
                                         message: format!("Uncaught ArgumentCountError: {}", err_msg),
                                         line: op.line,
                                     });
+                                }
+                            }
+                            // Also check for Undef gaps in required parameters (named arg skips)
+                            if !is_special && required > 0 {
+                                let variadic_start = user_fn.variadic_param.map(|v| v as usize).unwrap_or(usize::MAX);
+                                let mut missing_param_err: Option<String> = None;
+                                for param_idx in implicit_args..(implicit_args + required as usize) {
+                                    if param_idx >= variadic_start {
+                                        break;
+                                    }
+                                    if param_idx < call.args.len() && matches!(call.args[param_idx], Value::Undef) {
+                                        let display_name = call.name.to_string_lossy();
+                                        let fn_display = if let Some(pos) = display_name.rfind("::") {
+                                            &display_name[pos + 2..]
+                                        } else {
+                                            &display_name
+                                        };
+                                        let param_name = user_fn.cv_names.get(param_idx)
+                                            .map(|n| String::from_utf8_lossy(n).into_owned())
+                                            .unwrap_or_else(|| format!("param{}", param_idx));
+                                        let arg_num = param_idx - implicit_args + 1;
+                                        missing_param_err = Some(format!(
+                                            "{}(): Argument #{} (${}) not passed", fn_display, arg_num, param_name
+                                        ));
+                                        break;
+                                    }
+                                }
+                                if let Some(err_msg) = missing_param_err {
+                                    let exc_val = self.create_exception(b"ArgumentCountError", &err_msg, op.line);
+                                    self.current_exception = Some(exc_val);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        self.call_stack.pop();
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        return Err(VmError {
+                                            message: format!("Uncaught ArgumentCountError: {}", err_msg),
+                                            line: op.line,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -4604,13 +4984,22 @@ impl Vm {
                             || func_name_lower.ends_with(b"::__callstatic")
                         {
                             // Args: [this, method_name, arg1, arg2, ...]
-                            // Need: [this, method_name, [arg1, arg2, ...]]
+                            // Need: [this, method_name, [arg1, arg2, ..., name1 => val1, ...]]
+                            let mut args_arr = crate::array::PhpArray::new();
                             if call.args.len() > 2 {
                                 let extra_args: Vec<Value> = call.args.drain(2..).collect();
-                                let mut args_arr = crate::array::PhpArray::new();
                                 for arg in extra_args {
                                     args_arr.push(arg);
                                 }
+                            }
+                            // Add named args with string keys
+                            for (name, val) in call.named_args.drain(..) {
+                                args_arr.set(
+                                    ArrayKey::String(PhpString::from_vec(name)),
+                                    val,
+                                );
+                            }
+                            if !args_arr.is_empty() {
                                 call.args
                                     .push(Value::Array(Rc::new(RefCell::new(args_arr))));
                             } else {
@@ -4740,6 +5129,13 @@ impl Vm {
                             for arg in call.args.iter().skip(vi) {
                                 variadic_arr.push(arg.clone());
                             }
+                            // Add extra named args with string keys
+                            for (name, val) in call.named_args.drain(..) {
+                                variadic_arr.set(
+                                    ArrayKey::String(PhpString::from_vec(name)),
+                                    val,
+                                );
+                            }
                             if vi < func_cvs.len() {
                                 func_cvs[vi] = Value::Array(Rc::new(RefCell::new(variadic_arr)));
                             }
@@ -4848,6 +5244,22 @@ impl Vm {
                         // If it's a constructor call and the class has no __construct, silently succeed
                         let name_bytes = call.name.as_bytes();
                         if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
+                            // Check for unknown named parameters on classes without __construct
+                            if !call.named_args.is_empty() {
+                                let first_name = String::from_utf8_lossy(&call.named_args[0].0).into_owned();
+                                let err_msg = format!("Unknown named parameter ${}", first_name);
+                                let exc_val = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc_val);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                } else {
+                                    return Err(VmError {
+                                        message: format!("Uncaught Error: {}", err_msg),
+                                        line: op.line,
+                                    });
+                                }
+                            }
                             // For Exception-like classes, set message/code from args
                             if !call.args.is_empty() {
                                 let this_idx = if call.args.len() > 1 { 0 } else { usize::MAX };
@@ -8366,7 +8778,14 @@ impl Vm {
                     } else {
                         0
                     };
-                call.resolve_named_args(&user_fn.cv_names, implicit_args_count);
+                if let Err(err_msg) = call.resolve_named_args(&user_fn.cv_names, implicit_args_count, user_fn.variadic_param) {
+                    let exc_val = self.create_exception(b"Error", &err_msg, line);
+                    self.current_exception = Some(exc_val);
+                    return Err(VmError {
+                        message: format!("Uncaught Error: {}", err_msg),
+                        line,
+                    });
+                }
             }
 
             // Check if this user function is a generator

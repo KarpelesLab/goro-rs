@@ -752,6 +752,8 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let callback = &args[0];
     let call_args: Vec<Value> = args[1..].to_vec();
+    // Take any forwarded named args from the VM
+    let named_args: Vec<(Vec<u8>, Value)> = std::mem::take(&mut vm.pending_named_args);
 
     // Handle array callback: [class_or_object, method_name]
     if let Value::Array(arr) = callback {
@@ -770,13 +772,7 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if let Some(class) = vm.classes.get(&class_lower).cloned() {
                         if let Some(method) = class.methods.get(&method_lower) {
                             let op = method.op_array.clone();
-                            let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
-                            for (i, arg) in call_args.iter().enumerate() {
-                                if i < fn_cvs.len() {
-                                    fn_cvs[i] = arg.clone();
-                                }
-                            }
-                            return vm.execute_fn(&op, fn_cvs);
+                            return vm.execute_fn_with_named_args(&op, call_args, named_args, None);
                         }
                     }
                     return Ok(Value::Null);
@@ -791,17 +787,7 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if let Some(class) = vm.classes.get(&class_lower).cloned() {
                         if let Some(method) = class.methods.get(&method_lower) {
                             let op = method.op_array.clone();
-                            let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
-                            // Set $this
-                            if let Some(this_idx) = op.cv_names.iter().position(|n| n == b"this") {
-                                fn_cvs[this_idx] = Value::Object(obj.clone());
-                            }
-                            for (i, arg) in call_args.iter().enumerate() {
-                                if i < fn_cvs.len() && op.cv_names.get(i).map(|n| n.as_slice()) != Some(b"this") {
-                                    fn_cvs[i] = arg.clone();
-                                }
-                            }
-                            return vm.execute_fn(&op, fn_cvs);
+                            return vm.execute_fn_with_named_args(&op, call_args, named_args, Some(Value::Object(obj.clone())));
                         }
                     }
                     return Ok(Value::Null);
@@ -819,48 +805,32 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return builtin(vm, &call_args);
             }
             if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                let mut idx = 0;
-                for cv in &captured {
-                    if idx < fn_cvs.len() {
-                        fn_cvs[idx] = cv.clone();
-                        idx += 1;
-                    }
-                }
-                for arg in &call_args {
-                    if idx < fn_cvs.len() {
-                        fn_cvs[idx] = arg.clone();
-                        idx += 1;
-                    }
-                }
-                return vm.execute_fn(&user_fn, fn_cvs);
+                let mut combined_args = captured;
+                combined_args.extend(call_args);
+                return vm.execute_fn_with_named_args(&user_fn, combined_args, named_args, None);
             }
         }
         return Ok(Value::Null);
     }
 
-    // Get function name from string callback
-    let func_name = match callback {
-        Value::String(s) => s.as_bytes().to_vec(),
-        _ => return Ok(Value::Null),
-    };
+    // Handle closure callback (stored as string name or array with captures)
+    if let Value::String(s) = callback {
+        let func_name = s.as_bytes().to_vec();
+        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
-    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-    // Try builtin first
-    if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-        return builtin(vm, &call_args);
-    }
-
-    // Try user function
-    if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-        let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-        for (i, arg) in call_args.iter().enumerate() {
-            if i < fn_cvs.len() {
-                fn_cvs[i] = arg.clone();
+        // Try builtin first
+        if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+            // For builtins, forward named args via pending_named_args
+            if !named_args.is_empty() {
+                vm.pending_named_args = named_args;
             }
+            return builtin(vm, &call_args);
         }
-        return vm.execute_fn(&user_fn, fn_cvs);
+
+        // Try user function
+        if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+            return vm.execute_fn_with_named_args(&user_fn, call_args, named_args, None);
+        }
     }
 
     Ok(Value::Null)
@@ -870,15 +840,42 @@ fn call_user_func_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
     let callback = args[0].clone();
-    let params = match &args[1] {
+    let (positional, named) = match &args[1] {
         Value::Array(arr) => {
             let arr = arr.borrow();
-            arr.values().cloned().collect::<Vec<_>>()
+            let mut pos = Vec::new();
+            let mut named = Vec::new();
+            let mut had_named = false;
+            for (k, v) in arr.iter() {
+                match k {
+                    goro_core::array::ArrayKey::String(s) => {
+                        had_named = true;
+                        named.push((s.as_bytes().to_vec(), v.clone()));
+                    }
+                    goro_core::array::ArrayKey::Int(_) => {
+                        if had_named {
+                            // Cannot use positional argument after named argument
+                            let exc = vm.create_exception(b"Error", "Cannot use positional argument after named argument", 0);
+                            vm.current_exception = Some(exc);
+                            return Err(VmError {
+                                message: "Cannot use positional argument after named argument".into(),
+                                line: 0,
+                            });
+                        }
+                        pos.push(v.clone());
+                    }
+                }
+            }
+            (pos, named)
         }
-        _ => vec![],
+        _ => (vec![], vec![]),
     };
+    // Store named args for forwarding
+    if !named.is_empty() {
+        vm.pending_named_args = named;
+    }
     let mut call_args = vec![callback];
-    call_args.extend(params);
+    call_args.extend(positional);
     call_user_func(vm, &call_args)
 }
 
@@ -1107,9 +1104,13 @@ fn array_unique(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn array_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
-        let entries: Vec<_> = arr.iter().map(|(_, v)| v.clone()).collect();
+        let entries: Vec<_> = arr.iter().collect();
         let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        let length = args.get(2).map(|v| v.to_long());
+        let length = match args.get(2) {
+            Some(Value::Null) | None => None,
+            Some(v) => Some(v.to_long()),
+        };
+        let preserve_keys = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
 
         let start = if offset < 0 {
             (entries.len() as i64 + offset).max(0) as usize
@@ -1125,8 +1126,20 @@ fn array_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
         let end = end.min(entries.len());
         let start = start.min(end);
-        for val in &entries[start..end] {
-            result.push(val.clone());
+        for &(ref k, ref v) in &entries[start..end] {
+            match k {
+                ArrayKey::String(s) => {
+                    // String keys are always preserved
+                    result.set(ArrayKey::String(s.clone()), (*v).clone());
+                }
+                ArrayKey::Int(i) => {
+                    if preserve_keys {
+                        result.set(ArrayKey::Int(*i), (*v).clone());
+                    } else {
+                        result.push((*v).clone());
+                    }
+                }
+            }
         }
         Ok(Value::Array(Rc::new(RefCell::new(result))))
     } else {
@@ -3015,19 +3028,55 @@ fn rawurldecode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn htmlspecialchars(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(11); // ENT_QUOTES | ENT_SUBSTITUTE (default)
-    let _double_encode = args.get(3).map(|v| v.is_truthy()).unwrap_or(true);
+    let double_encode = match args.get(3) {
+        Some(Value::Null) | None => true,
+        Some(v) => v.is_truthy(),
+    };
     let ent_compat = flags & 2 != 0;  // ENT_COMPAT
     let ent_quotes = flags & 3 == 3;  // ENT_QUOTES (both single and double)
+    let bytes = s.as_bytes();
     let mut result = Vec::new();
-    for &b in s.as_bytes() {
-        match b {
-            b'&' => result.extend_from_slice(b"&amp;"),
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'&' => {
+                if !double_encode {
+                    // Check if this is already an entity
+                    let remaining = &bytes[i..];
+                    let is_entity = remaining.starts_with(b"&amp;")
+                        || remaining.starts_with(b"&lt;")
+                        || remaining.starts_with(b"&gt;")
+                        || remaining.starts_with(b"&quot;")
+                        || remaining.starts_with(b"&#039;")
+                        || remaining.starts_with(b"&apos;")
+                        || (remaining.len() > 2 && remaining[1] == b'#' && {
+                            // Numeric entity: &#digits; or &#xhex;
+                            if let Some(end) = remaining.iter().position(|&b| b == b';') {
+                                end > 2
+                            } else { false }
+                        })
+                        || {
+                            // Named entity: &name;
+                            if let Some(end) = remaining.iter().position(|&b| b == b';') {
+                                end > 1 && remaining[1..end].iter().all(|&b| b.is_ascii_alphanumeric())
+                            } else { false }
+                        };
+                    if is_entity {
+                        result.push(b'&');
+                    } else {
+                        result.extend_from_slice(b"&amp;");
+                    }
+                } else {
+                    result.extend_from_slice(b"&amp;");
+                }
+            }
             b'"' if ent_compat || ent_quotes => result.extend_from_slice(b"&quot;"),
             b'\'' if ent_quotes => result.extend_from_slice(b"&#039;"),
             b'<' => result.extend_from_slice(b"&lt;"),
             b'>' => result.extend_from_slice(b"&gt;"),
-            _ => result.push(b),
+            _ => result.push(bytes[i]),
         }
+        i += 1;
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }

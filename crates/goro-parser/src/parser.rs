@@ -4126,20 +4126,95 @@ impl Parser {
             let unpack = self.eat(&TokenKind::Ellipsis);
 
             // Check for named arguments: name: value
-            let name = if let TokenKind::Identifier(ident) = self.peek().clone() {
-                if self
-                    .tokens
-                    .get(self.pos + 1)
-                    .is_some_and(|t| t.kind == TokenKind::Colon)
-                {
-                    self.advance(); // identifier
-                    self.advance(); // colon
-                    Some(ident)
+            // PHP allows reserved keywords as named parameter names
+            let name = {
+                let maybe_name = match self.peek().clone() {
+                    TokenKind::Identifier(ident) => Some(ident),
+                    // Reserved keywords that can be used as named parameter names
+                    TokenKind::Array => Some(b"array".to_vec()),
+                    TokenKind::Callable => Some(b"callable".to_vec()),
+                    TokenKind::Class => Some(b"class".to_vec()),
+                    TokenKind::Static => Some(b"static".to_vec()),
+                    TokenKind::Abstract => Some(b"abstract".to_vec()),
+                    TokenKind::Final => Some(b"final".to_vec()),
+                    TokenKind::Function => Some(b"function".to_vec()),
+                    TokenKind::Fn => Some(b"fn".to_vec()),
+                    TokenKind::Null => Some(b"null".to_vec()),
+                    TokenKind::True => Some(b"true".to_vec()),
+                    TokenKind::False => Some(b"false".to_vec()),
+                    TokenKind::If => Some(b"if".to_vec()),
+                    TokenKind::Else => Some(b"else".to_vec()),
+                    TokenKind::ElseIf => Some(b"elseif".to_vec()),
+                    TokenKind::While => Some(b"while".to_vec()),
+                    TokenKind::For => Some(b"for".to_vec()),
+                    TokenKind::Foreach => Some(b"foreach".to_vec()),
+                    TokenKind::Do => Some(b"do".to_vec()),
+                    TokenKind::Switch => Some(b"switch".to_vec()),
+                    TokenKind::Case => Some(b"case".to_vec()),
+                    TokenKind::Default => Some(b"default".to_vec()),
+                    TokenKind::Break => Some(b"break".to_vec()),
+                    TokenKind::Continue => Some(b"continue".to_vec()),
+                    TokenKind::Return => Some(b"return".to_vec()),
+                    TokenKind::Try => Some(b"try".to_vec()),
+                    TokenKind::Catch => Some(b"catch".to_vec()),
+                    TokenKind::Finally => Some(b"finally".to_vec()),
+                    TokenKind::Throw => Some(b"throw".to_vec()),
+                    TokenKind::Yield => Some(b"yield".to_vec()),
+                    TokenKind::YieldFrom => Some(b"yield".to_vec()),
+                    TokenKind::Match => Some(b"match".to_vec()),
+                    TokenKind::Enum => Some(b"enum".to_vec()),
+                    TokenKind::New => Some(b"new".to_vec()),
+                    TokenKind::Clone => Some(b"clone".to_vec()),
+                    TokenKind::Extends => Some(b"extends".to_vec()),
+                    TokenKind::Implements => Some(b"implements".to_vec()),
+                    TokenKind::Interface => Some(b"interface".to_vec()),
+                    TokenKind::Trait => Some(b"trait".to_vec()),
+                    TokenKind::Namespace => Some(b"namespace".to_vec()),
+                    TokenKind::Use => Some(b"use".to_vec()),
+                    TokenKind::Const => Some(b"const".to_vec()),
+                    TokenKind::Var => Some(b"var".to_vec()),
+                    TokenKind::Public => Some(b"public".to_vec()),
+                    TokenKind::Protected => Some(b"protected".to_vec()),
+                    TokenKind::Private => Some(b"private".to_vec()),
+                    TokenKind::Readonly => Some(b"readonly".to_vec()),
+                    TokenKind::Global => Some(b"global".to_vec()),
+                    TokenKind::Isset => Some(b"isset".to_vec()),
+                    TokenKind::Unset => Some(b"unset".to_vec()),
+                    TokenKind::Empty => Some(b"empty".to_vec()),
+                    TokenKind::Include => Some(b"include".to_vec()),
+                    TokenKind::IncludeOnce => Some(b"include_once".to_vec()),
+                    TokenKind::Require => Some(b"require".to_vec()),
+                    TokenKind::RequireOnce => Some(b"require_once".to_vec()),
+                    TokenKind::Echo => Some(b"echo".to_vec()),
+                    TokenKind::Print => Some(b"print".to_vec()),
+                    TokenKind::Instanceof => Some(b"instanceof".to_vec()),
+                    TokenKind::Insteadof => Some(b"insteadof".to_vec()),
+                    TokenKind::As => Some(b"as".to_vec()),
+                    TokenKind::And => Some(b"and".to_vec()),
+                    TokenKind::Or => Some(b"or".to_vec()),
+                    TokenKind::Xor => Some(b"xor".to_vec()),
+                    TokenKind::Eval => Some(b"eval".to_vec()),
+                    TokenKind::Exit => Some(b"exit".to_vec()),
+                    TokenKind::Goto => Some(b"goto".to_vec()),
+                    TokenKind::List => Some(b"list".to_vec()),
+                    TokenKind::Declare => Some(b"declare".to_vec()),
+                    _ => None,
+                };
+                if let Some(ident) = maybe_name {
+                    if self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == TokenKind::Colon)
+                    {
+                        self.advance(); // identifier/keyword
+                        self.advance(); // colon
+                        Some(ident)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
-            } else {
-                None
             };
 
             let value = self.parse_expression()?;
