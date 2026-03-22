@@ -1333,10 +1333,22 @@ impl Parser {
         loop {
             match self.peek() {
                 TokenKind::Abstract => {
+                    if modifiers.is_abstract {
+                        return Err(ParseError {
+                            message: "Multiple abstract modifiers are not allowed".into(),
+                            span: self.span(),
+                        });
+                    }
                     modifiers.is_abstract = true;
                     self.advance();
                 }
                 TokenKind::Final => {
+                    if modifiers.is_final {
+                        return Err(ParseError {
+                            message: "Multiple final modifiers are not allowed".into(),
+                            span: self.span(),
+                        });
+                    }
                     modifiers.is_final = true;
                     self.advance();
                 }
@@ -1366,7 +1378,11 @@ impl Parser {
                 modifiers.is_trait = true;
                 self.advance();
             }
-            TokenKind::Class | TokenKind::Enum => {
+            TokenKind::Enum => {
+                modifiers.is_enum = true;
+                self.advance();
+            }
+            TokenKind::Class => {
                 self.advance();
             }
             _ => {
@@ -1467,31 +1483,53 @@ impl Parser {
         let mut is_abstract = false;
         let mut is_final = false;
         let mut is_readonly = false;
+        let mut has_visibility = false;
 
         // Parse modifiers
         loop {
             match self.peek() {
-                TokenKind::Public => {
-                    visibility = Visibility::Public;
-                    self.advance();
-                }
-                TokenKind::Protected => {
-                    visibility = Visibility::Protected;
-                    self.advance();
-                }
-                TokenKind::Private => {
-                    visibility = Visibility::Private;
+                TokenKind::Public | TokenKind::Protected | TokenKind::Private => {
+                    if has_visibility {
+                        return Err(ParseError {
+                            message: "Multiple access type modifiers are not allowed".into(),
+                            span: self.span(),
+                        });
+                    }
+                    has_visibility = true;
+                    match self.peek() {
+                        TokenKind::Protected => visibility = Visibility::Protected,
+                        TokenKind::Private => visibility = Visibility::Private,
+                        _ => visibility = Visibility::Public,
+                    }
                     self.advance();
                 }
                 TokenKind::Static => {
+                    if is_static {
+                        return Err(ParseError {
+                            message: "Multiple static modifiers are not allowed".into(),
+                            span: self.span(),
+                        });
+                    }
                     is_static = true;
                     self.advance();
                 }
                 TokenKind::Abstract => {
+                    if is_abstract {
+                        return Err(ParseError {
+                            message: "Multiple abstract modifiers are not allowed".into(),
+                            span: self.span(),
+                        });
+                    }
                     is_abstract = true;
                     self.advance();
                 }
                 TokenKind::Final => {
+                    if is_final {
+                        return Err(ParseError {
+                            message: "Multiple final modifiers are not allowed".into(),
+                            span: self.span(),
+                        });
+                    }
                     is_final = true;
                     self.advance();
                 }
@@ -1894,8 +1932,11 @@ impl Parser {
             let mut types = Vec::new();
             loop {
                 // Parse qualified name: [\]Identifier[\Identifier]*
-                self.eat(&TokenKind::Backslash); // optional leading backslash
+                let is_fqn = self.eat(&TokenKind::Backslash); // optional leading backslash
                 let mut type_name = Vec::new();
+                if is_fqn {
+                    type_name.push(Vec::new()); // empty part marks fully qualified
+                }
                 loop {
                     match self.peek().clone() {
                         TokenKind::Identifier(name) => {

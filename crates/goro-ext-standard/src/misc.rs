@@ -428,6 +428,13 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = name_val.to_php_string();
     let value = args.get(1).cloned().unwrap_or(Value::Null);
     let name_bytes = name.as_bytes().to_vec();
+    // Check if it's a built-in keyword constant (TRUE, FALSE, NULL)
+    let name_upper: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
+    if name_upper == b"TRUE" || name_upper == b"FALSE" || name_upper == b"NULL" {
+        let name_str = name.to_string_lossy();
+        vm.emit_warning(&format!("Constant {} already defined, this will be an error in PHP 9", name_str));
+        return Ok(Value::False);
+    }
     // Check if constant is already defined
     if vm.constants.contains_key(&name_bytes) {
         let name_str = name.to_string_lossy();
@@ -451,7 +458,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Ok(val.clone());
             }
         }
-        let msg = format!("Undefined constant \"{}\"", name_str);
+        let msg = format!("Undefined constant {}", name_str);
         let exc = vm.create_exception(b"Error", &msg, 0);
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: 0 });
@@ -459,7 +466,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(val) = vm.constants.get(name.as_bytes()) {
         return Ok(val.clone());
     }
-    let msg = format!("Undefined constant \"{}\"", name_str);
+    let msg = format!("Undefined constant {}", name_str);
     let exc = vm.create_exception(b"Error", &msg, 0);
     vm.current_exception = Some(exc);
     Err(VmError { message: msg, line: 0 })

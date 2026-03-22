@@ -450,6 +450,7 @@ pub struct ClassModifiers {
     pub is_readonly: bool,
     pub is_interface: bool,
     pub is_trait: bool,
+    pub is_enum: bool,
 }
 
 #[derive(Debug, Clone)]

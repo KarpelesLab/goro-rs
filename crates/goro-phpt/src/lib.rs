@@ -393,7 +393,8 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
                 || err_msg.contains("must be")
                 || err_msg.contains("previously implemented")
                 || err_msg.contains("already in use")
-                || err_msg.contains("is redundant");
+                || err_msg.contains("is redundant")
+                || err_msg.contains("not allowed");
             let msg = if is_fatal {
                 format!(
                     "\nFatal error: {} in {} on line {}\n",

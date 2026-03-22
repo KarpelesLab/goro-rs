@@ -37,6 +37,7 @@ pub struct ClassEntry {
     pub is_final: bool,
     pub is_interface: bool,
     pub is_trait: bool,
+    pub is_enum: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,7 @@ impl ClassEntry {
             is_final: false,
             is_interface: false,
             is_trait: false,
+            is_enum: false,
         }
     }
 

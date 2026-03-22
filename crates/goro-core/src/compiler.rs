@@ -1560,6 +1560,7 @@ impl Compiler {
                 class.is_final = modifiers.is_final;
                 class.is_interface = modifiers.is_interface;
                 class.is_trait = modifiers.is_trait;
+                class.is_enum = modifiers.is_enum;
 
                 for member in body {
                     match member {
@@ -1705,6 +1706,24 @@ impl Compiler {
                                     line: *method_line,
                                 });
                             }
+                            // Enums cannot include certain magic methods
+                            if modifiers.is_enum {
+                                let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let forbidden_magic = matches!(mn_lower.as_slice(),
+                                    b"__get" | b"__set" | b"__destruct" | b"__clone"
+                                    | b"__sleep" | b"__wakeup" | b"__set_state"
+                                    | b"__unserialize" | b"__serialize"
+                                    | b"__isset" | b"__unset" | b"__debuginfo"
+                                    | b"__construct"
+                                );
+                                if forbidden_magic {
+                                    return Err(CompileError {
+                                        message: format!("Enum {} cannot include magic method {}",
+                                            String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                        line: *method_line,
+                                    });
+                                }
+                            }
                             // Enforce: __construct and __destruct cannot declare return types
                             {
                                 let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -1715,22 +1734,76 @@ impl Compiler {
                                             line: *method_line,
                                         });
                                     }
-                                    // __clone can only declare void return type
-                                    if mn_lower == b"__clone" {
-                                        let is_void = match method_return_type {
-                                            Some(th) => {
-                                                match th {
-                                                    TypeHint::Simple(n) => n.eq_ignore_ascii_case(b"void"),
-                                                    _ => false,
-                                                }
+                                    // Magic method return type restrictions
+                                    if let Some(rt) = method_return_type {
+                                        let class_display = String::from_utf8_lossy(name);
+                                        // Helper: check if a type hint matches a simple type name
+                                        let is_simple_type = |hint: &TypeHint, expected: &[u8]| -> bool {
+                                            match hint {
+                                                TypeHint::Simple(n) => n.eq_ignore_ascii_case(expected),
+                                                _ => false,
                                             }
-                                            None => false,
                                         };
-                                        if !is_void {
-                                            return Err(CompileError {
-                                                message: format!("{}::__clone(): Return type must be void when declared", String::from_utf8_lossy(name)),
-                                                line: *method_line,
-                                            });
+                                        // Helper: check if type is ?array (nullable array)
+                                        let is_nullable_array = |hint: &TypeHint| -> bool {
+                                            match hint {
+                                                TypeHint::Simple(n) => n.eq_ignore_ascii_case(b"array"),
+                                                TypeHint::Nullable(inner) => matches!(inner.as_ref(), TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array")),
+                                                TypeHint::Union(types) => {
+                                                    // array|null or null|array
+                                                    types.len() == 2 && types.iter().any(|t| is_simple_type(t, b"array")) && types.iter().any(|t| is_simple_type(t, b"null"))
+                                                }
+                                                _ => false,
+                                            }
+                                        };
+                                        // __clone, __set, __unset, __unserialize, __wakeup: must be void
+                                        if mn_lower == b"__clone" || mn_lower == b"__set" || mn_lower == b"__unset"
+                                            || mn_lower == b"__unserialize" || mn_lower == b"__wakeup"
+                                        {
+                                            if !is_simple_type(rt, b"void") {
+                                                return Err(CompileError {
+                                                    message: format!("{}::{}(): Return type must be void when declared",
+                                                        class_display, String::from_utf8_lossy(method_name)),
+                                                    line: *method_line,
+                                                });
+                                            }
+                                        }
+                                        // __isset: must be bool
+                                        if mn_lower == b"__isset" {
+                                            if !is_simple_type(rt, b"bool") {
+                                                return Err(CompileError {
+                                                    message: format!("{}::__isset(): Return type must be bool when declared", class_display),
+                                                    line: *method_line,
+                                                });
+                                            }
+                                        }
+                                        // __toString: must be string
+                                        if mn_lower == b"__tostring" {
+                                            if !is_simple_type(rt, b"string") {
+                                                return Err(CompileError {
+                                                    message: format!("{}::__toString(): Return type must be string when declared", class_display),
+                                                    line: *method_line,
+                                                });
+                                            }
+                                        }
+                                        // __debugInfo: must be ?array (array or null|array or ?array)
+                                        if mn_lower == b"__debuginfo" {
+                                            if !is_nullable_array(rt) {
+                                                return Err(CompileError {
+                                                    message: format!("{}::__debugInfo(): Return type must be ?array when declared", class_display),
+                                                    line: *method_line,
+                                                });
+                                            }
+                                        }
+                                        // __serialize, __sleep: must be array
+                                        if mn_lower == b"__serialize" || mn_lower == b"__sleep" {
+                                            if !is_simple_type(rt, b"array") {
+                                                return Err(CompileError {
+                                                    message: format!("{}::{}(): Return type must be array when declared",
+                                                        class_display, String::from_utf8_lossy(method_name)),
+                                                    line: *method_line,
+                                                });
+                                            }
                                         }
                                     }
                                 }

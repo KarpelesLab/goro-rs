@@ -928,6 +928,10 @@ impl Vm {
 
     /// Get a human-readable name for a ParamType
     fn param_type_name(&self, pt: &ParamType) -> String {
+        self.param_type_name_inner(pt, false)
+    }
+
+    fn param_type_name_inner(&self, pt: &ParamType, in_union: bool) -> String {
         match pt {
             ParamType::Simple(name) => {
                 match name.as_slice() {
@@ -967,17 +971,24 @@ impl Vm {
                 }
                 String::from_utf8_lossy(name).to_string()
             }
-            ParamType::Nullable(inner) => format!("?{}", self.param_type_name(inner)),
+            ParamType::Nullable(inner) => format!("?{}", self.param_type_name_inner(inner, false)),
             ParamType::Union(types) => types
                 .iter()
-                .map(|t| self.param_type_name(t))
+                .map(|t| self.param_type_name_inner(t, true))
                 .collect::<Vec<_>>()
                 .join("|"),
-            ParamType::Intersection(types) => types
-                .iter()
-                .map(|t| self.param_type_name(t))
-                .collect::<Vec<_>>()
-                .join("&"),
+            ParamType::Intersection(types) => {
+                let s = types
+                    .iter()
+                    .map(|t| self.param_type_name_inner(t, false))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                if in_union {
+                    format!("({})", s)
+                } else {
+                    s
+                }
+            }
         }
     }
 
@@ -5080,7 +5091,7 @@ impl Vm {
                                     .unwrap_or(Value::Null)
                             })
                     } else {
-                        // Emit "Cannot use X as array" warning for non-array types
+                        // Emit warning for non-array types
                         let type_name = match &arr_val {
                             Value::True | Value::False => "bool",
                             Value::Long(_) => "int",
