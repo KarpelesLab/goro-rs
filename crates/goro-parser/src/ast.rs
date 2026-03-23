@@ -92,6 +92,8 @@ pub enum StmtKind {
         extends: Option<Vec<u8>>,
         implements: Vec<Vec<u8>>,
         body: Vec<ClassMember>,
+        /// For enums: the backing type (e.g. b"string", b"int"), None for unit enums
+        enum_backing_type: Option<Vec<u8>>,
     },
 
     /// try { ... } catch (E $e) { ... } finally { ... }

@@ -39,6 +39,11 @@ pub struct ClassEntry {
     pub is_interface: bool,
     pub is_trait: bool,
     pub is_enum: bool,
+    /// For enums: the backing type (b"string" or b"int"), None for unit enums
+    pub enum_backing_type: Option<Vec<u8>>,
+    /// For enums: list of (case_name, backing_value) pairs
+    /// backing_value is Value::Null for unit enums
+    pub enum_cases: Vec<(Vec<u8>, Value)>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +95,8 @@ impl ClassEntry {
             is_interface: false,
             is_trait: false,
             is_enum: false,
+            enum_backing_type: None,
+            enum_cases: Vec::new(),
         }
     }
 

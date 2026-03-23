@@ -1618,6 +1618,7 @@ impl Compiler {
                 extends,
                 implements,
                 body,
+                enum_backing_type,
             } => {
                 // Prefix class name with namespace
                 let qualified_name = self.prefix_with_namespace(name);
@@ -1656,6 +1657,18 @@ impl Compiler {
                 class.is_interface = modifiers.is_interface;
                 class.is_trait = modifiers.is_trait;
                 class.is_enum = modifiers.is_enum;
+                class.enum_backing_type = enum_backing_type.clone();
+
+                // Validate enum backing type
+                if let Some(bt) = &enum_backing_type {
+                    if !bt.eq_ignore_ascii_case(b"int") && !bt.eq_ignore_ascii_case(b"string") {
+                        return Err(CompileError {
+                            message: format!("Enum backing type must be int or string, {} given",
+                                String::from_utf8_lossy(bt)),
+                            line: stmt.span.line,
+                        });
+                    }
+                }
 
                 for member in body {
                     match member {
@@ -1667,6 +1680,14 @@ impl Compiler {
                             is_static,
                             is_readonly,
                         } => {
+                            // Enums cannot include properties
+                            if modifiers.is_enum {
+                                return Err(CompileError {
+                                    message: format!("Enum {} cannot include properties",
+                                        String::from_utf8_lossy(name)),
+                                    line: stmt.span.line,
+                                });
+                            }
                             // Readonly property validations
                             let prop_is_readonly = *is_readonly || modifiers.is_readonly;
                             if prop_is_readonly {
@@ -1836,6 +1857,14 @@ impl Compiler {
                                     line: *method_line,
                                 });
                             }
+                            // Enums cannot have abstract methods
+                            if modifiers.is_enum && *is_abstract {
+                                return Err(CompileError {
+                                    message: format!("Enum method {}::{}() must not be abstract",
+                                        String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                    line: *method_line,
+                                });
+                            }
                             // Enums cannot include certain magic methods
                             if modifiers.is_enum {
                                 let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -1844,11 +1873,24 @@ impl Compiler {
                                     | b"__sleep" | b"__wakeup" | b"__set_state"
                                     | b"__unserialize" | b"__serialize"
                                     | b"__isset" | b"__unset" | b"__debuginfo"
-                                    | b"__construct"
+                                    | b"__construct" | b"__tostring"
                                 );
                                 if forbidden_magic {
                                     return Err(CompileError {
                                         message: format!("Enum {} cannot include magic method {}",
+                                            String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                        line: *method_line,
+                                    });
+                                }
+                                // Backed enums cannot redeclare from/tryFrom, any enum cannot redeclare cases
+                                let is_reserved_enum_method = if enum_backing_type.is_some() {
+                                    matches!(mn_lower.as_slice(), b"from" | b"tryfrom" | b"cases")
+                                } else {
+                                    matches!(mn_lower.as_slice(), b"cases")
+                                };
+                                if is_reserved_enum_method {
+                                    return Err(CompileError {
+                                        message: format!("Cannot redeclare {}::{}()",
                                             String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
                                         line: *method_line,
                                     });
@@ -2266,17 +2308,61 @@ impl Compiler {
                             };
                             class.constants.insert(const_name.clone(), val);
                         }
-                        ClassMember::EnumCase { name, value } => {
-                            // Enum cases are stored as class constants
-                            // For unit enums, the value is the case name as a string
-                            // For backed enums, the value is the backing value
-                            let case_value = if let Some(val_expr) = value {
+                        ClassMember::EnumCase { name: case_name, value } => {
+                            // 'case' can only be used in enums
+                            if !modifiers.is_enum {
+                                return Err(CompileError {
+                                    message: format!("Case can only be used in enums"),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            // Backed enum cases must have values, unit enum cases must not
+                            if enum_backing_type.is_some() && value.is_none() {
+                                return Err(CompileError {
+                                    message: format!("Case {} of backed enum {} must have a value",
+                                        String::from_utf8_lossy(case_name), String::from_utf8_lossy(name)),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            // Enum cases: store the backing value for backed enums
+                            let backing_value = if let Some(val_expr) = value {
                                 Self::eval_const_expr(&val_expr)
-                                    .unwrap_or_else(|| Value::String(crate::string::PhpString::from_vec(name.clone())))
+                                    .unwrap_or(Value::Null)
                             } else {
-                                Value::String(crate::string::PhpString::from_vec(name.clone()))
+                                Value::Null
                             };
-                            class.constants.insert(name.clone(), case_value);
+                            // Check for duplicate backing values
+                            if enum_backing_type.is_some() {
+                                for (existing_name, existing_val) in &class.enum_cases {
+                                    if existing_val.identical(&backing_value) {
+                                        return Err(CompileError {
+                                            message: format!("Duplicate value in enum {} for cases {} and {}",
+                                                String::from_utf8_lossy(name),
+                                                String::from_utf8_lossy(existing_name),
+                                                String::from_utf8_lossy(case_name)),
+                                            line: stmt.span.line,
+                                        });
+                                    }
+                                }
+                            }
+                            // Validate backing type matches
+                            if let Some(bt) = &enum_backing_type {
+                                if bt.eq_ignore_ascii_case(b"int") && !matches!(backing_value, Value::Long(_) | Value::Null) {
+                                    // Type mismatch: string value for int-backed enum
+                                    // (Null means unit enum case, which is already handled above)
+                                }
+                                if bt.eq_ignore_ascii_case(b"string") && !matches!(backing_value, Value::String(_) | Value::Null) {
+                                    // Type mismatch: int value for string-backed enum
+                                }
+                            }
+                            // Store in enum_cases list for runtime enum object creation
+                            class.enum_cases.push((case_name.clone(), backing_value.clone()));
+                            // Store a special marker constant "__enum_case__::CaseName"
+                            // The VM will detect this and create/return enum case objects
+                            let marker = Value::String(crate::string::PhpString::from_vec(
+                                [b"__enum_case__::" as &[u8], case_name.as_slice()].concat()
+                            ));
+                            class.constants.insert(case_name.clone(), marker);
                         }
                         ClassMember::TraitUse { traits, adaptations } => {
                             // Interfaces cannot use traits

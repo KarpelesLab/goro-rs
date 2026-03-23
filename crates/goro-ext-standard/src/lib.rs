@@ -232,6 +232,7 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"function_exists", b"function");
     params!(b"class_exists", b"class", b"autoload");
     params!(b"interface_exists", b"interface", b"autoload");
+    params!(b"enum_exists", b"enum", b"autoload");
     params!(b"get_class", b"object");
     params!(b"get_parent_class", b"object_or_class");
     params!(b"property_exists", b"object_or_class", b"property");

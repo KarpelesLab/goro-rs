@@ -78,6 +78,14 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
         }
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
+            // Check if this is an enum case object
+            if obj_borrow.has_property(b"__enum_case") {
+                let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+                let case_name = obj_borrow.get_property(b"name");
+                let case_name_str = case_name.to_php_string().to_string_lossy();
+                vm.write_output(format!("{}enum({}::{})\n", prefix, class_name, case_name_str).as_bytes());
+                return;
+            }
             let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
             let class_lower: Vec<u8> = obj_borrow
                 .class_name
@@ -327,6 +335,34 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
         }
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
+            // Check if this is an enum case object
+            if obj_borrow.has_property(b"__enum_case") {
+                let class_name = String::from_utf8_lossy(&obj_borrow.class_name).into_owned();
+                let prefix = " ".repeat(indent);
+                // Determine backing type from stored property
+                let has_backing = obj_borrow.has_property(b"__enum_backing_type");
+                let header = if has_backing {
+                    let bt = obj_borrow.get_property(b"__enum_backing_type");
+                    let bt_str = bt.to_php_string().to_string_lossy();
+                    format!("{} Enum:{}\n", class_name, bt_str)
+                } else {
+                    format!("{} Enum\n", class_name)
+                };
+                buf.extend_from_slice(header.as_bytes());
+                buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
+                let case_name = obj_borrow.get_property(b"name");
+                buf.extend_from_slice(format!("{}    [name] => ", prefix).as_bytes());
+                print_r_value(&case_name, buf, indent + 8);
+                buf.push(b'\n');
+                if has_backing {
+                    let case_value = obj_borrow.get_property(b"value");
+                    buf.extend_from_slice(format!("{}    [value] => ", prefix).as_bytes());
+                    print_r_value(&case_value, buf, indent + 8);
+                    buf.push(b'\n');
+                }
+                buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+                return;
+            }
             let class_name = String::from_utf8_lossy(&obj_borrow.class_name).into_owned();
             let class_lower: Vec<u8> = obj_borrow
                 .class_name
@@ -473,6 +509,15 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
         }
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
+            // Check if this is an enum case
+            if obj_borrow.has_property(b"__enum_case") {
+                let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+                let case_name = obj_borrow.get_property(b"name");
+                let case_name_str = case_name.to_php_string().to_string_lossy();
+                let prefix_backslash = if class_name.contains('\\') { "" } else { "\\" };
+                buf.extend_from_slice(format!("{}{}::{}", prefix_backslash, class_name, case_name_str).as_bytes());
+                return;
+            }
             let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
             // PHP prefixes class names with \ in var_export unless they already contain \
             let prefix_backslash = if class_name.contains('\\') { "" } else { "\\" };

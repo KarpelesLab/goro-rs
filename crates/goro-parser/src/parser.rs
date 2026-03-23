@@ -1462,13 +1462,32 @@ impl Parser {
             }
         };
 
-        // For enums: skip `: type` backing type declaration
+        // For enums: capture `: type` backing type declaration
+        let mut enum_backing_type: Option<Vec<u8>> = None;
         if self.eat(&TokenKind::Colon) {
-            // Consume the backing type name (e.g., string, int)
-            match self.peek() {
-                TokenKind::Identifier(_) => { self.advance(); }
-                _ if self.is_semi_reserved_keyword() => { self.advance(); }
-                _ => { self.advance(); } // skip whatever it is
+            // Capture the backing type name (e.g., string, int)
+            let backing = match self.peek() {
+                TokenKind::Identifier(name) => {
+                    let n = name.clone();
+                    self.advance();
+                    n
+                }
+                _ if self.is_semi_reserved_keyword() => {
+                    // Handle keywords used as type names
+                    let name = match self.peek() {
+                        TokenKind::Array => b"array".to_vec(),
+                        _ => b"mixed".to_vec(),
+                    };
+                    self.advance();
+                    name
+                }
+                _ => {
+                    self.advance(); // skip unknown
+                    b"mixed".to_vec()
+                }
+            };
+            if modifiers.is_enum {
+                enum_backing_type = Some(backing);
             }
         }
 
@@ -1516,6 +1535,7 @@ impl Parser {
                 extends,
                 implements,
                 body,
+                enum_backing_type,
             },
             span,
         })
@@ -3598,6 +3618,7 @@ impl Parser {
                                 extends,
                                 implements,
                                 body,
+                                enum_backing_type: None,
                             },
                             span,
                         };

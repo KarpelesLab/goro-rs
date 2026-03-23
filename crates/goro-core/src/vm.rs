@@ -240,6 +240,8 @@ pub struct Vm {
     last_return_line: u32,
     /// Current executing line number (updated during execution for warning/error reporting)
     pub current_line: u32,
+    /// Cached enum case singleton objects: key = "classname_lower::CaseName"
+    pub enum_case_cache: HashMap<Vec<u8>, Value>,
 }
 
 impl Vm {
@@ -274,6 +276,7 @@ impl Vm {
             current_file: "Unknown.php".to_string(),
             last_return_line: 0,
             current_line: 0,
+            enum_case_cache: HashMap::new(),
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -2220,7 +2223,14 @@ impl Vm {
             Value::Array(_) => "Array".to_string(),
             Value::Object(obj) => {
                 let obj_ref = obj.borrow();
-                format!("Object({})", String::from_utf8_lossy(&obj_ref.class_name))
+                if obj_ref.has_property(b"__enum_case") {
+                    let class_name = String::from_utf8_lossy(&obj_ref.class_name);
+                    let case_name = obj_ref.get_property(b"name");
+                    let case_name_str = case_name.to_php_string().to_string_lossy();
+                    format!("{}::{}", class_name, case_name_str)
+                } else {
+                    format!("Object({})", String::from_utf8_lossy(&obj_ref.class_name))
+                }
             }
             Value::Reference(r) => {
                 let inner = r.borrow();
@@ -3183,6 +3193,62 @@ impl Vm {
         id
     }
 
+    /// Get or create a singleton enum case object.
+    /// Returns the cached Value::Object for the given class and case name.
+    pub fn get_enum_case(&mut self, class_lower: &[u8], case_name: &[u8]) -> Option<Value> {
+        // Build cache key: "class_lower::CaseName"
+        let mut cache_key = class_lower.to_vec();
+        cache_key.extend_from_slice(b"::");
+        cache_key.extend_from_slice(case_name);
+
+        // Return cached if exists
+        if let Some(val) = self.enum_case_cache.get(&cache_key) {
+            return Some(val.clone());
+        }
+
+        // Look up the class to get enum info
+        let class = self.classes.get(class_lower)?.clone();
+        if !class.is_enum {
+            return None;
+        }
+
+        // Find the case in enum_cases
+        let case_entry = class.enum_cases.iter().find(|(n, _)| n == case_name)?;
+        let backing_value = case_entry.1.clone();
+
+        // Create the enum case object
+        let obj_id = self.next_object_id;
+        self.next_object_id += 1;
+        let mut obj = PhpObject::new(class.name.clone(), obj_id);
+        // Set the name property
+        obj.set_property(
+            b"name".to_vec(),
+            Value::String(PhpString::from_vec(case_name.to_vec())),
+        );
+        // Set the value property for backed enums
+        if let Some(ref bt) = class.enum_backing_type {
+            obj.set_property(b"value".to_vec(), backing_value);
+            obj.set_property(b"__enum_backing_type".to_vec(),
+                Value::String(PhpString::from_vec(bt.clone())));
+        }
+        // Mark as enum case with a special internal property
+        obj.set_property(b"__enum_case".to_vec(), Value::True);
+
+        let val = Value::Object(Rc::new(RefCell::new(obj)));
+        self.enum_case_cache.insert(cache_key, val.clone());
+        Some(val)
+    }
+
+    /// Check if a Value is an enum case object
+    pub fn is_enum_case(val: &Value) -> bool {
+        if let Value::Object(obj) = val {
+            let obj = obj.borrow();
+            obj.has_property(b"__enum_case")
+        } else {
+            false
+        }
+    }
+
     /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
@@ -3832,9 +3898,10 @@ impl Vm {
                 OpCode::Less => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
-                        if a.compare(&b) < 0 {
+                        if cmp != i64::MIN && cmp < 0 {
                             Value::True
                         } else {
                             Value::False
@@ -3847,9 +3914,10 @@ impl Vm {
                 OpCode::LessEqual => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
-                        if a.compare(&b) <= 0 {
+                        if cmp != i64::MIN && cmp <= 0 {
                             Value::True
                         } else {
                             Value::False
@@ -3862,9 +3930,10 @@ impl Vm {
                 OpCode::Greater => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
-                        if a.compare(&b) > 0 {
+                        if cmp != i64::MIN && cmp > 0 {
                             Value::True
                         } else {
                             Value::False
@@ -3877,9 +3946,10 @@ impl Vm {
                 OpCode::GreaterEqual => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
-                        if a.compare(&b) >= 0 {
+                        if cmp != i64::MIN && cmp >= 0 {
                             Value::True
                         } else {
                             Value::False
@@ -4791,6 +4861,157 @@ impl Vm {
                                 &static_cv_keys,
                             );
                         }
+                    } else if func_name_lower.contains(&b':') && {
+                        // Check if this is an enum static method call (from/tryFrom/cases)
+                        let sep_pos = func_name_lower.iter().position(|&b| b == b':').unwrap_or(0);
+                        if sep_pos > 0 && func_name_lower.get(sep_pos + 1) == Some(&b':') {
+                            let class_part = &func_name_lower[..sep_pos];
+                            let method_part = &func_name_lower[sep_pos + 2..];
+                            self.classes.get(class_part).map(|c| c.is_enum).unwrap_or(false)
+                                && (method_part == b"from" || method_part == b"tryfrom" || method_part == b"cases")
+                        } else {
+                            false
+                        }
+                    } {
+                        // Handle enum static methods: from(), tryFrom(), cases()
+                        let sep_pos = func_name_lower.iter().position(|&b| b == b':').unwrap();
+                        let class_part = func_name_lower[..sep_pos].to_vec();
+                        let method_part = func_name_lower[sep_pos + 2..].to_vec();
+
+                        let result = match method_part.as_slice() {
+                            b"from" => {
+                                let arg = call.args.first().cloned().unwrap_or(Value::Null);
+                                let class = self.classes.get(&class_part).cloned();
+                                if let Some(class) = class {
+                                    if class.enum_backing_type.is_none() {
+                                        // Unit enums don't have from()
+                                        let class_name = String::from_utf8_lossy(&class.name);
+                                        let msg = format!("Cannot use ::from on non-backed enum {}", class_name);
+                                        let exc = self.create_exception(b"Error", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: msg, line: op.line });
+                                    }
+                                    // Type check: for int-backed enums, only int is accepted
+                                    // For string-backed enums, both string and int are accepted
+                                    let bt = class.enum_backing_type.as_ref().unwrap();
+                                    if bt.eq_ignore_ascii_case(b"int") && !matches!(arg, Value::Long(_)) {
+                                        let class_name = String::from_utf8_lossy(&class.name);
+                                        let arg_type = arg.type_name();
+                                        let msg = format!("{}::from(): Argument #1 ($value) must be of type int, {} given",
+                                            class_name, arg_type);
+                                        let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: msg, line: op.line });
+                                    }
+                                    // For string-backed enums, convert arg to string for comparison
+                                    let lookup_arg = if bt.eq_ignore_ascii_case(b"string") && !matches!(arg, Value::String(_)) {
+                                        Value::String(arg.to_php_string())
+                                    } else {
+                                        arg.clone()
+                                    };
+                                    let mut found = None;
+                                    for (case_name, case_val) in &class.enum_cases {
+                                        if case_val.identical(&lookup_arg) {
+                                            found = Some(case_name.clone());
+                                            break;
+                                        }
+                                    }
+                                    if let Some(case_name) = found {
+                                        self.get_enum_case(&class_part, &case_name).unwrap_or(Value::Null)
+                                    } else {
+                                        let class_name = String::from_utf8_lossy(&class.name);
+                                        let arg_str = lookup_arg.to_php_string().to_string_lossy();
+                                        let msg = if bt.eq_ignore_ascii_case(b"string") {
+                                            format!("\"{}\" is not a valid backing value for enum {}", arg_str, class_name)
+                                        } else {
+                                            format!("{} is not a valid backing value for enum {}", arg_str, class_name)
+                                        };
+                                        let exc = self.create_exception(b"ValueError", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: msg, line: op.line });
+                                    }
+                                } else {
+                                    Value::Null
+                                }
+                            }
+                            b"tryfrom" => {
+                                let arg = call.args.first().cloned().unwrap_or(Value::Null);
+                                let class = self.classes.get(&class_part).cloned();
+                                if let Some(class) = class {
+                                    // Type check for int-backed enums
+                                    if let Some(ref bt) = class.enum_backing_type {
+                                        if bt.eq_ignore_ascii_case(b"int") && !matches!(arg, Value::Long(_)) {
+                                            let class_name = String::from_utf8_lossy(&class.name);
+                                            let arg_type = arg.type_name();
+                                            let msg = format!("{}::tryFrom(): Argument #1 ($value) must be of type int, {} given",
+                                                class_name, arg_type);
+                                            let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                            self.current_exception = Some(exc);
+                                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                                ip = catch_target as usize;
+                                                continue;
+                                            }
+                                            return Err(VmError { message: msg, line: op.line });
+                                        }
+                                    }
+                                    // For string-backed enums, convert arg to string
+                                    let lookup_arg = if class.enum_backing_type.as_ref()
+                                        .map(|bt| bt.eq_ignore_ascii_case(b"string"))
+                                        .unwrap_or(false) && !matches!(arg, Value::String(_)) {
+                                        Value::String(arg.to_php_string())
+                                    } else {
+                                        arg.clone()
+                                    };
+                                    let mut found = None;
+                                    for (case_name, case_val) in &class.enum_cases {
+                                        if case_val.identical(&lookup_arg) {
+                                            found = Some(case_name.clone());
+                                            break;
+                                        }
+                                    }
+                                    if let Some(case_name) = found {
+                                        self.get_enum_case(&class_part, &case_name).unwrap_or(Value::Null)
+                                    } else {
+                                        Value::Null
+                                    }
+                                } else {
+                                    Value::Null
+                                }
+                            }
+                            b"cases" => {
+                                let class = self.classes.get(&class_part).cloned();
+                                if let Some(class) = class {
+                                    let mut arr = PhpArray::new();
+                                    for (case_name, _) in &class.enum_cases {
+                                        let case_obj = self.get_enum_case(&class_part, case_name).unwrap_or(Value::Null);
+                                        arr.push(case_obj);
+                                    }
+                                    Value::Array(Rc::new(RefCell::new(arr)))
+                                } else {
+                                    Value::Null
+                                }
+                            }
+                            _ => Value::Null,
+                        };
+                        self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
                     } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
                         // Built-in function - resolve named args if present
                         if !call.named_args.is_empty() {
@@ -6486,6 +6707,18 @@ impl Vm {
                                     break;
                                 }
                             }
+                            // Check for enum interfaces (UnitEnum, BackedEnum)
+                            if !found {
+                                if let Some(class_def) = self.classes.get(&obj_class_lower) {
+                                    if class_def.is_enum {
+                                        if class_lower == b"unitenum" {
+                                            found = true;
+                                        } else if class_lower == b"backedenum" && class_def.enum_backing_type.is_some() {
+                                            found = true;
+                                        }
+                                    }
+                                }
+                            }
                             if found { Value::True } else { Value::False }
                         }
                     } else {
@@ -6644,12 +6877,60 @@ impl Vm {
 
                         let val = if let Some(class) = self.classes.get(&class_lower) {
                             // Check static properties first, then constants
-                            class
+                            let raw_val = class
                                 .static_properties
                                 .get(prop_name.as_bytes())
                                 .cloned()
                                 .or_else(|| class.constants.get(prop_name.as_bytes()).cloned())
-                                .unwrap_or(Value::Null)
+                                .unwrap_or(Value::Null);
+                            // Check if this is an enum case marker
+                            if let Value::String(s) = &raw_val {
+                                if s.as_bytes().starts_with(b"__enum_case__::") {
+                                    // Extract the case name from the marker
+                                    let case_name_bytes = s.as_bytes()[15..].to_vec(); // skip "__enum_case__::"
+                                    // Check for type mismatch before creating the enum case
+                                    let type_error = if let Some(class_def) = self.classes.get(&class_lower) {
+                                        if let Some(ref bt) = class_def.enum_backing_type {
+                                            if let Some((_, case_val)) = class_def.enum_cases.iter().find(|(n, _)| *n == case_name_bytes) {
+                                                let ok = if bt.eq_ignore_ascii_case(b"int") {
+                                                    matches!(case_val, Value::Long(_))
+                                                } else if bt.eq_ignore_ascii_case(b"string") {
+                                                    matches!(case_val, Value::String(_))
+                                                } else {
+                                                    true
+                                                };
+                                                if !ok {
+                                                    Some(format!("Enum case type {} does not match enum backing type {}",
+                                                        case_val.type_name(), String::from_utf8_lossy(bt)))
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(err_msg) = type_error {
+                                        let exc = self.create_exception(b"TypeError", &err_msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: err_msg, line: op.line });
+                                    }
+                                    self.get_enum_case(&class_lower, &case_name_bytes)
+                                        .unwrap_or(raw_val)
+                                } else {
+                                    raw_val
+                                }
+                            } else {
+                                raw_val
+                            }
                         } else {
                             Value::Null
                         };
@@ -6857,6 +7138,19 @@ impl Vm {
                     let cloned = match &val {
                         Value::Object(obj) => {
                             let obj_borrow = obj.borrow();
+                            // Check if this is an enum case (enums are uncloneable)
+                            if obj_borrow.has_property(b"__enum_case") {
+                                let class_name = String::from_utf8_lossy(&obj_borrow.class_name).to_string();
+                                drop(obj_borrow);
+                                let msg = format!("Trying to clone an uncloneable object of class {}", class_name);
+                                let exc_val = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc_val);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: msg, line: op.line });
+                            }
                             let clone_id = self.next_object_id;
                             self.next_object_id += 1;
                             let mut new_obj =
@@ -7281,6 +7575,15 @@ impl Vm {
                                         line: op.line,
                                     });
                                 }
+                                // Check if parent is an enum (enums cannot be extended)
+                                if parent.is_enum {
+                                    let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                    let child_display = String::from_utf8_lossy(&name_val.to_php_string().as_bytes()).to_string();
+                                    return Err(VmError {
+                                        message: format!("Class {} cannot extend enum {}", child_display, parent_display),
+                                        line: op.line,
+                                    });
+                                }
                                 // Inherit methods (child overrides take precedence)
                                 for (method_name, method) in &parent.methods {
                                     // Check if parent method is final and child overrides it
@@ -7591,7 +7894,21 @@ impl Vm {
                                             None
                                         };
                                         if let Some(val) = resolved {
-                                            class.constants.insert(const_name, val);
+                                            // If the resolved value is itself an enum case marker, resolve it
+                                            if let Value::String(s2) = &val {
+                                                if s2.as_bytes().starts_with(b"__enum_case__::") {
+                                                    let case_name = &s2.as_bytes()[15..];
+                                                    if let Some(enum_obj) = self.get_enum_case(&ref_class_lower, case_name) {
+                                                        class.constants.insert(const_name, enum_obj);
+                                                    } else {
+                                                        class.constants.insert(const_name, val);
+                                                    }
+                                                } else {
+                                                    class.constants.insert(const_name, val);
+                                                }
+                                            } else {
+                                                class.constants.insert(const_name, val);
+                                            }
                                         }
                                     }
                                 }
@@ -7678,13 +7995,18 @@ impl Vm {
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
 
-                    // Check for abstract class or interface
+                    // Check for abstract class, interface, or enum
                     if let Some(class) = self.classes.get(&name_lower) {
-                        if class.is_abstract || class.is_interface {
+                        if class.is_abstract || class.is_interface || class.is_enum {
                             // Create an Error object and throw it
                             let err_msg = if class.is_interface {
                                 format!(
                                     "Cannot instantiate interface {}",
+                                    class_name.to_string_lossy()
+                                )
+                            } else if class.is_enum {
+                                format!(
+                                    "Cannot instantiate enum {}",
                                     class_name.to_string_lossy()
                                 )
                             } else {
@@ -8029,6 +8351,20 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
+
+                        // Enums cannot have properties set
+                        if obj.borrow().has_property(b"__enum_case") {
+                            let class_name = String::from_utf8_lossy(&class_name_orig).to_string();
+                            let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                            let msg = format!("Cannot create dynamic property {}::${}", class_name, prop_str);
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: msg, line: op.line });
+                        }
 
                         // Check visibility and readonly before setting the property
                         let mut visibility_error: Option<String> = None;

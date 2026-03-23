@@ -118,6 +118,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"register_shutdown_function", register_shutdown_fn);
     vm.register_function(b"interface_exists", interface_exists_fn);
     vm.register_function(b"trait_exists", trait_exists_fn);
+    vm.register_function(b"enum_exists", enum_exists_fn);
     vm.register_function(b"gc_collect_cycles", gc_collect_fn);
     vm.register_function(b"gc_enabled", gc_enabled_fn);
     vm.register_function(b"gc_disable", gc_disable_fn);
@@ -4234,6 +4235,27 @@ fn trait_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .classes
             .get(&name_lower)
             .map(|c| c.is_trait)
+            .unwrap_or(false)
+        {
+            Value::True
+        } else {
+            Value::False
+        },
+    )
+}
+fn enum_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let raw_bytes = name.as_bytes();
+    let name_bytes = if raw_bytes.starts_with(b"\\") { &raw_bytes[1..] } else { raw_bytes };
+    let name_lower: Vec<u8> = name_bytes
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    Ok(
+        if vm
+            .classes
+            .get(&name_lower)
+            .map(|c| c.is_enum)
             .unwrap_or(false)
         {
             Value::True
