@@ -22,6 +22,7 @@ license = "MIT"
 
 [dependencies]
 goro-core = { path = "crates/goro-core" }
+libc = "0.2"
 goro-parser = { path = "crates/goro-parser" }
 goro-vfs = { path = "crates/goro-vfs" }
 goro-sapi = { path = "crates/goro-sapi" }
