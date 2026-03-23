@@ -744,6 +744,21 @@ impl Compiler {
                 body,
                 ..
             } => {
+                // Check for $this in foreach target variables
+                if self.check_foreach_this_assign(value, stmt.span.line)? {
+                    return Err(CompileError {
+                        message: "Cannot re-assign $this".into(),
+                        line: stmt.span.line,
+                    });
+                }
+                if let Some(k) = key {
+                    if self.check_foreach_this_assign(k, stmt.span.line)? {
+                        return Err(CompileError {
+                            message: "Cannot re-assign $this".into(),
+                            line: stmt.span.line,
+                        });
+                    }
+                }
                 let arr = self.compile_expr(expr)?;
 
                 // Create iterator temp
@@ -1056,6 +1071,24 @@ impl Compiler {
 
                 // Set return type
                 if let Some(hint) = return_type {
+                    // Check for self/parent outside of class scope
+                    if self.current_class.is_none() {
+                        if let TypeHint::Simple(name) = hint {
+                            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if name_lower == b"self" {
+                                return Err(CompileError {
+                                    message: "Cannot use \"self\" when no class scope is active".into(),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            if name_lower == b"parent" {
+                                return Err(CompileError {
+                                    message: "Cannot use \"parent\" when no class scope is active".into(),
+                                    line: stmt.span.line,
+                                });
+                            }
+                        }
+                    }
                     func_compiler.op_array.return_type = Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
                 }
 
@@ -1588,8 +1621,32 @@ impl Compiler {
             } => {
                 // Prefix class name with namespace
                 let qualified_name = self.prefix_with_namespace(name);
+                // Check for reserved class names
+                let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if name_lower == b"self" || name_lower == b"parent" {
+                    let kind = if modifiers.is_interface {
+                        "interface"
+                    } else {
+                        "class"
+                    };
+                    return Err(CompileError {
+                        message: format!("Cannot use \"{}\" as {} name, as it is reserved",
+                            String::from_utf8_lossy(name), kind),
+                        line: stmt.span.line,
+                    });
+                }
                 let mut class = ClassEntry::new(qualified_name.clone());
-                // Resolve parent class name
+                // Resolve parent class name - also check for reserved names
+                if let Some(p) = extends.as_ref() {
+                    let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if p_lower == b"self" || p_lower == b"parent" {
+                        return Err(CompileError {
+                            message: format!("Cannot use \"{}\" as class name, as it is reserved",
+                                String::from_utf8_lossy(p)),
+                            line: stmt.span.line,
+                        });
+                    }
+                }
                 class.parent = extends.as_ref().map(|p| self.resolve_class_name(p));
                 // Resolve interface names
                 class.interfaces = implements.iter().map(|i| self.resolve_class_name(i)).collect();
@@ -1771,6 +1828,14 @@ impl Compiler {
                                     line: *method_line,
                                 });
                             }
+                            // Check: abstract method cannot be private (except in traits, since PHP 8.0)
+                            if *is_abstract && matches!(visibility, goro_parser::ast::Visibility::Private) && !modifiers.is_trait {
+                                return Err(CompileError {
+                                    message: format!("Abstract function {}::{}() cannot be declared private",
+                                        String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                    line: *method_line,
+                                });
+                            }
                             // Enums cannot include certain magic methods
                             if modifiers.is_enum {
                                 let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -1871,6 +1936,54 @@ impl Compiler {
                                             }
                                         }
                                     }
+                                }
+                            }
+                            // Validate magic method argument counts and static modifiers
+                            {
+                                let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let class_display = String::from_utf8_lossy(name);
+                                let method_display = String::from_utf8_lossy(method_name);
+                                // Cannot be static checks
+                                if matches!(mn_lower.as_slice(), b"__construct" | b"__destruct" | b"__clone") {
+                                    if *is_static {
+                                        return Err(CompileError {
+                                            message: format!("Method {}::{}() cannot be static",
+                                                class_display, method_display),
+                                            line: *method_line,
+                                        });
+                                    }
+                                }
+                                // __clone() cannot take arguments
+                                if mn_lower == b"__clone" && !params.is_empty() {
+                                    return Err(CompileError {
+                                        message: format!("Method {}::__clone() cannot take arguments",
+                                            class_display),
+                                        line: *method_line,
+                                    });
+                                }
+                                // __destruct() cannot take arguments
+                                if mn_lower == b"__destruct" && !params.is_empty() {
+                                    return Err(CompileError {
+                                        message: format!("Method {}::__destruct() cannot take arguments",
+                                            class_display),
+                                        line: *method_line,
+                                    });
+                                }
+                                // __isset() must take exactly 1 argument
+                                if mn_lower == b"__isset" && params.len() != 1 {
+                                    return Err(CompileError {
+                                        message: format!("Method {}::__isset() must take exactly 1 argument",
+                                            class_display),
+                                        line: *method_line,
+                                    });
+                                }
+                                // __unset() must take exactly 1 argument
+                                if mn_lower == b"__unset" && params.len() != 1 {
+                                    return Err(CompileError {
+                                        message: format!("Method {}::__unset() must take exactly 1 argument",
+                                            class_display),
+                                        line: *method_line,
+                                    });
                                 }
                             }
                             // Add promoted properties from constructor params
@@ -2058,6 +2171,14 @@ impl Compiler {
                                     },
                                 );
                             } else {
+                                // Non-abstract method without body in a concrete class
+                                if !*is_abstract && !modifiers.is_abstract && !modifiers.is_interface {
+                                    return Err(CompileError {
+                                        message: format!("Non-abstract method {}::{}() must contain body",
+                                            String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                        line: *method_line,
+                                    });
+                                }
                                 // Abstract method or interface method (no body)
                                 let vis = match visibility {
                                     Visibility::Public => ObjVisibility::Public,
@@ -2158,6 +2279,15 @@ impl Compiler {
                             class.constants.insert(name.clone(), case_value);
                         }
                         ClassMember::TraitUse { traits, adaptations } => {
+                            // Interfaces cannot use traits
+                            if modifiers.is_interface {
+                                let trait_list: Vec<String> = traits.iter().map(|t| String::from_utf8_lossy(t).to_string()).collect();
+                                return Err(CompileError {
+                                    message: format!("Cannot use traits inside of interfaces. {} is used in {}",
+                                        trait_list.first().unwrap_or(&String::new()), String::from_utf8_lossy(name)),
+                                    line: stmt.span.line,
+                                });
+                            }
                             for trait_name in traits {
                                 class.traits.push(self.resolve_class_name(trait_name));
                             }
@@ -2566,8 +2696,13 @@ impl Compiler {
                                     .collect()
                             }
                             _ => {
+                                let msg = match &target.kind {
+                                    ExprKind::FunctionCall { .. } => "Can't use function return value in write context",
+                                    ExprKind::MethodCall { .. } => "Can't use method return value in write context",
+                                    _ => "Can't use function return value in write context",
+                                };
                                 return Err(CompileError {
-                                    message: "invalid assignment target".into(),
+                                    message: msg.into(),
                                     line: expr.span.line,
                                 });
                             }
@@ -4984,6 +5119,32 @@ impl Compiler {
     }
 
     /// Evaluate a constant expression at compile time (for property defaults, etc.)
+    /// Check if an expression (foreach value/key target) contains $this assignment
+    fn check_foreach_this_assign(&self, expr: &Expr, _line: u32) -> CompileResult<bool> {
+        match &expr.kind {
+            ExprKind::Variable(name) if name == b"this" => Ok(true),
+            ExprKind::Array(elems) => {
+                for elem in elems {
+                    if self.check_foreach_this_assign(&elem.value, _line)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            ExprKind::FunctionCall { name, args }
+                if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) =>
+            {
+                for arg in args {
+                    if self.check_foreach_this_assign(&arg.value, _line)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn eval_const_expr(expr: &Expr) -> Option<Value> {
         match &expr.kind {
             ExprKind::Int(n) => Some(Value::Long(*n)),

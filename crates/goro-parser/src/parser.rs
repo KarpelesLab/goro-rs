@@ -1195,6 +1195,15 @@ impl Parser {
                 types.push(self.parse_simple_type()?);
             }
             if types.len() > 1 {
+                // Validate: scalar types cannot be part of an intersection
+                for t in &types {
+                    if let Some(err_name) = Self::check_invalid_intersection_type(t) {
+                        return Err(ParseError {
+                            message: format!("Type {} cannot be part of an intersection type", err_name),
+                            span: self.span(),
+                        });
+                    }
+                }
                 return Ok(TypeHint::Intersection(types));
             }
             return Ok(types.into_iter().next().unwrap());
@@ -1215,6 +1224,15 @@ impl Parser {
             self.expect(&TokenKind::CloseParen)?;
             if types.len() == 1 {
                 return Ok(types.into_iter().next().unwrap());
+            }
+            // Validate: scalar types cannot be part of an intersection
+            for t in &types {
+                if let Some(err_name) = Self::check_invalid_intersection_type(t) {
+                    return Err(ParseError {
+                        message: format!("Type {} cannot be part of an intersection type", err_name),
+                        span: self.span(),
+                    });
+                }
             }
             return Ok(TypeHint::Intersection(types));
         }
@@ -1262,6 +1280,28 @@ impl Parser {
             }
         }
         Ok(name)
+    }
+
+    /// Check if a type hint is a scalar/builtin type that cannot be part of an intersection type
+    fn check_invalid_intersection_type(hint: &TypeHint) -> Option<String> {
+        match hint {
+            TypeHint::Simple(name) => {
+                let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                match lower.as_slice() {
+                    b"int" | b"float" | b"string" | b"bool" | b"array" | b"null"
+                    | b"void" | b"never" | b"object" | b"mixed" | b"callable"
+                    | b"false" | b"true" | b"static" | b"iterable" => {
+                        let display = match lower.as_slice() {
+                            b"iterable" => "Traversable|array".to_string(),
+                            _ => String::from_utf8_lossy(name).to_string(),
+                        };
+                        Some(display)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     fn parse_simple_type(&mut self) -> ParseResult<TypeHint> {
@@ -1432,7 +1472,14 @@ impl Parser {
             }
         }
 
-        let extends = if self.eat(&TokenKind::Extends) {
+        let extends = if matches!(self.peek(), TokenKind::Extends) {
+            if modifiers.is_trait {
+                return Err(ParseError {
+                    message: "syntax error, unexpected token \"extends\", expecting \"{\"".into(),
+                    span: self.span(),
+                });
+            }
+            self.advance(); // eat extends
             let first = self.parse_class_name_ref()?;
             Some(first)
         } else {
@@ -1754,7 +1801,18 @@ impl Parser {
                     None
                 };
 
-                let body = if is_abstract || matches!(self.peek(), TokenKind::Semicolon) {
+                let body = if is_abstract {
+                    if matches!(self.peek(), TokenKind::Semicolon) {
+                        self.expect_semicolon()?;
+                        None
+                    } else if matches!(self.peek(), TokenKind::OpenBrace) {
+                        // Abstract method with body - parse it but it will be an error
+                        Some(self.parse_block()?)
+                    } else {
+                        self.expect_semicolon()?;
+                        None
+                    }
+                } else if matches!(self.peek(), TokenKind::Semicolon) {
                     self.expect_semicolon()?;
                     None
                 } else {

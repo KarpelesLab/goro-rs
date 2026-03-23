@@ -403,7 +403,11 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
                 || err_msg.contains("previously implemented")
                 || err_msg.contains("already in use")
                 || err_msg.contains("is redundant")
-                || err_msg.contains("not allowed");
+                || err_msg.contains("not allowed")
+                || err_msg.contains("Can't use")
+                || err_msg.contains("Abstract function")
+                || err_msg.contains("Non-abstract method")
+                || err_msg.contains("cannot be part of an intersection type");
             let msg = if is_fatal {
                 format!(
                     "\nFatal error: {} in {} on line {}\n",

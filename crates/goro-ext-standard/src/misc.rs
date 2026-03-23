@@ -444,8 +444,10 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Check if :: is in the name (not allowed)
     let name_str_check = name.to_string_lossy();
     if name_str_check.contains("::") {
-        vm.emit_warning("define(): Argument #1 ($constant_name) cannot be a class constant");
-        return Ok(Value::False);
+        let msg = "define(): Argument #1 ($constant_name) cannot be a class constant";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: vm.current_line });
     }
     // Check if it's a built-in keyword constant (TRUE, FALSE, NULL)
     let name_upper: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
@@ -471,13 +473,14 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(pos) = name_str.find("::") {
         let class_name = &name_str[..pos];
         let const_name = &name_str[pos+2..];
-        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        let class_name_stripped = class_name.strip_prefix('\\').unwrap_or(class_name);
+        let class_lower: Vec<u8> = class_name_stripped.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
         if let Some(class) = vm.classes.get(&class_lower) {
             if let Some(val) = class.constants.get(const_name.as_bytes()) {
                 return Ok(val.clone());
             }
         }
-        let msg = format!("Undefined constant \"{}\"", name_str);
+        let msg = format!("Undefined constant {}", name_str);
         let line = vm.current_line;
         let exc = vm.create_exception(b"Error", &msg, line);
         vm.current_exception = Some(exc);
@@ -486,7 +489,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(val) = vm.constants.get(name.as_bytes()) {
         return Ok(val.clone());
     }
-    let msg = format!("Undefined constant \"{}\"", name_str);
+    let msg = format!("Undefined constant {}", name_str);
     let line = vm.current_line;
     let exc = vm.create_exception(b"Error", &msg, line);
     vm.current_exception = Some(exc);
@@ -6982,7 +6985,9 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(pos) = name_str.find("::") {
         let class_name = &name_str[..pos];
         let const_name = &name_str[pos+2..];
-        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        // Strip leading backslash from class name
+        let class_name_stripped = class_name.strip_prefix('\\').unwrap_or(class_name);
+        let class_lower: Vec<u8> = class_name_stripped.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
         if let Some(class) = vm.classes.get(&class_lower) {
             if class.constants.contains_key(const_name.as_bytes()) {
                 return Ok(Value::True);

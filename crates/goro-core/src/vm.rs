@@ -2032,6 +2032,139 @@ impl Vm {
 
     /// Get the output buffer contents
     /// Format the current call stack as a PHP-style stack trace string
+    /// Check method signature compatibility between child and parent methods.
+    /// Returns None if compatible, Some(error_message) if not.
+    fn check_method_compatibility(
+        child_class: &[u8],
+        child_method: &crate::object::MethodDef,
+        parent_class: &[u8],
+        parent_method: &crate::object::MethodDef,
+    ) -> Option<String> {
+        let child_op = &child_method.op_array;
+        let parent_op = &parent_method.op_array;
+
+        // Subtract $this from param counts for non-static methods
+        let child_offset: u32 = if child_method.is_static { 0 } else { 1 };
+        let parent_offset: u32 = if parent_method.is_static { 0 } else { 1 };
+        let child_params = child_op.param_count.saturating_sub(child_offset);
+        let parent_params = parent_op.param_count.saturating_sub(parent_offset);
+        let child_required = child_op.required_param_count;
+        let parent_required = parent_op.required_param_count;
+        let child_variadic = child_op.variadic_param.is_some();
+        let parent_variadic = parent_op.variadic_param.is_some();
+
+        // Build parameter signature strings for error messages
+        let format_param_sig = |op: &crate::opcode::OpArray, class_name: &[u8]| -> String {
+            let mut parts = Vec::new();
+            // Determine offset: methods have $this at CV 0, functions don't
+            let cv_offset = if op.scope_class.is_some() { 1usize } else { 0 };
+            let actual_param_count = (op.param_count as usize).saturating_sub(cv_offset);
+            for i in 0..actual_param_count {
+                let cv_idx = i + cv_offset;
+                let param_name = op.cv_names.get(cv_idx)
+                    .map(|n| String::from_utf8_lossy(n).to_string())
+                    .unwrap_or_else(|| format!("arg{}", i));
+
+                let mut part = String::new();
+                // Add type hint if available
+                if let Some(Some(pt)) = op.param_types.get(i) {
+                    let type_str = Self::format_param_type_for_sig(&pt.param_type, class_name);
+                    if !type_str.is_empty() {
+                        part.push_str(&type_str);
+                        part.push(' ');
+                    }
+                }
+
+                // Check if variadic
+                if op.variadic_param == Some(cv_idx as u32) {
+                    part.push_str("...");
+                }
+
+                part.push('$');
+                part.push_str(&param_name.trim_start_matches('$'));
+
+                // Check if has default value (optional)
+                if i as u32 >= op.required_param_count && op.variadic_param != Some(cv_idx as u32) {
+                    part.push_str(" = null");
+                }
+
+                parts.push(part);
+            }
+            parts.join(", ")
+        };
+
+        // Check: child must not have more required parameters than parent
+        // Check: child must accept at least as many parameters as parent
+        let incompatible = if !parent_variadic && !child_variadic {
+            // Neither is variadic
+            child_required > parent_required || child_params < parent_params
+        } else if parent_variadic && !child_variadic {
+            // Parent is variadic but child is not - child must accept at least parent's non-variadic params
+            child_params < (parent_params.saturating_sub(1))
+        } else {
+            // Child is variadic - generally OK as long as required params match
+            child_required > parent_required
+        };
+
+        // Check return type compatibility (basic: if parent has return type, child must also have it)
+        let return_type_incompatible = if let Some(parent_rt) = &parent_op.return_type {
+            if let Some(_child_rt) = &child_op.return_type {
+                // Both have return types - for now, don't check covariance (complex)
+                false
+            } else {
+                // Parent has return type but child doesn't
+                // This is OK in PHP 8.x (it's only a warning in strict mode)
+                false
+            }
+        } else {
+            // Parent has no return type - child can add one
+            false
+        };
+
+        if incompatible || return_type_incompatible {
+            let child_class_str = String::from_utf8_lossy(child_class);
+            let parent_class_str = String::from_utf8_lossy(parent_class);
+            let method_name = String::from_utf8_lossy(&child_method.name);
+            let parent_method_name = String::from_utf8_lossy(&parent_method.name);
+
+            let child_sig = format_param_sig(child_op, child_class);
+            let parent_sig = format_param_sig(parent_op, parent_class);
+
+            // Format return types
+            let child_ret = child_op.return_type.as_ref()
+                .map(|rt| format!(": {}", Self::format_param_type_for_sig(rt, child_class)))
+                .unwrap_or_default();
+            let parent_ret = parent_op.return_type.as_ref()
+                .map(|rt| format!(": {}", Self::format_param_type_for_sig(rt, parent_class)))
+                .unwrap_or_default();
+
+            Some(format!(
+                "Declaration of {}::{}({}){} must be compatible with {}::{}({}){}",
+                child_class_str, method_name, child_sig, child_ret,
+                parent_class_str, parent_method_name, parent_sig, parent_ret,
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Format a ParamType for signature display
+    fn format_param_type_for_sig(pt: &crate::opcode::ParamType, _class_name: &[u8]) -> String {
+        use crate::opcode::ParamType;
+        match pt {
+            ParamType::Simple(name) => String::from_utf8_lossy(name).to_string(),
+            ParamType::Nullable(inner) => format!("?{}", Self::format_param_type_for_sig(inner, _class_name)),
+            ParamType::Union(types) => types.iter()
+                .map(|t| Self::format_param_type_for_sig(t, _class_name))
+                .collect::<Vec<_>>()
+                .join("|"),
+            ParamType::Intersection(types) => types.iter()
+                .map(|t| Self::format_param_type_for_sig(t, _class_name))
+                .collect::<Vec<_>>()
+                .join("&"),
+        }
+    }
+
     pub fn format_stack_trace(&self) -> String {
         let mut lines = Vec::new();
         // The call stack is ordered from outermost to innermost
@@ -5831,7 +5964,7 @@ impl Vm {
                 }
 
                 OpCode::ForeachInit => {
-                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let arr_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, &op_array, op.line);
 
                     if let Value::Generator(gen_rc) = &arr_val {
                         // For generators, advance to the first yield on init
@@ -6688,6 +6821,27 @@ impl Vm {
                                 }
                             }
                             Err(e) => {
+                                // PHP 7+: parse errors in eval throw ParseError exception
+                                let msg = format!("syntax error, unexpected token \"{}\"",
+                                    if e.message.contains("unexpected") {
+                                        e.message.clone()
+                                    } else {
+                                        format!("syntax error in eval()'d code on line {}", e.span.line)
+                                    });
+                                let eval_file = format!("{} : eval()'d code", self.current_file);
+                                let exc = self.create_exception(b"ParseError", &msg, e.span.line);
+                                // Set file and line on the exception
+                                if let Value::Object(ref obj) = exc {
+                                    let mut ob = obj.borrow_mut();
+                                    ob.set_property(b"file".to_vec(), Value::String(PhpString::from_string(eval_file)));
+                                    ob.set_property(b"line".to_vec(), Value::Long(e.span.line as i64));
+                                }
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                // No exception handler - output as parse error
                                 let msg = format!("\nParse error: syntax error in {} : eval()'d code on line {}\n",
                                     self.current_file, e.span.line);
                                 self.output.extend_from_slice(msg.as_bytes());
@@ -7130,7 +7284,7 @@ impl Vm {
                                 // Inherit methods (child overrides take precedence)
                                 for (method_name, method) in &parent.methods {
                                     // Check if parent method is final and child overrides it
-                                    if class.methods.contains_key(method_name) {
+                                    if let Some(child_method) = class.methods.get(method_name) {
                                         if method.is_final {
                                             let parent_display = String::from_utf8_lossy(parent_name).to_string();
                                             let method_display = String::from_utf8_lossy(&method.name).to_string();
@@ -7138,6 +7292,20 @@ impl Vm {
                                                 message: format!("Cannot override final method {}::{}()", parent_display, method_display),
                                                 line: op.line,
                                             });
+                                        }
+                                        // Skip __construct compatibility checks
+                                        let mn_lower = method_name.as_slice();
+                                        if mn_lower != b"__construct" && !method.is_abstract {
+                                            // Check method signature compatibility
+                                            if let Some(err_msg) = Self::check_method_compatibility(
+                                                &class.name, child_method,
+                                                &parent.name, method,
+                                            ) {
+                                                return Err(VmError {
+                                                    message: err_msg,
+                                                    line: op.line,
+                                                });
+                                            }
                                         }
                                     } else {
                                         class.methods.insert(method_name.clone(), method.clone());
