@@ -3,18 +3,6 @@ use std::path::Path;
 use std::process;
 
 fn main() {
-    // Set hard virtual memory limit to prevent OOM kills
-    // PHP scripts have memory_limit (128MB default) but some tests bypass tracking
-    #[cfg(unix)]
-    unsafe {
-        let limit: libc::rlim_t = 4 * 1024 * 1024 * 1024; // 4GB
-        let rlim = libc::rlimit {
-            rlim_cur: limit,
-            rlim_max: limit,
-        };
-        libc::setrlimit(libc::RLIMIT_AS, &rlim);
-    }
-
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {

@@ -314,7 +314,7 @@ fn execute_php_with_timeout_and_filename(
             // Set per-process virtual memory limit as OOM safety net
             #[cfg(unix)]
             unsafe {
-                let limit: libc::rlim_t = 4 * 1024 * 1024 * 1024; // 4GB
+                let limit: libc::rlim_t = 8 * 1024 * 1024 * 1024; // 8GB
                 let rlim = libc::rlimit { rlim_cur: limit, rlim_max: limit };
                 libc::setrlimit(libc::RLIMIT_AS, &rlim);
             }
