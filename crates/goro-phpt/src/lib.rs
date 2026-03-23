@@ -311,15 +311,11 @@ fn execute_php_with_timeout_and_filename(
     let handle = std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024) // 32MB stack
         .spawn(move || {
-            // Set per-process virtual memory limit as OOM safety net
-            #[cfg(unix)]
-            unsafe {
-                let limit: libc::rlim_t = 8 * 1024 * 1024 * 1024; // 8GB
-                let rlim = libc::rlimit { rlim_cur: limit, rlim_max: limit };
-                libc::setrlimit(libc::RLIMIT_AS, &rlim);
-            }
-            // Memory protection is also handled by:
-            // - PhpArray memory_alloc tracking against memory_limit
+            // Memory protection handled by:
+            // - PhpArray memory_alloc tracking against memory_limit (128MB default)
+            // - str_repeat/str_pad 128MB limits
+            // - 5s execution timeout
+            // - call_depth limit (100)
             // - 5s execution timeout
             // - call_depth limit (100)
             // Change to test directory if provided, otherwise use temp dir

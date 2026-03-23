@@ -1,6 +1,11 @@
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+use crate::value::{memory_alloc, memory_free};
+
+/// Threshold for tracking string memory (only track large strings)
+const STRING_TRACK_THRESHOLD: usize = 1024;
+
 /// PHP binary-safe string with cached hash
 #[derive(Clone)]
 pub struct PhpString {
@@ -10,6 +15,15 @@ pub struct PhpString {
 struct PhpStringInner {
     data: Vec<u8>,
     hash: std::cell::Cell<Option<u64>>,
+    tracked_bytes: usize, // bytes tracked in memory_alloc (0 if below threshold)
+}
+
+impl Drop for PhpStringInner {
+    fn drop(&mut self) {
+        if self.tracked_bytes > 0 {
+            memory_free(self.tracked_bytes);
+        }
+    }
 }
 
 impl PhpString {
@@ -18,24 +32,46 @@ impl PhpString {
             inner: Rc::new(PhpStringInner {
                 data: Vec::new(),
                 hash: std::cell::Cell::new(None),
+                tracked_bytes: 0,
             }),
         }
     }
 
     pub fn from_bytes(data: &[u8]) -> Self {
+        let tracked = if data.len() >= STRING_TRACK_THRESHOLD {
+            let bytes = data.len();
+            if !memory_alloc(bytes) {
+                // Over memory limit - return empty string
+                return Self::empty();
+            }
+            bytes
+        } else {
+            0
+        };
         Self {
             inner: Rc::new(PhpStringInner {
                 data: data.to_vec(),
                 hash: std::cell::Cell::new(None),
+                tracked_bytes: tracked,
             }),
         }
     }
 
     pub fn from_vec(data: Vec<u8>) -> Self {
+        let tracked = if data.len() >= STRING_TRACK_THRESHOLD {
+            let bytes = data.len();
+            if !memory_alloc(bytes) {
+                return Self::empty();
+            }
+            bytes
+        } else {
+            0
+        };
         Self {
             inner: Rc::new(PhpStringInner {
                 data,
                 hash: std::cell::Cell::new(None),
+                tracked_bytes: tracked,
             }),
         }
     }
