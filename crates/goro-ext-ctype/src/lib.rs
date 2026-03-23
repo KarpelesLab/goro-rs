@@ -25,7 +25,7 @@ fn ctype_get_bytes(vm: &mut Vm, args: &[Value], func_name: &str) -> Vec<u8> {
         Value::Long(n) => {
             vm.emit_deprecated_at(
                 &format!("{func_name}(): Argument of type int will be interpreted as string in the future"),
-                0,
+                vm.current_line,
             );
             if *n >= -128 && *n <= 255 {
                 let c = if *n < 0 { (*n + 256) as u8 } else { *n as u8 };
@@ -37,7 +37,7 @@ fn ctype_get_bytes(vm: &mut Vm, args: &[Value], func_name: &str) -> Vec<u8> {
         Value::Double(f) => {
             vm.emit_deprecated_at(
                 &format!("{func_name}(): Argument of type float will be interpreted as string in the future"),
-                0,
+                vm.current_line,
             );
             // PHP treats float as (int)$float for ctype functions
             let n = *f as i64;
@@ -51,14 +51,14 @@ fn ctype_get_bytes(vm: &mut Vm, args: &[Value], func_name: &str) -> Vec<u8> {
         Value::Null | Value::Undef => {
             vm.emit_deprecated_at(
                 &format!("{func_name}(): Argument of type null will be interpreted as string in the future"),
-                0,
+                vm.current_line,
             );
             val.to_php_string().as_bytes().to_vec()
         }
         Value::True => {
             vm.emit_deprecated_at(
                 &format!("{func_name}(): Argument of type bool will be interpreted as string in the future"),
-                0,
+                vm.current_line,
             );
             // PHP treats bool as int (1/0) then as ASCII code
             vec![1u8]
@@ -66,7 +66,7 @@ fn ctype_get_bytes(vm: &mut Vm, args: &[Value], func_name: &str) -> Vec<u8> {
         Value::False => {
             vm.emit_deprecated_at(
                 &format!("{func_name}(): Argument of type bool will be interpreted as string in the future"),
-                0,
+                vm.current_line,
             );
             // false = 0 (NUL byte)
             vec![0u8]
@@ -74,7 +74,7 @@ fn ctype_get_bytes(vm: &mut Vm, args: &[Value], func_name: &str) -> Vec<u8> {
         Value::Array(_) => {
             vm.emit_deprecated_at(
                 &format!("{func_name}(): Argument of type array will be interpreted as string in the future"),
-                0,
+                vm.current_line,
             );
             // PHP returns false for array arguments
             vec![]
@@ -83,7 +83,7 @@ fn ctype_get_bytes(vm: &mut Vm, args: &[Value], func_name: &str) -> Vec<u8> {
             let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
             vm.emit_deprecated_at(
                 &format!("{func_name}(): Argument of type {class_name} will be interpreted as string in the future"),
-                0,
+                vm.current_line,
             );
             // PHP returns false for object arguments
             vec![]

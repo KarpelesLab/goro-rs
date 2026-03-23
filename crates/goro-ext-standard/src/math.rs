@@ -137,8 +137,8 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if arr.len() == 0 {
                 // Empty array - throw ValueError
                 let msg = "max(): Argument #1 ($value) must contain at least one element".to_string();
-                vm.emit_warning_at(&msg, 0);
-                return Err(VmError { message: msg, line: 0 });
+                vm.emit_warning_at(&msg, vm.current_line);
+                return Err(VmError { message: msg, line: vm.current_line });
             }
             let mut max_val = Value::Null;
             let mut first = true;
@@ -152,8 +152,8 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             // Single non-array - throw TypeError
             let msg = "max(): Argument #1 ($value) must be of type array, int given".to_string();
-            vm.emit_warning_at(&msg, 0);
-            return Err(VmError { message: msg, line: 0 });
+            vm.emit_warning_at(&msg, vm.current_line);
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     }
 
@@ -179,8 +179,8 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let arr = arr.borrow();
             if arr.len() == 0 {
                 let msg = "min(): Argument #1 ($value) must contain at least one element".to_string();
-                vm.emit_warning_at(&msg, 0);
-                return Err(VmError { message: msg, line: 0 });
+                vm.emit_warning_at(&msg, vm.current_line);
+                return Err(VmError { message: msg, line: vm.current_line });
             }
             let mut min_val = Value::Null;
             let mut first = true;
@@ -193,8 +193,8 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(min_val);
         } else {
             let msg = "min(): Argument #1 ($value) must be of type array, int given".to_string();
-            vm.emit_warning_at(&msg, 0);
-            return Err(VmError { message: msg, line: 0 });
+            vm.emit_warning_at(&msg, vm.current_line);
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     }
 
@@ -225,13 +225,13 @@ fn intdiv(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "Division by zero";
         let exc = vm.create_exception(b"DivisionByZeroError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: 0 });
+        return Err(VmError { message: msg.into(), line: vm.current_line });
     }
     if a == i64::MIN && b == -1 {
         let msg = "Division of PHP_INT_MIN by -1 is not an integer";
         let exc = vm.create_exception(b"ArithmeticError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: 0 });
+        return Err(VmError { message: msg.into(), line: vm.current_line });
     }
     Ok(Value::Long(a / b))
 }
@@ -370,7 +370,7 @@ fn log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "log(): Argument #2 ($base) must be greater than 0";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg.into(), line: 0 })
+            Err(VmError { message: msg.into(), line: vm.current_line })
         }
         Some(b) if b == 1.0 => {
             // Division by zero in log would return NaN/Inf, but PHP throws ValueError
@@ -431,7 +431,7 @@ fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     if to_base < 2 || to_base > 36 {
         let msg = "base_convert(): Argument #3 ($to_base) must be between 2 and 36 (inclusive)".to_string();
@@ -440,7 +440,7 @@ fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let input = num_str.to_string_lossy().to_lowercase();
     // Strip invalid characters for the given base, emit deprecation if any were removed
@@ -459,7 +459,7 @@ fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     if had_invalid {
-        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", 0);
+        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", vm.current_line);
     }
     if cleaned.is_empty() {
         return Ok(Value::String(goro_core::string::PhpString::from_string("0".to_string())));
@@ -565,7 +565,7 @@ fn parse_base_string_strip(vm: &mut Vm, s: &str, base: u32) -> Value {
         }
     }
     if had_invalid {
-        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", 0);
+        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", vm.current_line);
     }
     if cleaned.is_empty() {
         return Value::Long(0);

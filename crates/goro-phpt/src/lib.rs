@@ -425,7 +425,8 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
     };
 
     // Compile
-    let compiler = Compiler::new();
+    let mut compiler = Compiler::new();
+    compiler.source_file = filename.as_bytes().to_vec();
     let (op_array, compiled_classes) = match compiler.compile(&program) {
         Ok(r) => r,
         Err(e) => {

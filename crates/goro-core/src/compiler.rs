@@ -59,6 +59,8 @@ pub struct Compiler {
     label_offsets: HashMap<Vec<u8>, u32>,
     /// Pending gotos for forward references: maps label name -> list of jmp instruction offsets
     pending_gotos: HashMap<Vec<u8>, Vec<u32>>,
+    /// Source file path (for __FILE__, __DIR__)
+    pub source_file: Vec<u8>,
 }
 
 impl Default for Compiler {
@@ -114,6 +116,7 @@ impl Compiler {
             use_const_map: HashMap::new(),
             label_offsets: HashMap::new(),
             pending_gotos: HashMap::new(),
+            source_file: Vec::new(),
         }
     }
 
@@ -1048,6 +1051,8 @@ impl Compiler {
                 func_compiler.use_const_map = self.use_const_map.clone();
                 func_compiler.op_array.name = qualified_name.clone();
                 func_compiler.op_array.is_generator = is_generator;
+                func_compiler.op_array.decl_line = stmt.span.line;
+                func_compiler.source_file = self.source_file.clone();
 
                 // Set return type
                 if let Some(hint) = return_type {
@@ -1911,6 +1916,8 @@ impl Compiler {
                                 method_compiler.use_const_map = self.use_const_map.clone();
                                 method_compiler.op_array.name = method_name.clone();
                                 method_compiler.op_array.is_generator = method_is_generator;
+                                method_compiler.op_array.decl_line = *method_line;
+                                method_compiler.source_file = self.source_file.clone();
                                 if let Some(hint) = method_return_type {
                                     method_compiler.op_array.return_type =
                                         Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
@@ -3481,8 +3488,29 @@ impl Compiler {
                 let val = match lower.as_slice() {
                     // Magic constants
                     b"__line__" => Value::Long(expr.span.line as i64),
-                    b"__file__" => Value::String(PhpString::from_bytes(b"unknown")),
-                    b"__dir__" => Value::String(PhpString::from_bytes(b".")),
+                    b"__file__" => {
+                        if self.source_file.is_empty() {
+                            Value::String(PhpString::from_bytes(b"unknown"))
+                        } else {
+                            Value::String(PhpString::from_vec(self.source_file.clone()))
+                        }
+                    }
+                    b"__dir__" => {
+                        if self.source_file.is_empty() {
+                            Value::String(PhpString::from_bytes(b"."))
+                        } else {
+                            // Extract directory from file path
+                            let path = String::from_utf8_lossy(&self.source_file);
+                            let dir = if let Some(pos) = path.rfind('/') {
+                                &path[..pos]
+                            } else if let Some(pos) = path.rfind('\\') {
+                                &path[..pos]
+                            } else {
+                                "."
+                            };
+                            Value::String(PhpString::from_string(dir.to_string()))
+                        }
+                    }
                     b"__function__" => {
                         let name = self.op_array.name.clone();
                         Value::String(PhpString::from_vec(name))
@@ -3500,6 +3528,9 @@ impl Compiler {
                             method.extend_from_slice(b"::");
                             method.extend_from_slice(&self.op_array.name);
                             Value::String(PhpString::from_vec(method))
+                        } else if self.op_array.name.is_empty() || self.op_array.name == b"main" {
+                            // __METHOD__ outside of a method returns ""
+                            Value::String(PhpString::empty())
                         } else {
                             Value::String(PhpString::from_vec(self.op_array.name.clone()))
                         }
@@ -3934,6 +3965,8 @@ impl Compiler {
                 closure_compiler.op_array.name = closure_name.clone();
                 closure_compiler.op_array.is_generator = is_generator;
                 closure_compiler.op_array.is_static_closure = *is_static;
+                closure_compiler.op_array.decl_line = expr.span.line;
+                closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
@@ -4139,6 +4172,8 @@ impl Compiler {
 
                 let mut closure_compiler = Compiler::new();
                 closure_compiler.op_array.name = closure_name.clone();
+                closure_compiler.op_array.decl_line = expr.span.line;
+                closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
                 // Inherit scope_class from the enclosing function for visibility checks

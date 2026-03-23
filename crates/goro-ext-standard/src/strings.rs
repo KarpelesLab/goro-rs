@@ -305,11 +305,16 @@ fn strpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Long(offset as i64));
     }
 
-    if offset >= h.len() {
+    if offset >= h.len() || n.len() > h.len() {
         return Ok(Value::False);
     }
 
-    for i in offset..=(h.len().saturating_sub(n.len())) {
+    let end = h.len() - n.len();
+    if offset > end {
+        return Ok(Value::False);
+    }
+
+    for i in offset..=end {
         if &h[i..i + n.len()] == n {
             return Ok(Value::Long(i as i64));
         }
@@ -372,7 +377,7 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let total_len = s.len().saturating_mul(times as usize);
     if total_len > 128 * 1024 * 1024 {
@@ -942,7 +947,7 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let chunklen = chunklen as usize;
 
@@ -1571,7 +1576,7 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 obj.borrow_mut().class_name = b"ValueError".to_vec();
             }
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     }
 
@@ -1941,7 +1946,7 @@ fn count_chars(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
     let mut counts = [0i64; 256];
@@ -2115,7 +2120,7 @@ fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let len = len_raw as usize;
     let a_bytes = a.as_bytes();
@@ -2163,7 +2168,7 @@ fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let len = len_raw as usize;
     let a_bytes = a.as_bytes();
@@ -2352,7 +2357,7 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "substr_count(): Argument #2 ($needle) must not be empty";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: 0 });
+        return Err(VmError { message: msg.into(), line: vm.current_line });
     }
     let h_bytes = haystack.as_bytes();
     let h_len = h_bytes.len() as i64;
@@ -2365,7 +2370,7 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: 0 });
+            return Err(VmError { message: msg.into(), line: vm.current_line });
         }
         s as usize
     } else {
@@ -2373,7 +2378,7 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: 0 });
+            return Err(VmError { message: msg.into(), line: vm.current_line });
         }
         raw_offset as usize
     };
@@ -2387,7 +2392,7 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     let msg = "substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)";
                     let exc = vm.create_exception(b"ValueError", msg, 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg.into(), line: 0 });
+                    return Err(VmError { message: msg.into(), line: vm.current_line });
                 }
                 e as usize
             } else {
@@ -2396,7 +2401,7 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     let msg = "substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)";
                     let exc = vm.create_exception(b"ValueError", msg, 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg.into(), line: 0 });
+                    return Err(VmError { message: msg.into(), line: vm.current_line });
                 }
                 e
             }
@@ -2525,7 +2530,7 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
     if bytes.is_empty() {

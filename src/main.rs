@@ -84,7 +84,8 @@ fn run_code(source: &[u8], filename: &str) {
     };
 
     // Compile
-    let compiler = Compiler::new();
+    let mut compiler = Compiler::new();
+    compiler.source_file = filename.as_bytes().to_vec();
     let (op_array, compiled_classes) = match compiler.compile(&program) {
         Ok(result) => result,
         Err(e) => {

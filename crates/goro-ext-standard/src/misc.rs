@@ -434,7 +434,7 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = format!("define(): Argument #1 ($constant_name) must be of type string, {} given", type_name);
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError { message: msg, line: vm.current_line });
         }
         _ => {}
     }
@@ -477,18 +477,20 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Ok(val.clone());
             }
         }
-        let msg = format!("Undefined constant {}", name_str);
-        let exc = vm.create_exception(b"Error", &msg, 0);
+        let msg = format!("Undefined constant \"{}\"", name_str);
+        let line = vm.current_line;
+        let exc = vm.create_exception(b"Error", &msg, line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line });
     }
     if let Some(val) = vm.constants.get(name.as_bytes()) {
         return Ok(val.clone());
     }
-    let msg = format!("Undefined constant {}", name_str);
-    let exc = vm.create_exception(b"Error", &msg, 0);
+    let msg = format!("Undefined constant \"{}\"", name_str);
+    let line = vm.current_line;
+    let exc = vm.create_exception(b"Error", &msg, line);
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg, line: 0 })
+    Err(VmError { message: msg, line })
 }
 
 // === Output buffering ===
@@ -1594,7 +1596,7 @@ fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let mut result = PhpArray::new();
     let keys_vec: Vec<_> = keys.values().cloned().collect();
@@ -1630,7 +1632,7 @@ fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 obj.borrow_mut().class_name = b"ValueError".to_vec();
             }
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError { message: msg, line: vm.current_line });
         }
         let size = size as usize;
         let preserve_keys = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
@@ -1710,7 +1712,7 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     if num > 10_000_000 {
         let msg = "array_fill(): Argument #2 ($count) is too large".to_string();
@@ -1719,7 +1721,7 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let val = args.get(2).cloned().unwrap_or(Value::Null);
     let mut result = PhpArray::new();
@@ -1808,7 +1810,7 @@ fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = format!("array_diff(): Argument #{} must be of type array, {} given", i + 1, type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     }
     if args.len() < 2 {
@@ -2433,23 +2435,38 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn get_class(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
-    match val.deref() {
+    let derefed = val.deref();
+    match &derefed {
         Value::Object(obj) => {
             let obj_ref = obj.borrow();
             Ok(Value::String(PhpString::from_vec(obj_ref.class_name.clone())))
         }
+        Value::Generator(_) => {
+            Ok(Value::String(PhpString::from_bytes(b"Generator")))
+        }
+        Value::String(s) => {
+            let b = s.as_bytes();
+            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                Ok(Value::String(PhpString::from_bytes(b"Closure")))
+            } else {
+                let type_name = Vm::value_type_name(val);
+                let msg = format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name);
+                let line = vm.current_line;
+                let exc = vm.create_exception(b"TypeError", &msg, line);
+                vm.current_exception = Some(exc);
+                Err(VmError { message: msg, line })
+            }
+        }
         Value::Null | Value::Undef => {
-            // No argument: try to get class from current scope
-            // Return false if not in a class context
             Ok(Value::False)
         }
         _ => {
-            // PHP 8: throw TypeError for non-objects
             let type_name = Vm::value_type_name(val);
             let msg = format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name);
-            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: 0 })
+            Err(VmError { message: msg, line })
         }
     }
 }
@@ -2590,8 +2607,29 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(if has_builtin_method { Value::True } else { Value::False })
 }
 fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(match args.first() {
-        Some(Value::Object(_)) | Some(Value::Generator(_)) => Value::True,
+    let val = args.first().unwrap_or(&Value::Null);
+    Ok(match val {
+        Value::Object(_) | Value::Generator(_) => Value::True,
+        Value::String(s) => {
+            let b = s.as_bytes();
+            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            if let Some(first) = arr.values().next() {
+                if let Value::String(s) = first {
+                    let b = s.as_bytes();
+                    if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                        return Ok(Value::True);
+                    }
+                }
+            }
+            Value::False
+        }
         _ => Value::False,
     })
 }
@@ -4050,7 +4088,7 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let levels = levels_raw as usize;
     let mut result = s.to_string();
@@ -4238,11 +4276,30 @@ fn get_object_vars_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Object(obj)) = args.first() {
+    let val = args.first().unwrap_or(&Value::Null);
+    if let Value::Object(obj) = val {
         let obj = obj.borrow();
         Ok(Value::String(PhpString::from_vec(obj.class_name.clone())))
-    } else if let Some(Value::Generator(_)) = args.first() {
+    } else if let Value::Generator(_) = val {
         Ok(Value::String(PhpString::from_bytes(b"Generator")))
+    } else if let Value::String(s) = val {
+        let b = s.as_bytes();
+        if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+            Ok(Value::String(PhpString::from_bytes(b"Closure")))
+        } else {
+            Ok(Value::False)
+        }
+    } else if let Value::Array(arr) = val {
+        let arr = arr.borrow();
+        if let Some(first) = arr.values().next() {
+            if let Value::String(s) = first {
+                let b = s.as_bytes();
+                if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                    return Ok(Value::String(PhpString::from_bytes(b"Closure")));
+                }
+            }
+        }
+        Ok(Value::False)
     } else {
         Ok(Value::False)
     }
@@ -4330,7 +4387,7 @@ fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(val) => Ok(val),
         None => {
             let msg = format!("unserialize(): Error at offset 0 of {} bytes", data.len());
-            vm.emit_warning_at(&msg, 0);
+            vm.emit_warning_at(&msg, vm.current_line);
             Ok(Value::False)
         }
     }
@@ -4670,9 +4727,15 @@ fn putenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(eq_pos) = s.find('=') {
         let key = &s[..eq_pos];
         let value = &s[eq_pos + 1..];
+        if key.is_empty() {
+            return Ok(Value::False);
+        }
         unsafe { std::env::set_var(key, value); }
         Ok(Value::True)
     } else {
+        if s.is_empty() {
+            return Ok(Value::False);
+        }
         unsafe { std::env::remove_var(&*s); }
         Ok(Value::True)
     }
@@ -4903,7 +4966,7 @@ fn array_change_key_case_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 let msg = format!("array_change_key_case(): Argument #2 ($case) must be of type int, {} given", type_name);
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: 0 });
+                return Err(VmError { message: msg, line: vm.current_line });
             }
             // For string values, throw TypeError too
             if let Value::String(s) = case_val {
@@ -4911,7 +4974,7 @@ fn array_change_key_case_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                     let msg = "array_change_key_case(): Argument #2 ($case) must be of type int, string given".to_string();
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: 0 });
+                    return Err(VmError { message: msg, line: vm.current_line });
                 }
             }
         }
@@ -5033,7 +5096,7 @@ fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     }
     if args.len() < 2 {
@@ -5073,7 +5136,7 @@ fn array_diff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = format!("array_diff_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     }
     if args.len() < 2 {
@@ -5117,7 +5180,7 @@ fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             let msg = format!("array_intersect_key(): Argument #{} must be of type array, {} given", i + 1, type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     }
     if args.len() < 2 {
@@ -5147,7 +5210,7 @@ fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             let msg = format!("array_intersect_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     }
     if args.len() < 2 {
@@ -5438,7 +5501,7 @@ fn array_is_list_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = format!("array_is_list(): Argument #1 ($array) must be of type array, {} given", type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: 0 })
+            Err(VmError { message: msg, line: vm.current_line })
         }
     }
 }
@@ -7074,11 +7137,11 @@ fn class_uses_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn str_increment_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn str_increment_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
     if bytes.is_empty() {
-        return Err(VmError { message: "str_increment(): Argument #1 ($string) must not be empty".to_string(), line: 0 });
+        return Err(VmError { message: "str_increment(): Argument #1 ($string) must not be empty".to_string(), line: vm.current_line });
     }
     // PHP string increment: like spreadsheet columns
     let mut result: Vec<u8> = bytes.to_vec();
@@ -7093,7 +7156,7 @@ fn str_increment_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'A'..=b'Y' => { result[i] += 1; carry = false; }
             b'0'..=b'8' => { result[i] += 1; carry = false; }
             _ => {
-                return Err(VmError { message: "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters".to_string(), line: 0 });
+                return Err(VmError { message: "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters".to_string(), line: vm.current_line });
             }
         }
     }
@@ -7112,15 +7175,15 @@ fn str_increment_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn str_decrement_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn str_decrement_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
     if bytes.is_empty() {
-        return Err(VmError { message: "str_decrement(): Argument #1 ($string) must not be empty".to_string(), line: 0 });
+        return Err(VmError { message: "str_decrement(): Argument #1 ($string) must not be empty".to_string(), line: vm.current_line });
     }
     // Cannot decrement 'a', 'A', or '0'
     if bytes.len() == 1 && (bytes[0] == b'a' || bytes[0] == b'A' || bytes[0] == b'0') {
-        return Err(VmError { message: "str_decrement(): Argument #1 ($string) \"".to_string() + &String::from_utf8_lossy(bytes) + "\" is out of decrement range", line: 0 });
+        return Err(VmError { message: "str_decrement(): Argument #1 ($string) \"".to_string() + &String::from_utf8_lossy(bytes) + "\" is out of decrement range", line: vm.current_line });
     }
     let mut result: Vec<u8> = bytes.to_vec();
     let mut borrow = true;
@@ -7134,7 +7197,7 @@ fn str_decrement_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'B'..=b'Z' => { result[i] -= 1; borrow = false; }
             b'1'..=b'9' => { result[i] -= 1; borrow = false; }
             _ => {
-                return Err(VmError { message: "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters".to_string(), line: 0 });
+                return Err(VmError { message: "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters".to_string(), line: vm.current_line });
             }
         }
     }

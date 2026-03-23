@@ -324,7 +324,7 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Emit deprecation warning for null argument
     let is_null_arg = matches!(args.first(), Some(Value::Null) | Some(Value::Undef) | None);
     if is_null_arg {
-        vm.emit_deprecated_at("json_decode(): Passing null to parameter #1 ($json) of type string is deprecated", 0);
+        vm.emit_deprecated_at("json_decode(): Passing null to parameter #1 ($json) of type string is deprecated", vm.current_line);
     }
     let json_str = match args.first() {
         Some(v) => v.to_php_string(),

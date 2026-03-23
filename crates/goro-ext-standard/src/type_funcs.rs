@@ -2,6 +2,33 @@ use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
+/// Check if a Value is an internal closure representation (string or array starting with __closure_/__arrow_/__bound_closure_/__closure_fcc_)
+fn is_closure_value(val: &Value) -> bool {
+    match val {
+        Value::String(s) => {
+            let bytes = s.as_bytes();
+            bytes.starts_with(b"__closure_")
+                || bytes.starts_with(b"__arrow_")
+                || bytes.starts_with(b"__bound_closure_")
+                || bytes.starts_with(b"__closure_fcc_")
+        }
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            if let Some(first) = arr.values().next() {
+                if let Value::String(s) = first {
+                    let bytes = s.as_bytes();
+                    return bytes.starts_with(b"__closure_")
+                        || bytes.starts_with(b"__arrow_")
+                        || bytes.starts_with(b"__bound_closure_")
+                        || bytes.starts_with(b"__closure_fcc_");
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"gettype", gettype);
     vm.register_function(b"is_null", is_null);
@@ -38,7 +65,9 @@ fn gettype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::True | Value::False => "boolean",
         Value::Long(_) => "integer",
         Value::Double(_) => "double",
+        Value::String(_) if is_closure_value(val) => "object",
         Value::String(_) => "string",
+        Value::Array(_) if is_closure_value(val) => "object",
         Value::Array(_) => "array",
         Value::Object(_) | Value::Generator(_) => "object",
         Value::Reference(r) => return gettype(_vm, &[r.borrow().clone()]),
@@ -75,8 +104,18 @@ fn is_float(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn is_string(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(match args.first().unwrap_or(&Value::Null) {
+    let val = args.first().unwrap_or(&Value::Null);
+    Ok(match val {
+        Value::String(_) if is_closure_value(val) => Value::False,
         Value::String(_) => Value::True,
+        Value::Reference(r) => {
+            let inner = r.borrow();
+            match &*inner {
+                Value::String(_) if is_closure_value(&inner) => Value::False,
+                Value::String(_) => Value::True,
+                _ => Value::False,
+            }
+        }
         _ => Value::False,
     })
 }
@@ -165,16 +204,75 @@ fn intval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     let base = args.get(1).map(|v| v.to_long()).unwrap_or(10);
 
-    if base != 10
-        && let Value::String(s) = val
-    {
+    if let Value::String(s) = val {
         let s_str = s.to_string_lossy();
         let trimmed = s_str.trim();
-        let result = i64::from_str_radix(trimmed, base as u32).unwrap_or(0);
-        return Ok(Value::Long(result));
+
+        // Handle sign
+        let (sign, trimmed) = if trimmed.starts_with('-') {
+            (-1i64, trimmed[1..].trim_start())
+        } else if trimmed.starts_with('+') {
+            (1i64, trimmed[1..].trim_start())
+        } else {
+            (1i64, trimmed)
+        };
+
+        if base == 0 {
+            // Auto-detect base from prefix
+            let result = if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+                parse_int_str(&trimmed[2..], 16)
+            } else if trimmed.starts_with("0b") || trimmed.starts_with("0B") {
+                parse_int_str(&trimmed[2..], 2)
+            } else if trimmed.starts_with("0o") || trimmed.starts_with("0O") {
+                parse_int_str(&trimmed[2..], 8)
+            } else if trimmed.starts_with('0') && trimmed.len() > 1 {
+                parse_int_str(&trimmed[1..], 8)
+            } else {
+                parse_int_str(trimmed, 10)
+            };
+            return Ok(Value::Long(sign * result));
+        } else if base >= 2 && base <= 36 {
+            // Strip prefix for matching bases
+            let digits = if (base == 16) && (trimmed.starts_with("0x") || trimmed.starts_with("0X")) {
+                &trimmed[2..]
+            } else if (base == 2) && (trimmed.starts_with("0b") || trimmed.starts_with("0B")) {
+                &trimmed[2..]
+            } else if (base == 8) && (trimmed.starts_with("0o") || trimmed.starts_with("0O")) {
+                &trimmed[2..]
+            } else {
+                trimmed
+            };
+            let result = parse_int_str(digits, base as u32);
+            return Ok(Value::Long(sign * result));
+        }
+    }
+
+    if base != 10 {
+        // Non-string with non-10 base: convert to string first
+        let s = val.to_php_string();
+        let trimmed = s.to_string_lossy();
+        let trimmed = trimmed.trim();
+        if base >= 2 && base <= 36 {
+            return Ok(Value::Long(parse_int_str(trimmed, base as u32)));
+        }
     }
 
     Ok(Value::Long(val.to_long()))
+}
+
+/// Parse an integer string in a given radix, stopping at the first invalid character.
+/// Returns 0 for empty/invalid strings.
+fn parse_int_str(s: &str, radix: u32) -> i64 {
+    let mut result: i64 = 0;
+    for c in s.chars() {
+        match c.to_digit(radix) {
+            Some(d) => {
+                result = result.wrapping_mul(radix as i64).wrapping_add(d as i64);
+            }
+            None => break,
+        }
+    }
+    result
 }
 
 fn floatval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -333,12 +431,14 @@ fn count_recursive(val: &Value) -> i64 {
 fn is_scalar(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     Ok(match val {
+        Value::String(_) if is_closure_value(val) => Value::False,
         Value::Long(_) | Value::Double(_) | Value::String(_) | Value::True | Value::False => {
             Value::True
         }
         Value::Reference(r) => {
             let inner = r.borrow();
             match &*inner {
+                Value::String(_) if is_closure_value(&inner) => Value::False,
                 Value::Long(_)
                 | Value::Double(_)
                 | Value::String(_)

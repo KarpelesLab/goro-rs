@@ -238,6 +238,8 @@ pub struct Vm {
     pub current_file: String,
     /// Line number of the last return statement (for return type error messages)
     last_return_line: u32,
+    /// Current executing line number (updated during execution for warning/error reporting)
+    pub current_line: u32,
 }
 
 impl Vm {
@@ -271,6 +273,7 @@ impl Vm {
             pending_named_args: Vec::new(),
             current_file: "Unknown.php".to_string(),
             last_return_line: 0,
+            current_line: 0,
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -1115,19 +1118,14 @@ impl Vm {
     }
 
     pub fn emit_warning(&mut self, msg: &str) {
-        if self.error_reporting & 2 != 0 {
-            // E_WARNING = 2
-            if self.call_user_error_handler(2, msg, 0) {
-                return;
-            }
-            self.emit_warning_raw(msg);
-        }
+        let line = self.current_line;
+        self.emit_warning_at(msg, line);
     }
 
-    /// Emit a raw warning (no user error handler)
+    /// Emit a raw warning (no user error handler, no line tracking)
     pub fn emit_warning_raw(&mut self, msg: &str) {
         if self.error_reporting & 2 != 0 {
-            let warning = format!("\nWarning: {} in {} on line 0\n", msg, self.current_file);
+            let warning = format!("\nWarning: {} in {} on line {}\n", msg, self.current_file, self.current_line);
             self.output.extend_from_slice(warning.as_bytes());
         }
     }
@@ -1289,7 +1287,7 @@ impl Vm {
     /// Create a TypeError exception object and set it as current_exception.
     /// Returns the error message for use in VmError if no exception handler is available.
     pub fn throw_type_error(&mut self, message: String) -> Value {
-        self.create_exception(b"TypeError", &message, 0)
+        self.create_exception(b"TypeError", &message, self.current_line)
     }
 
     pub fn create_exception(&mut self, class_name: &[u8], message: &str, line: u32) -> Value {
@@ -1760,11 +1758,12 @@ impl Vm {
 
         if !call.named_args.is_empty() {
             if let Err(err_msg) = call.resolve_named_args(&op_array.cv_names, implicit_args, op_array.variadic_param) {
-                let exc_val = self.create_exception(b"Error", &err_msg, 0);
+                let line = self.current_line;
+                let exc_val = self.create_exception(b"Error", &err_msg, line);
                 self.current_exception = Some(exc_val);
                 return Err(VmError {
                     message: format!("Uncaught Error: {}", err_msg),
-                    line: 0,
+                    line,
                 });
             }
         }
@@ -3100,7 +3099,7 @@ impl Vm {
             self.call_depth -= 1;
             return Err(VmError {
                 message: "Maximum call depth exceeded (possible infinite recursion)".into(),
-                line: 0,
+                line: self.current_line,
             });
         }
         let result = self.execute_op_array_inner(op_array, cvs);
@@ -3137,8 +3136,14 @@ impl Vm {
                         "{}(): Return value must be of type {}, {} returned",
                         func_name, expected_type, actual_type
                     );
-                    let ret_line = self.last_return_line;
-                    let exc_val = self.throw_type_error(msg.clone());
+                    let ret_line = if self.last_return_line > 0 {
+                        self.last_return_line
+                    } else if op_array.decl_line > 0 {
+                        op_array.decl_line
+                    } else {
+                        self.current_line
+                    };
+                    let exc_val = self.create_exception(b"TypeError", &msg, ret_line);
                     self.current_exception = Some(exc_val);
                     return Err(VmError {
                         message: msg,
@@ -3197,6 +3202,7 @@ impl Vm {
 
             let op = &op_array.ops[ip];
             ip += 1;
+            self.current_line = op.line;
 
             match op.opcode {
                 OpCode::Nop => {}
@@ -4962,7 +4968,11 @@ impl Vm {
                             }
                             if let Some(err_msg) = param_err {
                                 // Use the function definition line for the exception, not the call site
-                                let def_line = user_fn.ops.first().map(|o| o.line).unwrap_or(op.line);
+                                let def_line = if user_fn.decl_line > 0 {
+                                    user_fn.decl_line
+                                } else {
+                                    user_fn.ops.first().map(|o| o.line).unwrap_or(op.line)
+                                };
                                 let exc_val = self.create_exception(b"TypeError", &err_msg, def_line);
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _)) = exception_handlers.pop() {
@@ -6596,7 +6606,8 @@ impl Vm {
                             let mut parser = goro_parser::Parser::new(tokens);
                             match parser.parse() {
                                 Ok(program) => {
-                                    let compiler = crate::compiler::Compiler::new();
+                                    let mut compiler = crate::compiler::Compiler::new();
+                                    compiler.source_file = path.as_bytes().to_vec();
                                     match compiler.compile(&program) {
                                         Ok((inc_op_array, inc_classes)) => {
                                             // Register classes from included file
@@ -6641,7 +6652,9 @@ impl Vm {
                         let mut parser = goro_parser::Parser::new(tokens);
                         match parser.parse() {
                             Ok(program) => {
-                                let compiler = crate::compiler::Compiler::new();
+                                let mut compiler = crate::compiler::Compiler::new();
+                                let eval_file = format!("{} : eval()'d code", self.current_file);
+                                compiler.source_file = eval_file.into_bytes();
                                 match compiler.compile(&program) {
                                     Ok((eval_op_array, eval_classes)) => {
                                         for class in eval_classes {

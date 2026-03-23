@@ -294,6 +294,8 @@ pub struct OpArray {
     pub scope_class: Option<Vec<u8>>,
     /// Whether this is a static closure (declared with `static function() {}`)
     pub is_static_closure: bool,
+    /// Line number of the function/method declaration (for error reporting)
+    pub decl_line: u32,
 }
 
 impl OpArray {
@@ -313,6 +315,7 @@ impl OpArray {
             return_type: None,
             scope_class: None,
             is_static_closure: false,
+            decl_line: 0,
         }
     }
 
