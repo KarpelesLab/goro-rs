@@ -2140,21 +2140,17 @@ fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn strcasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args.first().unwrap_or(&Value::Null).to_php_string();
     let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let a_lower: Vec<u8> = a
-        .as_bytes()
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let b_lower: Vec<u8> = b
-        .as_bytes()
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    Ok(Value::Long(match a_lower.cmp(&b_lower) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }))
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let min_len = a_bytes.len().min(b_bytes.len());
+    for i in 0..min_len {
+        let ca = a_bytes[i].to_ascii_lowercase();
+        let cb = b_bytes[i].to_ascii_lowercase();
+        if ca != cb {
+            return Ok(Value::Long(ca as i64 - cb as i64));
+        }
+    }
+    Ok(Value::Long(a_bytes.len() as i64 - b_bytes.len() as i64))
 }
 
 fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2184,8 +2180,9 @@ fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::Long(ca as i64 - cb as i64));
         }
     }
-    // If all compared bytes are equal, compare by length
-    Ok(Value::Long(a_sub_len as i64 - b_sub_len as i64))
+    // If all compared bytes are equal, compare by length (normalized to -1/0/1)
+    let len_diff = a_sub_len as i64 - b_sub_len as i64;
+    Ok(Value::Long(if len_diff < 0 { -1 } else if len_diff > 0 { 1 } else { 0 }))
 }
 
 fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

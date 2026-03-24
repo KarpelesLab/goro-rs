@@ -1158,6 +1158,17 @@ fn parse_leading_float(s: &str) -> f64 {
     if s.is_empty() {
         return 0.0;
     }
+    // Check for INF/NAN
+    let trimmed = s.trim();
+    if trimmed.eq_ignore_ascii_case("inf") || trimmed.eq_ignore_ascii_case("infinity") {
+        return f64::INFINITY;
+    }
+    if trimmed.eq_ignore_ascii_case("-inf") || trimmed.eq_ignore_ascii_case("-infinity") {
+        return f64::NEG_INFINITY;
+    }
+    if trimmed.eq_ignore_ascii_case("nan") {
+        return f64::NAN;
+    }
     // Find the longest valid prefix that's a number
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -1204,6 +1215,16 @@ pub fn parse_numeric_string(s: &[u8]) -> Option<f64> {
     let s = s.trim();
     if s.is_empty() {
         return None;
+    }
+    // Check for INF/NAN
+    if s.eq_ignore_ascii_case("inf") || s.eq_ignore_ascii_case("infinity") {
+        return Some(f64::INFINITY);
+    }
+    if s.eq_ignore_ascii_case("-inf") || s.eq_ignore_ascii_case("-infinity") {
+        return Some(f64::NEG_INFINITY);
+    }
+    if s.eq_ignore_ascii_case("nan") {
+        return Some(f64::NAN);
     }
     // Try parsing as a number (handles int, float, scientific notation)
     let mut chars = s.chars().peekable();

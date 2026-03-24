@@ -490,7 +490,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(val) = vm.constants.get(name.as_bytes()) {
         return Ok(val.clone());
     }
-    let msg = format!("Undefined constant {}", name_str);
+    let msg = format!("Undefined constant \"{}\"", name_str);
     let line = vm.current_line;
     let exc = vm.create_exception(b"Error", &msg, line);
     vm.current_exception = Some(exc);
@@ -641,8 +641,10 @@ fn func_get_arg(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let name_lower: Vec<u8> = name
-        .as_bytes()
+    let raw = name.as_bytes();
+    // Strip leading backslash for namespace resolution
+    let stripped = if raw.first() == Some(&b'\\') { &raw[1..] } else { raw };
+    let name_lower: Vec<u8> = stripped
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
@@ -660,8 +662,14 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     match val {
         Value::String(s) => {
-            let name_lower: Vec<u8> = s
-                .as_bytes()
+            let raw_bytes = s.as_bytes();
+            // Strip leading backslash for namespace resolution
+            let stripped = if raw_bytes.first() == Some(&b'\\') {
+                &raw_bytes[1..]
+            } else {
+                raw_bytes
+            };
+            let name_lower: Vec<u8> = stripped
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
@@ -2578,8 +2586,18 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut current = class_lower.clone();
     for _ in 0..50 {
         if let Some(class) = vm.classes.get(&current) {
-            if class.methods.contains_key(&method_lower) {
-                return Ok(Value::True);
+            if let Some(method) = class.methods.get(&method_lower) {
+                // Private methods are only visible in their declaring class
+                if method.visibility == goro_core::object::Visibility::Private {
+                    // Check if the declaring class matches the requested class
+                    let declaring_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if declaring_lower == class_lower {
+                        return Ok(Value::True);
+                    }
+                    // Private method from parent - not accessible
+                } else {
+                    return Ok(Value::True);
+                }
             }
             if let Some(ref parent) = class.parent {
                 current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();

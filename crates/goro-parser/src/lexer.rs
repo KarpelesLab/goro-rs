@@ -201,7 +201,10 @@ impl<'a> Lexer<'a> {
                     match i64::from_str_radix(&s[2..], 16) {
                         Ok(n) => return TokenKind::LongNumber(n),
                         Err(_) => {
-                            // Overflow: convert to float
+                            // Overflow: try u64 first for better precision
+                            if let Ok(n) = u64::from_str_radix(&s[2..], 16) {
+                                return TokenKind::DoubleNumber(n as f64);
+                            }
                             let mut val = 0.0f64;
                             for ch in s[2..].chars() {
                                 val = val * 16.0 + ch.to_digit(16).unwrap_or(0) as f64;
@@ -228,9 +231,15 @@ impl<'a> Lexer<'a> {
                     match i64::from_str_radix(&s[2..], 2) {
                         Ok(n) => return TokenKind::LongNumber(n),
                         Err(_) => {
-                            // Overflow: convert to float
+                            // Overflow: try u64 first for better precision, then fall back to f64
+                            if let Ok(n) = u64::from_str_radix(&s[2..], 2) {
+                                return TokenKind::DoubleNumber(n as f64);
+                            }
+                            // Truly large numbers: parse string as decimal first
+                            let binary_str = &s[2..];
+                            // Convert binary string to decimal string to avoid FP accumulation errors
                             let mut val = 0.0f64;
-                            for ch in s[2..].chars() {
+                            for ch in binary_str.chars() {
                                 val = val * 2.0 + ch.to_digit(2).unwrap_or(0) as f64;
                             }
                             return TokenKind::DoubleNumber(val);

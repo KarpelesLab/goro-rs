@@ -6,6 +6,83 @@ use goro_core::vm::{Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+// Public API for use by VM
+pub fn ymd_to_days_pub(year: i64, month: u32, day: u32) -> i64 {
+    ymd_to_days(year, month, day)
+}
+
+pub fn days_to_ymd_pub(days: i64) -> (i64, u32, u32) {
+    days_to_ymd(days)
+}
+
+/// Create a DateInterval object from the difference between two timestamps
+pub fn create_date_interval(vm: &mut Vm, ts1: i64, ts2: i64, absolute: bool) -> Value {
+    create_date_interval_from_diff(vm, ts1, ts2, absolute)
+}
+
+/// Parse an ISO 8601 duration string like "P1Y2M3DT4H5M6S"
+pub fn parse_iso8601_duration(spec: &str) -> (i64, i64, i64, i64, i64, i64) {
+    parse_iso8601_duration_impl(spec)
+}
+
+fn parse_iso8601_duration_impl(spec: &str) -> (i64, i64, i64, i64, i64, i64) {
+    let mut y = 0i64;
+    let mut m = 0i64;
+    let mut d = 0i64;
+    let mut h = 0i64;
+    let mut i = 0i64;
+    let mut s = 0i64;
+
+    let s_bytes = spec.as_bytes();
+    let mut idx = 0;
+    let mut in_time = false;
+
+    // Skip leading P
+    if idx < s_bytes.len() && s_bytes[idx] == b'P' {
+        idx += 1;
+    }
+
+    while idx < s_bytes.len() {
+        if s_bytes[idx] == b'T' {
+            in_time = true;
+            idx += 1;
+            continue;
+        }
+
+        // Parse number
+        let start = idx;
+        while idx < s_bytes.len() && s_bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        if idx == start || idx >= s_bytes.len() {
+            break;
+        }
+        let num: i64 = std::str::from_utf8(&s_bytes[start..idx])
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        match s_bytes[idx] {
+            b'Y' => y = num,
+            b'M' => {
+                if in_time {
+                    i = num;
+                } else {
+                    m = num;
+                }
+            }
+            b'D' => d = num,
+            b'H' => h = num,
+            b'S' => s = num,
+            b'W' => d = num * 7,
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    (y, m, d, h, i, s)
+}
+
 /// Register all date/time extension functions
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"date_default_timezone_set", date_default_timezone_set);
@@ -26,6 +103,16 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"idate", idate_fn);
     vm.register_function(b"date_format", date_format_fn);
     vm.register_function(b"date_create_immutable", date_create_immutable_fn);
+    vm.register_function(b"date_parse", date_parse_fn);
+    vm.register_function(b"date_parse_from_format", date_parse_from_format_fn);
+    vm.register_function(b"date_modify", date_modify_fn);
+    vm.register_function(b"date_timestamp_get", date_timestamp_get_fn);
+    vm.register_function(b"date_timestamp_set", date_timestamp_set_fn);
+    vm.register_function(b"date_diff", date_diff_fn);
+    vm.register_function(b"date_create_from_format", date_create_from_format_fn);
+    vm.register_function(b"date_date_set", date_date_set_fn);
+    vm.register_function(b"date_time_set", date_time_set_fn);
+    vm.register_function(b"date_interval_create_from_date_string", date_interval_create_from_date_string_fn);
 }
 
 fn date_default_timezone_set(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -223,8 +310,24 @@ fn mktime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let timestamp = days * 86400 + hour * 3600 + minute * 60 + second;
     Ok(Value::Long(timestamp))
 }
-fn strtotime(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn strtotime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let datetime_str = args
+        .first()
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    let base_time = args.get(1).map(|v| v.to_long());
+
+    let now_secs = base_time.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    });
+
+    match parse_datetime_string(&datetime_str, now_secs) {
+        Some(ts) => Ok(Value::Long(ts)),
+        None => Ok(Value::False),
+    }
 }
 
 fn gmdate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -337,46 +440,33 @@ fn strftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(result)))
 }
 
-/// date_create - create a DateTime-like value (returns stdClass with timestamp property)
+/// date_create - create a DateTime-like value (returns DateTime object with timestamp property)
 fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let datetime_str = args
         .first()
-        .map(|v| v.to_php_string().to_string_lossy())
+        .map(|v| {
+            if matches!(v, Value::Null) {
+                String::new()
+            } else {
+                v.to_php_string().to_string_lossy()
+            }
+        })
         .unwrap_or_default();
 
-    // Get current timestamp as default
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let timestamp = if datetime_str.is_empty() || datetime_str == "now" {
+    let timestamp = if datetime_str.is_empty() || datetime_str.eq_ignore_ascii_case("now") {
         now_secs
     } else {
-        // Very basic parsing: try "Y-m-d H:i:s" or "Y-m-d"
-        let parts: Vec<&str> = datetime_str.split(|c: char| c == ' ' || c == 'T').collect();
-        let date_parts: Vec<&str> = parts.first().unwrap_or(&"").split('-').collect();
-        if date_parts.len() == 3 {
-            let year = date_parts[0].parse::<i64>().unwrap_or(1970);
-            let month = date_parts[1].parse::<u32>().unwrap_or(1);
-            let day = date_parts[2].parse::<u32>().unwrap_or(1);
-            let mut h = 0i64;
-            let mut m = 0i64;
-            let mut s = 0i64;
-            if let Some(time_str) = parts.get(1) {
-                let time_parts: Vec<&str> = time_str.split(':').collect();
-                h = time_parts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
-                m = time_parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-                s = time_parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
-            }
-            let days = ymd_to_days(year, month, day);
-            days * 86400 + h * 3600 + m * 60 + s
-        } else {
-            now_secs
+        match parse_datetime_string(&datetime_str, now_secs) {
+            Some(ts) => ts,
+            None => return Ok(Value::False),
         }
     };
 
-    // Return a DateTime object with a timestamp property
     let obj_id = _vm.next_object_id();
     let mut obj = PhpObject::new(b"DateTime".to_vec(), obj_id);
     obj.set_property(b"timestamp".to_vec(), Value::Long(timestamp));
@@ -765,7 +855,13 @@ fn date_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let datetime_str = args
         .first()
-        .map(|v| v.to_php_string().to_string_lossy())
+        .map(|v| {
+            if matches!(v, Value::Null) {
+                String::new()
+            } else {
+                v.to_php_string().to_string_lossy()
+            }
+        })
         .unwrap_or_default();
 
     let now_secs = std::time::SystemTime::now()
@@ -773,28 +869,12 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let timestamp = if datetime_str.is_empty() || datetime_str == "now" {
+    let timestamp = if datetime_str.is_empty() || datetime_str.eq_ignore_ascii_case("now") {
         now_secs
     } else {
-        let parts: Vec<&str> = datetime_str.split(|c: char| c == ' ' || c == 'T').collect();
-        let date_parts: Vec<&str> = parts.first().unwrap_or(&"").split('-').collect();
-        if date_parts.len() == 3 {
-            let year = date_parts[0].parse::<i64>().unwrap_or(1970);
-            let month = date_parts[1].parse::<u32>().unwrap_or(1);
-            let day = date_parts[2].parse::<u32>().unwrap_or(1);
-            let mut h = 0i64;
-            let mut m = 0i64;
-            let mut s = 0i64;
-            if let Some(time_str) = parts.get(1) {
-                let time_parts: Vec<&str> = time_str.split(':').collect();
-                h = time_parts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
-                m = time_parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-                s = time_parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
-            }
-            let days = ymd_to_days(year, month, day);
-            days * 86400 + h * 3600 + m * 60 + s
-        } else {
-            now_secs
+        match parse_datetime_string(&datetime_str, now_secs) {
+            Some(ts) => ts,
+            None => return Ok(Value::False),
         }
     };
 
@@ -909,4 +989,896 @@ pub fn format_timestamp(format: &str, secs: i64) -> String {
         i += 1;
     }
     result
+}
+
+// ==================== Comprehensive date string parser ====================
+
+/// Parse a datetime string into a unix timestamp.
+/// Supports: "now", "@timestamp", "Y-m-d", "Y-m-d H:i:s", "Y-m-dTH:i:s",
+/// "yesterday", "today", "tomorrow", relative expressions like "+1 day", "-2 hours",
+/// month names, "first day of", "last day of", etc.
+pub fn parse_datetime_string(input: &str, now: i64) -> Option<i64> {
+    let s = input.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("now") {
+        return Some(now);
+    }
+
+    // @timestamp
+    if s.starts_with('@') {
+        return s[1..].trim().parse::<i64>().ok();
+    }
+
+    // Try absolute date formats first
+    if let Some(ts) = try_parse_absolute(s) {
+        return Some(ts);
+    }
+
+    // Try relative date expressions
+    if let Some(ts) = try_parse_relative(s, now) {
+        return Some(ts);
+    }
+
+    None
+}
+
+/// Try to parse an absolute date/time string
+fn try_parse_absolute(s: &str) -> Option<i64> {
+    // "Y-m-d H:i:s" or "Y-m-dTH:i:s"
+    let parts: Vec<&str> = s.splitn(2, |c: char| c == ' ' || c == 'T').collect();
+    let date_str = parts.first()?;
+
+    // Try Y-m-d format
+    let date_parts: Vec<&str> = date_str.split('-').collect();
+    if date_parts.len() == 3 {
+        let year = date_parts[0].parse::<i64>().ok()?;
+        let month = date_parts[1].parse::<u32>().ok()?;
+        let day = date_parts[2].parse::<u32>().ok()?;
+        if month < 1 || month > 12 || day < 1 || day > 31 {
+            return None;
+        }
+        let mut h = 0i64;
+        let mut m = 0i64;
+        let mut sec = 0i64;
+        if let Some(time_str) = parts.get(1) {
+            // Strip timezone suffix if present (e.g., "+00:00", "Z", " UTC")
+            let time_clean = time_str
+                .trim_end_matches(|c: char| c == 'Z' || c == 'z')
+                .split('+').next().unwrap_or(time_str)
+                .split('-').next().unwrap_or(time_str)
+                .trim();
+            // Handle "H:i:s.u" (with microseconds)
+            let time_no_micro = time_clean.split('.').next().unwrap_or(time_clean);
+            let time_parts: Vec<&str> = time_no_micro.split(':').collect();
+            h = time_parts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+            m = time_parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            sec = time_parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
+        }
+        let days = ymd_to_days(year, month, day);
+        return Some(days * 86400 + h * 3600 + m * 60 + sec);
+    }
+
+    // Try m/d/Y format (US format)
+    let slash_parts: Vec<&str> = date_str.split('/').collect();
+    if slash_parts.len() == 3 {
+        let month = slash_parts[0].parse::<u32>().ok()?;
+        let day = slash_parts[1].parse::<u32>().ok()?;
+        let year = slash_parts[2].parse::<i64>().ok()?;
+        if month >= 1 && month <= 12 && day >= 1 && day <= 31 {
+            let mut h = 0i64;
+            let mut m = 0i64;
+            let mut sec = 0i64;
+            if let Some(time_str) = parts.get(1) {
+                let time_parts: Vec<&str> = time_str.split(':').collect();
+                h = time_parts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+                m = time_parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                sec = time_parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
+            }
+            let days = ymd_to_days(year, month, day);
+            return Some(days * 86400 + h * 3600 + m * 60 + sec);
+        }
+    }
+
+    // Try "d Mon Y" or "Mon d, Y" format
+    // "15 Jan 2024" or "Jan 15, 2024"
+    if let Some(ts) = try_parse_textual_date(s) {
+        return Some(ts);
+    }
+
+    None
+}
+
+/// Parse textual date like "15 Jan 2024", "Jan 15 2024", "January 15, 2024"
+fn try_parse_textual_date(s: &str) -> Option<i64> {
+    let month_names = [
+        ("jan", 1), ("january", 1), ("feb", 2), ("february", 2),
+        ("mar", 3), ("march", 3), ("apr", 4), ("april", 4),
+        ("may", 5), ("jun", 6), ("june", 6), ("jul", 7), ("july", 7),
+        ("aug", 8), ("august", 8), ("sep", 9), ("september", 9),
+        ("oct", 10), ("october", 10), ("nov", 11), ("november", 11),
+        ("dec", 12), ("december", 12),
+    ];
+
+    let lower = s.to_lowercase();
+    let tokens: Vec<&str> = lower.split(|c: char| c == ' ' || c == ',' || c == '-').filter(|t| !t.is_empty()).collect();
+
+    if tokens.len() >= 3 {
+        // Try "Mon d Y" pattern
+        if let Some(&(_, mon)) = month_names.iter().find(|(name, _)| *name == tokens[0]) {
+            if let (Ok(day), Ok(year)) = (tokens[1].parse::<u32>(), tokens[2].parse::<i64>()) {
+                let days = ymd_to_days(year, mon, day);
+                return Some(days * 86400);
+            }
+        }
+        // Try "d Mon Y" pattern
+        if let Some(&(_, mon)) = month_names.iter().find(|(name, _)| *name == tokens[1]) {
+            if let (Ok(day), Ok(year)) = (tokens[0].parse::<u32>(), tokens[2].parse::<i64>()) {
+                let days = ymd_to_days(year, mon, day);
+                return Some(days * 86400);
+            }
+        }
+    }
+    None
+}
+
+/// Try to parse relative date expressions
+fn try_parse_relative(s: &str, now: i64) -> Option<i64> {
+    let lower = s.to_lowercase().trim().to_string();
+
+    // Simple keywords
+    match lower.as_str() {
+        "yesterday" => {
+            let days = now / 86400;
+            return Some((days - 1) * 86400);
+        }
+        "today" | "midnight" => {
+            let days = now / 86400;
+            return Some(days * 86400);
+        }
+        "tomorrow" => {
+            let days = now / 86400;
+            return Some((days + 1) * 86400);
+        }
+        "noon" => {
+            let days = now / 86400;
+            return Some(days * 86400 + 12 * 3600);
+        }
+        _ => {}
+    }
+
+    // "first day of January 2024", etc. - extract month/year
+    if lower.starts_with("first day of") || lower.starts_with("last day of") {
+        let is_first = lower.starts_with("first");
+        let rest = if is_first { &lower[13..] } else { &lower[12..] };
+        let rest = rest.trim();
+
+        // Try to parse as "Month Year" or relative month
+        if let Some(ts) = parse_month_year_expression(rest, now, is_first) {
+            return Some(ts);
+        }
+    }
+
+    // Apply relative modifications to the current timestamp
+    apply_relative_modification(&lower, now)
+}
+
+fn parse_month_year_expression(s: &str, now: i64, is_first: bool) -> Option<i64> {
+    let month_names = [
+        ("jan", 1u32), ("january", 1), ("feb", 2), ("february", 2),
+        ("mar", 3), ("march", 3), ("apr", 4), ("april", 4),
+        ("may", 5), ("jun", 6), ("june", 6), ("jul", 7), ("july", 7),
+        ("aug", 8), ("august", 8), ("sep", 9), ("september", 9),
+        ("oct", 10), ("october", 10), ("nov", 11), ("november", 11),
+        ("dec", 12), ("december", 12),
+    ];
+
+    let lower = s.to_lowercase();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+
+    // "next month", "this month", "+1 month" etc. relative to now
+    if lower.contains("month") || lower.contains("year") {
+        return apply_relative_modification(s, now);
+    }
+
+    // "January 2024" or "January"
+    for &(name, mon) in &month_names {
+        if tokens.first().map(|t| *t == name).unwrap_or(false) {
+            let now_days = now / 86400;
+            let (now_year, _, _) = days_to_ymd(now_days);
+            let year = tokens.get(1).and_then(|t| t.parse::<i64>().ok()).unwrap_or(now_year);
+            if is_first {
+                let days = ymd_to_days(year, mon, 1);
+                return Some(days * 86400);
+            } else {
+                let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+                let last = match mon {
+                    2 => if is_leap { 29 } else { 28 },
+                    4 | 6 | 9 | 11 => 30,
+                    _ => 31,
+                };
+                let days = ymd_to_days(year, mon, last);
+                return Some(days * 86400);
+            }
+        }
+    }
+    None
+}
+
+/// Apply a relative modification string to a timestamp.
+/// Handles: "+1 day", "-2 hours", "next month", "last year", compound like "+1 day +2 hours"
+pub fn apply_relative_modification(s: &str, ts: i64) -> Option<i64> {
+    let lower = s.to_lowercase().trim().to_string();
+    let mut result = ts;
+
+    // Split compound expressions and handle each
+    // First handle "yesterday/today/tomorrow" prefixes
+    let working = if lower.starts_with("yesterday") {
+        let days = ts / 86400;
+        result = (days - 1) * 86400 + (ts % 86400 + 86400) % 86400;
+        lower[9..].trim().to_string()
+    } else if lower.starts_with("tomorrow") {
+        let days = ts / 86400;
+        result = (days + 1) * 86400 + (ts % 86400 + 86400) % 86400;
+        lower[8..].trim().to_string()
+    } else if lower.starts_with("today") || lower.starts_with("now") {
+        let skip = if lower.starts_with("today") { 5 } else { 3 };
+        lower[skip..].trim().to_string()
+    } else {
+        lower.clone()
+    };
+
+    if working.is_empty() {
+        return Some(result);
+    }
+
+    // Tokenize and process
+    let tokens: Vec<&str> = working.split_whitespace().collect();
+    let mut i = 0;
+    let mut any_match = false;
+
+    while i < tokens.len() {
+        let token = tokens[i];
+
+        // Handle "next", "last", "this" prefix
+        if token == "next" || token == "last" || token == "this" {
+            if i + 1 < tokens.len() {
+                let unit = tokens[i + 1];
+                let amount: i64 = if token == "next" { 1 } else if token == "last" { -1 } else { 0 };
+                if let Some(new_ts) = apply_unit_modification(result, amount, unit) {
+                    result = new_ts;
+                    any_match = true;
+                }
+                i += 2;
+                continue;
+            }
+        }
+
+        // Handle "+N unit" or "-N unit" or "N unit" or "N units ago"
+        if let Some(amount) = parse_amount(token) {
+            if i + 1 < tokens.len() {
+                let unit = tokens[i + 1];
+                let actual_amount = if i + 2 < tokens.len() && tokens[i + 2] == "ago" {
+                    i += 1; // skip "ago"
+                    -amount
+                } else {
+                    amount
+                };
+                if let Some(new_ts) = apply_unit_modification(result, actual_amount, unit) {
+                    result = new_ts;
+                    any_match = true;
+                }
+                i += 2;
+                continue;
+            }
+        }
+
+        // Handle day names for "next Monday", etc.
+        let day_names = [
+            ("sunday", 0), ("monday", 1), ("tuesday", 2), ("wednesday", 3),
+            ("thursday", 4), ("friday", 5), ("saturday", 6),
+            ("sun", 0), ("mon", 1), ("tue", 2), ("wed", 3),
+            ("thu", 4), ("fri", 5), ("sat", 6),
+        ];
+        if let Some(&(_, target_dow)) = day_names.iter().find(|(name, _)| *name == token) {
+            let current_days = result / 86400;
+            let current_dow = (((current_days % 7) + 4) % 7 + 7) % 7; // 0=Sun
+            let mut diff = target_dow - current_dow;
+            if diff <= 0 {
+                diff += 7;
+            }
+            result = (current_days + diff) * 86400 + (result % 86400 + 86400) % 86400;
+            any_match = true;
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    if any_match { Some(result) } else { None }
+}
+
+fn parse_amount(s: &str) -> Option<i64> {
+    if s.starts_with('+') {
+        s[1..].parse::<i64>().ok()
+    } else if s.starts_with('-') {
+        s.parse::<i64>().ok()
+    } else {
+        s.parse::<i64>().ok()
+    }
+}
+
+fn apply_unit_modification(ts: i64, amount: i64, unit: &str) -> Option<i64> {
+    let unit = unit.trim_end_matches('s'); // "days" -> "day"
+    match unit {
+        "second" | "sec" => Some(ts + amount),
+        "minute" | "min" => Some(ts + amount * 60),
+        "hour" => Some(ts + amount * 3600),
+        "day" => Some(ts + amount * 86400),
+        "week" => Some(ts + amount * 7 * 86400),
+        "fortnight" => Some(ts + amount * 14 * 86400),
+        "month" => {
+            let days = ts / 86400;
+            let time_of_day = ((ts % 86400) + 86400) % 86400;
+            let (year, month, day) = days_to_ymd(days);
+            let new_month = month as i64 + amount;
+            let (adj_year, adj_month) = if new_month > 0 {
+                let y = year + (new_month - 1) / 12;
+                let m = ((new_month - 1) % 12 + 1) as u32;
+                (y, m)
+            } else {
+                let y = year + (new_month - 12) / 12;
+                let m = (12 - ((-new_month) % 12)) as u32;
+                let m = if m == 0 { 12 } else { m };
+                (y, m)
+            };
+            // Clamp day to max days in target month
+            let is_leap = adj_year % 4 == 0 && (adj_year % 100 != 0 || adj_year % 400 == 0);
+            let max_day = match adj_month {
+                2 => if is_leap { 29 } else { 28 },
+                4 | 6 | 9 | 11 => 30,
+                _ => 31,
+            };
+            let adj_day = day.min(max_day);
+            let new_days = ymd_to_days(adj_year, adj_month, adj_day);
+            Some(new_days * 86400 + time_of_day)
+        }
+        "year" => {
+            let days = ts / 86400;
+            let time_of_day = ((ts % 86400) + 86400) % 86400;
+            let (year, month, day) = days_to_ymd(days);
+            let new_year = year + amount;
+            // Handle Feb 29 on non-leap year
+            let is_leap = new_year % 4 == 0 && (new_year % 100 != 0 || new_year % 400 == 0);
+            let adj_day = if month == 2 && day == 29 && !is_leap { 28 } else { day };
+            let new_days = ymd_to_days(new_year, month, adj_day);
+            Some(new_days * 86400 + time_of_day)
+        }
+        _ => None,
+    }
+}
+
+// ==================== New date functions ====================
+
+/// date_parse($string) - Parse about any English textual datetime description into an array
+fn date_parse_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let datetime_str = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let mut result = PhpArray::new();
+
+    // Try to parse the date string
+    let parsed = parse_datetime_string(&datetime_str, now_secs);
+
+    if let Some(ts) = parsed {
+        let days = ts / 86400;
+        let time_of_day = ((ts % 86400) + 86400) % 86400;
+        let (year, month, day) = days_to_ymd(days);
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+
+        result.set(ArrayKey::String(PhpString::from_bytes(b"year")), Value::Long(year));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"month")), Value::Long(month as i64));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"day")), Value::Long(day as i64));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"hour")), Value::Long(hours));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"minute")), Value::Long(minutes));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"second")), Value::Long(seconds));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"fraction")), Value::Double(0.0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"warning_count")), Value::Long(0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"warnings")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"error_count")), Value::Long(0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"errors")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"is_localtime")), Value::False);
+    } else {
+        result.set(ArrayKey::String(PhpString::from_bytes(b"year")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"month")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"day")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"hour")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"minute")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"second")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"fraction")), Value::Double(0.0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"warning_count")), Value::Long(0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"warnings")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"error_count")), Value::Long(1));
+        let mut errors = PhpArray::new();
+        errors.set(ArrayKey::Int(0), Value::String(PhpString::from_string(format!("The string \"{}\" could not be parsed", datetime_str))));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"errors")), Value::Array(Rc::new(RefCell::new(errors))));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"is_localtime")), Value::False);
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// date_parse_from_format($format, $datetime)
+fn date_parse_from_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Simplified version - just use regular parsing
+    let _format = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let datetime_str = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let parsed = parse_datetime_string(&datetime_str, now_secs);
+    let mut result = PhpArray::new();
+
+    if let Some(ts) = parsed {
+        let days = ts / 86400;
+        let time_of_day = ((ts % 86400) + 86400) % 86400;
+        let (year, month, day) = days_to_ymd(days);
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+
+        result.set(ArrayKey::String(PhpString::from_bytes(b"year")), Value::Long(year));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"month")), Value::Long(month as i64));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"day")), Value::Long(day as i64));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"hour")), Value::Long(hours));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"minute")), Value::Long(minutes));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"second")), Value::Long(seconds));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"fraction")), Value::Double(0.0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"warning_count")), Value::Long(0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"warnings")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"error_count")), Value::Long(0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"errors")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"is_localtime")), Value::False);
+    } else {
+        result.set(ArrayKey::String(PhpString::from_bytes(b"year")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"month")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"day")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"hour")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"minute")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"second")), Value::False);
+        result.set(ArrayKey::String(PhpString::from_bytes(b"fraction")), Value::Double(0.0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"warning_count")), Value::Long(0));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"warnings")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"error_count")), Value::Long(1));
+        let mut errors = PhpArray::new();
+        errors.set(ArrayKey::Int(0), Value::String(PhpString::from_string("Could not be parsed".to_string())));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"errors")), Value::Array(Rc::new(RefCell::new(errors))));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"is_localtime")), Value::False);
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// date_modify($object, $modifier) - Modify a DateTime object
+fn date_modify_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let obj = args.first().unwrap_or(&Value::Null);
+    let modifier = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+
+    if let Value::Object(o) = obj {
+        let ts = o.borrow().get_property(b"timestamp").to_long();
+        if let Some(new_ts) = apply_relative_modification(&modifier, ts) {
+            o.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+            Ok(obj.clone())
+        } else {
+            Ok(Value::False)
+        }
+    } else {
+        Ok(Value::False)
+    }
+}
+
+/// date_timestamp_get($object) - Get timestamp from DateTime
+fn date_timestamp_get_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let obj = args.first().unwrap_or(&Value::Null);
+    if let Value::Object(o) = obj {
+        Ok(o.borrow().get_property(b"timestamp"))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+/// date_timestamp_set($object, $timestamp) - Set timestamp on DateTime
+fn date_timestamp_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let obj = args.first().unwrap_or(&Value::Null);
+    let ts = args.get(1).unwrap_or(&Value::Null).to_long();
+    if let Value::Object(o) = obj {
+        o.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(ts));
+        Ok(obj.clone())
+    } else {
+        Ok(Value::False)
+    }
+}
+
+/// date_diff($datetime1, $datetime2, $absolute = false)
+fn date_diff_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let obj1 = args.first().unwrap_or(&Value::Null);
+    let obj2 = args.get(1).unwrap_or(&Value::Null);
+    let absolute = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+
+    let ts1 = if let Value::Object(o) = obj1 {
+        o.borrow().get_property(b"timestamp").to_long()
+    } else {
+        return Ok(Value::False);
+    };
+    let ts2 = if let Value::Object(o) = obj2 {
+        o.borrow().get_property(b"timestamp").to_long()
+    } else {
+        return Ok(Value::False);
+    };
+
+    Ok(create_date_interval_from_diff(_vm, ts1, ts2, absolute))
+}
+
+/// Create a DateInterval from the difference between two timestamps
+fn create_date_interval_from_diff(vm: &mut Vm, ts1: i64, ts2: i64, absolute: bool) -> Value {
+    let diff = ts2 - ts1;
+    let invert = if diff < 0 && !absolute { 1 } else { 0 };
+    let abs_diff = diff.unsigned_abs() as i64;
+
+    let days1 = ts1 / 86400;
+    let days2 = ts2 / 86400;
+    let (y1, m1, d1) = days_to_ymd(days1);
+    let (y2, m2, d2) = days_to_ymd(days2);
+
+    let time1 = ((ts1 % 86400) + 86400) % 86400;
+    let time2 = ((ts2 % 86400) + 86400) % 86400;
+    let h1 = time1 / 3600;
+    let i1 = (time1 % 3600) / 60;
+    let s1 = time1 % 60;
+    let h2 = time2 / 3600;
+    let i2 = (time2 % 3600) / 60;
+    let s2 = time2 % 60;
+
+    // Calculate calendar diff
+    let (mut years, mut months, mut days_val, mut hours, mut minutes, mut seconds);
+    if invert == 1 {
+        // swap for calculation
+        let (sy, sm, sd, sh, si, ss) = (y2, m2, d2, h2, i2, s2);
+        let (ey, em, ed, eh, ei, es) = (y1, m1, d1, h1, i1, s1);
+        let r = calc_calendar_diff(sy, sm as i64, sd as i64, sh, si, ss, ey, em as i64, ed as i64, eh, ei, es);
+        years = r.0; months = r.1; days_val = r.2; hours = r.3; minutes = r.4; seconds = r.5;
+    } else {
+        let r = calc_calendar_diff(y1, m1 as i64, d1 as i64, h1, i1, s1, y2, m2 as i64, d2 as i64, h2, i2, s2);
+        years = r.0; months = r.1; days_val = r.2; hours = r.3; minutes = r.4; seconds = r.5;
+    }
+
+    let total_days = abs_diff / 86400;
+
+    let obj_id = vm.next_object_id();
+    let mut obj = PhpObject::new(b"DateInterval".to_vec(), obj_id);
+    obj.set_property(b"y".to_vec(), Value::Long(years));
+    obj.set_property(b"m".to_vec(), Value::Long(months));
+    obj.set_property(b"d".to_vec(), Value::Long(days_val));
+    obj.set_property(b"h".to_vec(), Value::Long(hours));
+    obj.set_property(b"i".to_vec(), Value::Long(minutes));
+    obj.set_property(b"s".to_vec(), Value::Long(seconds));
+    obj.set_property(b"f".to_vec(), Value::Double(0.0));
+    obj.set_property(b"days".to_vec(), Value::Long(total_days));
+    obj.set_property(b"invert".to_vec(), Value::Long(if absolute { 0 } else { invert }));
+
+    Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+fn calc_calendar_diff(sy: i64, sm: i64, sd: i64, sh: i64, si: i64, ss: i64,
+                      ey: i64, em: i64, ed: i64, eh: i64, ei: i64, es: i64) -> (i64, i64, i64, i64, i64, i64) {
+    let mut seconds = es - ss;
+    let mut minutes = ei - si;
+    let mut hours = eh - sh;
+    let mut days_val = ed - sd;
+    let mut months = em - sm;
+    let mut years = ey - sy;
+
+    if seconds < 0 { seconds += 60; minutes -= 1; }
+    if minutes < 0 { minutes += 60; hours -= 1; }
+    if hours < 0 { hours += 24; days_val -= 1; }
+    if days_val < 0 {
+        // Days in the start month
+        let dim = match sm as u32 {
+            2 => if sy % 4 == 0 && (sy % 100 != 0 || sy % 400 == 0) { 29 } else { 28 },
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        };
+        days_val += dim;
+        months -= 1;
+    }
+    if months < 0 { months += 12; years -= 1; }
+
+    (years, months, days_val, hours, minutes, seconds)
+}
+
+/// date_create_from_format($format, $datetime, $timezone = null)
+fn date_create_from_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let format = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let datetime_str = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let timestamp = parse_with_format(&format, &datetime_str, now_secs);
+
+    match timestamp {
+        Some(ts) => {
+            let obj_id = _vm.next_object_id();
+            let mut obj = PhpObject::new(b"DateTime".to_vec(), obj_id);
+            obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+            Ok(Value::Object(Rc::new(RefCell::new(obj))))
+        }
+        None => Ok(Value::False),
+    }
+}
+
+/// Parse a datetime string using a format string (like PHP's DateTime::createFromFormat)
+fn parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
+    let now_days = now / 86400;
+    let now_time = ((now % 86400) + 86400) % 86400;
+    let (now_year, now_month, now_day) = days_to_ymd(now_days);
+
+    let mut year = now_year;
+    let mut month = now_month;
+    let mut day = now_day;
+    let mut hour = 0i64;
+    let mut minute = 0i64;
+    let mut second = 0i64;
+    let mut has_time = false;
+
+    let fmt_bytes = format.as_bytes();
+    let dt_bytes = datetime.as_bytes();
+    let mut fi = 0;
+    let mut di = 0;
+
+    while fi < fmt_bytes.len() && di <= dt_bytes.len() {
+        let fc = fmt_bytes[fi];
+        match fc {
+            b'Y' => {
+                // 4-digit year
+                let end = (di + 4).min(dt_bytes.len());
+                let s = std::str::from_utf8(&dt_bytes[di..end]).ok()?;
+                year = s.parse().ok()?;
+                di = end;
+            }
+            b'y' => {
+                // 2-digit year
+                let end = (di + 2).min(dt_bytes.len());
+                let s = std::str::from_utf8(&dt_bytes[di..end]).ok()?;
+                let y: i64 = s.parse().ok()?;
+                year = if y >= 70 { 1900 + y } else { 2000 + y };
+                di = end;
+            }
+            b'm' | b'n' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], if fc == b'm' { 2 } else { 1 })?;
+                month = val as u32;
+                di += consumed;
+            }
+            b'd' | b'j' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], if fc == b'd' { 2 } else { 1 })?;
+                day = val as u32;
+                di += consumed;
+            }
+            b'H' | b'G' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], if fc == b'H' { 2 } else { 1 })?;
+                hour = val;
+                has_time = true;
+                di += consumed;
+            }
+            b'h' | b'g' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], if fc == b'h' { 2 } else { 1 })?;
+                hour = val;
+                has_time = true;
+                di += consumed;
+            }
+            b'i' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                minute = val;
+                di += consumed;
+            }
+            b's' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                second = val;
+                di += consumed;
+            }
+            b'U' => {
+                // Unix timestamp - consume all remaining digits
+                let start = di;
+                let neg = di < dt_bytes.len() && dt_bytes[di] == b'-';
+                if neg { di += 1; }
+                while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() {
+                    di += 1;
+                }
+                let s = std::str::from_utf8(&dt_bytes[start..di]).ok()?;
+                return s.parse().ok();
+            }
+            b'A' | b'a' => {
+                // AM/PM
+                if di + 2 <= dt_bytes.len() {
+                    let ampm = std::str::from_utf8(&dt_bytes[di..di+2]).ok()?.to_lowercase();
+                    if ampm == "pm" && hour < 12 {
+                        hour += 12;
+                    } else if ampm == "am" && hour == 12 {
+                        hour = 0;
+                    }
+                    di += 2;
+                }
+            }
+            b'u' | b'v' => {
+                // Microseconds/milliseconds - skip digits
+                while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() {
+                    di += 1;
+                }
+            }
+            b'e' | b'T' | b'O' | b'P' | b'p' => {
+                // Timezone - skip
+                while di < dt_bytes.len() && !dt_bytes[di].is_ascii_whitespace() {
+                    di += 1;
+                }
+            }
+            b'\\' => {
+                // Escape next character
+                fi += 1;
+                if fi < fmt_bytes.len() && di < dt_bytes.len() {
+                    di += 1;
+                }
+            }
+            b' ' | b'-' | b'/' | b':' | b'.' | b'T' => {
+                // Literal separator
+                if di < dt_bytes.len() {
+                    di += 1;
+                }
+            }
+            b'!' => {
+                // Reset all fields to Unix epoch
+                year = 1970;
+                month = 1;
+                day = 1;
+                hour = 0;
+                minute = 0;
+                second = 0;
+            }
+            b'|' => {
+                // Reset fields that haven't been parsed yet
+                if !has_time {
+                    hour = 0;
+                    minute = 0;
+                    second = 0;
+                }
+            }
+            _ => {
+                // Skip literal character
+                if di < dt_bytes.len() {
+                    di += 1;
+                }
+            }
+        }
+        fi += 1;
+    }
+
+    let days = ymd_to_days(year, month, day);
+    Some(days * 86400 + hour * 3600 + minute * 60 + second)
+}
+
+fn parse_num(bytes: &[u8], max_digits: usize) -> Option<(i64, usize)> {
+    let mut i = 0;
+    // Skip leading whitespace
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    let start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() && (i - start) < max_digits {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    let s = std::str::from_utf8(&bytes[start..i]).ok()?;
+    Some((s.parse().ok()?, i))
+}
+
+/// date_date_set($object, $year, $month, $day)
+fn date_date_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let obj = args.first().unwrap_or(&Value::Null);
+    let year = args.get(1).unwrap_or(&Value::Null).to_long();
+    let month = args.get(2).unwrap_or(&Value::Null).to_long() as u32;
+    let day = args.get(3).unwrap_or(&Value::Null).to_long() as u32;
+
+    if let Value::Object(o) = obj {
+        let ts = o.borrow().get_property(b"timestamp").to_long();
+        let time_of_day = ((ts % 86400) + 86400) % 86400;
+        let new_days = ymd_to_days(year, month, day);
+        let new_ts = new_days * 86400 + time_of_day;
+        o.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+        Ok(obj.clone())
+    } else {
+        Ok(Value::False)
+    }
+}
+
+/// date_time_set($object, $hour, $minute, $second = 0, $microsecond = 0)
+fn date_time_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let obj = args.first().unwrap_or(&Value::Null);
+    let hour = args.get(1).unwrap_or(&Value::Null).to_long();
+    let minute = args.get(2).unwrap_or(&Value::Null).to_long();
+    let second = args.get(3).map(|v| v.to_long()).unwrap_or(0);
+
+    if let Value::Object(o) = obj {
+        let ts = o.borrow().get_property(b"timestamp").to_long();
+        let days = ts / 86400;
+        let new_ts = days * 86400 + hour * 3600 + minute * 60 + second;
+        o.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+        Ok(obj.clone())
+    } else {
+        Ok(Value::False)
+    }
+}
+
+/// date_interval_create_from_date_string($datetime) - Creates DateInterval from date string
+fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let lower = s.to_lowercase();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+
+    let mut years = 0i64;
+    let mut months = 0i64;
+    let mut days = 0i64;
+    let mut hours = 0i64;
+    let mut minutes = 0i64;
+    let mut seconds = 0i64;
+
+    let mut i = 0;
+    while i < tokens.len() {
+        if let Ok(val) = tokens[i].parse::<i64>() {
+            if i + 1 < tokens.len() {
+                let unit = tokens[i + 1].trim_end_matches('s');
+                match unit {
+                    "year" => years = val,
+                    "month" => months = val,
+                    "day" => days = val,
+                    "hour" => hours = val,
+                    "minute" | "min" => minutes = val,
+                    "second" | "sec" => seconds = val,
+                    "week" => days += val * 7,
+                    _ => {}
+                }
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    let obj_id = _vm.next_object_id();
+    let mut obj = PhpObject::new(b"DateInterval".to_vec(), obj_id);
+    obj.set_property(b"y".to_vec(), Value::Long(years));
+    obj.set_property(b"m".to_vec(), Value::Long(months));
+    obj.set_property(b"d".to_vec(), Value::Long(days));
+    obj.set_property(b"h".to_vec(), Value::Long(hours));
+    obj.set_property(b"i".to_vec(), Value::Long(minutes));
+    obj.set_property(b"s".to_vec(), Value::Long(seconds));
+    obj.set_property(b"f".to_vec(), Value::Double(0.0));
+    obj.set_property(b"days".to_vec(), Value::False);
+    obj.set_property(b"invert".to_vec(), Value::Long(0));
+
+    Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }

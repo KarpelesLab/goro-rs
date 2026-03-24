@@ -2353,7 +2353,30 @@ impl Vm {
                         let ob = obj.borrow();
                         Some(ob.get_property(b"timestamp"))
                     }
+                    b"getoffset" => Some(Value::Long(0)), // UTC
+                    b"gettimezone" => {
+                        let obj_id = self.next_object_id;
+                        self.next_object_id += 1;
+                        let mut tz_obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
+                        tz_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
+                        Some(Value::Object(Rc::new(RefCell::new(tz_obj))))
+                    }
                     _ => None, // format() and others handled via __spl:: dispatch
+                }
+            }
+            b"datetimezone" => {
+                match method_lower {
+                    b"getname" => {
+                        let ob = obj.borrow();
+                        let tz = ob.get_property(b"timezone");
+                        if matches!(tz, Value::Null) {
+                            Some(Value::String(PhpString::from_bytes(b"UTC")))
+                        } else {
+                            Some(tz)
+                        }
+                    }
+                    b"getoffset" => Some(Value::Long(0)),
+                    _ => None,
                 }
             }
             b"reflectionclass" | b"reflectionobject" | b"reflectionenum" => {
@@ -2651,7 +2674,9 @@ impl Vm {
                 b"attach" | b"detach" | b"contains" | b"offsetget" | b"offsetset"
             ),
             b"splpriorityqueue" => matches!(method, b"insert" | b"extract"),
-            b"datetime" | b"datetimeimmutable" => matches!(method, b"format" | b"modify" | b"settimezone" | b"settime" | b"setdate" | b"settimestamp" | b"add" | b"sub" | b"diff"),
+            b"datetime" | b"datetimeimmutable" => matches!(method, b"format" | b"modify" | b"settimezone" | b"gettimezone" | b"settime" | b"setdate" | b"settimestamp" | b"add" | b"sub" | b"diff" | b"getoffset"),
+            b"dateinterval" => matches!(method, b"format"),
+            b"datetimezone" => matches!(method, b"getname" | b"getoffset"),
             b"reflectionclass" | b"reflectionobject" | b"reflectionenum" => matches!(
                 method,
                 b"getmethod" | b"getproperty" | b"getconstant" | b"hasconstant"
@@ -3033,13 +3058,12 @@ impl Vm {
                     }
                 }
                 b"datetime" | b"datetimeimmutable" => {
+                    let is_immutable = class == b"datetimeimmutable";
                     match method {
                         b"format" => {
                             let format_str = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
                             let ob = obj.borrow();
                             let timestamp = ob.get_property(b"timestamp").to_long();
-                            // Call into the registered date_format function
-                            // We implement a basic format here directly
                             let result = self.format_datetime_timestamp(&format_str, timestamp);
                             Some(Value::String(PhpString::from_string(result)))
                         }
@@ -3049,9 +3073,262 @@ impl Vm {
                         }
                         b"settimestamp" => {
                             let ts = args.get(1).cloned().unwrap_or(Value::Null).to_long();
-                            obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(ts));
-                            Some(this.clone())
+                            if is_immutable {
+                                // Return new object
+                                let obj_id = self.next_object_id;
+                                self.next_object_id += 1;
+                                let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
+                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+                                Some(Value::Object(Rc::new(RefCell::new(new_obj))))
+                            } else {
+                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(ts));
+                                Some(this.clone())
+                            }
                         }
+                        b"modify" => {
+                            let modifier = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
+                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            if let Some(new_ts) = vm_apply_relative_modification(&modifier, ts) {
+                                if is_immutable {
+                                    let obj_id = self.next_object_id;
+                                    self.next_object_id += 1;
+                                    let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
+                                    new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                    Some(Value::Object(Rc::new(RefCell::new(new_obj))))
+                                } else {
+                                    obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                    Some(this.clone())
+                                }
+                            } else {
+                                Some(Value::False)
+                            }
+                        }
+                        b"settimezone" => {
+                            // For now just return $this (we don't really handle timezones)
+                            if is_immutable {
+                                let obj_id = self.next_object_id;
+                                self.next_object_id += 1;
+                                let ts = obj.borrow().get_property(b"timestamp").to_long();
+                                let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
+                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+                                Some(Value::Object(Rc::new(RefCell::new(new_obj))))
+                            } else {
+                                Some(this.clone())
+                            }
+                        }
+                        b"gettimezone" => {
+                            let obj_id = self.next_object_id;
+                            self.next_object_id += 1;
+                            let mut tz_obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
+                            tz_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
+                            Some(Value::Object(Rc::new(RefCell::new(tz_obj))))
+                        }
+                        b"setdate" => {
+                            let year = args.get(1).cloned().unwrap_or(Value::Null).to_long();
+                            let month = args.get(2).cloned().unwrap_or(Value::Null).to_long() as u32;
+                            let day = args.get(3).cloned().unwrap_or(Value::Null).to_long() as u32;
+                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            let time_of_day = ((ts % 86400) + 86400) % 86400;
+                            let new_days = vm_ymd_to_days(year, month, day);
+                            let new_ts = new_days * 86400 + time_of_day;
+                            if is_immutable {
+                                let obj_id = self.next_object_id;
+                                self.next_object_id += 1;
+                                let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
+                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                Some(Value::Object(Rc::new(RefCell::new(new_obj))))
+                            } else {
+                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                Some(this.clone())
+                            }
+                        }
+                        b"settime" => {
+                            let hour = args.get(1).cloned().unwrap_or(Value::Null).to_long();
+                            let minute = args.get(2).cloned().unwrap_or(Value::Null).to_long();
+                            let second = args.get(3).map(|v| v.to_long()).unwrap_or(0);
+                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            let days = ts / 86400;
+                            let new_ts = days * 86400 + hour * 3600 + minute * 60 + second;
+                            if is_immutable {
+                                let obj_id = self.next_object_id;
+                                self.next_object_id += 1;
+                                let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
+                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                Some(Value::Object(Rc::new(RefCell::new(new_obj))))
+                            } else {
+                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                Some(this.clone())
+                            }
+                        }
+                        b"diff" => {
+                            let other = args.get(1).cloned().unwrap_or(Value::Null);
+                            let absolute = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+                            let ts1 = obj.borrow().get_property(b"timestamp").to_long();
+                            let ts2 = if let Value::Object(o2) = &other {
+                                o2.borrow().get_property(b"timestamp").to_long()
+                            } else {
+                                0
+                            };
+                            Some(create_date_interval_from_timestamps(self, ts1, ts2, absolute))
+                        }
+                        b"add" => {
+                            // DateTime::add(DateInterval $interval) - add interval
+                            let interval = args.get(1).cloned().unwrap_or(Value::Null);
+                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            let new_ts = if let Value::Object(iv) = &interval {
+                                let iv = iv.borrow();
+                                let y = iv.get_property(b"y").to_long();
+                                let m = iv.get_property(b"m").to_long();
+                                let d = iv.get_property(b"d").to_long();
+                                let h = iv.get_property(b"h").to_long();
+                                let i = iv.get_property(b"i").to_long();
+                                let s = iv.get_property(b"s").to_long();
+                                let invert = iv.get_property(b"invert").to_long();
+                                let sign: i64 = if invert != 0 { -1 } else { 1 };
+                                let mut result_ts = ts;
+                                // Apply year/month changes
+                                if y != 0 || m != 0 {
+                                    let days_now = result_ts / 86400;
+                                    let tod = ((result_ts % 86400) + 86400) % 86400;
+                                    let (cy, cm, cd) = vm_days_to_ymd(days_now);
+                                    let new_m = cm as i64 + sign * m;
+                                    let total_months = (cy * 12 + new_m - 1 + sign * y * 12) as i64;
+                                    let ny = total_months / 12;
+                                    let nm = (total_months % 12 + 1) as u32;
+                                    let is_leap = ny % 4 == 0 && (ny % 100 != 0 || ny % 400 == 0);
+                                    let max_d = match nm { 2 => if is_leap {29} else {28}, 4|6|9|11 => 30, _ => 31 };
+                                    let nd = cd.min(max_d);
+                                    let new_days = vm_ymd_to_days(ny, nm, nd);
+                                    result_ts = new_days * 86400 + tod;
+                                }
+                                result_ts += sign * (d * 86400 + h * 3600 + i * 60 + s);
+                                result_ts
+                            } else { ts };
+                            if is_immutable {
+                                let obj_id = self.next_object_id;
+                                self.next_object_id += 1;
+                                let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
+                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                Some(Value::Object(Rc::new(RefCell::new(new_obj))))
+                            } else {
+                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                Some(this.clone())
+                            }
+                        }
+                        b"sub" => {
+                            // DateTime::sub(DateInterval $interval) - subtract interval
+                            let interval = args.get(1).cloned().unwrap_or(Value::Null);
+                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            let new_ts = if let Value::Object(iv) = &interval {
+                                let iv = iv.borrow();
+                                let y = iv.get_property(b"y").to_long();
+                                let m = iv.get_property(b"m").to_long();
+                                let d = iv.get_property(b"d").to_long();
+                                let h = iv.get_property(b"h").to_long();
+                                let i = iv.get_property(b"i").to_long();
+                                let s = iv.get_property(b"s").to_long();
+                                let invert = iv.get_property(b"invert").to_long();
+                                let sign: i64 = if invert != 0 { 1 } else { -1 };
+                                let mut result_ts = ts;
+                                if y != 0 || m != 0 {
+                                    let days_now = result_ts / 86400;
+                                    let tod = ((result_ts % 86400) + 86400) % 86400;
+                                    let (cy, cm, cd) = vm_days_to_ymd(days_now);
+                                    let new_m = cm as i64 + sign * m;
+                                    let total_months = (cy * 12 + new_m - 1 + sign * y * 12) as i64;
+                                    let ny = total_months / 12;
+                                    let nm = (total_months % 12 + 1) as u32;
+                                    let is_leap = ny % 4 == 0 && (ny % 100 != 0 || ny % 400 == 0);
+                                    let max_d = match nm { 2 => if is_leap {29} else {28}, 4|6|9|11 => 30, _ => 31 };
+                                    let nd = cd.min(max_d);
+                                    let new_days = vm_ymd_to_days(ny, nm, nd);
+                                    result_ts = new_days * 86400 + tod;
+                                }
+                                result_ts += sign * (d * 86400 + h * 3600 + i * 60 + s);
+                                result_ts
+                            } else { ts };
+                            if is_immutable {
+                                let obj_id = self.next_object_id;
+                                self.next_object_id += 1;
+                                let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
+                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                Some(Value::Object(Rc::new(RefCell::new(new_obj))))
+                            } else {
+                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                Some(this.clone())
+                            }
+                        }
+                        b"getoffset" => Some(Value::Long(0)), // UTC
+                        _ => None,
+                    }
+                }
+                b"dateinterval" => {
+                    match method {
+                        b"format" => {
+                            let format_str = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
+                            let ob = obj.borrow();
+                            let y = ob.get_property(b"y").to_long();
+                            let m = ob.get_property(b"m").to_long();
+                            let d = ob.get_property(b"d").to_long();
+                            let h = ob.get_property(b"h").to_long();
+                            let i = ob.get_property(b"i").to_long();
+                            let s = ob.get_property(b"s").to_long();
+                            let days = ob.get_property(b"days");
+                            let invert = ob.get_property(b"invert").to_long();
+
+                            let mut result = String::new();
+                            let fmt_bytes = format_str.as_bytes();
+                            let mut fi = 0;
+                            while fi < fmt_bytes.len() {
+                                if fmt_bytes[fi] == b'%' && fi + 1 < fmt_bytes.len() {
+                                    fi += 1;
+                                    match fmt_bytes[fi] {
+                                        b'Y' => result.push_str(&format!("{:04}", y)),
+                                        b'y' => result.push_str(&format!("{}", y)),
+                                        b'M' => result.push_str(&format!("{:02}", m)),
+                                        b'm' => result.push_str(&format!("{}", m)),
+                                        b'D' => result.push_str(&format!("{:02}", d)),
+                                        b'd' => result.push_str(&format!("{}", d)),
+                                        b'H' => result.push_str(&format!("{:02}", h)),
+                                        b'h' => result.push_str(&format!("{}", h)),
+                                        b'I' => result.push_str(&format!("{:02}", i)),
+                                        b'i' => result.push_str(&format!("{}", i)),
+                                        b'S' => result.push_str(&format!("{:02}", s)),
+                                        b's' => result.push_str(&format!("{}", s)),
+                                        b'a' => {
+                                            if let Value::Long(d_val) = &days {
+                                                result.push_str(&format!("{}", d_val));
+                                            } else {
+                                                result.push_str("(unknown)");
+                                            }
+                                        }
+                                        b'R' => result.push(if invert != 0 { '-' } else { '+' }),
+                                        b'r' => { if invert != 0 { result.push('-'); } }
+                                        b'%' => result.push('%'),
+                                        _ => { result.push('%'); result.push(fmt_bytes[fi] as char); }
+                                    }
+                                } else {
+                                    result.push(fmt_bytes[fi] as char);
+                                }
+                                fi += 1;
+                            }
+                            Some(Value::String(PhpString::from_string(result)))
+                        }
+                        _ => None,
+                    }
+                }
+                b"datetimezone" => {
+                    match method {
+                        b"getname" => {
+                            let ob = obj.borrow();
+                            let tz = ob.get_property(b"timezone");
+                            if matches!(tz, Value::Null) {
+                                Some(Value::String(PhpString::from_bytes(b"UTC")))
+                            } else {
+                                Some(tz)
+                            }
+                        }
+                        b"getoffset" => Some(Value::Long(0)),
                         _ => None,
                     }
                 }
@@ -3227,6 +3504,8 @@ impl Vm {
             b"splobjectstorage" => "SplObjectStorage",
             b"datetime" => "DateTime",
             b"datetimeimmutable" => "DateTimeImmutable",
+            b"dateinterval" => "DateInterval",
+            b"datetimezone" => "DateTimeZone",
             _ => return String::from_utf8_lossy(class_lower).to_string(),
         };
         canonical.to_string()
@@ -7296,6 +7575,54 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
+                    } else if func_name_lower == b"datetime::createfromformat"
+                        || func_name_lower == b"datetimeimmutable::createfromformat" {
+                        let is_immutable = func_name_lower.starts_with(b"datetimeimmutable");
+                        let format = call.args.first().cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
+                        let datetime_str = call.args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        // Use a simple format-based parser
+                        let ts = vm_parse_with_format(&format, &datetime_str, now_secs);
+                        let result = match ts {
+                            Some(timestamp) => {
+                                let obj_id = self.next_object_id();
+                                let class_name = if is_immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() };
+                                let mut obj = PhpObject::new(class_name, obj_id);
+                                obj.set_property(b"timestamp".to_vec(), Value::Long(timestamp));
+                                Value::Object(Rc::new(RefCell::new(obj)))
+                            }
+                            None => Value::False,
+                        };
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower == b"datetime::createfromtimestamp"
+                        || func_name_lower == b"datetimeimmutable::createfromtimestamp" {
+                        let is_immutable = func_name_lower.starts_with(b"datetimeimmutable");
+                        let ts = call.args.first().cloned().unwrap_or(Value::Null).to_long();
+                        let obj_id = self.next_object_id();
+                        let class_name = if is_immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() };
+                        let mut obj = PhpObject::new(class_name, obj_id);
+                        obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+                        let result = Value::Object(Rc::new(RefCell::new(obj)));
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower == b"datetime::createfromimmutable"
+                        || func_name_lower == b"datetime::createfrominterface"
+                        || func_name_lower == b"datetimeimmutable::createfrommutable"
+                        || func_name_lower == b"datetimeimmutable::createfrominterface" {
+                        let is_immutable = func_name_lower.starts_with(b"datetimeimmutable");
+                        let ts = if let Some(Value::Object(o)) = call.args.first() {
+                            o.borrow().get_property(b"timestamp").to_long()
+                        } else {
+                            std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+                        };
+                        let obj_id = self.next_object_id();
+                        let class_name = if is_immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() };
+                        let mut obj = PhpObject::new(class_name, obj_id);
+                        obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+                        let result = Value::Object(Rc::new(RefCell::new(obj)));
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower.starts_with(b"__spl::") {
                         // SPL method call with args
                         let spl_path = &func_name_lower[7..]; // skip "__spl::"
@@ -8315,6 +8642,71 @@ impl Vm {
                                             // ReflectionGenerator::__construct(Generator $generator)
                                             if call.args.len() > 1 {
                                                 obj_mut.set_property(b"__reflection_target".to_vec(), call.args[1].clone());
+                                            }
+                                        }
+                                        b"datetime" | b"datetimeimmutable" => {
+                                            // DateTime::__construct($datetime = "now", $timezone = null)
+                                            let datetime_str = if call.args.len() > 1 {
+                                                let arg = &call.args[1];
+                                                if matches!(arg, Value::Null) {
+                                                    String::new()
+                                                } else {
+                                                    arg.to_php_string().to_string_lossy()
+                                                }
+                                            } else {
+                                                String::new()
+                                            };
+                                            let now_secs = std::time::SystemTime::now()
+                                                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                                .map(|d| d.as_secs() as i64)
+                                                .unwrap_or(0);
+                                            let timestamp = if datetime_str.is_empty() || datetime_str.eq_ignore_ascii_case("now") {
+                                                now_secs
+                                            } else {
+                                                match vm_parse_datetime_string(&datetime_str, now_secs) {
+                                                    Some(ts) => ts,
+                                                    None => {
+                                                        drop(obj_mut);
+                                                        let err_msg = format!("Failed to parse time string ({}) at position 0", datetime_str);
+                                                        let exc = self.create_exception(b"Exception", &err_msg, op.line);
+                                                        self.current_exception = Some(exc);
+                                                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                                            ip = catch_target as usize;
+                                                            continue;
+                                                        } else {
+                                                            return Err(VmError {
+                                                                message: format!("Uncaught Exception: {}", err_msg),
+                                                                line: op.line,
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                            };
+                                            obj_mut.set_property(b"timestamp".to_vec(), Value::Long(timestamp));
+                                        }
+                                        b"dateinterval" => {
+                                            // DateInterval::__construct($duration) - ISO 8601 duration
+                                            if call.args.len() > 1 {
+                                                let spec = call.args[1].to_php_string().to_string_lossy();
+                                                let (y, m, d, h, i, s) = parse_iso8601_duration(&spec);
+                                                obj_mut.set_property(b"y".to_vec(), Value::Long(y));
+                                                obj_mut.set_property(b"m".to_vec(), Value::Long(m));
+                                                obj_mut.set_property(b"d".to_vec(), Value::Long(d));
+                                                obj_mut.set_property(b"h".to_vec(), Value::Long(h));
+                                                obj_mut.set_property(b"i".to_vec(), Value::Long(i));
+                                                obj_mut.set_property(b"s".to_vec(), Value::Long(s));
+                                                obj_mut.set_property(b"f".to_vec(), Value::Double(0.0));
+                                                obj_mut.set_property(b"days".to_vec(), Value::False);
+                                                obj_mut.set_property(b"invert".to_vec(), Value::Long(0));
+                                            }
+                                        }
+                                        b"datetimezone" => {
+                                            // DateTimeZone::__construct($timezone)
+                                            if call.args.len() > 1 {
+                                                let tz = call.args[1].to_php_string().to_string_lossy();
+                                                obj_mut.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz)));
+                                            } else {
+                                                obj_mut.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
                                             }
                                         }
                                         _ => {
@@ -10758,6 +11150,11 @@ impl Vm {
                             b"splminheap" => b"SplMinHeap".to_vec(),
                             b"splobjectstorage" => b"SplObjectStorage".to_vec(),
                             b"recursivearrayiterator" => b"RecursiveArrayIterator".to_vec(),
+                            // DateTime classes
+                            b"datetime" => b"DateTime".to_vec(),
+                            b"datetimeimmutable" => b"DateTimeImmutable".to_vec(),
+                            b"dateinterval" => b"DateInterval".to_vec(),
+                            b"datetimezone" => b"DateTimeZone".to_vec(),
                             b"lengthexception" => b"LengthException".to_vec(),
                             b"outofrangeexception" => b"OutOfRangeException".to_vec(),
                             b"outofboundsexception" => b"OutOfBoundsException".to_vec(),
@@ -12153,6 +12550,8 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
         b"splobjectstorage" => &[b"Countable", b"Iterator", b"Traversable", b"Serializable", b"ArrayAccess"],
         b"splpriorityqueue" => &[b"Iterator", b"Traversable", b"Countable"],
         b"splheap" | b"splminheap" | b"splmaxheap" => &[b"Iterator", b"Traversable", b"Countable"],
+        b"datetime" => &[b"DateTimeInterface"],
+        b"datetimeimmutable" => &[b"DateTimeInterface"],
         b"exception" | b"error" | b"typeerror" | b"valueerror" | b"argumentcounterror"
         | b"rangeerror" | b"arithmeticerror" | b"divisionbyzeroerror" | b"assertionerror"
         | b"unhandledmatcherror" | b"runtimeexception" | b"logicexception"
@@ -12222,6 +12621,10 @@ pub fn canonicalize_class_name(name_lower: &[u8]) -> Vec<u8> {
         b"splminheap" => b"SplMinHeap".to_vec(),
         b"splheap" => b"SplHeap".to_vec(),
         b"splobjectstorage" => b"SplObjectStorage".to_vec(),
+        b"datetime" => b"DateTime".to_vec(),
+        b"datetimeimmutable" => b"DateTimeImmutable".to_vec(),
+        b"dateinterval" => b"DateInterval".to_vec(),
+        b"datetimezone" => b"DateTimeZone".to_vec(),
         _ => name_lower.to_vec(),
     }
 }
@@ -12255,6 +12658,10 @@ fn is_builtin_implements(class: &[u8], interface: &[u8]) -> bool {
         b"splheap" | b"splminheap" | b"splmaxheap" => matches!(
             interface,
             b"iterator" | b"traversable" | b"countable"
+        ),
+        b"datetime" | b"datetimeimmutable" => matches!(
+            interface,
+            b"datetimeinterface"
         ),
         _ => false,
     }
@@ -12455,4 +12862,350 @@ pub fn format_trace_args(args: &[Value]) -> String {
         .map(|v| Vm::format_trace_arg(v))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+// ==================== Date/time utility functions for VM ====================
+
+/// Convert days since epoch (1970-01-01) to (year, month, day)
+fn vm_days_to_ymd(days: i64) -> (i64, u32, u32) {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as u32, d as u32)
+}
+
+/// Convert (year, month, day) to days since epoch (1970-01-01)
+fn vm_ymd_to_days(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let m = month;
+    let doy = if m > 2 {
+        (153 * (m as u64 - 3) + 2) / 5 + day as u64 - 1
+    } else {
+        (153 * (m as u64 + 9) + 2) / 5 + day as u64 - 1
+    };
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe as i64 - 719468
+}
+
+/// Parse a datetime string into a unix timestamp
+fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
+    let s = input.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("now") {
+        return Some(now);
+    }
+    if s.starts_with('@') {
+        return s[1..].trim().parse::<i64>().ok();
+    }
+    // Try absolute date formats
+    let parts: Vec<&str> = s.splitn(2, |c: char| c == ' ' || c == 'T').collect();
+    let date_str = parts.first().unwrap_or(&"");
+    let date_parts: Vec<&str> = date_str.split('-').collect();
+    if date_parts.len() == 3 {
+        if let (Ok(year), Ok(month), Ok(day)) = (date_parts[0].parse::<i64>(), date_parts[1].parse::<u32>(), date_parts[2].parse::<u32>()) {
+            if month >= 1 && month <= 12 && day >= 1 && day <= 31 {
+                let mut h = 0i64;
+                let mut m = 0i64;
+                let mut sec = 0i64;
+                if let Some(time_str) = parts.get(1) {
+                    let time_clean = time_str.trim_end_matches(|c: char| c == 'Z' || c == 'z');
+                    let time_no_tz = time_clean.split('+').next().unwrap_or(time_clean);
+                    let time_no_micro = time_no_tz.split('.').next().unwrap_or(time_no_tz);
+                    let time_parts: Vec<&str> = time_no_micro.split(':').collect();
+                    h = time_parts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    m = time_parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                    sec = time_parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
+                }
+                let days = vm_ymd_to_days(year, month, day);
+                return Some(days * 86400 + h * 3600 + m * 60 + sec);
+            }
+        }
+    }
+    // Relative keywords
+    let lower = s.to_lowercase();
+    match lower.as_str() {
+        "yesterday" => return Some((now / 86400 - 1) * 86400),
+        "today" | "midnight" => return Some((now / 86400) * 86400),
+        "tomorrow" => return Some((now / 86400 + 1) * 86400),
+        "noon" => return Some((now / 86400) * 86400 + 12 * 3600),
+        _ => {}
+    }
+    // Try relative modification
+    vm_apply_relative_modification(&lower, now)
+}
+
+/// Apply relative modification like "+1 day", "-2 hours" etc
+fn vm_apply_relative_modification(s: &str, ts: i64) -> Option<i64> {
+    let lower = s.trim().to_lowercase();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    let mut result = ts;
+    let mut i = 0;
+    let mut any_match = false;
+
+    while i < tokens.len() {
+        let token = tokens[i];
+        if token == "next" || token == "last" || token == "this" {
+            if i + 1 < tokens.len() {
+                let amount: i64 = if token == "next" { 1 } else if token == "last" { -1 } else { 0 };
+                if let Some(new_ts) = vm_apply_unit(result, amount, tokens[i + 1]) {
+                    result = new_ts;
+                    any_match = true;
+                }
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(amount) = token.strip_prefix('+').and_then(|s| s.parse::<i64>().ok())
+            .or_else(|| token.parse::<i64>().ok()) {
+            if i + 1 < tokens.len() {
+                let mut actual = amount;
+                let mut skip = 2;
+                if i + 2 < tokens.len() && tokens[i + 2] == "ago" { actual = -amount; skip = 3; }
+                if let Some(new_ts) = vm_apply_unit(result, actual, tokens[i + 1]) {
+                    result = new_ts;
+                    any_match = true;
+                }
+                i += skip;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if any_match { Some(result) } else { None }
+}
+
+fn vm_apply_unit(ts: i64, amount: i64, unit: &str) -> Option<i64> {
+    let unit = unit.trim_end_matches('s');
+    match unit {
+        "second" | "sec" => Some(ts + amount),
+        "minute" | "min" => Some(ts + amount * 60),
+        "hour" => Some(ts + amount * 3600),
+        "day" => Some(ts + amount * 86400),
+        "week" => Some(ts + amount * 7 * 86400),
+        "month" => {
+            let days = ts / 86400;
+            let tod = ((ts % 86400) + 86400) % 86400;
+            let (year, month, day) = vm_days_to_ymd(days);
+            let new_m = month as i64 + amount;
+            let (adj_y, adj_m) = if new_m > 0 {
+                (year + (new_m - 1) / 12, ((new_m - 1) % 12 + 1) as u32)
+            } else {
+                (year + (new_m - 12) / 12, (12 - ((-new_m) % 12)) as u32)
+            };
+            let adj_m = if adj_m == 0 { 12 } else { adj_m };
+            let is_leap = adj_y % 4 == 0 && (adj_y % 100 != 0 || adj_y % 400 == 0);
+            let max_d = match adj_m { 2 => if is_leap {29} else {28}, 4|6|9|11 => 30, _ => 31 };
+            let adj_d = day.min(max_d);
+            Some(vm_ymd_to_days(adj_y, adj_m, adj_d) * 86400 + tod)
+        }
+        "year" => {
+            let days = ts / 86400;
+            let tod = ((ts % 86400) + 86400) % 86400;
+            let (year, month, day) = vm_days_to_ymd(days);
+            let ny = year + amount;
+            let is_leap = ny % 4 == 0 && (ny % 100 != 0 || ny % 400 == 0);
+            let adj_d = if month == 2 && day == 29 && !is_leap { 28 } else { day };
+            Some(vm_ymd_to_days(ny, month, adj_d) * 86400 + tod)
+        }
+        _ => None,
+    }
+}
+
+/// Parse ISO 8601 duration string like "P1Y2M3DT4H5M6S"
+fn parse_iso8601_duration(spec: &str) -> (i64, i64, i64, i64, i64, i64) {
+    let mut y = 0i64;
+    let mut m = 0i64;
+    let mut d = 0i64;
+    let mut h = 0i64;
+    let mut mi = 0i64;
+    let mut s = 0i64;
+    let bytes = spec.as_bytes();
+    let mut idx = 0;
+    let mut in_time = false;
+    if idx < bytes.len() && bytes[idx] == b'P' { idx += 1; }
+    while idx < bytes.len() {
+        if bytes[idx] == b'T' { in_time = true; idx += 1; continue; }
+        let start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() { idx += 1; }
+        if idx == start || idx >= bytes.len() { break; }
+        let num: i64 = std::str::from_utf8(&bytes[start..idx]).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        match bytes[idx] {
+            b'Y' => y = num,
+            b'M' => if in_time { mi = num; } else { m = num; },
+            b'D' => d = num,
+            b'H' => h = num,
+            b'S' => s = num,
+            b'W' => d = num * 7,
+            _ => {}
+        }
+        idx += 1;
+    }
+    (y, m, d, h, mi, s)
+}
+
+/// Create a DateInterval object from two timestamps
+fn create_date_interval_from_timestamps(vm: &mut Vm, ts1: i64, ts2: i64, absolute: bool) -> Value {
+    let diff = ts2 - ts1;
+    let invert = if diff < 0 && !absolute { 1 } else { 0 };
+    let abs_diff = diff.unsigned_abs() as i64;
+
+    let days1 = ts1 / 86400;
+    let days2 = ts2 / 86400;
+    let (y1, m1, d1) = vm_days_to_ymd(days1);
+    let (y2, m2, d2) = vm_days_to_ymd(days2);
+
+    let time1 = ((ts1 % 86400) + 86400) % 86400;
+    let time2 = ((ts2 % 86400) + 86400) % 86400;
+    let h1 = time1 / 3600; let i1 = (time1 % 3600) / 60; let s1 = time1 % 60;
+    let h2 = time2 / 3600; let i2 = (time2 % 3600) / 60; let s2 = time2 % 60;
+
+    let (years, months, days_val, hours, minutes, seconds) = if invert == 1 {
+        vm_calc_calendar_diff(y2, m2 as i64, d2 as i64, h2, i2, s2, y1, m1 as i64, d1 as i64, h1, i1, s1)
+    } else {
+        vm_calc_calendar_diff(y1, m1 as i64, d1 as i64, h1, i1, s1, y2, m2 as i64, d2 as i64, h2, i2, s2)
+    };
+
+    let total_days = abs_diff / 86400;
+    let obj_id = vm.next_object_id;
+    vm.next_object_id += 1;
+    let mut obj = PhpObject::new(b"DateInterval".to_vec(), obj_id);
+    obj.set_property(b"y".to_vec(), Value::Long(years));
+    obj.set_property(b"m".to_vec(), Value::Long(months));
+    obj.set_property(b"d".to_vec(), Value::Long(days_val));
+    obj.set_property(b"h".to_vec(), Value::Long(hours));
+    obj.set_property(b"i".to_vec(), Value::Long(minutes));
+    obj.set_property(b"s".to_vec(), Value::Long(seconds));
+    obj.set_property(b"f".to_vec(), Value::Double(0.0));
+    obj.set_property(b"days".to_vec(), Value::Long(total_days));
+    obj.set_property(b"invert".to_vec(), Value::Long(if absolute { 0 } else { invert }));
+    Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+fn vm_calc_calendar_diff(sy: i64, sm: i64, sd: i64, sh: i64, si: i64, ss: i64,
+                         ey: i64, em: i64, ed: i64, eh: i64, ei: i64, es: i64) -> (i64, i64, i64, i64, i64, i64) {
+    let mut seconds = es - ss;
+    let mut minutes = ei - si;
+    let mut hours = eh - sh;
+    let mut days_val = ed - sd;
+    let mut months = em - sm;
+    let mut years = ey - sy;
+    if seconds < 0 { seconds += 60; minutes -= 1; }
+    if minutes < 0 { minutes += 60; hours -= 1; }
+    if hours < 0 { hours += 24; days_val -= 1; }
+    if days_val < 0 {
+        let dim = match sm as u32 { 2 => if sy % 4 == 0 && (sy % 100 != 0 || sy % 400 == 0) {29} else {28}, 4|6|9|11 => 30, _ => 31 };
+        days_val += dim;
+        months -= 1;
+    }
+    if months < 0 { months += 12; years -= 1; }
+    (years, months, days_val, hours, minutes, seconds)
+}
+
+/// Parse a datetime string using a PHP-style format string
+fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
+    let now_days = now / 86400;
+    let (now_year, now_month, now_day) = vm_days_to_ymd(now_days);
+
+    let mut year = now_year;
+    let mut month = now_month;
+    let mut day = now_day;
+    let mut hour = 0i64;
+    let mut minute = 0i64;
+    let mut second = 0i64;
+
+    let fmt_bytes = format.as_bytes();
+    let dt_bytes = datetime.as_bytes();
+    let mut fi = 0;
+    let mut di = 0;
+
+    while fi < fmt_bytes.len() && di <= dt_bytes.len() {
+        let fc = fmt_bytes[fi];
+        match fc {
+            b'Y' => {
+                let end = (di + 4).min(dt_bytes.len());
+                year = std::str::from_utf8(&dt_bytes[di..end]).ok()?.parse().ok()?;
+                di = end;
+            }
+            b'y' => {
+                let end = (di + 2).min(dt_bytes.len());
+                let y: i64 = std::str::from_utf8(&dt_bytes[di..end]).ok()?.parse().ok()?;
+                year = if y >= 70 { 1900 + y } else { 2000 + y };
+                di = end;
+            }
+            b'm' | b'n' => {
+                let (val, consumed) = vm_parse_num(&dt_bytes[di..], if fc == b'm' { 2 } else { 2 })?;
+                month = val as u32;
+                di += consumed;
+            }
+            b'd' | b'j' => {
+                let (val, consumed) = vm_parse_num(&dt_bytes[di..], 2)?;
+                day = val as u32;
+                di += consumed;
+            }
+            b'H' | b'G' | b'h' | b'g' => {
+                let (val, consumed) = vm_parse_num(&dt_bytes[di..], 2)?;
+                hour = val;
+                di += consumed;
+            }
+            b'i' => {
+                let (val, consumed) = vm_parse_num(&dt_bytes[di..], 2)?;
+                minute = val;
+                di += consumed;
+            }
+            b's' => {
+                let (val, consumed) = vm_parse_num(&dt_bytes[di..], 2)?;
+                second = val;
+                di += consumed;
+            }
+            b'U' => {
+                let start = di;
+                if di < dt_bytes.len() && dt_bytes[di] == b'-' { di += 1; }
+                while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() { di += 1; }
+                return std::str::from_utf8(&dt_bytes[start..di]).ok()?.parse().ok();
+            }
+            b'A' | b'a' => {
+                if di + 2 <= dt_bytes.len() {
+                    let ampm = std::str::from_utf8(&dt_bytes[di..di+2]).ok()?.to_lowercase();
+                    if ampm == "pm" && hour < 12 { hour += 12; }
+                    else if ampm == "am" && hour == 12 { hour = 0; }
+                    di += 2;
+                }
+            }
+            b'u' | b'v' => {
+                while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() { di += 1; }
+            }
+            b'e' | b'T' | b'O' | b'P' | b'p' => {
+                while di < dt_bytes.len() && !dt_bytes[di].is_ascii_whitespace() { di += 1; }
+            }
+            b'\\' => {
+                fi += 1;
+                if fi < fmt_bytes.len() && di < dt_bytes.len() { di += 1; }
+            }
+            b'!' => { year = 1970; month = 1; day = 1; hour = 0; minute = 0; second = 0; }
+            b'|' => { /* reset unset fields - simplified */ }
+            _ => { if di < dt_bytes.len() { di += 1; } }
+        }
+        fi += 1;
+    }
+
+    let days = vm_ymd_to_days(year, month, day);
+    Some(days * 86400 + hour * 3600 + minute * 60 + second)
+}
+
+fn vm_parse_num(bytes: &[u8], max_digits: usize) -> Option<(i64, usize)> {
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] == b' ' { i += 1; }
+    let start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() && (i - start) < max_digits { i += 1; }
+    if i == start { return None; }
+    let s = std::str::from_utf8(&bytes[start..i]).ok()?;
+    Some((s.parse().ok()?, i))
 }
