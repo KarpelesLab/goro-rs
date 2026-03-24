@@ -1662,15 +1662,15 @@ impl Compiler {
                 let qualified_name = self.prefix_with_namespace(name);
                 // Check for reserved class names
                 let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if name_lower == b"self" || name_lower == b"parent" {
+                if name_lower == b"self" || name_lower == b"parent" || name_lower == b"static" {
                     let kind = if modifiers.is_interface {
                         "interface"
                     } else {
                         "class"
                     };
                     return Err(CompileError {
-                        message: format!("Cannot use \"{}\" as {} name, as it is reserved",
-                            String::from_utf8_lossy(name), kind),
+                        message: format!("Cannot use \"{}\" as {} name as it is reserved",
+                            String::from_utf8_lossy(name), if kind == "interface" { "an interface" } else { "a class" }),
                         line: stmt.span.line,
                     });
                 }
@@ -1678,7 +1678,7 @@ impl Compiler {
                 // Resolve parent class name - also check for reserved names
                 if let Some(p) = extends.as_ref() {
                     let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if p_lower == b"self" || p_lower == b"parent" {
+                    if p_lower == b"self" || p_lower == b"parent" || p_lower == b"static" {
                         return Err(CompileError {
                             message: format!("Cannot use \"{}\" as class name, as it is reserved",
                                 String::from_utf8_lossy(p)),
@@ -1687,7 +1687,35 @@ impl Compiler {
                     }
                 }
                 class.parent = extends.as_ref().map(|p| self.resolve_class_name(p));
-                // Resolve interface names
+                // Resolve interface names - also check for reserved names
+                for iface in implements.iter() {
+                    let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if iface_lower == b"self" || iface_lower == b"parent" || iface_lower == b"static" {
+                        return Err(CompileError {
+                            message: format!("Cannot use \"{}\" as interface name, as it is reserved",
+                                String::from_utf8_lossy(iface)),
+                            line: stmt.span.line,
+                        });
+                    }
+                }
+                // Check for duplicate interface implementations
+                {
+                    let mut seen: Vec<Vec<u8>> = Vec::new();
+                    for iface in implements.iter() {
+                        let resolved = self.resolve_class_name(iface);
+                        let lower: Vec<u8> = resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if seen.contains(&lower) {
+                            let kind = if modifiers.is_enum { "Enum" } else if modifiers.is_interface { "Interface" } else { "Class" };
+                            let iface_display = String::from_utf8_lossy(iface);
+                            return Err(CompileError {
+                                message: format!("{} {} cannot implement previously implemented interface {}",
+                                    kind, String::from_utf8_lossy(name), iface_display),
+                                line: stmt.span.line,
+                            });
+                        }
+                        seen.push(lower);
+                    }
+                }
                 class.interfaces = implements.iter().map(|i| self.resolve_class_name(i)).collect();
                 class.is_abstract = modifiers.is_abstract;
                 class.is_final = modifiers.is_final;
@@ -1909,6 +1937,14 @@ impl Compiler {
                             let prop_type = type_hint.as_ref().map(|hint| {
                                 type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
                             });
+                            // Check for duplicate property names
+                            if class.properties.iter().any(|p| p.name == *prop_name) {
+                                return Err(CompileError {
+                                    message: format!("Cannot redeclare {}::${}",
+                                        String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                    line: stmt.span.line,
+                                });
+                            }
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
                                 default: default_val,
@@ -2160,6 +2196,14 @@ impl Compiler {
                                             let promoted_prop_type = param.type_hint.as_ref().map(|hint| {
                                                 type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
                                             });
+                                            // Check for duplicate property from promotion
+                                            if class.properties.iter().any(|p| p.name == param.name) {
+                                                return Err(CompileError {
+                                                    message: format!("Cannot redeclare {}::${}",
+                                                        String::from_utf8_lossy(name), String::from_utf8_lossy(&param.name)),
+                                                    line: *method_line,
+                                                });
+                                            }
                                             class.properties.push(PropertyDef {
                                                 name: param.name.clone(),
                                                 default: Value::Null,
@@ -2312,6 +2356,14 @@ impl Compiler {
                                 let param_count = params.len();
                                 let lower_name: Vec<u8> =
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                // Check for duplicate method names
+                                if class.methods.contains_key(&lower_name) {
+                                    return Err(CompileError {
+                                        message: format!("Cannot redeclare {}::{}()",
+                                            String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                        line: *method_line,
+                                    });
+                                }
                                 let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 class.methods.insert(
                                     lower_name,
@@ -5433,6 +5485,43 @@ impl Compiler {
                 match Self::eval_const_expr(operand)? {
                     Value::Long(n) => Some(Value::Long(-n)),
                     Value::Double(f) => Some(Value::Double(-f)),
+                    _ => None,
+                }
+            }
+            ExprKind::UnaryOp { op: UnaryOp::BitwiseNot, operand, .. } => {
+                match Self::eval_const_expr(operand)? {
+                    Value::Long(n) => Some(Value::Long(!n)),
+                    _ => None,
+                }
+            }
+            ExprKind::BinaryOp { left, op, right, .. } => {
+                let l = Self::eval_const_expr(left)?;
+                let r = Self::eval_const_expr(right)?;
+                match (l, op, r) {
+                    (Value::Long(a), BinaryOp::ShiftLeft, Value::Long(b)) => Some(Value::Long(a << b)),
+                    (Value::Long(a), BinaryOp::ShiftRight, Value::Long(b)) => Some(Value::Long(a >> b)),
+                    (Value::Long(a), BinaryOp::BitwiseAnd, Value::Long(b)) => Some(Value::Long(a & b)),
+                    (Value::Long(a), BinaryOp::BitwiseOr, Value::Long(b)) => Some(Value::Long(a | b)),
+                    (Value::Long(a), BinaryOp::BitwiseXor, Value::Long(b)) => Some(Value::Long(a ^ b)),
+                    (Value::Long(a), BinaryOp::Add, Value::Long(b)) => Some(Value::Long(a.wrapping_add(b))),
+                    (Value::Long(a), BinaryOp::Sub, Value::Long(b)) => Some(Value::Long(a.wrapping_sub(b))),
+                    (Value::Long(a), BinaryOp::Mul, Value::Long(b)) => Some(Value::Long(a.wrapping_mul(b))),
+                    (Value::Long(a), BinaryOp::Div, Value::Long(b)) if b != 0 => {
+                        if a % b == 0 { Some(Value::Long(a / b)) } else { Some(Value::Double(a as f64 / b as f64)) }
+                    }
+                    (Value::Long(a), BinaryOp::Mod, Value::Long(b)) if b != 0 => Some(Value::Long(a % b)),
+                    (Value::Long(a), BinaryOp::Pow, Value::Long(b)) if b >= 0 => Some(Value::Long(a.wrapping_pow(b as u32))),
+                    (Value::Double(a), BinaryOp::Add, Value::Double(b)) => Some(Value::Double(a + b)),
+                    (Value::Double(a), BinaryOp::Sub, Value::Double(b)) => Some(Value::Double(a - b)),
+                    (Value::Double(a), BinaryOp::Mul, Value::Double(b)) => Some(Value::Double(a * b)),
+                    (Value::Double(a), BinaryOp::Div, Value::Double(b)) if b != 0.0 => Some(Value::Double(a / b)),
+                    (Value::Long(a), BinaryOp::Add, Value::Double(b)) => Some(Value::Double(a as f64 + b)),
+                    (Value::Double(a), BinaryOp::Add, Value::Long(b)) => Some(Value::Double(a + b as f64)),
+                    (Value::String(a), BinaryOp::Concat, Value::String(b)) => {
+                        let mut result = a.as_bytes().to_vec();
+                        result.extend_from_slice(b.as_bytes());
+                        Some(Value::String(PhpString::from_vec(result)))
+                    }
                     _ => None,
                 }
             }

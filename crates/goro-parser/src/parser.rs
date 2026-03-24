@@ -32,6 +32,8 @@ pub struct Parser {
     anon_counter: u32,
     /// Set to true by parse_arguments() when it detects first-class callable syntax (...)
     first_class_callable_flag: bool,
+    /// Pending extra constants from comma-separated const declarations
+    pending_extra_constants: Vec<ClassMember>,
 }
 
 const MAX_PARSE_DEPTH: u32 = 512;
@@ -45,6 +47,7 @@ impl Parser {
             anon_class_stmts: Vec::new(),
             anon_counter: 0,
             first_class_callable_flag: false,
+            pending_extra_constants: Vec::new(),
         }
     }
 
@@ -1553,7 +1556,10 @@ impl Parser {
 
     fn parse_class_members(&mut self) -> ParseResult<Vec<ClassMember>> {
         let member = self.parse_class_member()?;
-        Ok(vec![member])
+        let mut members = vec![member];
+        // Drain any extra constants from comma-separated declarations
+        members.append(&mut self.pending_extra_constants);
+        Ok(members)
     }
 
     fn parse_class_member(&mut self) -> ParseResult<ClassMember> {
@@ -1881,6 +1887,22 @@ impl Parser {
                         };
                         self.expect(&TokenKind::Assign)?;
                         let value = self.parse_expression()?;
+                        // Handle comma-separated typed constants
+                        self.pending_extra_constants.clear();
+                        while self.eat(&TokenKind::Comma) {
+                            let extra_name = match self.peek().clone() {
+                                TokenKind::Identifier(n) => { self.advance(); n }
+                                _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
+                                _ => break,
+                            };
+                            self.expect(&TokenKind::Assign)?;
+                            let extra_value = self.parse_expression()?;
+                            self.pending_extra_constants.push(ClassMember::ClassConstant {
+                                name: extra_name,
+                                value: extra_value,
+                                visibility,
+                            });
+                        }
                         self.expect_semicolon()?;
                         return Ok(ClassMember::ClassConstant { name, value, visibility });
                     }
@@ -1922,6 +1944,23 @@ impl Parser {
                 };
                 self.expect(&TokenKind::Assign)?;
                 let value = self.parse_expression()?;
+                // Handle comma-separated constants: const A = 1, B = 2;
+                // We only return the first one here; additional ones are handled by parse_class_members
+                self.pending_extra_constants.clear();
+                while self.eat(&TokenKind::Comma) {
+                    let extra_name = match self.peek().clone() {
+                        TokenKind::Identifier(n) => { self.advance(); n }
+                        _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
+                        _ => break,
+                    };
+                    self.expect(&TokenKind::Assign)?;
+                    let extra_value = self.parse_expression()?;
+                    self.pending_extra_constants.push(ClassMember::ClassConstant {
+                        name: extra_name,
+                        value: extra_value,
+                        visibility,
+                    });
+                }
                 self.expect_semicolon()?;
                 Ok(ClassMember::ClassConstant {
                     name,

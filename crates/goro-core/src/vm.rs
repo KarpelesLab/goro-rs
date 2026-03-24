@@ -3814,7 +3814,7 @@ impl Vm {
             }
             b"isfinal" => {
                 let is_final = self.classes.get(&class_lower)
-                    .map(|c| c.is_final)
+                    .map(|c| c.is_final || c.is_enum) // Enums are implicitly final
                     .unwrap_or(false);
                 Some(if is_final { Value::True } else { Value::False })
             }
@@ -8170,6 +8170,39 @@ impl Vm {
                             }
                         }
 
+                        // Special handling for __call/__callStatic:
+                        // Pack extra args into an array for the $args parameter
+                        // Must happen BEFORE type checking so the array arg passes the type check.
+                        if func_name_lower.ends_with(b"::__call")
+                            || func_name_lower.ends_with(b"::__callstatic")
+                        {
+                            // Args: [this, method_name, arg1, arg2, ...]
+                            // Need: [this, method_name, [arg1, arg2, ..., name1 => val1, ...]]
+                            let mut args_arr = crate::array::PhpArray::new();
+                            if call.args.len() > 2 {
+                                let extra_args: Vec<Value> = call.args.drain(2..).collect();
+                                for arg in extra_args {
+                                    args_arr.push(arg);
+                                }
+                            }
+                            // Add named args with string keys
+                            for (name, val) in call.named_args.drain(..) {
+                                args_arr.set(
+                                    ArrayKey::String(PhpString::from_vec(name)),
+                                    val,
+                                );
+                            }
+                            if !args_arr.is_empty() {
+                                call.args
+                                    .push(Value::Array(Rc::new(RefCell::new(args_arr))));
+                            } else {
+                                // No extra args - push empty array
+                                call.args.push(Value::Array(Rc::new(RefCell::new(
+                                    crate::array::PhpArray::new(),
+                                ))));
+                            }
+                        }
+
                         // Check parameter types before executing
                         if !user_fn.param_types.is_empty() {
                             // Push class scope temporarily for self/parent/static type checking
@@ -8230,38 +8263,6 @@ impl Vm {
                                         line: def_line,
                                     });
                                 }
-                            }
-                        }
-
-                        // Special handling for __call/__callStatic:
-                        // Pack extra args into an array for the $args parameter
-                        if func_name_lower.ends_with(b"::__call")
-                            || func_name_lower.ends_with(b"::__callstatic")
-                        {
-                            // Args: [this, method_name, arg1, arg2, ...]
-                            // Need: [this, method_name, [arg1, arg2, ..., name1 => val1, ...]]
-                            let mut args_arr = crate::array::PhpArray::new();
-                            if call.args.len() > 2 {
-                                let extra_args: Vec<Value> = call.args.drain(2..).collect();
-                                for arg in extra_args {
-                                    args_arr.push(arg);
-                                }
-                            }
-                            // Add named args with string keys
-                            for (name, val) in call.named_args.drain(..) {
-                                args_arr.set(
-                                    ArrayKey::String(PhpString::from_vec(name)),
-                                    val,
-                                );
-                            }
-                            if !args_arr.is_empty() {
-                                call.args
-                                    .push(Value::Array(Rc::new(RefCell::new(args_arr))));
-                            } else {
-                                // No extra args - push empty array
-                                call.args.push(Value::Array(Rc::new(RefCell::new(
-                                    crate::array::PhpArray::new(),
-                                ))));
                             }
                         }
 
@@ -10552,7 +10553,16 @@ impl Vm {
                         Value::Object(obj) => {
                             let obj_borrow = obj.borrow();
                             let name = String::from_utf8_lossy(&obj_borrow.class_name);
-                            format!("of type {}", name)
+                            if obj_borrow.has_property(b"__enum_case") {
+                                // For enums, show ClassName::CaseName
+                                if let Value::String(case_name) = obj_borrow.get_property(b"name") {
+                                    format!("{}::{}", name, case_name.to_string_lossy())
+                                } else {
+                                    format!("of type {}", name)
+                                }
+                            } else {
+                                format!("of type {}", name)
+                            }
                         }
                         _ => subject.to_php_string().to_string_lossy(),
                     };
@@ -10668,7 +10678,9 @@ impl Vm {
                                         }
                                         // Skip __construct compatibility checks
                                         let mn_lower = method_name.as_slice();
-                                        if mn_lower != b"__construct" && !method.is_abstract {
+                                        if mn_lower != b"__construct" && !method.is_abstract
+                                            && method.visibility != Visibility::Private
+                                            && child_method.visibility != Visibility::Private {
                                             // Check method signature compatibility
                                             if let Some(err_msg) = Self::check_method_compatibility(
                                                 &class.name, child_method,
@@ -10905,16 +10917,23 @@ impl Vm {
                                         );
                                     }
                                 }
-                                let msg = if !self_declared_abstract.is_empty() && self_declared_abstract.len() == count {
+                                let kind = if class.is_enum { "Enum" } else { "Class" };
+                                let msg = if class.is_enum {
+                                    // Enums use a different message format
+                                    format!(
+                                        "Enum {} must implement {} abstract {} ({})",
+                                        class_name_str, count, method_word, methods_list
+                                    )
+                                } else if !self_declared_abstract.is_empty() && self_declared_abstract.len() == count {
                                     // All abstract methods are self-declared
                                     format!(
-                                        "Class {} declares abstract method {}() and must therefore be declared abstract",
-                                        class_name_str, self_declared_abstract[0]
+                                        "{} {} declares abstract method {}() and must therefore be declared abstract",
+                                        kind, class_name_str, self_declared_abstract[0]
                                     )
                                 } else {
                                     format!(
-                                        "Class {} contains {} abstract {} and must therefore be declared abstract or implement the remaining {} ({})",
-                                        class_name_str, count, method_word, method_word, methods_list
+                                        "{} {} contains {} abstract {} and must therefore be declared abstract or implement the remaining {} ({})",
+                                        kind, class_name_str, count, method_word, method_word, methods_list
                                     )
                                 };
                                 return Err(VmError {
@@ -11421,6 +11440,20 @@ impl Vm {
                                     self.magic_depth -= 1;
                                     result
                                 } else {
+                                    // Emit "Undefined property" warning, but only for user-defined classes
+                                    // that have declared properties in the class table.
+                                    // Internal classes (Reflection*, Exception, etc.) use dynamic properties.
+                                    let has_declared_props = self.classes.get(&class_lower)
+                                        .map(|c| !c.properties.is_empty() || !c.methods.is_empty())
+                                        .unwrap_or(false);
+                                    if has_declared_props {
+                                        let class_display = String::from_utf8_lossy(&class_name_orig);
+                                        let prop_display = prop_name.to_string_lossy();
+                                        self.emit_warning_at(&format!(
+                                            "Undefined property: {}::${}",
+                                            class_display, prop_display
+                                        ), op.line);
+                                    }
                                     Value::Null
                                 }
                             } else {

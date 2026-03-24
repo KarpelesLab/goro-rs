@@ -2569,16 +2569,29 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_lower: Vec<u8> = match class_or_obj {
         Value::Object(obj) => {
             let obj = obj.borrow();
+            // Closures have __invoke method
+            let cn_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if cn_lower.starts_with(b"__closure") || cn_lower == b"closure" {
+                if method_lower == b"__invoke" {
+                    return Ok(Value::True);
+                }
+                return Ok(Value::False);
+            }
             obj.class_name
                 .iter()
                 .map(|c| c.to_ascii_lowercase())
                 .collect()
         }
-        Value::String(s) => s
-            .as_bytes()
-            .iter()
-            .map(|c| c.to_ascii_lowercase())
-            .collect(),
+        Value::String(s) => {
+            // Closures are stored as strings starting with "__closure"
+            if s.as_bytes().starts_with(b"__closure") && method_lower == b"__invoke" {
+                return Ok(Value::True);
+            }
+            s.as_bytes()
+                .iter()
+                .map(|c| c.to_ascii_lowercase())
+                .collect()
+        }
         _ => return Ok(Value::False),
     };
 
