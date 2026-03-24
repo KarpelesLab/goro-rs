@@ -1059,7 +1059,10 @@ fn format_php_float_with_precision(f: f64, sig_digits: usize) -> String {
     // PHP uses G format with `sig_digits` significant digits
     // This is equivalent to: sprintf("%.{sig_digits}G", f) but with some PHP-specific quirks
     let sig_digits = if sig_digits == 0 { 1 } else { sig_digits };
-    let s = format!("{:.width$e}", f, width = sig_digits);
+    // Rust's {:.Ne} gives N decimal places after leading digit = N+1 significant digits.
+    // We want sig_digits significant digits total, so use sig_digits - 1.
+    let fmt_width = if sig_digits > 0 { sig_digits - 1 } else { 0 };
+    let s = format!("{:.width$e}", f, width = fmt_width);
 
     // Parse the scientific notation
     let parts: Vec<&str> = s.split('e').collect();

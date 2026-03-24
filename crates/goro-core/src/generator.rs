@@ -373,6 +373,12 @@ impl PhpGenerator {
                     let b = self.read_operand(&op.op2, &op_array.literals);
                     self.write_operand(&op.result, Value::Long(a.to_long() ^ b.to_long()));
                 }
+                OpCode::BoolXor => {
+                    let a = self.read_operand(&op.op1, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &op_array.literals);
+                    let result = if a.is_truthy() ^ b.is_truthy() { Value::True } else { Value::False };
+                    self.write_operand(&op.result, result);
+                }
                 OpCode::BitwiseNot => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     self.write_operand(&op.result, Value::Long(!a.to_long()));

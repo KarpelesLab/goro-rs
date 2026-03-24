@@ -1317,6 +1317,7 @@ impl<'a> Lexer<'a> {
 
         // Now scan until we find the closing label
         let mut content = Vec::new();
+        let mut closing_indent = Vec::new();
         loop {
             // Check for closing label at start of line
             let _line_start = self.pos;
@@ -1331,6 +1332,7 @@ impl<'a> Lexer<'a> {
                 let next_ch = self.source.get(after_label).copied();
                 if matches!(next_ch, None | Some(b';') | Some(b'\n') | Some(b'\r')) {
                     self.pos = after_label;
+                    closing_indent = indent;
                     // Consume ; and newline if present
                     break;
                 }
@@ -1359,6 +1361,26 @@ impl<'a> Lexer<'a> {
             if content.last() == Some(&b'\r') {
                 content.pop();
             }
+        }
+
+        // PHP 7.3+ flexible heredoc: strip closing label's indentation from each content line
+        if !closing_indent.is_empty() {
+            let indent_len = closing_indent.len();
+            let mut stripped = Vec::new();
+            let lines: Vec<&[u8]> = content.split(|&b| b == b'\n').collect();
+            for (i, line) in lines.iter().enumerate() {
+                if line.len() >= indent_len && line[..indent_len] == closing_indent[..] {
+                    stripped.extend_from_slice(&line[indent_len..]);
+                } else {
+                    // Lines shorter than indent or with different indent: include as-is
+                    // (PHP would produce an error, but we'll be lenient)
+                    stripped.extend_from_slice(line);
+                }
+                if i < lines.len() - 1 {
+                    stripped.push(b'\n');
+                }
+            }
+            content = stripped;
         }
 
         if is_nowdoc {

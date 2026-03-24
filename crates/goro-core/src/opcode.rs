@@ -84,6 +84,7 @@ pub enum OpCode {
 
     // ---- Logical ----
     BooleanNot,
+    BoolXor,
 
     // ---- Assignment ----
     /// Assign op2 to CV(op1), result = value

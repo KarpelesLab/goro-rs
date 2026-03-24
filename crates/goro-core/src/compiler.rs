@@ -3282,7 +3282,7 @@ impl Compiler {
                     BinaryOp::LessEqual => OpCode::LessEqual,
                     BinaryOp::GreaterEqual => OpCode::GreaterEqual,
                     BinaryOp::Spaceship => OpCode::Spaceship,
-                    BinaryOp::LogicalXor => OpCode::BitwiseXor,
+                    BinaryOp::LogicalXor => OpCode::BoolXor,
                     BinaryOp::BooleanAnd
                     | BinaryOp::BooleanOr
                     | BinaryOp::LogicalAnd
@@ -5522,8 +5522,67 @@ impl Compiler {
                         result.extend_from_slice(b.as_bytes());
                         Some(Value::String(PhpString::from_vec(result)))
                     }
+                    // String concatenation with non-string right side
+                    (Value::String(a), BinaryOp::Concat, rv) => {
+                        let mut result = a.as_bytes().to_vec();
+                        result.extend_from_slice(rv.to_php_string().as_bytes());
+                        Some(Value::String(PhpString::from_vec(result)))
+                    }
+                    // Boolean/logical operators - always return bool
+                    (l, BinaryOp::BooleanAnd, r) | (l, BinaryOp::LogicalAnd, r) => {
+                        Some(if l.is_truthy() && r.is_truthy() { Value::True } else { Value::False })
+                    }
+                    (l, BinaryOp::BooleanOr, r) | (l, BinaryOp::LogicalOr, r) => {
+                        Some(if l.is_truthy() || r.is_truthy() { Value::True } else { Value::False })
+                    }
+                    (l, BinaryOp::LogicalXor, r) => {
+                        Some(if l.is_truthy() ^ r.is_truthy() { Value::True } else { Value::False })
+                    }
+                    // Comparison operators
+                    (Value::Long(a), BinaryOp::Less, Value::Long(b)) => Some(if a < b { Value::True } else { Value::False }),
+                    (Value::Long(a), BinaryOp::Greater, Value::Long(b)) => Some(if a > b { Value::True } else { Value::False }),
+                    (Value::Long(a), BinaryOp::LessEqual, Value::Long(b)) => Some(if a <= b { Value::True } else { Value::False }),
+                    (Value::Long(a), BinaryOp::GreaterEqual, Value::Long(b)) => Some(if a >= b { Value::True } else { Value::False }),
+                    (Value::Long(a), BinaryOp::Equal, Value::Long(b)) => Some(if a == b { Value::True } else { Value::False }),
+                    (Value::Long(a), BinaryOp::Identical, Value::Long(b)) => Some(if a == b { Value::True } else { Value::False }),
+                    (Value::Long(a), BinaryOp::NotEqual, Value::Long(b)) => Some(if a != b { Value::True } else { Value::False }),
+                    (Value::Long(a), BinaryOp::NotIdentical, Value::Long(b)) => Some(if a != b { Value::True } else { Value::False }),
+                    // Equal/NotEqual with string comparison (loose)
+                    (Value::String(a), BinaryOp::Equal, Value::String(b)) => Some(if a.as_bytes() == b.as_bytes() { Value::True } else { Value::False }),
+                    (Value::String(a), BinaryOp::NotEqual, Value::String(b)) => Some(if a.as_bytes() != b.as_bytes() { Value::True } else { Value::False }),
+                    (Value::Long(a), BinaryOp::Equal, Value::String(b)) | (Value::String(b), BinaryOp::Equal, Value::Long(a)) => {
+                        let s = std::str::from_utf8(b.as_bytes()).unwrap_or("");
+                        Some(if s.parse::<i64>().ok() == Some(a) { Value::True } else { Value::False })
+                    }
+                    (Value::Long(a), BinaryOp::NotEqual, Value::String(b)) | (Value::String(b), BinaryOp::NotEqual, Value::Long(a)) => {
+                        let s = std::str::from_utf8(b.as_bytes()).unwrap_or("");
+                        Some(if s.parse::<i64>().ok() != Some(a) { Value::True } else { Value::False })
+                    }
                     _ => None,
                 }
+            }
+            // Ternary operator
+            ExprKind::Ternary { condition, if_true, if_false } => {
+                let cond = Self::eval_const_expr(condition)?;
+                if cond.is_truthy() {
+                    if let Some(true_expr) = if_true {
+                        Self::eval_const_expr(true_expr)
+                    } else {
+                        // Short ternary: $a ?: $b - return the condition value itself
+                        Some(cond)
+                    }
+                } else {
+                    Self::eval_const_expr(if_false)
+                }
+            }
+            // UnaryOp::BooleanNot (!)
+            ExprKind::UnaryOp { op: UnaryOp::BooleanNot, operand, .. } => {
+                let val = Self::eval_const_expr(operand)?;
+                Some(if val.is_truthy() { Value::False } else { Value::True })
+            }
+            // UnaryOp::Plus (+)
+            ExprKind::UnaryOp { op: UnaryOp::Plus, operand, .. } => {
+                Self::eval_const_expr(operand)
             }
             _ => None,
         }

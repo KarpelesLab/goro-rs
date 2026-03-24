@@ -6621,6 +6621,22 @@ impl Vm {
                         &static_cv_keys,
                     );
                 }
+                OpCode::BoolXor => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let result = if a.is_truthy() ^ b.is_truthy() {
+                        Value::True
+                    } else {
+                        Value::False
+                    };
+                    self.write_operand(
+                        &op.result,
+                        result,
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
+                }
                 OpCode::BitwiseNot => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let result = if matches!(a.deref(), Value::String(_)) {
@@ -12070,7 +12086,14 @@ impl Vm {
                             }
                             b"getreturn" => {
                                 let gen_borrow = gen_rc.borrow();
-                                gen_borrow.return_value.clone()
+                                if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                    drop(gen_borrow);
+                                    let mut gen_borrow = gen_rc.borrow_mut();
+                                    let _ = gen_borrow.resume(self);
+                                    gen_borrow.return_value.clone()
+                                } else {
+                                    gen_borrow.return_value.clone()
+                                }
                             }
                             _ => Value::Null,
                         };

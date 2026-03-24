@@ -836,6 +836,10 @@ pub fn do_sprintf(args: &[Value]) -> String {
                 b'b' => format!("{:b}", arg.to_long()),
                 b'c' => String::from(arg.to_long() as u8 as char),
                 b'u' => format!("{}", arg.to_long() as u64),
+                b'%' => {
+                    // `%` as type specifier (after flags/width): output literal `%` and consume arg
+                    "%".to_string()
+                }
                 _ => {
                     arg_idx -= 1;
                     format!("%{}", spec as char)
@@ -964,7 +968,7 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn str_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null).to_php_string();
     let length = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
     let pad_string = match args.get(2) {
@@ -973,16 +977,28 @@ fn str_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let pad_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // STR_PAD_RIGHT=1
 
+    let pad_bytes = pad_string.as_bytes();
+    if pad_bytes.is_empty() {
+        let msg = "str_pad(): Argument #3 ($pad_string) must not be empty";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: 0 });
+    }
+
+    // Validate pad_type
+    if pad_type != 0 && pad_type != 1 && pad_type != 2 {
+        let msg = "str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: 0 });
+    }
+
     let bytes = input.as_bytes();
     if bytes.len() >= length || length > 128 * 1024 * 1024 {
         return Ok(Value::String(input));
     }
 
     let pad_needed = length - bytes.len();
-    let pad_bytes = pad_string.as_bytes();
-    if pad_bytes.is_empty() {
-        return Ok(Value::String(input));
-    }
 
     let mut padding = Vec::new();
     while padding.len() < pad_needed {
