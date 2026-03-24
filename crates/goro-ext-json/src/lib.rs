@@ -60,6 +60,17 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut seen = std::collections::HashSet::new();
     let mut recursion_detected = false;
     let s = json_encode_value_flags_tracked(val, 0, flags, &mut seen, &mut recursion_detected);
+    if s.contains("\x00ENUM_ERROR") {
+        // Non-backed enum cannot be serialized
+        let err_msg = "Non-backed enums have no default serialization";
+        vm.json_last_error = 11; // JSON_ERROR_NON_BACKED_ENUM
+        if throw_on_error {
+            let exc = vm.create_exception(b"JsonException", err_msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: format!("Uncaught JsonException: {}", err_msg), line: 0 });
+        }
+        return Ok(Value::False);
+    }
     if recursion_detected {
         vm.json_last_error = 6; // JSON_ERROR_RECURSION
         if flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
@@ -190,6 +201,20 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: 
                 return "null".to_string();
             }
             let obj_ref = obj.borrow();
+            // Special handling for enum cases
+            if obj_ref.has_property(b"__enum_case") {
+                seen.remove(&obj_ptr);
+                // Check if this is a backed enum
+                if obj_ref.has_property(b"__enum_backing_type") {
+                    // Backed enum: encode the backing value
+                    let value = obj_ref.get_property(b"value");
+                    return json_encode_value_flags_tracked(&value, depth, flags, seen, recursion_detected);
+                } else {
+                    // Non-backed enum: cannot be serialized
+                    // Return empty string to signal error
+                    return "\x00ENUM_ERROR".to_string();
+                }
+            }
             if obj_ref.properties.is_empty() {
                 seen.remove(&obj_ptr);
                 return "{}".to_string();
@@ -779,6 +804,7 @@ fn json_last_error_msg(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         8 => "Type is not supported",
         9 => "The decoded property name is invalid",
         10 => "Single unpaired UTF-16 surrogate in unicode escape",
+        11 => "Non-backed enums have no default serialization",
         _ => "Unknown error",
     };
     Ok(Value::String(PhpString::from_bytes(msg.as_bytes())))

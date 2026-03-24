@@ -891,6 +891,63 @@ impl Value {
                     }
                 }
             }
+            // Object vs Object comparison
+            (Value::Object(a_obj), Value::Object(b_obj)) => {
+                let a_borrow = a_obj.borrow();
+                let b_borrow = b_obj.borrow();
+                // Enum cases: only equal if same class and same case name
+                let a_is_enum = a_borrow.has_property(b"__enum_case");
+                let b_is_enum = b_borrow.has_property(b"__enum_case");
+                if a_is_enum || b_is_enum {
+                    // Enums are not orderable - return incomparable (i64::MIN)
+                    // They can only be compared for equality via == / ===
+                    if a_is_enum && b_is_enum {
+                        let a_class = &a_borrow.class_name;
+                        let b_class = &b_borrow.class_name;
+                        let a_case = a_borrow.get_property(b"name");
+                        let b_case = b_borrow.get_property(b"name");
+                        if a_class.eq_ignore_ascii_case(b_class) {
+                            if a_case.compare(&b_case) == 0 {
+                                return 0; // Same enum case
+                            }
+                        }
+                    }
+                    return i64::MIN; // Not comparable
+                }
+                // Regular objects: compare by class name and properties
+                if !a_borrow.class_name.eq_ignore_ascii_case(&b_borrow.class_name) {
+                    // Different classes - not comparable in PHP 8 for ordered comparison
+                    // but == returns false (handled elsewhere), <=> should return 1
+                    return 1;
+                }
+                // Same class: compare properties
+                if a_borrow.properties.len() != b_borrow.properties.len() {
+                    return if a_borrow.properties.len() < b_borrow.properties.len() { -1 } else { 1 };
+                }
+                // Compare each property value
+                for (key, a_val) in &a_borrow.properties {
+                    let b_val = b_borrow.get_property(key);
+                    let cmp = a_val.compare(&b_val);
+                    if cmp != 0 {
+                        return cmp;
+                    }
+                }
+                0
+            }
+            // Object vs non-object: objects are generally greater except vs bool
+            (Value::Object(_), _) | (_, Value::Object(_)) => {
+                // For non-bool comparisons, PHP 8 produces a notice/warning
+                // and converts object to int (1). But for enums this is different.
+                let a = self.to_double();
+                let b = other.to_double();
+                if a < b {
+                    -1
+                } else if a > b {
+                    1
+                } else {
+                    0
+                }
+            }
             _ => {
                 let a = self.to_double();
                 let b = other.to_double();

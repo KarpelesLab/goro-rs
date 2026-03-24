@@ -547,6 +547,7 @@ impl Vm {
                 c.insert(b"JSON_ERROR_UNSUPPORTED_TYPE".to_vec(), Value::Long(8));
                 c.insert(b"JSON_ERROR_INVALID_PROPERTY_NAME".to_vec(), Value::Long(9));
                 c.insert(b"JSON_ERROR_UTF16".to_vec(), Value::Long(10));
+                c.insert(b"JSON_ERROR_NON_BACKED_ENUM".to_vec(), Value::Long(11));
                 // URL constants
                 c.insert(b"PHP_URL_SCHEME".to_vec(), Value::Long(0));
                 c.insert(b"PHP_URL_HOST".to_vec(), Value::Long(1));
@@ -1024,14 +1025,14 @@ impl Vm {
 
     /// Find the PropertyDef for a given property name in a class (by lowercase class name).
     /// Walks up the parent chain to find the property definition.
-    /// Returns (visibility, declaring_class, is_readonly).
-    fn find_property_def(&self, class_name_lower: &[u8], prop_name: &[u8]) -> Option<(Visibility, Vec<u8>, bool)> {
+    /// Returns (visibility, declaring_class, is_readonly, property_type).
+    fn find_property_def(&self, class_name_lower: &[u8], prop_name: &[u8]) -> Option<(Visibility, Vec<u8>, bool, Option<crate::opcode::ParamType>)> {
         let mut current = class_name_lower.to_vec();
         for _ in 0..50 {
             if let Some(class) = self.classes.get(&current) {
                 for prop in &class.properties {
                     if prop.name == prop_name {
-                        return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly));
+                        return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
                     }
                 }
                 if let Some(parent) = &class.parent {
@@ -11311,7 +11312,7 @@ impl Vm {
 
                         // Check visibility before accessing the property
                         let mut visibility_error: Option<String> = None;
-                        if let Some((vis, declaring_class, _is_readonly)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
+                        if let Some((vis, declaring_class, _is_readonly, _prop_type)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
                             if vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -11460,10 +11461,11 @@ impl Vm {
                             return Err(VmError { message: msg, line: op.line });
                         }
 
-                        // Check visibility and readonly before setting the property
+                        // Check visibility, readonly, and type before setting the property
                         let mut visibility_error: Option<String> = None;
                         let mut readonly_error: Option<String> = None;
-                        if let Some((vis, declaring_class, prop_is_readonly)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
+                        let mut type_error: Option<String> = None;
+                        if let Some((vis, declaring_class, prop_is_readonly, prop_type)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
                             if vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -11487,9 +11489,37 @@ impl Vm {
                                     readonly_error = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_display));
                                 }
                             }
+                            // Enforce typed properties (only if no readonly error, since readonly takes precedence)
+                            if readonly_error.is_none() && visibility_error.is_none() {
+                                if let Some(ref pt) = prop_type {
+                                    if !self.value_matches_type(&value, pt) {
+                                        let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
+                                        let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                        let expected = self.param_type_name(pt);
+                                        let given = Self::value_type_name(&value);
+                                        type_error = Some(format!(
+                                            "Cannot assign {} to property {}::${} of type {}",
+                                            given, class_display, prop_display, expected
+                                        ));
+                                    }
+                                }
+                            }
                         }
 
-                        if let Some(err_msg) = readonly_error {
+                        if let Some(err_msg) = type_error {
+                            // Property type violation - throw TypeError
+                            let exc = self.create_exception(b"TypeError", &err_msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: format!("Uncaught TypeError: {}", err_msg),
+                                    line: op.line,
+                                });
+                            }
+                        } else if let Some(err_msg) = readonly_error {
                             // Readonly violation - throw Error
                             let err_id = self.next_object_id;
                             self.next_object_id += 1;
@@ -12558,7 +12588,8 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
         | b"invalidargumentexception" | b"badmethodcallexception" | b"badfunctioncallexception"
         | b"overflowexception" | b"underflowexception" | b"outofboundsexception"
         | b"domainexception" | b"unexpectedvalueexception" | b"lengthexception"
-        | b"outofrangeexception" | b"closedgeneratorexception" | b"errorexception" => &[b"Throwable"],
+        | b"outofrangeexception" | b"closedgeneratorexception" | b"errorexception"
+        | b"jsonexception" => &[b"Throwable"],
         _ => &[],
     };
     interfaces.iter().map(|i| i.to_vec()).collect()
@@ -12571,7 +12602,7 @@ pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
         | b"unhandledmatcherror" | b"assertionerror" => Some(b"Error"),
         b"arithmeticerror" => Some(b"Error"),
         b"divisionbyzeroerror" => Some(b"ArithmeticError"),
-        b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"errorexception" => Some(b"Exception"),
+        b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"errorexception" | b"jsonexception" => Some(b"Exception"),
         b"overflowexception" | b"underflowexception" | b"outofboundsexception" => Some(b"RuntimeException"),
         b"invalidargumentexception" | b"badmethodcallexception" | b"domainexception"
         | b"unexpectedvalueexception" | b"lengthexception" | b"outofrangeexception" => Some(b"LogicException"),
@@ -12683,7 +12714,7 @@ fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             b"divisionbyzeroerror" => Some(b"arithmeticerror".to_vec()),
             b"error" => Some(b"throwable".to_vec()),
             // Exception hierarchy
-            b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" => {
+            b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"jsonexception" => {
                 Some(b"exception".to_vec())
             }
             b"overflowexception" | b"underflowexception" | b"outofboundsexception" => {

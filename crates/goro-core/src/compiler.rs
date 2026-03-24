@@ -1052,6 +1052,16 @@ impl Compiler {
             StmtKind::FunctionDecl {
                 name, params, body, return_type, ..
             } => {
+                // Check for promoted properties in free functions
+                for param in params {
+                    if param.visibility.is_some() || param.readonly {
+                        return Err(CompileError {
+                            message: "Cannot declare promoted property outside a constructor".to_string(),
+                            line: stmt.span.line,
+                        });
+                    }
+                }
+
                 // Check if this function contains yield (making it a generator)
                 let is_generator = stmts_contain_yield(body);
 
@@ -1090,6 +1100,34 @@ impl Compiler {
                         }
                     }
                     func_compiler.op_array.return_type = Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                }
+
+                // Validate parameter types
+                for param in params.iter() {
+                    if let Some(hint) = &param.type_hint {
+                        let simple_hint = match hint {
+                            TypeHint::Simple(n) => Some(n),
+                            TypeHint::Nullable(inner) => {
+                                if let TypeHint::Simple(n) = inner.as_ref() { Some(n) } else { None }
+                            }
+                            _ => None,
+                        };
+                        if let Some(n) = simple_hint {
+                            let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if lower == b"void" {
+                                return Err(CompileError {
+                                    message: "void cannot be used as a parameter type".to_string(),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            if lower == b"never" {
+                                return Err(CompileError {
+                                    message: "never cannot be used as a parameter type".to_string(),
+                                    line: stmt.span.line,
+                                });
+                            }
+                        }
+                    }
                 }
 
                 // Set up parameter CVs and default values
@@ -1688,6 +1726,52 @@ impl Compiler {
                                     line: stmt.span.line,
                                 });
                             }
+                            // Properties cannot have type callable
+                            if let Some(hint) = type_hint {
+                                let check_callable = |h: &TypeHint| -> bool {
+                                    match h {
+                                        TypeHint::Simple(n) => n.eq_ignore_ascii_case(b"callable"),
+                                        TypeHint::Nullable(inner) => matches!(inner.as_ref(), TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"callable")),
+                                        TypeHint::Union(types) => types.iter().any(|t| matches!(t, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"callable"))),
+                                        _ => false,
+                                    }
+                                };
+                                if check_callable(hint) {
+                                    return Err(CompileError {
+                                        message: format!("Property {}::${} cannot have type callable",
+                                            String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                                // Properties cannot have type void
+                                let check_void = |h: &TypeHint| -> bool {
+                                    match h {
+                                        TypeHint::Simple(n) => n.eq_ignore_ascii_case(b"void"),
+                                        _ => false,
+                                    }
+                                };
+                                if check_void(hint) {
+                                    return Err(CompileError {
+                                        message: format!("Property {}::${} cannot have type void",
+                                            String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                                // Properties cannot have type never
+                                let check_never = |h: &TypeHint| -> bool {
+                                    match h {
+                                        TypeHint::Simple(n) => n.eq_ignore_ascii_case(b"never"),
+                                        _ => false,
+                                    }
+                                };
+                                if check_never(hint) {
+                                    return Err(CompileError {
+                                        message: format!("Property {}::${} cannot have type never",
+                                            String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                            }
                             // Readonly property validations
                             let prop_is_readonly = *is_readonly || modifiers.is_readonly;
                             if prop_is_readonly {
@@ -1822,6 +1906,9 @@ impl Compiler {
                                     .insert(prop_name.clone(), default_val.clone());
                             }
                             let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let prop_type = type_hint.as_ref().map(|hint| {
+                                type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
+                            });
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
                                 default: default_val,
@@ -1829,6 +1916,7 @@ impl Compiler {
                                 visibility: vis,
                                 declaring_class: declaring_class_lower,
                                 is_readonly: prop_is_readonly,
+                                property_type: prop_type,
                             });
                         }
                         ClassMember::Method {
@@ -2032,6 +2120,28 @@ impl Compiler {
                             {
                                 let mn_lower: Vec<u8> =
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                // Check for promoted properties in non-constructors
+                                if mn_lower != b"__construct" {
+                                    for param in params {
+                                        if param.visibility.is_some() || param.readonly {
+                                            return Err(CompileError {
+                                                message: "Cannot declare promoted property outside a constructor".to_string(),
+                                                line: stmt.span.line,
+                                            });
+                                        }
+                                    }
+                                }
+                                // Check for promoted properties in abstract constructors
+                                if mn_lower == b"__construct" && *is_abstract {
+                                    for param in params {
+                                        if param.visibility.is_some() || param.readonly {
+                                            return Err(CompileError {
+                                                message: "Cannot declare promoted property in an abstract constructor".to_string(),
+                                                line: stmt.span.line,
+                                            });
+                                        }
+                                    }
+                                }
                                 if mn_lower == b"__construct" {
                                     for param in params {
                                         if let Some(vis) = &param.visibility {
@@ -2047,6 +2157,9 @@ impl Compiler {
                                                 }
                                             };
                                             let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            let promoted_prop_type = param.type_hint.as_ref().map(|hint| {
+                                                type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
+                                            });
                                             class.properties.push(PropertyDef {
                                                 name: param.name.clone(),
                                                 default: Value::Null,
@@ -2054,6 +2167,7 @@ impl Compiler {
                                                 visibility: prop_vis,
                                                 declaring_class: declaring_class_lower,
                                                 is_readonly: param.readonly || modifiers.is_readonly,
+                                                property_type: promoted_prop_type,
                                             });
                                         }
                                     }
@@ -2320,6 +2434,13 @@ impl Compiler {
                             if enum_backing_type.is_some() && value.is_none() {
                                 return Err(CompileError {
                                     message: format!("Case {} of backed enum {} must have a value",
+                                        String::from_utf8_lossy(case_name), String::from_utf8_lossy(name)),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            if enum_backing_type.is_none() && value.is_some() {
+                                return Err(CompileError {
+                                    message: format!("Case {} of non-backed enum {} must not have a value",
                                         String::from_utf8_lossy(case_name), String::from_utf8_lossy(name)),
                                     line: stmt.span.line,
                                 });
@@ -4541,6 +4662,20 @@ impl Compiler {
 
             ExprKind::Spread(inner) => self.compile_expr(inner),
 
+            ExprKind::ThrowExpr(inner) => {
+                let val = self.compile_expr(inner)?;
+                self.op_array.emit(Op {
+                    opcode: OpCode::Throw,
+                    op1: val,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
+                // throw never returns, but we need a result for expression context
+                let null_idx = self.op_array.add_literal(Value::Null);
+                Ok(OperandType::Const(null_idx))
+            }
+
             ExprKind::ClassConstAccess { class, constant } => {
                 // Handle ClassName::class, ClassName::CONST, self::CONST
                 let class_name = match &class.kind {
@@ -4623,6 +4758,43 @@ impl Compiler {
                     opcode: OpCode::StaticPropGet,
                     op1: OperandType::Const(class_idx),
                     op2: OperandType::Const(const_name_idx),
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
+            }
+
+            ExprKind::DynamicClassConstAccess { class, constant } => {
+                // Dynamic class constant fetch: Foo::{$expr}
+                let class_name = match &class.kind {
+                    ExprKind::Identifier(name) => {
+                        let resolved = self.resolve_class_name(name);
+                        if resolved.eq_ignore_ascii_case(b"self") {
+                            self.current_class.clone().unwrap_or(resolved)
+                        } else if resolved.eq_ignore_ascii_case(b"parent") {
+                            self.current_parent_class.clone().unwrap_or(resolved)
+                        } else if resolved.eq_ignore_ascii_case(b"static") {
+                            b"static".to_vec()
+                        } else {
+                            resolved
+                        }
+                    }
+                    _ => {
+                        let _ = self.compile_expr(class)?;
+                        let idx = self.op_array.add_literal(Value::Null);
+                        return Ok(OperandType::Const(idx));
+                    }
+                };
+
+                let class_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(class_name)));
+                let const_expr = self.compile_expr(constant)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::StaticPropGet,
+                    op1: OperandType::Const(class_idx),
+                    op2: const_expr,
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
                 });
@@ -5484,7 +5656,7 @@ fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
             collect_expr_variables(left, vars);
             collect_expr_variables(right, vars);
         }
-        ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) => {
+        ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::ThrowExpr(e) => {
             collect_expr_variables(e, vars);
         }
         ExprKind::PropertyAccess { object, .. } => {
@@ -5492,7 +5664,15 @@ fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
         }
         ExprKind::Instanceof { expr, .. } => collect_expr_variables(expr, vars),
         ExprKind::ArrowFunction { body, .. } => collect_expr_variables(body, vars),
-        ExprKind::Closure { .. } => {} // Don't recurse into closures
+        ExprKind::Closure { use_vars, .. } => {
+            // Don't recurse into closures body, but DO collect use vars
+            // so that enclosing arrow functions know to capture them
+            for uv in use_vars {
+                if !vars.contains(&uv.variable) {
+                    vars.push(uv.variable.clone());
+                }
+            }
+        }
         ExprKind::Match { subject, arms } => {
             collect_expr_variables(subject, vars);
             for arm in arms {
@@ -5546,7 +5726,7 @@ fn expr_contains_yield(expr: &Expr) -> bool {
             expr_contains_yield(left) || expr_contains_yield(right)
         }
         ExprKind::Cast(_, e) => expr_contains_yield(e),
-        ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) => expr_contains_yield(e),
+        ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::ThrowExpr(e) => expr_contains_yield(e),
         ExprKind::PropertyAccess { object, .. } => expr_contains_yield(object),
         ExprKind::Include { path, .. } => expr_contains_yield(path),
         _ => false,

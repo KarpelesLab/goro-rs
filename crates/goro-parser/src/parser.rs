@@ -2802,6 +2802,14 @@ impl Parser {
                     kind: ExprKind::Print(Box::new(operand)),
                 })
             }
+            TokenKind::Throw => {
+                self.advance();
+                let operand = self.parse_expression()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::ThrowExpr(Box::new(operand)),
+                })
+            }
             _ => self.parse_postfix(),
         }
     }
@@ -3175,6 +3183,20 @@ impl Parser {
                                     },
                                 };
                             }
+                        }
+                        TokenKind::OpenBrace => {
+                            // Dynamic class constant fetch: Foo::{$expr}
+                            self.advance();
+                            let inner = self.parse_expression()?;
+                            let end_span = self.span();
+                            self.expect(&TokenKind::CloseBrace)?;
+                            expr = Expr {
+                                span: expr.span.merge(end_span),
+                                kind: ExprKind::DynamicClassConstAccess {
+                                    class: Box::new(expr),
+                                    constant: Box::new(inner),
+                                },
+                            };
                         }
                         _ => {
                             return Err(ParseError {

@@ -514,13 +514,14 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                 let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
                 let case_name = obj_borrow.get_property(b"name");
                 let case_name_str = case_name.to_php_string().to_string_lossy();
-                let prefix_backslash = if class_name.contains('\\') { "" } else { "\\" };
+                // PHP always adds a leading \ to enum class names in var_export
+                let prefix_backslash = if class_name.starts_with('\\') { "" } else { "\\" };
                 buf.extend_from_slice(format!("{}{}::{}", prefix_backslash, class_name, case_name_str).as_bytes());
                 return;
             }
             let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
-            // PHP prefixes class names with \ in var_export unless they already contain \
-            let prefix_backslash = if class_name.contains('\\') { "" } else { "\\" };
+            // PHP prefixes class names with \ in var_export unless they already start with \
+            let prefix_backslash = if class_name.starts_with('\\') { "" } else { "\\" };
             buf.extend_from_slice(format!("{}{}::__set_state(array(\n", prefix_backslash, class_name).as_bytes());
             for (name, value) in &obj_borrow.properties {
                 let name_str = String::from_utf8_lossy(name);

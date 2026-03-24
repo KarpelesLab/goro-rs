@@ -303,6 +303,14 @@ pub enum ExprKind {
         class: Box<Expr>,
         constant: Vec<u8>,
     },
+    /// Dynamic class constant fetch: Foo::{$expr}
+    DynamicClassConstAccess {
+        class: Box<Expr>,
+        constant: Box<Expr>,
+    },
+
+    // Throw as expression (PHP 8.0+)
+    ThrowExpr(Box<Expr>),
 
     // Error suppression
     Suppress(Box<Expr>),

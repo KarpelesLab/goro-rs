@@ -55,6 +55,8 @@ pub struct PropertyDef {
     pub visibility: Visibility,
     /// The class that originally declared this property (lowercase)
     pub declaring_class: Vec<u8>,
+    /// Optional type constraint for the property
+    pub property_type: Option<crate::opcode::ParamType>,
 }
 
 #[derive(Debug, Clone)]
