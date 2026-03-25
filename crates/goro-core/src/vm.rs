@@ -1030,24 +1030,48 @@ impl Vm {
     /// Walks up the parent chain to find the property definition.
     /// Returns (visibility, declaring_class, is_readonly, property_type).
     fn find_property_def(&self, class_name_lower: &[u8], prop_name: &[u8]) -> Option<(Visibility, Vec<u8>, bool, Option<crate::opcode::ParamType>)> {
+        self.find_property_def_for_scope(class_name_lower, prop_name, None)
+    }
+
+    /// Find a property definition, optionally considering the caller scope for private property resolution.
+    /// When caller_scope is provided, private properties from other classes are skipped
+    /// so that a parent can access its own private property on a child object.
+    fn find_property_def_for_scope(&self, class_name_lower: &[u8], prop_name: &[u8], caller_scope: Option<&[u8]>) -> Option<(Visibility, Vec<u8>, bool, Option<crate::opcode::ParamType>)> {
         let mut current = class_name_lower.to_vec();
+        let mut first_match = None;
         for _ in 0..50 {
             if let Some(class) = self.classes.get(&current) {
                 for prop in &class.properties {
                     if prop.name == prop_name {
-                        return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
+                        if prop.visibility == Visibility::Private {
+                            if let Some(scope) = caller_scope {
+                                let declaring_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if declaring_lower == scope {
+                                    // Exact match for private property in caller's scope
+                                    return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
+                                }
+                                // Save first match but keep looking for a scope match
+                                if first_match.is_none() {
+                                    first_match = Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
+                                }
+                            } else {
+                                return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
+                            }
+                        } else {
+                            return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
+                        }
                     }
                 }
                 if let Some(parent) = &class.parent {
                     current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
                 } else {
-                    return None;
+                    return first_match;
                 }
             } else {
-                return None;
+                return first_match;
             }
         }
-        None
+        first_match
     }
 
     /// Emit a PHP warning message to output
@@ -2143,18 +2167,27 @@ impl Vm {
             child_required > parent_required
         };
 
-        // Check return type compatibility (basic: if parent has return type, child must also have it)
+        // Check return type compatibility (covariant return types)
         let return_type_incompatible = if let Some(parent_rt) = &parent_op.return_type {
-            if let Some(_child_rt) = &child_op.return_type {
-                // Both have return types - for now, don't check covariance (complex)
-                false
+            if let Some(child_rt) = &child_op.return_type {
+                // Both have return types - check if they're compatible
+                // Simple check: if the string representations differ and the child type
+                // is not a subtype of the parent type, they're incompatible
+                let parent_type_str = Self::format_param_type_for_sig(parent_rt, parent_class);
+                let child_type_str = Self::format_param_type_for_sig(child_rt, child_class);
+                if parent_type_str == child_type_str {
+                    false
+                } else {
+                    // Check basic covariance: child return type must be subtype of parent
+                    // For simple types: int is not compatible with string, etc.
+                    !Self::is_return_type_compatible(child_rt, parent_rt)
+                }
             } else {
-                // Parent has return type but child doesn't
-                // This is OK in PHP 8.x (it's only a warning in strict mode)
+                // Parent has return type but child doesn't - incompatible
                 false
             }
         } else {
-            // Parent has no return type - child can add one
+            // Parent has no return type - child can add one (covariant)
             false
         };
 
@@ -2182,6 +2215,61 @@ impl Vm {
             ))
         } else {
             None
+        }
+    }
+
+    /// Check if child return type is compatible (covariant) with parent return type.
+    /// This is a simplified check - only flags definitely-incompatible cases.
+    /// Returns true if types are compatible (or we can't determine).
+    fn is_return_type_compatible(child_rt: &crate::opcode::ParamType, parent_rt: &crate::opcode::ParamType) -> bool {
+        use crate::opcode::ParamType;
+        match (child_rt, parent_rt) {
+            // Same type is always compatible
+            (ParamType::Simple(a), ParamType::Simple(b)) if a.eq_ignore_ascii_case(b) => true,
+            // void is only compatible with void
+            (ParamType::Simple(a), _) if a.eq_ignore_ascii_case(b"void") => {
+                matches!(parent_rt, ParamType::Simple(b) if b.eq_ignore_ascii_case(b"void"))
+            }
+            (_, ParamType::Simple(b)) if b.eq_ignore_ascii_case(b"void") => false,
+            // never is compatible with anything (bottom type)
+            (ParamType::Simple(a), _) if a.eq_ignore_ascii_case(b"never") => true,
+            // anything is compatible with mixed (top type)
+            (_, ParamType::Simple(b)) if b.eq_ignore_ascii_case(b"mixed") => true,
+            // Nullable types: ?T is compatible with ?T
+            (ParamType::Nullable(a), ParamType::Nullable(b)) => Self::is_return_type_compatible(a, b),
+            // T is compatible with ?T (covariant - narrowing)
+            (_, ParamType::Nullable(inner)) => Self::is_return_type_compatible(child_rt, inner),
+            // For intersection types, union types, and class types, we can't easily check
+            // covariance without resolving the class hierarchy. Be permissive.
+            (ParamType::Intersection(_), _) => true,
+            (_, ParamType::Intersection(_)) => true,
+            // Union in parent: child type should be a subset
+            (ParamType::Union(_), ParamType::Union(_)) => true, // too complex, be permissive
+            (ParamType::Simple(name), ParamType::Union(parent_types)) => {
+                parent_types.iter().any(|pt| Self::is_return_type_compatible(child_rt, pt))
+            }
+            (ParamType::Union(child_types), ParamType::Simple(_)) => {
+                // Union child -> simple parent: only compatible if all child types are compatible
+                // But this is complex (class types), be permissive
+                true
+            }
+            // Different simple built-in types are definitely incompatible
+            (ParamType::Simple(a), ParamType::Simple(b)) => {
+                // Only flag incompatibility for clearly different primitive types
+                let primitives = [b"int".as_slice(), b"float", b"string", b"bool", b"array", b"null"];
+                let a_lower: Vec<u8> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let b_lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let a_is_prim = primitives.iter().any(|p| *p == a_lower.as_slice());
+                let b_is_prim = primitives.iter().any(|p| *p == b_lower.as_slice());
+                if a_is_prim && b_is_prim {
+                    // Both are primitives and different -> incompatible
+                    false
+                } else {
+                    // At least one is a class type - could be subclass, be permissive
+                    true
+                }
+            }
+            _ => true,
         }
     }
 
@@ -8634,10 +8722,20 @@ impl Vm {
                         let pushed_called_class =
                             if let Some(pos) = func_name_lower.iter().position(|&b| b == b':') {
                                 if func_name_lower.get(pos + 1) == Some(&b':') {
-                                    // Extract original-case class name from call.name
-                                    let orig_bytes = call.name.as_bytes();
-                                    let class_part = orig_bytes[..pos].to_vec();
-                                    self.called_class_stack.push(class_part);
+                                    // For late static binding, use the actual object class when $this is present.
+                                    // Check call.args first (explicit $this), then caller's CVs (parent:: calls).
+                                    let called_class = if let Some(Value::Object(obj)) = call.args.first() {
+                                        // Instance method call (has $this) - use object's runtime class
+                                        obj.borrow().class_name.clone()
+                                    } else if let Some(Value::Object(obj)) = cvs.first() {
+                                        // parent::method() from instance context - caller has $this
+                                        obj.borrow().class_name.clone()
+                                    } else {
+                                        // Pure static call - use the class name from the call
+                                        let orig_bytes = call.name.as_bytes();
+                                        orig_bytes[..pos].to_vec()
+                                    };
+                                    self.called_class_stack.push(called_class);
 
                                     // Push the defining class scope for visibility checks
                                     let class_part_lower = &func_name_lower[..pos];
@@ -8676,6 +8774,19 @@ impl Vm {
                                 {
                                     self.globals.insert(name.clone(), cv.clone());
                                 }
+                            }
+                        }
+
+                        // Auto-inject $this for parent:: / static method calls in instance context
+                        // When calling ClassName::method() (e.g. parent::show()), the method expects
+                        // $this as CV[0], but InitFCall doesn't pass it. Inject from current scope.
+                        if pushed_called_class
+                            && user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                            && !matches!(call.args.first(), Some(Value::Object(_)))
+                        {
+                            // Check if current scope has $this
+                            if let Some(this_val @ Value::Object(_)) = cvs.first() {
+                                call.args.insert(0, this_val.clone());
                             }
                         }
 
@@ -9472,6 +9583,24 @@ impl Vm {
                         let spl_args = vec![arr_val.clone(), Value::Null, val.clone()];
                         if self.handle_spl_docall(&class_lower, b"offsetset", &spl_args).is_none() {
                             self.call_object_method(&arr_val, b"offsetset", &[Value::Null, val]);
+                        }
+                    } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
+                        // Auto-initialize null/undef/false to array and append
+                        let mut arr = PhpArray::new();
+                        arr.push(val);
+                        let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
+                        if let OperandType::Cv(cv_idx) = &op.op1 {
+                            let i = *cv_idx as usize;
+                            if let Some(cv_val) = cvs.get_mut(i) {
+                                match cv_val {
+                                    Value::Reference(r) => {
+                                        *r.borrow_mut() = new_arr;
+                                    }
+                                    _ => {
+                                        *cv_val = new_arr;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -11217,6 +11346,24 @@ impl Vm {
                             let parent_lower: Vec<u8> =
                                 parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(parent) = self.classes.get(&parent_lower).cloned() {
+                                // Check: interface can only extend another interface
+                                if class.is_interface && !parent.is_interface {
+                                    let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                    let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                    return Err(VmError {
+                                        message: format!("{} cannot implement {} - it is not an interface", child_display, parent_display),
+                                        line: op.line,
+                                    });
+                                }
+                                // Check: class cannot extend an interface
+                                if !class.is_interface && parent.is_interface {
+                                    let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                    let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                    return Err(VmError {
+                                        message: format!("Class {} cannot extend interface {}", child_display, parent_display),
+                                        line: op.line,
+                                    });
+                                }
                                 // Check if parent is final
                                 if parent.is_final {
                                     let parent_display = String::from_utf8_lossy(parent_name).to_string();
@@ -11302,6 +11449,39 @@ impl Vm {
                             let iface_lower: Vec<u8> =
                                 iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(iface) = self.classes.get(&iface_lower).cloned() {
+                                // Check that we're implementing an interface, not a class
+                                if !iface.is_interface && !class.is_interface {
+                                    let iface_display = String::from_utf8_lossy(iface_name).to_string();
+                                    let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                    return Err(VmError {
+                                        message: format!("{} cannot implement {} - it is not an interface", class_display, iface_display),
+                                        line: op.line,
+                                    });
+                                }
+                                // Check for duplicate interface implementation (interface extends)
+                                if class.is_interface {
+                                    // Check if parent interfaces already include this one
+                                    let already_inherited = class.interfaces.iter()
+                                        .filter(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>() != iface_lower)
+                                        .any(|other_iface| {
+                                            let other_lower: Vec<u8> = other_iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            if let Some(other) = self.classes.get(&other_lower) {
+                                                other.interfaces.iter().any(|inherited| {
+                                                    inherited.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>() == iface_lower
+                                                })
+                                            } else {
+                                                false
+                                            }
+                                        });
+                                    if already_inherited {
+                                        let iface_display = String::from_utf8_lossy(iface_name).to_string();
+                                        let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                        return Err(VmError {
+                                            message: format!("Interface {} cannot implement previously implemented interface {}", class_display, iface_display),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
                                 for (method_name, method) in &iface.methods {
                                     if !class.methods.contains_key(method_name) {
                                         class.methods.insert(method_name.clone(), method.clone());
@@ -11313,6 +11493,22 @@ impl Vm {
                                         class
                                             .constants
                                             .insert(const_name.clone(), const_val.clone());
+                                    }
+                                }
+                                // Inherit interface's parent interfaces
+                                for parent_iface in &iface.interfaces {
+                                    let pi_lower: Vec<u8> = parent_iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if let Some(pi) = self.classes.get(&pi_lower).cloned() {
+                                        for (method_name, method) in &pi.methods {
+                                            if !class.methods.contains_key(method_name) {
+                                                class.methods.insert(method_name.clone(), method.clone());
+                                            }
+                                        }
+                                        for (const_name, const_val) in &pi.constants {
+                                            if !class.constants.contains_key(const_name) {
+                                                class.constants.insert(const_name.clone(), const_val.clone());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -11435,8 +11631,30 @@ impl Vm {
                         // Check for unimplemented abstract methods (interface enforcement)
                         if !class.is_abstract && !class.is_interface && !class.is_trait {
                             let mut abstract_methods: Vec<String> = Vec::new();
+                            let _class_name_lower_for_check: Vec<u8> = class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             for (_, method) in &class.methods {
                                 if method.is_abstract {
+                                    // Skip abstract methods inherited from traits
+                                    // (non-abstract classes are allowed to use traits with abstract methods)
+                                    let declaring_is_trait = self.classes.get(&method.declaring_class)
+                                        .map(|c| c.is_trait)
+                                        .unwrap_or(false);
+                                    if declaring_is_trait {
+                                        continue;
+                                    }
+                                    // Also check if the method came from a trait by looking at used trait names
+                                    let method_from_trait = trait_names.iter().any(|tn| {
+                                        let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if let Some(tc) = self.classes.get(&tn_lower) {
+                                            let method_lower: Vec<u8> = method.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            tc.methods.contains_key(&method_lower)
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                    if method_from_trait {
+                                        continue;
+                                    }
                                     // Find which interface this method belongs to
                                     let mut iface_origin = String::new();
                                     for iface_name in &iface_names {
@@ -11458,10 +11676,16 @@ impl Vm {
                                         }
                                     }
                                     if iface_origin.is_empty() {
-                                        iface_origin = String::from_utf8_lossy(
-                                            &name_val.to_php_string().as_bytes(),
-                                        )
-                                        .to_string();
+                                        // Use the declaring class of the abstract method
+                                        let declaring = &method.declaring_class;
+                                        if let Some(dc) = self.classes.get(declaring) {
+                                            iface_origin = String::from_utf8_lossy(&dc.name).to_string();
+                                        } else {
+                                            iface_origin = String::from_utf8_lossy(
+                                                &name_val.to_php_string().as_bytes(),
+                                            )
+                                            .to_string();
+                                        }
                                     }
                                     let method_name_str =
                                         String::from_utf8_lossy(&method.name).to_string();
@@ -11910,7 +12134,9 @@ impl Vm {
 
                         // Check visibility before accessing the property
                         let mut visibility_error: Option<String> = None;
-                        if let Some((vis, declaring_class, _is_readonly, _prop_type)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
+                        let caller_scope_for_get = self.current_class_scope()
+                            .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        if let Some((vis, declaring_class, _is_readonly, _prop_type)) = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_get.as_deref()) {
                             if vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -12040,6 +12266,26 @@ impl Vm {
                             }
                         }
                     } else {
+                        // Accessing property on non-object
+                        match &obj_val {
+                            Value::Null | Value::False => {
+                                let type_name = Self::value_type_name(&obj_val);
+                                let prop_str = prop_name.to_string_lossy();
+                                self.emit_warning_at(
+                                    &format!("Attempt to read property \"{}\" on {}", prop_str, type_name),
+                                    op.line,
+                                );
+                            }
+                            Value::True | Value::Long(_) | Value::Double(_) | Value::String(_) => {
+                                let type_name = Self::value_type_name(&obj_val);
+                                let prop_str = prop_name.to_string_lossy();
+                                self.emit_warning_at(
+                                    &format!("Attempt to read property \"{}\" on {}", prop_str, type_name),
+                                    op.line,
+                                );
+                            }
+                            _ => {} // Undef, Array, etc. - no warning
+                        }
                         Value::Null
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
@@ -12077,7 +12323,9 @@ impl Vm {
                         let mut visibility_error: Option<String> = None;
                         let mut readonly_error: Option<String> = None;
                         let mut type_error: Option<String> = None;
-                        if let Some((vis, declaring_class, prop_is_readonly, prop_type)) = self.find_property_def(&class_lower, prop_name.as_bytes()) {
+                        let caller_scope_for_prop = self.current_class_scope()
+                            .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        if let Some((vis, declaring_class, prop_is_readonly, prop_type)) = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_prop.as_deref()) {
                             if vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -12245,6 +12493,18 @@ impl Vm {
                                     .set_property(prop_name.as_bytes().to_vec(), value);
                             }
                         }
+                    } else if matches!(&obj_val, Value::Null | Value::Undef | Value::False) {
+                        // Attempt to assign property on null/false
+                        let type_name = Self::value_type_name(&obj_val);
+                        let prop_str = prop_name.to_string_lossy();
+                        let msg = format!("Attempt to assign property \"{}\" on {}", prop_str, type_name);
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
                     }
                 }
 

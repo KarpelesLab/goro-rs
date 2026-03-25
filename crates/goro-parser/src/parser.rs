@@ -1906,6 +1906,67 @@ impl Parser {
                         self.expect_semicolon()?;
                         return Ok(ClassMember::ClassConstant { name, value, visibility });
                     }
+                    TokenKind::OpenParen => {
+                        // DNF type hint: (A&B)|null CONST = value
+                        // Skip the entire parenthesized type expression
+                        self.advance(); // skip (
+                        let mut depth = 1u32;
+                        while depth > 0 {
+                            match self.peek() {
+                                TokenKind::OpenParen => { depth += 1; self.advance(); }
+                                TokenKind::CloseParen => { depth -= 1; self.advance(); }
+                                TokenKind::Eof => break,
+                                _ => { self.advance(); }
+                            }
+                        }
+                        // There may be a union | after the parenthesized group
+                        while matches!(self.peek(), TokenKind::Pipe | TokenKind::Ampersand) {
+                            self.advance(); // skip | or &
+                            if matches!(self.peek(), TokenKind::OpenParen) {
+                                self.advance();
+                                let mut d = 1u32;
+                                while d > 0 {
+                                    match self.peek() {
+                                        TokenKind::OpenParen => { d += 1; self.advance(); }
+                                        TokenKind::CloseParen => { d -= 1; self.advance(); }
+                                        TokenKind::Eof => break,
+                                        _ => { self.advance(); }
+                                    }
+                                }
+                            } else {
+                                match self.peek() {
+                                    TokenKind::Identifier(_) => { self.advance(); }
+                                    _ if self.is_semi_reserved_keyword() => { self.advance(); }
+                                    _ => { self.advance(); }
+                                }
+                            }
+                        }
+                        // Now parse the actual constant name
+                        let name = match self.peek().clone() {
+                            TokenKind::Identifier(name) => { self.advance(); name }
+                            _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
+                            _ => return Err(ParseError { message: "expected constant name".into(), span: self.span() }),
+                        };
+                        self.expect(&TokenKind::Assign)?;
+                        let value = self.parse_expression()?;
+                        self.pending_extra_constants.clear();
+                        while self.eat(&TokenKind::Comma) {
+                            let extra_name = match self.peek().clone() {
+                                TokenKind::Identifier(n) => { self.advance(); n }
+                                _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
+                                _ => break,
+                            };
+                            self.expect(&TokenKind::Assign)?;
+                            let extra_value = self.parse_expression()?;
+                            self.pending_extra_constants.push(ClassMember::ClassConstant {
+                                name: extra_name,
+                                value: extra_value,
+                                visibility,
+                            });
+                        }
+                        self.expect_semicolon()?;
+                        return Ok(ClassMember::ClassConstant { name, value, visibility });
+                    }
                     _ => {
                         return Err(ParseError {
                             message: "expected constant name".into(),

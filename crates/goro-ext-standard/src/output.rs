@@ -546,6 +546,76 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
 }
 
 /// Format a float using serialize_precision=-1 (shortest unique representation)
+/// Format a float using C's %.*G format (used by var_dump with precision INI setting).
+/// This formats with N significant digits, using E notation for very large/small numbers.
+fn format_php_float_g(f: f64, precision: usize) -> String {
+    if f.is_nan() {
+        return "NAN".to_string();
+    }
+    if f.is_infinite() {
+        return if f.is_sign_positive() {
+            "INF".to_string()
+        } else {
+            "-INF".to_string()
+        };
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+    }
+    // Use Rust's %G equivalent: format with precision significant digits
+    // Rust doesn't have %G directly, so we implement it
+    let abs_f = f.abs();
+    let exp = abs_f.log10().floor() as i32;
+
+    // %G uses scientific notation if exp < -4 or exp >= precision
+    let prec = if precision == 0 { 1 } else { precision };
+
+    if exp < -4 || exp >= prec as i32 {
+        // Use scientific notation with precision-1 decimal places
+        let decimal_places = if prec > 1 { prec - 1 } else { 0 };
+        let s = format!("{:.width$E}", f, width = decimal_places);
+        // Remove trailing zeros from mantissa (like %G), fix exponent format
+        if s.contains('.') {
+            let parts: Vec<&str> = s.split('E').collect();
+            if parts.len() == 2 {
+                let mantissa = parts[0].trim_end_matches('0').trim_end_matches('.');
+                let exp_part = parts[1];
+                // Ensure exponent has explicit + sign
+                let exp_formatted = if !exp_part.starts_with('-') && !exp_part.starts_with('+') {
+                    format!("+{}", exp_part)
+                } else {
+                    exp_part.to_string()
+                };
+                if mantissa.contains('.') {
+                    format!("{}E{}", mantissa, exp_formatted)
+                } else {
+                    format!("{}.0E{}", mantissa, exp_formatted)
+                }
+            } else {
+                s
+            }
+        } else {
+            s
+        }
+    } else {
+        // Use fixed-point notation
+        // Number of decimal places = precision - (exp + 1)
+        let decimal_places = if prec as i32 > exp + 1 {
+            (prec as i32 - exp - 1) as usize
+        } else {
+            0
+        };
+        let s = format!("{:.width$}", f, width = decimal_places);
+        // Remove trailing zeros (like %G) but keep at least one digit
+        if s.contains('.') {
+            let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+            trimmed.to_string()
+        } else {
+            s
+        }
+    }
+}
+
 /// This is what PHP 8 uses for var_dump, var_export, json_encode, etc.
 fn format_php_float_serialize(f: f64) -> String {
     if f.is_infinite() {
