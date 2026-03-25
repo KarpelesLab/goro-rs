@@ -209,6 +209,12 @@ pub enum ExprKind {
         method: Vec<u8>,
         args: Vec<Argument>,
     },
+    /// Dynamic static method call: Foo::$method()
+    DynamicStaticMethodCall {
+        class: Box<Expr>,
+        method: Box<Expr>,
+        args: Vec<Argument>,
+    },
     ArrayAccess {
         array: Box<Expr>,
         index: Option<Box<Expr>>,

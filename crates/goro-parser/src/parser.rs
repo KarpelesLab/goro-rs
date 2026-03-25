@@ -3177,13 +3177,37 @@ impl Parser {
                         }
                         TokenKind::Variable(name) => {
                             self.advance();
-                            expr = Expr {
-                                span: expr.span.merge(member_span),
-                                kind: ExprKind::StaticPropertyAccess {
-                                    class: Box::new(expr),
-                                    property: name,
-                                },
-                            };
+                            // Check if followed by ( for dynamic static method call: Foo::$method()
+                            if matches!(self.peek(), TokenKind::OpenParen) {
+                                // Dynamic method call: resolve variable to get method name
+                                self.advance(); // (
+                                let args = self.parse_arguments()?;
+                                let end_span = self.span();
+                                self.expect(&TokenKind::CloseParen)?;
+                                // Create a StaticMethodCall with the variable name as a dynamic expression
+                                // We need to compile this as InitDynamicStaticCall
+                                // For now, treat it as a function call: get the variable value,
+                                // then call ClassName::$method_value()
+                                expr = Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::DynamicStaticMethodCall {
+                                        class: Box::new(expr),
+                                        method: Box::new(Expr {
+                                            kind: ExprKind::Variable(name),
+                                            span: member_span,
+                                        }),
+                                        args,
+                                    },
+                                };
+                            } else {
+                                expr = Expr {
+                                    span: expr.span.merge(member_span),
+                                    kind: ExprKind::StaticPropertyAccess {
+                                        class: Box::new(expr),
+                                        property: name,
+                                    },
+                                };
+                            }
                         }
                         _ if self.is_semi_reserved_keyword() => {
                             let name = self.keyword_to_identifier();
@@ -3599,10 +3623,78 @@ impl Parser {
                     }
                     TokenKind::Variable(name) => {
                         self.advance();
-                        Expr {
+                        let mut expr = Expr {
                             kind: ExprKind::Variable(name),
                             span: class_span,
+                        };
+                        // Handle array access, property access, etc. after variable
+                        // e.g. new $arr[0](), new $obj->class()
+                        loop {
+                            match self.peek() {
+                                TokenKind::OpenBracket => {
+                                    self.advance();
+                                    let index = if matches!(self.peek(), TokenKind::CloseBracket) {
+                                        None
+                                    } else {
+                                        Some(self.parse_expression()?)
+                                    };
+                                    self.expect(&TokenKind::CloseBracket)?;
+                                    let s = expr.span;
+                                    expr = Expr {
+                                        kind: ExprKind::ArrayAccess {
+                                            array: Box::new(expr),
+                                            index: index.map(Box::new),
+                                        },
+                                        span: s,
+                                    };
+                                }
+                                TokenKind::Arrow => {
+                                    self.advance();
+                                    let prop = self.parse_primary()?;
+                                    let s = expr.span;
+                                    expr = Expr {
+                                        kind: ExprKind::PropertyAccess {
+                                            object: Box::new(expr),
+                                            property: Box::new(prop),
+                                            nullsafe: false,
+                                        },
+                                        span: s,
+                                    };
+                                }
+                                TokenKind::DoubleColon => {
+                                    self.advance();
+                                    let member = match self.peek().clone() {
+                                        TokenKind::Identifier(name) => {
+                                            self.advance();
+                                            name
+                                        }
+                                        TokenKind::Variable(name) => {
+                                            self.advance();
+                                            let mut prop = b"$".to_vec();
+                                            prop.extend_from_slice(&name);
+                                            prop
+                                        }
+                                        _ => {
+                                            let p = self.parse_primary()?;
+                                            match p.kind {
+                                                ExprKind::Identifier(name) => name,
+                                                _ => b"unknown".to_vec(),
+                                            }
+                                        }
+                                    };
+                                    let s = expr.span;
+                                    expr = Expr {
+                                        kind: ExprKind::StaticPropertyAccess {
+                                            class: Box::new(expr),
+                                            property: member,
+                                        },
+                                        span: s,
+                                    };
+                                }
+                                _ => break,
+                            }
                         }
+                        expr
                     }
                     TokenKind::Class => {
                         // Anonymous class: new class { ... }

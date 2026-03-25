@@ -653,6 +653,20 @@ impl PhpGenerator {
                     let name_val = self.read_operand(&op.op1, &op_array.literals);
                     vm.generator_init_fcall(name_val);
                 }
+                OpCode::InitDynamicStaticCall => {
+                    let class_val = self.read_operand(&op.op1, &op_array.literals);
+                    let method_val = self.read_operand(&op.op2, &op_array.literals);
+                    let method_name = method_val.to_php_string();
+                    let class_name = match &class_val {
+                        Value::Object(obj) => obj.borrow().class_name.clone(),
+                        Value::String(s) => s.as_bytes().to_vec(),
+                        _ => class_val.to_php_string().as_bytes().to_vec(),
+                    };
+                    let mut func_name = class_name;
+                    func_name.extend_from_slice(b"::");
+                    func_name.extend_from_slice(method_name.as_bytes());
+                    vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
+                }
                 OpCode::SendVal => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     vm.generator_send_val(val);
@@ -815,6 +829,43 @@ impl PhpGenerator {
                     }
                 }
 
+                OpCode::ForeachInitRef => {
+                    // In generators, treat by-ref foreach like by-value
+                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
+                    self.write_operand(&op.result, arr_val);
+                    let iter_idx = match op.result {
+                        OperandType::Tmp(idx) => idx,
+                        _ => 0,
+                    };
+                    self.foreach_positions.insert(iter_idx, 0usize);
+                }
+                OpCode::ForeachNextRef => {
+                    // In generators, treat by-ref foreach like by-value
+                    let iter_idx = match op.op1 {
+                        OperandType::Tmp(idx) => idx,
+                        _ => 0,
+                    };
+                    let pos = self.foreach_positions.get(&iter_idx).copied().unwrap_or(0);
+                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
+                    if let Value::Array(arr) = &arr_val {
+                        let arr_borrow = arr.borrow();
+                        let entries: Vec<_> = arr_borrow.iter().collect();
+                        if pos >= entries.len() {
+                            if let OperandType::JmpTarget(target) = op.op2 {
+                                ip = target as usize;
+                            }
+                        } else {
+                            let (_, value) = entries[pos];
+                            self.write_operand(&op.result, value.clone());
+                            self.foreach_positions.insert(iter_idx, pos + 1);
+                        }
+                    } else {
+                        if let OperandType::JmpTarget(target) = op.op2 {
+                            ip = target as usize;
+                        }
+                    }
+                }
+
                 OpCode::ConstLookup => {
                     let name = self
                         .read_operand(&op.op1, &op_array.literals)
@@ -946,6 +997,14 @@ impl PhpGenerator {
                 OpCode::ErrorRestore => {
                     if let Some(saved) = vm.error_reporting_stack.pop() {
                         vm.error_reporting = saved;
+                    }
+                }
+
+                OpCode::UnsetCv => {
+                    if let OperandType::Cv(idx) = op.op1 {
+                        if let Some(slot) = self.cvs.get_mut(idx as usize) {
+                            *slot = Value::Undef;
+                        }
                     }
                 }
 

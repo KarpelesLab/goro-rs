@@ -126,6 +126,8 @@ pub enum OpCode {
     // ---- Function calls ----
     /// Initialize a function call: op1 = function name (const)
     InitFCall,
+    /// Initialize a dynamic static call: op1 = class expr, op2 = method name (const), result = arg count (const)
+    InitDynamicStaticCall,
     /// Send argument: op1 = value, op2 = arg position
     SendVal,
     /// Send named argument: op1 = value, op2 = argument name (const)
@@ -176,6 +178,10 @@ pub enum OpCode {
     ForeachNext,
     /// Fetch key for current iteration: op1 = iterator (tmp), result = key (tmp)
     ForeachKey,
+    /// Initialize foreach by-ref: op1 = array, result = iterator state (tmp)
+    ForeachInitRef,
+    /// Fetch next value by-ref: op1 = iterator (tmp), result = reference (tmp), op2 = jump target if done
+    ForeachNextRef,
 
     // ---- OOP ----
     /// Create a new object: op1 = class name (const), result = object (tmp)
@@ -231,6 +237,8 @@ pub enum OpCode {
     YieldFrom,
 
     // ---- Unset ----
+    /// Unset a CV variable (direct replace, breaks reference links): op1 = CV
+    UnsetCv,
     /// Remove array element: op1 = array, op2 = key
     ArrayUnset,
     /// Remove object property: op1 = object, op2 = property name
@@ -361,7 +369,7 @@ impl OpArray {
         let op = &mut self.ops[op_index as usize];
         match op.opcode {
             OpCode::Jmp => op.op1 = OperandType::JmpTarget(target),
-            OpCode::JmpZ | OpCode::JmpNz | OpCode::ForeachNext => {
+            OpCode::JmpZ | OpCode::JmpNz | OpCode::ForeachNext | OpCode::ForeachNextRef => {
                 op.op2 = OperandType::JmpTarget(target);
             }
             _ => panic!("cannot patch non-jump instruction: {:?}", op.opcode),

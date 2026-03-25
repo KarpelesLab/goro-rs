@@ -741,6 +741,7 @@ impl Compiler {
                 expr,
                 key,
                 value,
+                by_ref,
                 body,
                 ..
             } => {
@@ -764,7 +765,7 @@ impl Compiler {
                 // Create iterator temp
                 let iter_tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
-                    opcode: OpCode::ForeachInit,
+                    opcode: if *by_ref { OpCode::ForeachInitRef } else { OpCode::ForeachInit },
                     op1: arr,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(iter_tmp),
@@ -781,16 +782,40 @@ impl Compiler {
 
                 // Fetch next value (or jump to end if done)
                 let val_tmp = self.op_array.alloc_temp();
-                let jmp_done = self.op_array.emit(Op {
-                    opcode: OpCode::ForeachNext,
-                    op1: OperandType::Tmp(iter_tmp),
-                    op2: OperandType::JmpTarget(0), // patched later
-                    result: OperandType::Tmp(val_tmp),
-                    line: stmt.span.line,
-                });
+                let jmp_done = if *by_ref {
+                    // For by-ref foreach, ForeachNextRef stores reference directly in val_tmp
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::ForeachNextRef,
+                        op1: OperandType::Tmp(iter_tmp),
+                        op2: OperandType::JmpTarget(0), // patched later
+                        result: OperandType::Tmp(val_tmp),
+                        line: stmt.span.line,
+                    });
+                    jmp
+                } else {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ForeachNext,
+                        op1: OperandType::Tmp(iter_tmp),
+                        op2: OperandType::JmpTarget(0), // patched later
+                        result: OperandType::Tmp(val_tmp),
+                        line: stmt.span.line,
+                    })
+                };
 
                 // Assign value to the value variable
-                if let ExprKind::Variable(name) = &value.kind {
+                if *by_ref {
+                    // For by-ref: directly replace CV slot with the reference (don't write through existing ref)
+                    if let ExprKind::Variable(name) = &value.kind {
+                        let cv = self.op_array.get_or_create_cv(name);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::AssignRef,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Tmp(val_tmp),
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    }
+                } else if let ExprKind::Variable(name) = &value.kind {
                     let cv = self.op_array.get_or_create_cv(name);
                     self.op_array.emit(Op {
                         opcode: OpCode::Assign,
@@ -1365,13 +1390,12 @@ impl Compiler {
                             });
                         }
                         _ => {
-                            // unset($var) - set variable to Undef
+                            // unset($var) - directly set variable to Undef (breaks reference links)
                             let operand = self.compile_expr(expr)?;
-                            let undef_idx = self.op_array.add_literal(Value::Undef);
                             self.op_array.emit(Op {
-                                opcode: OpCode::Assign,
+                                opcode: OpCode::UnsetCv,
                                 op1: operand,
-                                op2: OperandType::Const(undef_idx),
+                                op2: OperandType::Unused,
                                 result: OperandType::Unused,
                                 line: stmt.span.line,
                             });
@@ -2929,18 +2953,20 @@ impl Compiler {
                         object, property, ..
                     } => {
                         let obj = self.compile_expr(object)?;
-                        let prop_name = match &property.kind {
-                            ExprKind::Identifier(name) => name.clone(),
-                            _ => return Ok(val),
+                        let prop_operand = match &property.kind {
+                            ExprKind::Identifier(name) => {
+                                let name_idx = self
+                                    .op_array
+                                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                                OperandType::Const(name_idx)
+                            }
+                            _ => self.compile_expr(property)?,
                         };
-                        let name_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(prop_name)));
                         self.op_array.emit(Op {
                             opcode: OpCode::PropertySet,
                             op1: obj,
                             op2: val,
-                            result: OperandType::Const(name_idx),
+                            result: prop_operand,
                             line: expr.span.line,
                         });
                         Ok(val)
@@ -4926,44 +4952,99 @@ impl Compiler {
             } => {
                 // Handle ClassName::method() and parent::method()
                 let class_name = match &class.kind {
-                    ExprKind::Identifier(name) => self.resolve_class_name(name),
-                    _ => {
-                        let _ = self.compile_expr(class)?;
-                        let idx = self.op_array.add_literal(Value::Null);
-                        return Ok(OperandType::Const(idx));
-                    }
+                    ExprKind::Identifier(name) => Some(self.resolve_class_name(name)),
+                    _ => None, // Dynamic class expression - resolve at runtime
                 };
 
-                // Resolve self:: and parent:: to actual class names
-                // static:: is kept as literal "static" for late static binding
-                // Note: resolve_class_name already passes through self/parent/static,
-                // so we still need this resolution step
-                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
-                    self.current_class.clone().unwrap_or(class_name.clone())
-                } else if class_name.eq_ignore_ascii_case(b"static") {
-                    // Late static binding: resolve at runtime
-                    b"static".to_vec()
-                } else if class_name.eq_ignore_ascii_case(b"parent") {
-                    self.current_parent_class
-                        .clone()
-                        .unwrap_or(class_name.clone())
+                if let Some(class_name) = class_name {
+                    // Static class name known at compile time
+                    // Resolve self:: and parent:: to actual class names
+                    // static:: is kept as literal "static" for late static binding
+                    let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
+                        self.current_class.clone().unwrap_or(class_name.clone())
+                    } else if class_name.eq_ignore_ascii_case(b"static") {
+                        b"static".to_vec()
+                    } else if class_name.eq_ignore_ascii_case(b"parent") {
+                        self.current_parent_class
+                            .clone()
+                            .unwrap_or(class_name.clone())
+                    } else {
+                        class_name.clone()
+                    };
+
+                    let mut func_name = resolved_class;
+                    func_name.extend_from_slice(b"::");
+                    func_name.extend_from_slice(method);
+                    let name_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(func_name)));
+                    let arg_count = self.op_array.add_literal(Value::Long(args.len() as i64));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::InitFCall,
+                        op1: OperandType::Const(name_idx),
+                        op2: OperandType::Const(arg_count),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
                 } else {
-                    class_name.clone()
-                };
+                    // Dynamic class expression: $obj::method() or expr::method()
+                    // Compile the class expression, then use DynamicStaticCall opcode
+                    let class_operand = self.compile_expr(class)?;
+                    let method_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(method.to_vec())));
+                    let arg_count = self.op_array.add_literal(Value::Long(args.len() as i64));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::InitDynamicStaticCall,
+                        op1: class_operand,
+                        op2: OperandType::Const(method_idx),
+                        result: OperandType::Const(arg_count),
+                        line: expr.span.line,
+                    });
+                }
 
-                // Compile as a function call: ClassName::method => function "classname::method"
-                let mut func_name = resolved_class;
-                func_name.extend_from_slice(b"::");
-                func_name.extend_from_slice(method);
-                let name_idx = self
-                    .op_array
-                    .add_literal(Value::String(PhpString::from_vec(func_name)));
+                self.compile_send_args(args, expr.span.line)?;
+
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::DoFCall,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+
+                Ok(OperandType::Tmp(tmp))
+            }
+
+            ExprKind::DynamicStaticMethodCall {
+                class,
+                method,
+                args,
+            } => {
+                // Dynamic static method call: Foo::$method()
+                let class_operand = match &class.kind {
+                    ExprKind::Identifier(name) => {
+                        let resolved = self.resolve_class_name(name);
+                        let resolved = if resolved.eq_ignore_ascii_case(b"self") {
+                            self.current_class.clone().unwrap_or(resolved)
+                        } else if resolved.eq_ignore_ascii_case(b"parent") {
+                            self.current_parent_class.clone().unwrap_or(resolved)
+                        } else {
+                            resolved
+                        };
+                        let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(resolved)));
+                        OperandType::Const(idx)
+                    }
+                    _ => self.compile_expr(class)?,
+                };
+                let method_operand = self.compile_expr(method)?;
                 let arg_count = self.op_array.add_literal(Value::Long(args.len() as i64));
                 self.op_array.emit(Op {
-                    opcode: OpCode::InitFCall,
-                    op1: OperandType::Const(name_idx),
-                    op2: OperandType::Const(arg_count),
-                    result: OperandType::Unused,
+                    opcode: OpCode::InitDynamicStaticCall,
+                    op1: class_operand,
+                    op2: method_operand,
+                    result: OperandType::Const(arg_count),
                     line: expr.span.line,
                 });
 
@@ -5026,11 +5107,16 @@ impl Compiler {
                 nullsafe,
             } => {
                 let obj = self.compile_expr(object)?;
-                let prop_name = match &property.kind {
-                    ExprKind::Identifier(name) => name.clone(),
+                let prop_operand = match &property.kind {
+                    ExprKind::Identifier(name) => {
+                        let name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                        OperandType::Const(name_idx)
+                    }
                     _ => {
-                        let _ = self.compile_expr(property)?;
-                        return Ok(obj); // fallback
+                        // Dynamic property name: $obj->$prop
+                        self.compile_expr(property)?
                     }
                 };
 
@@ -5059,13 +5145,10 @@ impl Compiler {
                     None
                 };
 
-                let name_idx = self
-                    .op_array
-                    .add_literal(Value::String(PhpString::from_vec(prop_name)));
                 self.op_array.emit(Op {
                     opcode: OpCode::PropertyGet,
                     op1: obj,
-                    op2: OperandType::Const(name_idx),
+                    op2: prop_operand,
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
                 });
@@ -5112,18 +5195,23 @@ impl Compiler {
                     None
                 };
 
-                let method_name = match &method.kind {
-                    ExprKind::Identifier(name) => name.clone(),
-                    _ => b"__invoke".to_vec(),
+                let method_operand = match &method.kind {
+                    ExprKind::Identifier(name) => {
+                        let name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                        OperandType::Const(name_idx)
+                    }
+                    _ => {
+                        // Dynamic method name (e.g., $this->$method())
+                        self.compile_expr(method)?
+                    }
                 };
-                let name_idx = self
-                    .op_array
-                    .add_literal(Value::String(PhpString::from_vec(method_name)));
 
                 self.op_array.emit(Op {
                     opcode: OpCode::InitMethodCall,
                     op1: obj,
-                    op2: OperandType::Const(name_idx),
+                    op2: method_operand,
                     result: OperandType::Unused,
                     line: expr.span.line,
                 });

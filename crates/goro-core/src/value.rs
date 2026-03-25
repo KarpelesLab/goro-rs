@@ -589,8 +589,26 @@ impl Value {
                 CMP_DEPTH.with(|d| d.set(depth));
                 result
             }
+            // Object vs scalar: convert object to int(1) for comparison
+            (Value::Object(_), Value::Long(n)) | (Value::Long(n), Value::Object(_)) => {
+                *n == 1
+            }
+            (Value::Object(_), Value::Double(f)) | (Value::Double(f), Value::Object(_)) => {
+                *f == 1.0
+            }
+            (Value::Object(_), Value::String(s)) | (Value::String(s), Value::Object(_)) => {
+                // Object compared to string: not equal in PHP 8
+                false
+            }
             _ => false,
         }
+    }
+
+    /// PHP == comparison with object-to-scalar casting
+    /// This is the same as equals() but handles the object conversion case
+    /// (used by VM which also emits the Notice)
+    pub fn equals_with_object_cast(&self, other: &Value) -> bool {
+        self.equals(other)
     }
 
     /// PHP === comparison

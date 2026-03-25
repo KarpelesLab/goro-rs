@@ -1167,6 +1167,36 @@ impl Vm {
         }
     }
 
+    /// Emit object-to-scalar comparison notice when comparing object to int/float/string
+    /// PHP 8 emits: Notice: Object of class X could not be converted to int/float
+    fn emit_object_comparison_notice(&mut self, a: &Value, b: &Value, line: u32) {
+        let a_inner = match a {
+            Value::Reference(r) => r.borrow().clone(),
+            _ => a.clone(),
+        };
+        let b_inner = match b {
+            Value::Reference(r) => r.borrow().clone(),
+            _ => b.clone(),
+        };
+        match (&a_inner, &b_inner) {
+            (Value::Object(obj), Value::Long(_)) | (Value::Long(_), Value::Object(obj)) => {
+                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                self.emit_notice_at(
+                    &format!("Object of class {} could not be converted to int", class_name),
+                    line,
+                );
+            }
+            (Value::Object(obj), Value::Double(_)) | (Value::Double(_), Value::Object(obj)) => {
+                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                self.emit_notice_at(
+                    &format!("Object of class {} could not be converted to float", class_name),
+                    line,
+                );
+            }
+            _ => {}
+        }
+    }
+
     /// Emit a PHP deprecated warning
     pub fn emit_deprecated_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8192 != 0 {
@@ -6302,6 +6332,8 @@ impl Vm {
         let mut foreach_keys: HashMap<u32, Vec<ArrayKey>> = HashMap::new();
         // Generator key storage for foreach (saved before advancing to next yield)
         let mut foreach_gen_keys: HashMap<u32, Value> = HashMap::new();
+        // Track which foreach iterators are by-reference (stores the source array Rc)
+        let mut foreach_ref_arrays: HashMap<u32, Rc<RefCell<PhpArray>>> = HashMap::new();
         // Maps CV index -> static var key (for saving back on write)
         let mut static_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
         // Exception handler stack: (catch_target, finally_target, exception_tmp_idx)
@@ -6401,23 +6433,42 @@ impl Vm {
                 }
 
                 OpCode::AssignRef => {
-                    // Both op1 and op2 must be CVs. Make them share the same Reference.
-                    if let (OperandType::Cv(target_idx), OperandType::Cv(value_idx)) =
-                        (op.op1, op.op2)
-                    {
+                    if let OperandType::Cv(target_idx) = op.op1 {
                         let ti = target_idx as usize;
-                        let vi = value_idx as usize;
-                        // Get or create a reference cell for the value variable
-                        let ref_cell = if let Value::Reference(r) = &cvs[vi] {
-                            // Value is already a reference, share it
-                            r.clone()
-                        } else {
-                            // Wrap the current value in a new reference
-                            let r = Rc::new(RefCell::new(cvs[vi].clone()));
-                            cvs[vi] = Value::Reference(r.clone());
-                            r
+                        let ref_cell = match op.op2 {
+                            OperandType::Cv(value_idx) => {
+                                let vi = value_idx as usize;
+                                // Get or create a reference cell for the value variable
+                                if let Value::Reference(r) = &cvs[vi] {
+                                    r.clone()
+                                } else {
+                                    let r = Rc::new(RefCell::new(cvs[vi].clone()));
+                                    cvs[vi] = Value::Reference(r.clone());
+                                    r
+                                }
+                            }
+                            OperandType::Tmp(tmp_idx) => {
+                                let tmp_i = tmp_idx as usize;
+                                // For tmp sources (e.g., foreach by-ref), get the reference from tmp
+                                if let Value::Reference(r) = &tmps[tmp_i] {
+                                    r.clone()
+                                } else {
+                                    let r = Rc::new(RefCell::new(tmps[tmp_i].clone()));
+                                    tmps[tmp_i] = Value::Reference(r.clone());
+                                    r
+                                }
+                            }
+                            _ => {
+                                // Fallback
+                                let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                                if let Value::Reference(r) = &val {
+                                    r.clone()
+                                } else {
+                                    Rc::new(RefCell::new(val))
+                                }
+                            }
                         };
-                        // Point the target to the same reference
+                        // Point the target to the same reference (direct replace, not write-through)
                         cvs[ti] = Value::Reference(ref_cell);
                     }
                 }
@@ -6842,9 +6893,10 @@ impl Vm {
                 OpCode::Equal => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.emit_object_comparison_notice(&a, &b, op.line);
                     self.write_operand(
                         &op.result,
-                        if a.equals(&b) {
+                        if a.equals_with_object_cast(&b) {
                             Value::True
                         } else {
                             Value::False
@@ -6857,9 +6909,10 @@ impl Vm {
                 OpCode::NotEqual => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.emit_object_comparison_notice(&a, &b, op.line);
                     self.write_operand(
                         &op.result,
-                        if a.equals(&b) {
+                        if a.equals_with_object_cast(&b) {
                             Value::False
                         } else {
                             Value::True
@@ -6902,6 +6955,7 @@ impl Vm {
                 OpCode::Less => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.emit_object_comparison_notice(&a, &b, op.line);
                     let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
@@ -6918,6 +6972,7 @@ impl Vm {
                 OpCode::LessEqual => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.emit_object_comparison_notice(&a, &b, op.line);
                     let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
@@ -6934,6 +6989,7 @@ impl Vm {
                 OpCode::Greater => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.emit_object_comparison_notice(&a, &b, op.line);
                     let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
@@ -6950,6 +7006,7 @@ impl Vm {
                 OpCode::GreaterEqual => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.emit_object_comparison_notice(&a, &b, op.line);
                     let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
@@ -7514,6 +7571,31 @@ impl Vm {
                             named_args: Vec::new(),
                         });
                     }
+                }
+                OpCode::InitDynamicStaticCall => {
+                    // Dynamic static call: $obj::method() or $class::method()
+                    let class_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let method_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let method_name = method_val.to_php_string();
+
+                    // Resolve the class name from the value
+                    let class_name = match &class_val {
+                        Value::Object(obj) => {
+                            obj.borrow().class_name.clone()
+                        }
+                        Value::String(s) => s.as_bytes().to_vec(),
+                        _ => class_val.to_php_string().as_bytes().to_vec(),
+                    };
+
+                    let mut func_name = class_name;
+                    func_name.extend_from_slice(b"::");
+                    func_name.extend_from_slice(method_name.as_bytes());
+
+                    self.pending_calls.push(PendingCall {
+                        name: PhpString::from_vec(func_name),
+                        args: Vec::new(),
+                        named_args: Vec::new(),
+                    });
                 }
                 OpCode::SendVal => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -9046,9 +9128,12 @@ impl Vm {
                                     });
                                     let class_found = self.classes.contains_key(&class_lower);
                                     if class_found {
-                                        // Check if we're in an instance context (cvs[0] is $this object)
-                                        // If so, try __call first (parent::method() from instance method)
-                                        let in_instance_context = matches!(cvs.first(), Some(Value::Object(_)));
+                                        // Check if we're in an instance context AND calling via parent::
+                                        // Only parent::method() from instance method should use __call
+                                        // Regular ClassName::method() and $obj::method() should use __callStatic
+                                        let class_part_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let is_parent_call = class_part_lower == b"parent";
+                                        let in_instance_context = is_parent_call && matches!(cvs.first(), Some(Value::Object(_)));
                                         if in_instance_context {
                                             if let Some((call_op, declaring_class)) = magic_call {
                                                 let mut fn_cvs =
@@ -9903,6 +9988,150 @@ impl Vm {
                     }
                 }
 
+                OpCode::ForeachInitRef => {
+                    let arr_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, &op_array, op.line);
+                    let iter_idx = match op.result {
+                        OperandType::Tmp(idx) => idx,
+                        _ => 0,
+                    };
+
+                    // For by-ref foreach, we need to work on the original array
+                    // If the source is a CV, get the actual Rc from it
+                    let arr_rc = match &arr_val {
+                        Value::Array(a) => a.clone(),
+                        Value::Reference(r) => {
+                            let inner = r.borrow();
+                            match &*inner {
+                                Value::Array(a) => a.clone(),
+                                _ => {
+                                    // Not an array - emit warning
+                                    let type_name = Vm::value_type_name(&inner);
+                                    self.emit_warning_at(&format!(
+                                        "foreach() argument must be of type array|object, {} given",
+                                        type_name
+                                    ), op.line);
+                                    Rc::new(RefCell::new(PhpArray::new()))
+                                }
+                            }
+                        }
+                        _ => {
+                            match &arr_val {
+                                Value::Object(obj) => {
+                                    // For objects, convert to array of references to properties
+                                    let obj_borrow = obj.borrow();
+                                    let mut arr = PhpArray::new();
+                                    for (name, value) in &obj_borrow.properties {
+                                        arr.set(
+                                            ArrayKey::String(PhpString::from_vec(name.clone())),
+                                            value.clone(),
+                                        );
+                                    }
+                                    Rc::new(RefCell::new(arr))
+                                }
+                                _ => {
+                                    // Not an array or object - emit warning
+                                    let type_name = Vm::value_type_name(&arr_val);
+                                    self.emit_warning_at(&format!(
+                                        "foreach() argument must be of type array|object, {} given",
+                                        type_name
+                                    ), op.line);
+                                    Rc::new(RefCell::new(PhpArray::new()))
+                                }
+                            }
+                        }
+                    };
+
+                    // Also make the source CV point to the same array if it was a CV
+                    // (ensure modifications through &$v modify the original)
+                    match &op.op1 {
+                        OperandType::Cv(idx) => {
+                            cvs[*idx as usize] = Value::Array(arr_rc.clone());
+                        }
+                        _ => {}
+                    }
+
+                    foreach_ref_arrays.insert(iter_idx, arr_rc.clone());
+
+                    // Store as Value::Array for the iteration state
+                    self.write_operand(
+                        &op.result,
+                        Value::Array(arr_rc.clone()),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
+
+                    foreach_positions.insert(iter_idx, 0usize);
+                    // Snapshot keys for stable iteration
+                    let keys: Vec<ArrayKey> = arr_rc.borrow().keys().cloned().collect();
+                    foreach_keys.insert(iter_idx, keys);
+                }
+
+                OpCode::ForeachNextRef => {
+                    let iter_idx = match op.op1 {
+                        OperandType::Tmp(idx) => idx,
+                        _ => 0,
+                    };
+                    let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
+
+                    // Re-snapshot keys each iteration for by-ref (elements may be added)
+                    if let Some(arr_rc) = foreach_ref_arrays.get(&iter_idx) {
+                        let keys: Vec<ArrayKey> = arr_rc.borrow().keys().cloned().collect();
+                        foreach_keys.insert(iter_idx, keys);
+                    }
+
+                    let done = if let Some(keys) = foreach_keys.get(&iter_idx) {
+                        if let Some(arr_rc) = foreach_ref_arrays.get(&iter_idx).cloned() {
+                            // Find next valid key
+                            let mut found = false;
+                            let mut next_pos = pos;
+                            while next_pos < keys.len() {
+                                let key = &keys[next_pos];
+                                let has_key = arr_rc.borrow().get(key).is_some();
+                                if has_key {
+                                    // Get or create a reference to this element
+                                    let ref_val = {
+                                        let mut arr_borrow = arr_rc.borrow_mut();
+                                        let current = arr_borrow.get(key).unwrap().clone();
+                                        let reference = match current {
+                                            Value::Reference(r) => r,
+                                            other => {
+                                                let r = Rc::new(RefCell::new(other));
+                                                arr_borrow.set(key.clone(), Value::Reference(r.clone()));
+                                                r
+                                            }
+                                        };
+                                        Value::Reference(reference)
+                                    };
+
+                                    self.write_operand(
+                                        &op.result,
+                                        ref_val,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    foreach_positions.insert(iter_idx, next_pos + 1);
+                                    found = true;
+                                    break;
+                                }
+                                next_pos += 1;
+                            }
+                            !found
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    };
+
+                    if done {
+                        if let OperandType::JmpTarget(target) = op.op2 {
+                            ip = target as usize;
+                        }
+                    }
+                }
+
                 OpCode::BindGlobal => {
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name = name_val.to_php_string().as_bytes().to_vec();
@@ -10632,6 +10861,15 @@ impl Vm {
                         Value::False
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::UnsetCv => {
+                    // Directly replace the CV slot with Undef (breaks reference links)
+                    if let OperandType::Cv(idx) = op.op1 {
+                        if let Some(slot) = cvs.get_mut(idx as usize) {
+                            *slot = Value::Undef;
+                        }
+                    }
                 }
 
                 OpCode::ArrayUnset => {

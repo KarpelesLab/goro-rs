@@ -216,9 +216,14 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
         Value::Reference(r) => {
-            // Show the inner value with & prefix (PHP shows &int(42), &string(...), etc.)
+            // PHP only shows & prefix when reference count >= 2
             let inner = r.borrow().clone();
-            var_dump_value_ref(vm, &inner, indent, &prefix, seen);
+            if std::rc::Rc::strong_count(r) >= 2 {
+                var_dump_value_ref(vm, &inner, indent, &prefix, seen);
+            } else {
+                // Single reference - show without & prefix
+                var_dump_value(vm, &inner, indent, seen);
+            }
         }
     }
 }
