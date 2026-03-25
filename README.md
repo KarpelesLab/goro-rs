@@ -11,7 +11,7 @@ Active development. Core language features, OOP, generators, exceptions, closure
 | Test Directory | Pass | Total | Rate |
 |---|---|---|---|
 | Zend/tests (top-level) | 290 | 871 | 33.3% |
-| All tests (Zend+ext+standard) | ~3032 | ~11950 | ~25.4% |
+| All tests (Zend+ext+standard) | ~3084 | ~11950 | ~25.8% |
 
 **Key directory pass rates:**
 - ext/standard/strings: 185/730 (25.3%)
