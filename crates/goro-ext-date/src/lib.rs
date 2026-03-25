@@ -115,12 +115,17 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"date_interval_create_from_date_string", date_interval_create_from_date_string_fn);
 }
 
-fn date_default_timezone_set(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn date_default_timezone_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let tz = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    vm.constants.insert(b"__default_timezone".to_vec(), Value::String(PhpString::from_string(tz)));
     Ok(Value::True)
 }
 
-fn date_default_timezone_get(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"UTC")))
+fn date_default_timezone_get(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let tz = vm.constants.get(b"__default_timezone".as_ref())
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b"UTC"));
+    Ok(Value::String(tz))
 }
 
 fn time_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -165,84 +170,15 @@ fn date_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .unwrap_or(0)
     });
 
-    // Simple date formatting - compute components from unix timestamp
-    // This is a simplified version, not handling timezones properly
-    let days_since_epoch = secs / 86400;
-    let time_of_day = ((secs % 86400) + 86400) % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
+    // Apply timezone offset
+    let tz_name = get_default_tz(_vm);
+    let (offset_secs, tz_abbrev) = timezone_offset_and_abbrev(&tz_name, secs);
+    let local_secs = secs + offset_secs;
 
-    // Compute year/month/day from days since epoch (1970-01-01)
-    let (year, month, day) = days_to_ymd(days_since_epoch);
-
-    let mut result = String::new();
-    let fmt_bytes = format.as_bytes();
-    let mut i = 0;
-    while i < fmt_bytes.len() {
-        let c = fmt_bytes[i];
-        if c == b'\\' && i + 1 < fmt_bytes.len() {
-            result.push(fmt_bytes[i + 1] as char);
-            i += 2;
-            continue;
-        }
-        match c {
-            b'Y' => result.push_str(&format!("{:04}", year)),
-            b'y' => result.push_str(&format!("{:02}", year % 100)),
-            b'm' => result.push_str(&format!("{:02}", month)),
-            b'n' => result.push_str(&format!("{}", month)),
-            b'd' => result.push_str(&format!("{:02}", day)),
-            b'j' => result.push_str(&format!("{}", day)),
-            b'H' => result.push_str(&format!("{:02}", hours)),
-            b'G' => result.push_str(&format!("{}", hours)),
-            b'i' => result.push_str(&format!("{:02}", minutes)),
-            b's' => result.push_str(&format!("{:02}", seconds)),
-            b'U' => result.push_str(&format!("{}", secs)),
-            b'N' => {
-                let dow = ((days_since_epoch % 7) + 4) % 7; // Monday=1
-                result.push_str(&format!("{}", if dow == 0 { 7 } else { dow }));
-            }
-            b'w' => {
-                let dow = ((days_since_epoch % 7) + 4) % 7;
-                result.push_str(&format!("{}", dow));
-            }
-            b'g' => {
-                let h12 = if hours == 0 {
-                    12
-                } else if hours > 12 {
-                    hours - 12
-                } else {
-                    hours
-                };
-                result.push_str(&format!("{}", h12));
-            }
-            b'A' => result.push_str(if hours < 12 { "AM" } else { "PM" }),
-            b'a' => result.push_str(if hours < 12 { "am" } else { "pm" }),
-            b't' => {
-                let days_in_month = match month {
-                    2 => {
-                        if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
-                            29
-                        } else {
-                            28
-                        }
-                    }
-                    4 | 6 | 9 | 11 => 30,
-                    _ => 31,
-                };
-                result.push_str(&format!("{}", days_in_month));
-            }
-            b'L' => {
-                let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-                result.push(if leap { '1' } else { '0' });
-            }
-            _ => result.push(c as char),
-        }
-        i += 1;
-    }
-
+    let result = format_timestamp_with_tz(&format, local_secs, &tz_abbrev, offset_secs);
     Ok(Value::String(PhpString::from_string(result)))
 }
+
 
 /// Convert days since epoch (1970-01-01) to (year, month, day)
 fn days_to_ymd(days: i64) -> (i64, u32, u32) {
@@ -840,15 +776,205 @@ fn date_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let obj = args.first().unwrap_or(&Value::Null);
     let format = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
 
-    let timestamp = if let Value::Object(o) = obj {
-        o.borrow().get_property(b"timestamp").to_long()
+    let (timestamp, tz_name) = if let Value::Object(o) = obj {
+        let obj_borrow = o.borrow();
+        let ts = obj_borrow.get_property(b"timestamp").to_long();
+        let tz = obj_borrow.get_property(b"timezone").to_php_string().to_string_lossy();
+        (ts, if tz.is_empty() { get_default_tz(_vm) } else { tz })
     } else {
-        0
+        (0, get_default_tz(_vm))
     };
 
-    // Reuse the date formatting logic
-    let result = format_timestamp(&format, timestamp);
+    let (offset_secs, tz_abbrev) = timezone_offset_and_abbrev(&tz_name, timestamp);
+    let result = format_timestamp_with_tz(&format, timestamp + offset_secs, &tz_abbrev, offset_secs);
     Ok(Value::String(PhpString::from_string(result)))
+}
+
+fn get_default_tz(vm: &Vm) -> String {
+    vm.constants.get(b"__default_timezone".as_ref())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| "UTC".to_string())
+}
+
+/// Get the UTC offset (in seconds) and abbreviation for a timezone name at a given timestamp
+pub fn timezone_offset_and_abbrev(tz_name: &str, _timestamp: i64) -> (i64, String) {
+    match tz_name {
+        "UTC" | "utc" => (0, "UTC".to_string()),
+        "America/New_York" | "US/Eastern" => (-5 * 3600, "EST".to_string()),
+        "America/Chicago" | "US/Central" => (-6 * 3600, "CST".to_string()),
+        "America/Denver" | "US/Mountain" => (-7 * 3600, "MST".to_string()),
+        "America/Los_Angeles" | "US/Pacific" => (-8 * 3600, "PST".to_string()),
+        "Europe/London" => (0, "GMT".to_string()),
+        "Europe/Paris" | "Europe/Berlin" | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Rome" | "CET" => (1 * 3600, "CET".to_string()),
+        "Europe/Helsinki" | "Europe/Athens" | "EET" => (2 * 3600, "EET".to_string()),
+        "Europe/Moscow" => (3 * 3600, "MSK".to_string()),
+        "Asia/Tokyo" | "Japan" => (9 * 3600, "JST".to_string()),
+        "Asia/Shanghai" | "Asia/Hong_Kong" | "PRC" => (8 * 3600, "CST".to_string()),
+        "Asia/Kolkata" | "Asia/Calcutta" => (5 * 3600 + 1800, "IST".to_string()),
+        "Australia/Sydney" => (10 * 3600, "AEST".to_string()),
+        "Pacific/Auckland" | "NZ" => (12 * 3600, "NZST".to_string()),
+        _ => {
+            // Try to parse timezone offset like "+05:30"
+            if let Some(offset) = parse_tz_offset(tz_name) {
+                let abbrev = format_tz_offset(offset);
+                (offset, abbrev)
+            } else {
+                (0, "UTC".to_string())
+            }
+        }
+    }
+}
+
+fn parse_tz_offset(s: &str) -> Option<i64> {
+    if s.len() >= 5 && (s.starts_with('+') || s.starts_with('-')) {
+        let sign = if s.starts_with('-') { -1i64 } else { 1 };
+        let rest = &s[1..];
+        if let Some(colon) = rest.find(':') {
+            let hours: i64 = rest[..colon].parse().ok()?;
+            let mins: i64 = rest[colon+1..].parse().ok()?;
+            Some(sign * (hours * 3600 + mins * 60))
+        } else if rest.len() == 4 {
+            let hours: i64 = rest[..2].parse().ok()?;
+            let mins: i64 = rest[2..].parse().ok()?;
+            Some(sign * (hours * 3600 + mins * 60))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn format_tz_offset(offset_secs: i64) -> String {
+    let sign = if offset_secs < 0 { '-' } else { '+' };
+    let abs_offset = offset_secs.unsigned_abs();
+    let hours = abs_offset / 3600;
+    let mins = (abs_offset % 3600) / 60;
+    format!("{}{:02}:{:02}", sign, hours, mins)
+}
+
+/// Format timestamp with timezone-aware output
+pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_abbrev: &str, offset_secs: i64) -> String {
+    // This is format_timestamp but using the local time and timezone info
+    let days_since_epoch = if local_secs >= 0 {
+        local_secs / 86400
+    } else {
+        (local_secs - 86399) / 86400
+    };
+    let time_of_day = ((local_secs % 86400) + 86400) % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+
+    let mut result = String::new();
+    let fmt_bytes = format.as_bytes();
+    let mut i = 0;
+    while i < fmt_bytes.len() {
+        let c = fmt_bytes[i];
+        if c == b'\\' && i + 1 < fmt_bytes.len() {
+            result.push(fmt_bytes[i + 1] as char);
+            i += 2;
+            continue;
+        }
+        match c {
+            b'Y' => result.push_str(&format!("{:04}", year)),
+            b'y' => result.push_str(&format!("{:02}", year % 100)),
+            b'm' => result.push_str(&format!("{:02}", month)),
+            b'n' => result.push_str(&format!("{}", month)),
+            b'd' => result.push_str(&format!("{:02}", day)),
+            b'j' => result.push_str(&format!("{}", day)),
+            b'H' => result.push_str(&format!("{:02}", hours)),
+            b'G' => result.push_str(&format!("{}", hours)),
+            b'i' => result.push_str(&format!("{:02}", minutes)),
+            b's' => result.push_str(&format!("{:02}", seconds)),
+            b'A' => result.push_str(if hours >= 12 { "PM" } else { "AM" }),
+            b'a' => result.push_str(if hours >= 12 { "pm" } else { "am" }),
+            b'g' => result.push_str(&format!("{}", if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours })),
+            b'h' => result.push_str(&format!("{:02}", if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours })),
+            b'e' => result.push_str(tz_abbrev),
+            b'T' => result.push_str(tz_abbrev),
+            b'O' => {
+                let sign = if offset_secs < 0 { '-' } else { '+' };
+                let abs = offset_secs.unsigned_abs();
+                result.push_str(&format!("{}{:02}{:02}", sign, abs / 3600, (abs % 3600) / 60));
+            }
+            b'P' => {
+                let sign = if offset_secs < 0 { '-' } else { '+' };
+                let abs = offset_secs.unsigned_abs();
+                result.push_str(&format!("{}{:02}:{:02}", sign, abs / 3600, (abs % 3600) / 60));
+            }
+            b'p' => {
+                if offset_secs == 0 { result.push('Z'); }
+                else {
+                    let sign = if offset_secs < 0 { '-' } else { '+' };
+                    let abs = offset_secs.unsigned_abs();
+                    result.push_str(&format!("{}{:02}:{:02}", sign, abs / 3600, (abs % 3600) / 60));
+                }
+            }
+            b'Z' => result.push_str(&format!("{}", offset_secs)),
+            b'U' => result.push_str(&format!("{}", local_secs - offset_secs)),
+            b'N' => {
+                let dow = ((days_since_epoch % 7 + 7) % 7) + 1;
+                let iso_dow = if dow == 0 { 7 } else { dow };
+                result.push_str(&format!("{}", iso_dow));
+            }
+            b'w' => {
+                let dow = ((days_since_epoch + 4) % 7 + 7) % 7;
+                result.push_str(&format!("{}", dow));
+            }
+            b'D' => {
+                let dow = ((days_since_epoch + 4) % 7 + 7) % 7;
+                let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                result.push_str(names[dow as usize % 7]);
+            }
+            b'l' => {
+                let dow = ((days_since_epoch + 4) % 7 + 7) % 7;
+                let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+                result.push_str(names[dow as usize % 7]);
+            }
+            b'F' => {
+                let names = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+                if month >= 1 && month <= 12 { result.push_str(names[(month - 1) as usize]); }
+            }
+            b'M' => {
+                let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+                if month >= 1 && month <= 12 { result.push_str(names[(month - 1) as usize]); }
+            }
+            b't' => {
+                let days_in_month = match month {
+                    1|3|5|7|8|10|12 => 31, 4|6|9|11 => 30,
+                    2 => if (year%4==0 && year%100!=0) || year%400==0 { 29 } else { 28 },
+                    _ => 30,
+                };
+                result.push_str(&format!("{}", days_in_month));
+            }
+            b'L' => {
+                let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
+                result.push_str(&format!("{}", leap));
+            }
+            b'c' => {
+                let sign = if offset_secs < 0 { '-' } else { '+' };
+                let abs = offset_secs.unsigned_abs();
+                result.push_str(&format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{:02}:{:02}",
+                    year, month, day, hours, minutes, seconds, sign, abs/3600, (abs%3600)/60));
+            }
+            b'r' => {
+                let dow = ((days_since_epoch + 4) % 7 + 7) % 7;
+                let day_names = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+                let month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+                let sign = if offset_secs < 0 { '-' } else { '+' };
+                let abs = offset_secs.unsigned_abs();
+                result.push_str(&format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} {}{:02}{:02}",
+                    day_names[dow as usize % 7], day, month_names[(month-1).max(0) as usize % 12],
+                    year, hours, minutes, seconds, sign, abs/3600, (abs%3600)/60));
+            }
+            _ => result.push(c as char),
+        }
+        i += 1;
+    }
+    result
 }
 
 /// date_create_immutable - same as date_create but returns DateTimeImmutable

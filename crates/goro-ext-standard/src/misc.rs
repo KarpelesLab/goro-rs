@@ -1596,14 +1596,14 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         fn_cvs[idx] = extra.clone();
                     }
                 }
-                let _ = vm.execute_fn(&user_fn, fn_cvs);
+                vm.execute_fn(&user_fn, fn_cvs)?;
                 // Write modified value back to the array
                 let new_val = val_ref.borrow().clone();
                 arr.borrow_mut().set(key.clone(), new_val);
             }
         } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
             for (_key, val) in &entries {
-                let _ = builtin(vm, &[val.clone()]);
+                builtin(vm, &[val.clone()])?;
             }
         }
     }
@@ -2099,8 +2099,64 @@ fn krsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::True)
 }
-fn shuffle_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // TODO: implement actual shuffling (needs random number generator)
+fn shuffle_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Array(arr)) = args.first() {
+        let mut values: Vec<Value> = {
+            let arr_borrow = arr.borrow();
+            arr_borrow.values().cloned().collect()
+        };
+        // Fisher-Yates shuffle using simple time-based random
+        let n = values.len();
+        if n > 1 {
+            use std::time::SystemTime;
+            let mut seed = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            for i in (1..n).rev() {
+                // xorshift64 for better randomness
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let j = (seed as usize) % (i + 1);
+                values.swap(i, j);
+            }
+        }
+        // Rebuild array with sequential integer keys
+        let mut new_arr = PhpArray::new();
+        for v in values {
+            new_arr.push(v);
+        }
+        *arr.borrow_mut() = new_arr;
+    } else if let Some(Value::Reference(r)) = args.first() {
+        let val = r.borrow().clone();
+        if let Value::Array(arr) = val {
+            let mut values: Vec<Value> = {
+                let arr_borrow = arr.borrow();
+                arr_borrow.values().cloned().collect()
+            };
+            let n = values.len();
+            if n > 1 {
+                use std::time::SystemTime;
+                let mut seed = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                for i in (1..n).rev() {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let j = (seed as usize) % (i + 1);
+                    values.swap(i, j);
+                }
+            }
+            let mut new_arr = PhpArray::new();
+            for v in values {
+                new_arr.push(v);
+            }
+            *arr.borrow_mut() = new_arr;
+        }
+    }
     Ok(Value::True)
 }
 
@@ -2744,6 +2800,14 @@ fn array_column(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let obj = o.borrow();
                 let mut arr = PhpArray::new();
                 for (k, v) in obj.properties.iter() {
+                    // Try to parse numeric property names as integers
+                    let key_str = String::from_utf8_lossy(k);
+                    if let Ok(n) = key_str.parse::<i64>() {
+                        if n.to_string() == key_str.as_ref() {
+                            arr.set(goro_core::array::ArrayKey::Int(n), v.clone());
+                            continue;
+                        }
+                    }
                     let key = goro_core::array::ArrayKey::String(PhpString::from_vec(k.clone()));
                     arr.set(key, v.clone());
                 }
@@ -5096,8 +5160,110 @@ fn array_change_key_case_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     }
 }
 
-fn array_multisort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True) // stub
+fn array_multisort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        return Ok(Value::False);
+    }
+
+    // Parse arguments: arrays interleaved with sort flags
+    // SORT_ASC = 4, SORT_DESC = 3, SORT_REGULAR = 0, SORT_NUMERIC = 1, SORT_STRING = 2, SORT_NATURAL = 6
+    // SORT_FLAG_CASE = 8, SORT_LOCALE_STRING = 5
+    let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
+    let mut sort_orders: Vec<bool> = Vec::new(); // true = ascending
+    let mut sort_types: Vec<i64> = Vec::new();
+
+    let mut current_ascending = true;
+    let mut current_sort_type = 0i64; // SORT_REGULAR
+
+    for arg in args {
+        match arg {
+            Value::Array(arr) => {
+                arrays.push(arr.clone());
+                sort_orders.push(current_ascending);
+                sort_types.push(current_sort_type);
+                current_ascending = true;
+                current_sort_type = 0;
+            }
+            Value::Reference(r) => {
+                let val = r.borrow().clone();
+                if let Value::Array(arr) = val {
+                    arrays.push(arr.clone());
+                    sort_orders.push(current_ascending);
+                    sort_types.push(current_sort_type);
+                    current_ascending = true;
+                    current_sort_type = 0;
+                }
+            }
+            Value::Long(n) => {
+                match *n {
+                    4 => current_ascending = true,  // SORT_ASC
+                    3 => current_ascending = false,  // SORT_DESC
+                    _ => current_sort_type = *n,
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if arrays.is_empty() {
+        return Ok(Value::False);
+    }
+
+    // Check all arrays have the same length
+    let len = arrays[0].borrow().len();
+    for arr in &arrays[1..] {
+        if arr.borrow().len() != len {
+            return Ok(Value::False);
+        }
+    }
+
+    if len == 0 {
+        return Ok(Value::True);
+    }
+
+    // Extract values from the first array (the primary sort key)
+    let mut indices: Vec<usize> = (0..len).collect();
+    let first_values: Vec<Value> = arrays[0].borrow().values().cloned().collect();
+
+    // Sort indices based on the first array
+    let ascending = sort_orders[0];
+    let sort_type = sort_types[0];
+    indices.sort_by(|&a, &b| {
+        let result = php_compare_for_sort(&first_values[a], &first_values[b], sort_type);
+        if ascending { result } else { result.reverse() }
+    });
+
+    // Apply the sorted indices to all arrays
+    for arr_rc in &arrays {
+        let old_entries: Vec<(ArrayKey, Value)> = {
+            let arr = arr_rc.borrow();
+            arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        let mut new_arr = PhpArray::new();
+        // Check if original was using string keys
+        let has_string_keys = old_entries.iter().any(|(k, _)| matches!(k, ArrayKey::String(_)));
+        if has_string_keys {
+            // Preserve original keys but reorder values
+            let old_keys: Vec<ArrayKey> = old_entries.iter().map(|(k, _)| k.clone()).collect();
+            let old_vals: Vec<Value> = old_entries.iter().map(|(_, v)| v.clone()).collect();
+            for (idx, &sorted_idx) in indices.iter().enumerate() {
+                new_arr.set(old_keys[idx].clone(), old_vals[sorted_idx].clone());
+            }
+        } else {
+            // Rebuild with sequential integer keys
+            let old_vals: Vec<Value> = old_entries.iter().map(|(_, v)| v.clone()).collect();
+            for &sorted_idx in &indices {
+                new_arr.push(old_vals[sorted_idx].clone());
+            }
+        }
+        *arr_rc.borrow_mut() = new_arr;
+    }
+
+    Ok(Value::True)
+}
+
+fn php_compare_for_sort(a: &Value, b: &Value, sort_type: i64) -> std::cmp::Ordering {
+    php_sort_cmp_flags(a, b, sort_type)
 }
 
 fn highlight_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -5928,7 +6094,7 @@ fn walk_recursive_inner(
                         fn_cvs[idx] = extra.clone();
                     }
                 }
-                let _ = vm.execute_fn(&user_fn, fn_cvs);
+                vm.execute_fn(&user_fn, fn_cvs)?;
                 // Write modified value back to the array
                 let new_val = val_ref.borrow().clone();
                 arr.borrow_mut().set(key.clone(), new_val);

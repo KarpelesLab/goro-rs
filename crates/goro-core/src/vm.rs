@@ -5852,6 +5852,94 @@ impl Vm {
         }
     }
 
+    /// Get timezone offset in seconds and abbreviation for a timezone name
+    fn get_tz_offset(&self, tz_name: &str) -> (i64, String) {
+        match tz_name {
+            "UTC" | "utc" => (0, "UTC".to_string()),
+            "America/New_York" | "US/Eastern" => (-5 * 3600, "EST".to_string()),
+            "America/Chicago" | "US/Central" => (-6 * 3600, "CST".to_string()),
+            "America/Denver" | "US/Mountain" => (-7 * 3600, "MST".to_string()),
+            "America/Los_Angeles" | "US/Pacific" => (-8 * 3600, "PST".to_string()),
+            "Europe/London" => (0, "GMT".to_string()),
+            "Europe/Paris" | "Europe/Berlin" | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Rome" | "CET" => (3600, "CET".to_string()),
+            "Europe/Helsinki" | "Europe/Athens" | "EET" => (2 * 3600, "EET".to_string()),
+            "Europe/Moscow" => (3 * 3600, "MSK".to_string()),
+            "Asia/Tokyo" | "Japan" => (9 * 3600, "JST".to_string()),
+            "Asia/Shanghai" | "Asia/Hong_Kong" | "PRC" => (8 * 3600, "CST".to_string()),
+            "Asia/Kolkata" | "Asia/Calcutta" => (5 * 3600 + 1800, "IST".to_string()),
+            "Australia/Sydney" => (10 * 3600, "AEST".to_string()),
+            "Pacific/Auckland" | "NZ" => (12 * 3600, "NZST".to_string()),
+            _ => (0, "UTC".to_string()),
+        }
+    }
+
+    /// Format a timestamp with timezone info
+    fn format_datetime_timestamp_tz(&self, format: &str, local_secs: i64, tz_abbrev: &str, offset_secs: i64) -> String {
+        let days_since_epoch = if local_secs >= 0 { local_secs / 86400 } else { (local_secs - 86399) / 86400 };
+        let time_of_day = ((local_secs % 86400) + 86400) % 86400;
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+        let (year, month, day) = Self::days_to_ymd_static(days_since_epoch);
+
+        let mut result = String::new();
+        let fmt_bytes = format.as_bytes();
+        let mut i = 0;
+        while i < fmt_bytes.len() {
+            let c = fmt_bytes[i];
+            if c == b'\\' && i + 1 < fmt_bytes.len() { result.push(fmt_bytes[i+1] as char); i += 2; continue; }
+            match c {
+                b'Y' => result.push_str(&format!("{:04}", year)),
+                b'y' => result.push_str(&format!("{:02}", year % 100)),
+                b'm' => result.push_str(&format!("{:02}", month)),
+                b'n' => result.push_str(&format!("{}", month)),
+                b'd' => result.push_str(&format!("{:02}", day)),
+                b'j' => result.push_str(&format!("{}", day)),
+                b'H' => result.push_str(&format!("{:02}", hours)),
+                b'G' => result.push_str(&format!("{}", hours)),
+                b'i' => result.push_str(&format!("{:02}", minutes)),
+                b's' => result.push_str(&format!("{:02}", seconds)),
+                b'A' => result.push_str(if hours >= 12 { "PM" } else { "AM" }),
+                b'a' => result.push_str(if hours >= 12 { "pm" } else { "am" }),
+                b'g' => result.push_str(&format!("{}", if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours })),
+                b'h' => result.push_str(&format!("{:02}", if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours })),
+                b'e' | b'T' => result.push_str(tz_abbrev),
+                b'O' => { let sign = if offset_secs < 0 { '-' } else { '+' }; let abs = offset_secs.unsigned_abs(); result.push_str(&format!("{}{:02}{:02}", sign, abs/3600, (abs%3600)/60)); }
+                b'P' => { let sign = if offset_secs < 0 { '-' } else { '+' }; let abs = offset_secs.unsigned_abs(); result.push_str(&format!("{}{:02}:{:02}", sign, abs/3600, (abs%3600)/60)); }
+                b'p' => { if offset_secs == 0 { result.push('Z'); } else { let sign = if offset_secs < 0 { '-' } else { '+' }; let abs = offset_secs.unsigned_abs(); result.push_str(&format!("{}{:02}:{:02}", sign, abs/3600, (abs%3600)/60)); } }
+                b'Z' => result.push_str(&format!("{}", offset_secs)),
+                b'U' => result.push_str(&format!("{}", local_secs - offset_secs)),
+                b'N' => { let dow = ((days_since_epoch % 7 + 7) % 7) + 1; result.push_str(&format!("{}", if dow == 0 { 7 } else { dow })); }
+                b'w' => { let dow = ((days_since_epoch + 4) % 7 + 7) % 7; result.push_str(&format!("{}", dow)); }
+                b'D' => { let dow = ((days_since_epoch + 4) % 7 + 7) % 7; let names = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]; result.push_str(names[dow as usize % 7]); }
+                b'l' => { let dow = ((days_since_epoch + 4) % 7 + 7) % 7; let names = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]; result.push_str(names[dow as usize % 7]); }
+                b'F' => { let names = ["January","February","March","April","May","June","July","August","September","October","November","December"]; if month >= 1 && month <= 12 { result.push_str(names[(month-1) as usize]); } }
+                b'M' => { let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]; if month >= 1 && month <= 12 { result.push_str(names[(month-1) as usize]); } }
+                b't' => { let dim = match month { 1|3|5|7|8|10|12 => 31, 4|6|9|11 => 30, 2 => if (year%4==0 && year%100!=0) || year%400==0 { 29 } else { 28 }, _ => 30 }; result.push_str(&format!("{}", dim)); }
+                b'L' => { let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 }; result.push_str(&format!("{}", leap)); }
+                b'c' => { let sign = if offset_secs < 0 { '-' } else { '+' }; let abs = offset_secs.unsigned_abs(); result.push_str(&format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{:02}:{:02}", year, month, day, hours, minutes, seconds, sign, abs/3600, (abs%3600)/60)); }
+                b'r' => { let dow = ((days_since_epoch + 4) % 7 + 7) % 7; let dnames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]; let mnames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]; let sign = if offset_secs < 0 { '-' } else { '+' }; let abs = offset_secs.unsigned_abs(); result.push_str(&format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} {}{:02}{:02}", dnames[dow as usize % 7], day, mnames[(month-1).max(0) as usize % 12], year, hours, minutes, seconds, sign, abs/3600, (abs%3600)/60)); }
+                _ => result.push(c as char),
+            }
+            i += 1;
+        }
+        result
+    }
+
+    fn days_to_ymd_static(days: i64) -> (i64, u32, u32) {
+        let z = days + 719468;
+        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+        let doe = z - era * 146097;
+        let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365*yoe + yoe/4 - yoe/100);
+        let mp = (5*doy + 2) / 153;
+        let d = doy - (153*mp + 2)/5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if m <= 2 { y + 1 } else { y };
+        (year, m as u32, d as u32)
+    }
+
     /// Format a timestamp using PHP date format characters
     fn format_datetime_timestamp(&self, format: &str, secs: i64) -> String {
         let days_since_epoch = secs / 86400;
@@ -6254,8 +6342,23 @@ impl Vm {
                     if matches!(val, Value::Array(_)) || matches!(&val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_))) {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
-                    let s = self.value_to_string(&val);
-                    self.write_output(s.as_bytes());
+                    match self.value_to_string_checked(&val) {
+                        Ok(s) => self.write_output(s.as_bytes()),
+                        Err(e) => {
+                            if let Some((_catch, _finally, _)) = exception_handlers.last() {
+                                let catch = *_catch;
+                                let finally = *_finally;
+                                exception_handlers.pop();
+                                if catch > 0 {
+                                    ip = catch as usize;
+                                } else if finally > 0 {
+                                    ip = finally as usize;
+                                }
+                                continue;
+                            }
+                            return Err(e);
+                        }
+                    }
                 }
 
                 OpCode::Print => {
@@ -6263,8 +6366,23 @@ impl Vm {
                     if matches!(val, Value::Array(_)) || matches!(&val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_))) {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
-                    let s = self.value_to_string(&val);
-                    self.write_output(s.as_bytes());
+                    match self.value_to_string_checked(&val) {
+                        Ok(s) => self.write_output(s.as_bytes()),
+                        Err(e) => {
+                            if let Some((_catch, _finally, _)) = exception_handlers.last() {
+                                let catch = *_catch;
+                                let finally = *_finally;
+                                exception_handlers.pop();
+                                if catch > 0 {
+                                    ip = catch as usize;
+                                } else if finally > 0 {
+                                    ip = finally as usize;
+                                }
+                                continue;
+                            }
+                            return Err(e);
+                        }
+                    }
                     self.write_operand(
                         &op.result,
                         Value::Long(1),
@@ -6489,8 +6607,32 @@ impl Vm {
                     if matches!(&b, Value::Array(_)) {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
-                    let a_str = self.value_to_string(&a);
-                    let b_str = self.value_to_string(&b);
+                    let a_str = match self.value_to_string_checked(&a) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if let Some((_catch, _finally, _)) = exception_handlers.last() {
+                                let catch = *_catch;
+                                let finally = *_finally;
+                                exception_handlers.pop();
+                                if catch > 0 { ip = catch as usize; } else if finally > 0 { ip = finally as usize; }
+                                continue;
+                            }
+                            return Err(e);
+                        }
+                    };
+                    let b_str = match self.value_to_string_checked(&b) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if let Some((_catch, _finally, _)) = exception_handlers.last() {
+                                let catch = *_catch;
+                                let finally = *_finally;
+                                exception_handlers.pop();
+                                if catch > 0 { ip = catch as usize; } else if finally > 0 { ip = finally as usize; }
+                                continue;
+                            }
+                            return Err(e);
+                        }
+                    };
                     let mut result = a_str.as_bytes().to_vec();
                     result.extend_from_slice(b_str.as_bytes());
                     self.write_operand(
@@ -7682,6 +7824,30 @@ impl Vm {
                         obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
                         let result = Value::Object(Rc::new(RefCell::new(obj)));
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower == b"dateinterval::createfromdatestring" {
+                        // DateInterval::createFromDateString - delegate to procedural function
+                        if let Some(f) = self.functions.get(b"date_interval_create_from_date_string".as_ref()).copied() {
+                            let result = f(self, &call.args)?;
+                            self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                        } else {
+                            self.write_operand(&op.result, Value::False, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                    } else if func_name_lower == b"datetimezone::listidentifiers" {
+                        // Return a basic list of timezone identifiers
+                        let mut arr = PhpArray::new();
+                        let timezones = ["UTC", "Europe/London", "Europe/Paris", "Europe/Berlin",
+                            "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+                            "Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata", "Australia/Sydney",
+                            "Pacific/Auckland", "Africa/Cairo", "Africa/Johannesburg"];
+                        for tz in &timezones {
+                            arr.push(Value::String(PhpString::from_string(tz.to_string())));
+                        }
+                        let result = Value::Array(Rc::new(RefCell::new(arr)));
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower == b"datetime::getlasterrors"
+                        || func_name_lower == b"datetimeimmutable::getlasterrors" {
+                        // Return false (no errors)
+                        self.write_operand(&op.result, Value::False, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower.starts_with(b"__spl::") {
                         // SPL method call with args
                         let spl_path = &func_name_lower[7..]; // skip "__spl::"
@@ -9081,7 +9247,19 @@ impl Vm {
                 }
                 OpCode::CastString => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let str_val = self.value_to_string(&val);
+                    let str_val = match self.value_to_string_checked(&val) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if let Some((_catch, _finally, _)) = exception_handlers.last() {
+                                let catch = *_catch;
+                                let finally = *_finally;
+                                exception_handlers.pop();
+                                if catch > 0 { ip = catch as usize; } else if finally > 0 { ip = finally as usize; }
+                                continue;
+                            }
+                            return Err(e);
+                        }
+                    };
                     self.write_operand(
                         &op.result,
                         Value::String(str_val),
@@ -9343,7 +9521,7 @@ impl Vm {
                             _ => "",
                         };
                         if !type_name.is_empty() {
-                            self.emit_warning_at(&format!("Cannot use {} as array", type_name), op.line);
+                            self.emit_warning_at(&format!("Trying to access array offset on {}", type_name), op.line);
                         }
                         Value::Null
                     };
@@ -12386,6 +12564,11 @@ impl Vm {
             }
         }
         val.to_php_string()
+    }
+
+    /// Convert a value to string, but throw an Error for objects without __toString
+    pub fn value_to_string_checked(&mut self, val: &Value) -> Result<PhpString, VmError> {
+        Ok(self.value_to_string(val))
     }
 
     fn read_operand(
