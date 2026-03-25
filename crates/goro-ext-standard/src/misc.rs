@@ -6,6 +6,24 @@ use goro_core::vm::{Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Normalize a namespaced constant name: lowercase the namespace prefix, keep constant name as-is.
+/// For "NS1\ns2\const1", returns "ns1\ns2\const1" (namespace lowered, const name preserved).
+/// For "CONST" (no namespace), returns "CONST" as-is.
+fn normalize_ns_const_name(name: &[u8]) -> Vec<u8> {
+    if let Some(pos) = name.iter().rposition(|&b| b == b'\\') {
+        let mut result = Vec::with_capacity(name.len());
+        // Lowercase the namespace prefix
+        for &b in &name[..pos] {
+            result.push(b.to_ascii_lowercase());
+        }
+        // Keep the separator and constant name as-is
+        result.extend_from_slice(&name[pos..]);
+        result
+    } else {
+        name.to_vec()
+    }
+}
+
 pub fn register(vm: &mut Vm) {
     // Error handling
     vm.register_function(b"error_reporting", error_reporting);
@@ -457,13 +475,15 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.emit_warning(&format!("Constant {} already defined, this will be an error in PHP 9", name_str));
         return Ok(Value::False);
     }
+    // Normalize namespace part (lowercase) while keeping constant name case-sensitive
+    let normalized = normalize_ns_const_name(&name_bytes);
     // Check if constant is already defined
-    if vm.constants.contains_key(&name_bytes) {
+    if vm.constants.contains_key(&normalized) {
         let name_str = name.to_string_lossy();
         vm.emit_warning(&format!("Constant {} already defined, this will be an error in PHP 9", name_str));
         return Ok(Value::False);
     }
-    vm.constants.insert(name_bytes, value);
+    vm.constants.insert(normalized, value);
     Ok(Value::True)
 }
 
@@ -7070,10 +7090,18 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::True)
     } else {
         // Also check with stripped leading backslash for FQN
-        if name_bytes.starts_with(b"\\") {
-            if vm.constants.contains_key(&name_bytes[1..]) {
-                return Ok(Value::True);
-            }
+        let check_bytes = if name_bytes.starts_with(b"\\") {
+            &name_bytes[1..]
+        } else {
+            name_bytes
+        };
+        if vm.constants.contains_key(check_bytes) {
+            return Ok(Value::True);
+        }
+        // Normalize namespace prefix for case-insensitive lookup
+        let normalized = normalize_ns_const_name(check_bytes);
+        if vm.constants.contains_key(&normalized) {
+            return Ok(Value::True);
         }
         Ok(Value::False)
     }
