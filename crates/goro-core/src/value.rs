@@ -934,6 +934,9 @@ impl Value {
                 }
                 0
             }
+            // Array vs non-array (non-null): arrays are always greater than scalars in PHP
+            (Value::Array(_), _) => 1,
+            (_, Value::Array(_)) => -1,
             // Object vs non-object: objects are generally greater except vs bool
             (Value::Object(_), _) | (_, Value::Object(_)) => {
                 // For non-bool comparisons, PHP 8 produces a notice/warning

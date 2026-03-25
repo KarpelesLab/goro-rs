@@ -395,6 +395,9 @@ impl Vm {
                 c.insert(b"E_DEPRECATED".to_vec(), Value::Long(8192));
                 c.insert(b"E_USER_DEPRECATED".to_vec(), Value::Long(16384));
                 c.insert(b"E_ALL".to_vec(), Value::Long(32767));
+                // mt_rand constants
+                c.insert(b"MT_RAND_MT19937".to_vec(), Value::Long(0));
+                c.insert(b"MT_RAND_PHP".to_vec(), Value::Long(1));
                 // Array/sort constants
                 c.insert(b"CASE_LOWER".to_vec(), Value::Long(0));
                 c.insert(b"CASE_UPPER".to_vec(), Value::Long(1));
@@ -9394,6 +9397,26 @@ impl Vm {
                     if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val);
                         arr.borrow_mut().set(key, val);
+                    } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
+                        // Auto-initialize null/undef/false to array
+                        let mut arr = PhpArray::new();
+                        let key = Self::value_to_array_key(key_val);
+                        arr.set(key, val);
+                        let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
+                        // Write back to the CV or reference
+                        if let OperandType::Cv(cv_idx) = &op.op1 {
+                            let i = *cv_idx as usize;
+                            if let Some(cv_val) = cvs.get_mut(i) {
+                                match cv_val {
+                                    Value::Reference(r) => {
+                                        *r.borrow_mut() = new_arr;
+                                    }
+                                    _ => {
+                                        *cv_val = new_arr;
+                                    }
+                                }
+                            }
+                        }
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[$key] = $val -> offsetSet($key, $val)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();

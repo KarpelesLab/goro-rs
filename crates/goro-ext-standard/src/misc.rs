@@ -847,6 +847,22 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
 
+    // Handle object callback (invoking __invoke)
+    if let Value::Object(obj) = callback {
+        let class_lower: Vec<u8>;
+        {
+            let obj_borrow = obj.borrow();
+            class_lower = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        }
+        if let Some(class) = vm.classes.get(&class_lower).cloned() {
+            if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
+                let op = method.op_array.clone();
+                return vm.execute_fn_with_named_args(&op, call_args, named_args, Some(Value::Object(obj.clone())));
+            }
+        }
+        return Ok(Value::Null);
+    }
+
     // Handle closure callback (stored as string name or array with captures)
     if let Value::String(s) = callback {
         let func_name = s.as_bytes().to_vec();
@@ -2630,7 +2646,14 @@ fn property_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::False
             })
         }
-        _ => Ok(Value::False),
+        _ => {
+            let type_name = Vm::value_type_name(class_or_obj);
+            let msg = format!("property_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given", type_name);
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line })
+        }
     }
 }
 fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -5652,10 +5675,64 @@ fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-fn uasort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn uasort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
+        let mut arr_mut = arr.borrow_mut();
+        let mut entries: Vec<(ArrayKey, Value)> = arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+        let cb = callback.clone();
+        entries.sort_by(|a, b| {
+            let result = call_user_func(vm, &[cb.clone(), a.1.clone(), b.1.clone()]).unwrap_or(Value::Long(0));
+            let cmp = result.to_long();
+            if cmp < 0 {
+                std::cmp::Ordering::Less
+            } else if cmp > 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+
+        let mut new_arr = PhpArray::new();
+        for (key, val) in entries {
+            new_arr.set(key, val);
+        }
+        *arr_mut = new_arr;
+    }
     Ok(Value::True)
 }
-fn uksort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
+        let mut arr_mut = arr.borrow_mut();
+        let mut entries: Vec<(ArrayKey, Value)> = arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+        let cb = callback.clone();
+        entries.sort_by(|a, b| {
+            let key_a = match &a.0 {
+                ArrayKey::Int(n) => Value::Long(*n),
+                ArrayKey::String(s) => Value::String(s.clone()),
+            };
+            let key_b = match &b.0 {
+                ArrayKey::Int(n) => Value::Long(*n),
+                ArrayKey::String(s) => Value::String(s.clone()),
+            };
+            let result = call_user_func(vm, &[cb.clone(), key_a, key_b]).unwrap_or(Value::Long(0));
+            let cmp = result.to_long();
+            if cmp < 0 {
+                std::cmp::Ordering::Less
+            } else if cmp > 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+
+        let mut new_arr = PhpArray::new();
+        for (key, val) in entries {
+            new_arr.set(key, val);
+        }
+        *arr_mut = new_arr;
+    }
     Ok(Value::True)
 }
 

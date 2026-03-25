@@ -443,6 +443,16 @@ fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg, line: vm.current_line });
     }
     let input = num_str.to_string_lossy().to_lowercase();
+    // Strip known prefixes silently (0b, 0o, 0x, 0B, 0O, 0X)
+    let input = if input.starts_with("0b") && from_base == 2 {
+        input[2..].to_string()
+    } else if input.starts_with("0o") && from_base == 8 {
+        input[2..].to_string()
+    } else if input.starts_with("0x") && from_base == 16 {
+        input[2..].to_string()
+    } else {
+        input
+    };
     // Strip invalid characters for the given base, emit deprecation if any were removed
     let mut cleaned = String::new();
     let mut had_invalid = false;

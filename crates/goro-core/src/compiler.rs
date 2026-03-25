@@ -1144,9 +1144,18 @@ impl Compiler {
                     }
 
                     // Store parameter type info
-                    let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
-                        param_type: type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map),
-                        param_name: param.name.clone(),
+                    let type_info = param.type_hint.as_ref().map(|hint| {
+                        let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                        // Implicitly nullable: if default is null and type is not already nullable/mixed
+                        if let Some(default_expr) = &param.default {
+                            if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                                pt = ParamType::Nullable(Box::new(pt));
+                            }
+                        }
+                        ParamTypeInfo {
+                            param_type: pt,
+                            param_name: param.name.clone(),
+                        }
                     });
                     // Ensure param_types vec is large enough
                     while func_compiler.op_array.param_types.len() <= cv as usize {
@@ -2151,6 +2160,38 @@ impl Compiler {
                                         line: *method_line,
                                     });
                                 }
+                                // __call() must take exactly 2 arguments
+                                if mn_lower == b"__call" && params.len() != 2 {
+                                    return Err(CompileError {
+                                        message: format!("Method {}::__call() must take exactly 2 arguments",
+                                            class_display),
+                                        line: *method_line,
+                                    });
+                                }
+                                // __callStatic() must take exactly 2 arguments
+                                if mn_lower == b"__callstatic" && params.len() != 2 {
+                                    return Err(CompileError {
+                                        message: format!("Method {}::__callStatic() must take exactly 2 arguments",
+                                            class_display),
+                                        line: *method_line,
+                                    });
+                                }
+                                // __get() must take exactly 1 argument
+                                if mn_lower == b"__get" && params.len() != 1 {
+                                    return Err(CompileError {
+                                        message: format!("Method {}::__get() must take exactly 1 argument",
+                                            class_display),
+                                        line: *method_line,
+                                    });
+                                }
+                                // __set() must take exactly 2 arguments
+                                if mn_lower == b"__set" && params.len() != 2 {
+                                    return Err(CompileError {
+                                        message: format!("Method {}::__set() must take exactly 2 arguments",
+                                            class_display),
+                                        line: *method_line,
+                                    });
+                                }
                             }
                             // Add promoted properties from constructor params
                             {
@@ -2263,9 +2304,18 @@ impl Compiler {
 
                                     // Store parameter type info
                                     let type_info =
-                                        param.type_hint.as_ref().map(|hint| ParamTypeInfo {
-                                            param_type: type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map),
-                                            param_name: param.name.clone(),
+                                        param.type_hint.as_ref().map(|hint| {
+                                            let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                            // Implicitly nullable: if default is null and type is not already nullable/mixed
+                                            if let Some(default_expr) = &param.default {
+                                                if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                                                    pt = ParamType::Nullable(Box::new(pt));
+                                                }
+                                            }
+                                            ParamTypeInfo {
+                                                param_type: pt,
+                                                param_name: param.name.clone(),
+                                            }
                                         });
                                     while method_compiler.op_array.param_types.len() <= cv as usize
                                     {
@@ -4400,9 +4450,17 @@ impl Compiler {
                     }
 
                     // Store parameter type info
-                    let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
-                        param_type: type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map),
-                        param_name: param.name.clone(),
+                    let type_info = param.type_hint.as_ref().map(|hint| {
+                        let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                        if let Some(default_expr) = &param.default {
+                            if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                                pt = ParamType::Nullable(Box::new(pt));
+                            }
+                        }
+                        ParamTypeInfo {
+                            param_type: pt,
+                            param_name: param.name.clone(),
+                        }
                     });
                     while closure_compiler.op_array.param_types.len() <= cv as usize {
                         closure_compiler.op_array.param_types.push(None);
@@ -4583,9 +4641,17 @@ impl Compiler {
                     let cv = closure_compiler.op_array.get_or_create_cv(&param.name);
 
                     // Store parameter type info
-                    let type_info = param.type_hint.as_ref().map(|hint| ParamTypeInfo {
-                        param_type: type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map),
-                        param_name: param.name.clone(),
+                    let type_info = param.type_hint.as_ref().map(|hint| {
+                        let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                        if let Some(default_expr) = &param.default {
+                            if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                                pt = ParamType::Nullable(Box::new(pt));
+                            }
+                        }
+                        ParamTypeInfo {
+                            param_type: pt,
+                            param_name: param.name.clone(),
+                        }
                     });
                     while closure_compiler.op_array.param_types.len() <= cv as usize {
                         closure_compiler.op_array.param_types.push(None);
@@ -5658,6 +5724,24 @@ fn type_hint_to_param_type_with_ns(hint: &TypeHint, namespace: &[u8], use_map: &
         TypeHint::Intersection(types) => {
             ParamType::Intersection(types.iter().map(|t| type_hint_to_param_type_with_ns(t, namespace, use_map)).collect())
         }
+    }
+}
+
+/// Check if a ParamType is already nullable or mixed (which implicitly allows null)
+fn is_type_nullable_or_mixed(pt: &ParamType) -> bool {
+    match pt {
+        ParamType::Nullable(_) => true,
+        ParamType::Simple(name) => {
+            let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            lower == b"mixed" || lower == b"null"
+        }
+        ParamType::Union(types) => {
+            types.iter().any(|t| matches!(t, ParamType::Simple(n) if {
+                let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                lower == b"null" || lower == b"mixed"
+            }))
+        }
+        ParamType::Intersection(_) => false,
     }
 }
 
