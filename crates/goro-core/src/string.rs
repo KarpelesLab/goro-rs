@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use crate::value::{memory_alloc, memory_free};
 
-/// Threshold for tracking string memory (only track large strings)
-const STRING_TRACK_THRESHOLD: usize = 1024;
+/// Overhead per PhpString allocation (Rc + Cell + Vec header)
+const STRING_OVERHEAD: usize = 64;
 
 /// PHP binary-safe string with cached hash
 #[derive(Clone)]
@@ -15,7 +15,7 @@ pub struct PhpString {
 struct PhpStringInner {
     data: Vec<u8>,
     hash: std::cell::Cell<Option<u64>>,
-    tracked_bytes: usize, // bytes tracked in memory_alloc (0 if below threshold)
+    tracked_bytes: usize,
 }
 
 impl Drop for PhpStringInner {
@@ -32,46 +32,35 @@ impl PhpString {
             inner: Rc::new(PhpStringInner {
                 data: Vec::new(),
                 hash: std::cell::Cell::new(None),
-                tracked_bytes: 0,
+                tracked_bytes: 0, // empty strings don't track
             }),
         }
     }
 
     pub fn from_bytes(data: &[u8]) -> Self {
-        let tracked = if data.len() >= STRING_TRACK_THRESHOLD {
-            let bytes = data.len();
-            if !memory_alloc(bytes) {
-                // Over memory limit - return empty string
-                return Self::empty();
-            }
-            bytes
-        } else {
-            0
-        };
+        let bytes = data.len() + STRING_OVERHEAD;
+        if !memory_alloc(bytes) {
+            return Self::empty();
+        }
         Self {
             inner: Rc::new(PhpStringInner {
                 data: data.to_vec(),
                 hash: std::cell::Cell::new(None),
-                tracked_bytes: tracked,
+                tracked_bytes: bytes,
             }),
         }
     }
 
     pub fn from_vec(data: Vec<u8>) -> Self {
-        let tracked = if data.len() >= STRING_TRACK_THRESHOLD {
-            let bytes = data.len();
-            if !memory_alloc(bytes) {
-                return Self::empty();
-            }
-            bytes
-        } else {
-            0
-        };
+        let bytes = data.len() + STRING_OVERHEAD;
+        if !memory_alloc(bytes) {
+            return Self::empty();
+        }
         Self {
             inner: Rc::new(PhpStringInner {
                 data,
                 hash: std::cell::Cell::new(None),
-                tracked_bytes: tracked,
+                tracked_bytes: bytes,
             }),
         }
     }
