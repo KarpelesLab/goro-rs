@@ -865,7 +865,6 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 args_array.push(arg.clone());
                             }
                             let magic_args = vec![
-                                Value::Object(obj.clone()),
                                 Value::String(PhpString::from_vec(method_name.as_bytes().to_vec())),
                                 Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
                             ];

@@ -724,41 +724,20 @@ impl Value {
             (Value::False, Value::Null | Value::Undef) => 0,
             (Value::Null | Value::Undef, Value::True) => -1,
             (Value::True, Value::Null | Value::Undef) => 1,
+            // PHP 8: NULL is <= any int/float for ordering
+            // NULL == 0 for equality AND ordering (compare returns 0 for NULL vs 0)
+            // NULL < positive_int, NULL < negative_int (NULL is always <= any nonzero)
             (Value::Null | Value::Undef, Value::Long(n)) => {
-                if 0 < *n {
-                    -1
-                } else if 0 > *n {
-                    1
-                } else {
-                    0
-                }
+                if *n == 0 { 0 } else { -1 }
             }
             (Value::Long(n), Value::Null | Value::Undef) => {
-                if *n < 0 {
-                    -1
-                } else if *n > 0 {
-                    1
-                } else {
-                    0
-                }
+                if *n == 0 { 0 } else { 1 }
             }
             (Value::Null | Value::Undef, Value::Double(f)) => {
-                if 0.0 < *f {
-                    -1
-                } else if 0.0 > *f {
-                    1
-                } else {
-                    0
-                }
+                if *f == 0.0 { 0 } else { -1 }
             }
             (Value::Double(f), Value::Null | Value::Undef) => {
-                if *f < 0.0 {
-                    -1
-                } else if *f > 0.0 {
-                    1
-                } else {
-                    0
-                }
+                if *f == 0.0 { 0 } else { 1 }
             }
             (Value::Null | Value::Undef, Value::String(s)) => {
                 if s.is_empty() {
@@ -934,9 +913,10 @@ impl Value {
                 }
                 // Regular objects: compare by class name and properties
                 if !a_borrow.class_name.eq_ignore_ascii_case(&b_borrow.class_name) {
-                    // Different classes - not comparable in PHP 8 for ordered comparison
-                    // but == returns false (handled elsewhere), <=> should return 1
-                    return 1;
+                    // Different classes - not comparable in PHP 8
+                    // <, >, <=, >= all return false; == returns false
+                    // <=> returns 1 but </>/>=/<=  use i64::MIN to indicate incomparable
+                    return i64::MIN;
                 }
                 // Same class: compare properties
                 if a_borrow.properties.len() != b_borrow.properties.len() {
@@ -952,13 +932,18 @@ impl Value {
                 }
                 0
             }
-            // Array vs non-array (non-null): arrays are always greater than scalars in PHP
+            // Array vs Object: object is always greater than array in PHP 8
+            (Value::Array(_), Value::Object(_)) => -1,
+            (Value::Object(_), Value::Array(_)) => 1,
+            // Array vs non-array (non-null, non-object): arrays are always greater than scalars in PHP
             (Value::Array(_), _) => 1,
             (_, Value::Array(_)) => -1,
-            // Object vs non-object: objects are generally greater except vs bool
+            // Object vs String: object is always greater than string in PHP 8
+            (Value::Object(_), Value::String(_)) => 1,
+            (Value::String(_), Value::Object(_)) => -1,
+            // Object vs int/float: convert object to int/float, compare numerically
             (Value::Object(_), _) | (_, Value::Object(_)) => {
-                // For non-bool comparisons, PHP 8 produces a notice/warning
-                // and converts object to int (1). But for enums this is different.
+                // PHP 8 converts object to int (1) for numeric comparisons
                 let a = self.to_double();
                 let b = other.to_double();
                 if a < b {

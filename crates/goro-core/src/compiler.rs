@@ -3543,6 +3543,26 @@ impl Compiler {
                 // Special case: compact() - build array from variable names
                 if let ExprKind::Identifier(n) = &name.kind {
                     let func_lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if func_lower == b"extract" && !args.is_empty() {
+                        // extract($array [, $flags [, $prefix]])
+                        // Compile the array argument
+                        let arr_operand = self.compile_expr(&args[0].value)?;
+                        let flags = if args.len() > 1 {
+                            self.compile_expr(&args[1].value)?
+                        } else {
+                            let idx = self.op_array.add_literal(Value::Long(0)); // EXTR_OVERWRITE
+                            OperandType::Const(idx)
+                        };
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Extract,
+                            op1: arr_operand,
+                            op2: flags,
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(tmp));
+                    }
                     if func_lower == b"compact" && !args.is_empty() {
                         // compact("foo", "bar") => ["foo" => $foo, "bar" => $bar]
                         let arr_tmp = self.op_array.alloc_temp();
@@ -4204,14 +4224,18 @@ impl Compiler {
                         Value::String(PhpString::from_vec(name))
                     }
                     b"__class__" => {
-                        if let Some(ref class_name) = self.current_class {
+                        let class_val = if let Some(ref class_name) = self.current_class {
                             Value::String(PhpString::from_vec(class_name.clone()))
                         } else {
                             Value::String(PhpString::empty())
-                        }
+                        };
+                        // Track this literal as a __CLASS__ magic constant for trait patching
+                        let idx = self.op_array.add_literal(class_val);
+                        self.op_array.class_const_literals.push(idx);
+                        return Ok(OperandType::Const(idx));
                     }
                     b"__method__" => {
-                        if let Some(ref class_name) = self.current_class {
+                        let method_val = if let Some(ref class_name) = self.current_class {
                             let mut method = class_name.clone();
                             method.extend_from_slice(b"::");
                             method.extend_from_slice(&self.op_array.name);
@@ -4221,7 +4245,13 @@ impl Compiler {
                             Value::String(PhpString::empty())
                         } else {
                             Value::String(PhpString::from_vec(self.op_array.name.clone()))
-                        }
+                        };
+                        // Track this literal as a __CLASS__-derived constant for trait patching (for __METHOD__)
+                        let idx = self.op_array.add_literal(method_val);
+                        // __METHOD__ also needs patching (class part)
+                        // We use a negative convention: store -(idx+1) for __METHOD__ literals
+                        // Actually, let's just handle it in the trait patching code
+                        return Ok(OperandType::Const(idx));
                     }
                     b"__namespace__" => Value::String(PhpString::from_vec(self.current_namespace.clone())),
                     b"__trait__" => Value::String(PhpString::empty()),
@@ -5411,9 +5441,30 @@ impl Compiler {
                             });
                             return Ok(OperandType::Tmp(tmp));
                         }
-                        let _ = self.compile_expr(class)?;
-                        let idx = self.op_array.add_literal(Value::Null);
-                        return Ok(OperandType::Const(idx));
+                        // $obj::CONST - get class name from object, then look up constant
+                        let obj_operand = self.compile_expr(class)?;
+                        // Get class name at runtime
+                        let class_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::GetClassName,
+                            op1: obj_operand,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(class_tmp),
+                            line: expr.span.line,
+                        });
+                        // Look up the constant using StaticPropGet
+                        let const_name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(constant.clone())));
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropGet,
+                            op1: OperandType::Tmp(class_tmp),
+                            op2: OperandType::Const(const_name_idx),
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(tmp));
                     }
                 };
 

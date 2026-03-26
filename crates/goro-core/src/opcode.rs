@@ -272,6 +272,9 @@ pub enum OpCode {
     ErrorRestore,
     /// Eval: op1 = code string, result = return value
     Eval,
+    /// Extract: op1 = array value, op2 = flags (const), result = count of extracted vars
+    /// Iterates over array keys and sets corresponding CVs in the current scope
+    Extract,
 }
 
 /// A compiled function / script
@@ -308,6 +311,8 @@ pub struct OpArray {
     pub is_static_closure: bool,
     /// Line number of the function/method declaration (for error reporting)
     pub decl_line: u32,
+    /// Literal indices that contain __CLASS__ magic constant values (for trait patching)
+    pub class_const_literals: Vec<u32>,
 }
 
 impl OpArray {
@@ -328,6 +333,7 @@ impl OpArray {
             scope_class: None,
             is_static_closure: false,
             decl_line: 0,
+            class_const_literals: Vec::new(),
         }
     }
 

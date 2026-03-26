@@ -1193,6 +1193,35 @@ impl Vm {
 
     /// Emit object-to-scalar comparison notice when comparing object to int/float/string
     /// PHP 8 emits: Notice: Object of class X could not be converted to int/float
+    /// Emit "A non-numeric value encountered" warning for leading-numeric strings in arithmetic
+    fn check_leading_numeric_warning(&mut self, v: &Value, line: u32) {
+        let inner = match v {
+            Value::Reference(r) => r.borrow().clone(),
+            _ => v.clone(),
+        };
+        if let Value::String(s) = &inner {
+            let bytes = s.as_bytes();
+            if bytes.is_empty() {
+                return;
+            }
+            let trimmed = std::str::from_utf8(bytes).unwrap_or("").trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            let first = trimmed.as_bytes()[0];
+            let starts_numeric = first.is_ascii_digit() || first == b'.'
+                || ((first == b'+' || first == b'-') && trimmed.len() > 1
+                    && (trimmed.as_bytes()[1].is_ascii_digit() || trimmed.as_bytes()[1] == b'.'));
+            if starts_numeric {
+                // Check if it's a leading-numeric string (has trailing non-numeric chars)
+                if crate::value::parse_numeric_string(bytes).is_none() {
+                    // It starts numeric but isn't fully numeric -> leading numeric
+                    self.emit_warning_at("A non-numeric value encountered", line);
+                }
+            }
+        }
+    }
+
     fn emit_object_comparison_notice(&mut self, a: &Value, b: &Value, line: u32) {
         let a_inner = match a {
             Value::Reference(r) => r.borrow().clone(),
@@ -1292,9 +1321,46 @@ impl Vm {
             }
         }
 
-        // PHP 8: bitwise ops on fully non-numeric strings with non-strings throw TypeError
+        // PHP 8: arithmetic ops on fully non-numeric strings throw TypeError
         // Leading-numeric strings (like "45some") produce a Warning but NOT a TypeError
-        // Note: arithmetic ops (+, -, *, /, **) produce a Warning, not TypeError
+        {
+            // Helper: check if string is fully non-numeric
+            let is_fully_non_numeric_str = |v: &Value| -> bool {
+                if let Value::String(s) = v {
+                    let bytes = s.as_bytes();
+                    if bytes.is_empty() {
+                        return false; // empty string is treated as 0, not an error
+                    }
+                    let trimmed = std::str::from_utf8(bytes).unwrap_or("").trim();
+                    if trimmed.is_empty() {
+                        return false; // whitespace-only string is treated as 0
+                    }
+                    let first = trimmed.as_bytes()[0];
+                    !(first.is_ascii_digit() || first == b'.' || ((first == b'+' || first == b'-') && trimmed.len() > 1 && (trimmed.as_bytes()[1].is_ascii_digit() || trimmed.as_bytes()[1] == b'.')))
+                } else {
+                    false
+                }
+            };
+            let a_non_numeric = is_fully_non_numeric_str(&a_deref);
+            let b_non_numeric = is_fully_non_numeric_str(&b_deref);
+            // int/float + non-numeric string = TypeError
+            if a_non_numeric && matches!(b_deref, Value::Long(_) | Value::Double(_) | Value::True | Value::False) {
+                return Some(format!(
+                    "Unsupported operand types: {} {} {}",
+                    Self::value_type_name(&a_deref),
+                    op_symbol,
+                    Self::value_type_name(&b_deref)
+                ));
+            }
+            if b_non_numeric && matches!(a_deref, Value::Long(_) | Value::Double(_) | Value::True | Value::False) {
+                return Some(format!(
+                    "Unsupported operand types: {} {} {}",
+                    Self::value_type_name(&a_deref),
+                    op_symbol,
+                    Self::value_type_name(&b_deref)
+                ));
+            }
+        }
         if matches!(op_symbol, "&" | "|" | "^" | "%" | "<<" | ">>") {
             // Helper: check if string is fully non-numeric (not even leading numeric)
             let is_fully_non_numeric = |s: &crate::string::PhpString| -> bool {
@@ -8410,6 +8476,8 @@ impl Vm {
                 OpCode::Add => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.check_leading_numeric_warning(&a, op.line);
+                    self.check_leading_numeric_warning(&b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "+") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8428,6 +8496,8 @@ impl Vm {
                 OpCode::Sub => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.check_leading_numeric_warning(&a, op.line);
+                    self.check_leading_numeric_warning(&b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "-") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8446,6 +8516,8 @@ impl Vm {
                 OpCode::Mul => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    self.check_leading_numeric_warning(&a, op.line);
+                    self.check_leading_numeric_warning(&b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "*") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8583,6 +8655,12 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                    }
+                    // Check for deprecated: pow(0, negative)
+                    let base_val = a.to_double();
+                    let exp_val = b.to_double();
+                    if base_val == 0.0 && exp_val < 0.0 {
+                        self.emit_deprecated_at("Power of base 0 and negative exponent is deprecated", op.line);
                     }
                     self.write_operand(&op.result, a.pow(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
@@ -11255,7 +11333,26 @@ impl Vm {
                                         // Regular ClassName::method() and $obj::method() should use __callStatic
                                         let class_part_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         let is_parent_call = class_part_lower == b"parent";
-                                        let in_instance_context = is_parent_call && matches!(cvs.first(), Some(Value::Object(_)));
+                                        // In instance context: $this is an object AND calling class is in inheritance chain
+                                        // Exclude traits: traits should always use __callStatic for direct static calls
+                                        let calling_class_is_trait = self.classes.get(&class_lower)
+                                            .map(|c| c.is_trait)
+                                            .unwrap_or(false);
+                                        let in_instance_context = if !calling_class_is_trait && matches!(cvs.first(), Some(Value::Object(_))) {
+                                            if is_parent_call {
+                                                true
+                                            } else {
+                                                // Check if calling class is in the inheritance chain of $this
+                                                if let Some(Value::Object(obj)) = cvs.first() {
+                                                    let obj_class: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                    obj_class == class_lower || self.class_extends(&obj_class, &class_lower)
+                                                } else {
+                                                    false
+                                                }
+                                            }
+                                        } else {
+                                            false
+                                        };
                                         if in_instance_context {
                                             if let Some((call_op, declaring_class)) = magic_call {
                                                 let mut fn_cvs =
@@ -12636,12 +12733,45 @@ impl Vm {
 
                         let val = if let Some(class) = self.classes.get(&class_lower) {
                             // Check static properties first, then constants
-                            let raw_val = class
+                            let raw_val_opt = class
                                 .static_properties
                                 .get(prop_name.as_bytes())
                                 .cloned()
-                                .or_else(|| class.constants.get(prop_name.as_bytes()).cloned())
-                                .unwrap_or(Value::Null);
+                                .or_else(|| class.constants.get(prop_name.as_bytes()).cloned());
+                            if raw_val_opt.is_none() {
+                                // Neither static property nor constant found - check parent classes
+                                let mut found = false;
+                                let mut parent = class.parent.clone();
+                                while let Some(p) = parent {
+                                    let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if let Some(pc) = self.classes.get(&p_lower) {
+                                        if pc.static_properties.contains_key(prop_name.as_bytes())
+                                            || pc.constants.contains_key(prop_name.as_bytes()) {
+                                            found = true;
+                                            break;
+                                        }
+                                        parent = pc.parent.clone();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if !found {
+                                    // Also check built-in class constants before erroring
+                                    if self.get_builtin_class_constant(&class_lower, prop_name.as_bytes()).is_none() {
+                                        let class_display = String::from_utf8_lossy(&resolved_class).to_string();
+                                        let prop_display = prop_name.to_string_lossy();
+                                        let err_msg = format!("Undefined constant {}::{}", class_display, prop_display);
+                                        let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                                    }
+                                }
+                            }
+                            let raw_val = raw_val_opt.unwrap_or(Value::Null);
                             // Check if this is an enum case marker
                             if let Value::String(s) = &raw_val {
                                 if s.as_bytes().starts_with(b"__enum_case__::") {
@@ -12929,13 +13059,48 @@ impl Vm {
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::Extract => {
+                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let flags = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_long();
+                    // EXTR_OVERWRITE = 0, EXTR_SKIP = 1, EXTR_PREFIX_SAME = 2, etc.
+                    let mut count = 0i64;
+                    if let Value::Array(arr) = &arr_val {
+                        let arr_borrow = arr.borrow();
+                        for (key, val) in arr_borrow.iter() {
+                            if let crate::array::ArrayKey::String(key_str) = key {
+                                let key_bytes = key_str.as_bytes();
+                                // Find the CV index for this variable name
+                                let cv_idx = op_array.cv_names.iter().position(|n| n == key_bytes);
+                                if let Some(cv_idx) = cv_idx {
+                                    let should_set = match flags {
+                                        1 => { // EXTR_SKIP
+                                            // Only set if not already defined
+                                            matches!(&cvs[cv_idx], Value::Undef)
+                                        }
+                                        _ => true, // EXTR_OVERWRITE (default)
+                                    };
+                                    if should_set {
+                                        cvs[cv_idx] = val.clone();
+                                        count += 1;
+                                    }
+                                } else {
+                                    // Variable doesn't exist as a CV - we can't create new CVs at runtime
+                                    // Skip silently (this is a limitation)
+                                }
+                            }
+                        }
+                    }
+                    self.write_operand(&op.result, Value::Long(count), &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
                 OpCode::CloneObj => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let cloned = match &val {
                         Value::Object(obj) => {
                             let obj_borrow = obj.borrow();
-                            // Check if this is an enum case (enums are uncloneable)
-                            if obj_borrow.has_property(b"__enum_case") {
+                            // Check if this is an uncloneable object
+                            let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if class_lower == b"generator" || class_lower == b"closure" || obj_borrow.has_property(b"__enum_case") {
                                 let class_name = String::from_utf8_lossy(&obj_borrow.class_name).to_string();
                                 drop(obj_borrow);
                                 let msg = format!("Trying to clone an uncloneable object of class {}", class_name);
@@ -12981,6 +13146,19 @@ impl Vm {
                             // Clone array
                             let cloned_arr = arr.borrow().clone();
                             Value::Array(Rc::new(RefCell::new(cloned_arr)))
+                        }
+                        Value::Generator(_) => {
+                            let msg = "Trying to clone an uncloneable object of class Generator".to_string();
+                            let exc_val = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc_val);
+                            if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
                         }
                         _other => {
                             let type_name = Self::value_type_name(_other);
@@ -13447,6 +13625,15 @@ impl Vm {
                         if let Some(parent_name) = &class.parent.clone() {
                             let parent_lower: Vec<u8> =
                                 parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            // Check for extending reserved internal classes
+                            if parent_lower == b"generator" || parent_lower == b"closure" {
+                                let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                return Err(VmError {
+                                    message: format!("Class {} cannot extend final class {}", child_display, parent_display),
+                                    line: op.line,
+                                });
+                            }
                             if let Some(parent) = self.classes.get(&parent_lower).cloned() {
                                 // Check: interface can only extend another interface
                                 if class.is_interface && !parent.is_interface {
@@ -13656,16 +13843,32 @@ impl Vm {
                                         // Trait methods should have scope of the using class
                                         m.declaring_class = class_name_lower.clone();
                                         m.op_array.scope_class = Some(class_name_lower.clone());
+                                        // Patch __CLASS__ references in literals (only marked ones)
+                                        let trait_name_original = trait_def.name.clone();
+                                        for &lit_idx in &m.op_array.class_const_literals.clone() {
+                                            if let Some(Value::String(s)) = m.op_array.literals.get(lit_idx as usize) {
+                                                if s.as_bytes() == trait_name_original.as_slice() {
+                                                    m.op_array.literals[lit_idx as usize] = Value::String(PhpString::from_vec(class.name.clone()));
+                                                }
+                                            }
+                                        }
                                         class.methods.insert(method_name.clone(), m);
                                     }
                                 }
                                 // Copy trait properties (class's own properties take precedence)
                                 let child_prop_names: Vec<Vec<u8>> =
                                     class.properties.iter().map(|p| p.name.clone()).collect();
+                                let trait_name_original = trait_def.name.clone();
                                 for prop in &trait_def.properties {
                                     if !child_prop_names.contains(&prop.name) {
                                         let mut p = prop.clone();
                                         p.declaring_class = class_name_lower.clone();
+                                        // Patch __CLASS__ in property defaults
+                                        if let Value::String(s) = &p.default {
+                                            if s.as_bytes() == trait_name_original.as_slice() {
+                                                p.default = Value::String(PhpString::from_vec(class.name.clone()));
+                                            }
+                                        }
                                         class.properties.push(p);
                                     }
                                 }
@@ -13680,9 +13883,19 @@ impl Vm {
                                 // Copy trait static properties (class's own take precedence)
                                 for (prop_name, prop_val) in &trait_def.static_properties {
                                     if !class.static_properties.contains_key(prop_name) {
+                                        // Patch __CLASS__ in static property defaults
+                                        let patched_val = if let Value::String(s) = prop_val {
+                                            if s.as_bytes() == trait_name_original.as_slice() {
+                                                Value::String(PhpString::from_vec(class.name.clone()))
+                                            } else {
+                                                prop_val.clone()
+                                            }
+                                        } else {
+                                            prop_val.clone()
+                                        };
                                         class
                                             .static_properties
-                                            .insert(prop_name.clone(), prop_val.clone());
+                                            .insert(prop_name.clone(), patched_val);
                                     }
                                 }
                             }
@@ -13989,6 +14202,20 @@ impl Vm {
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
 
+                    // Check for reserved internal classes
+                    if name_lower == b"generator" || name_lower == b"closure" {
+                        let err_msg = format!(
+                            "The \"{}\" class is reserved for internal use and cannot be manually instantiated",
+                            class_name.to_string_lossy()
+                        );
+                        let exc = self.create_exception(b"Error", &err_msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                    }
                     // Check for abstract class, interface, or enum
                     if let Some(class) = self.classes.get(&name_lower) {
                         if class.is_abstract || class.is_interface || class.is_enum {
@@ -15324,6 +15551,37 @@ impl Vm {
 
     /// Convert a value to string, but throw an Error for objects without __toString
     pub fn value_to_string_checked(&mut self, val: &Value) -> Result<PhpString, VmError> {
+        if let Value::Object(obj) = val {
+            let class_name = {
+                let obj_ref = obj.borrow();
+                obj_ref.class_name.clone()
+            };
+            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Check if the class has __toString
+            let has_tostring = self
+                .classes
+                .get(&class_lower)
+                .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                .unwrap_or(false);
+            // Also check built-in toString support (throwable, reflection)
+            let is_throwable = class_lower == b"exception"
+                || class_lower == b"error"
+                || is_builtin_subclass(&class_lower, b"exception")
+                || is_builtin_subclass(&class_lower, b"error")
+                || self.class_extends(&class_lower, b"exception")
+                || self.class_extends(&class_lower, b"error");
+            let is_reflection = class_lower.starts_with(b"reflection");
+            if !has_tostring && !is_throwable && !is_reflection {
+                let class_display = String::from_utf8_lossy(&class_name).to_string();
+                let msg = format!("Object of class {} could not be converted to string", class_display);
+                let exc = self.create_exception(b"Error", &msg, self.current_line);
+                self.current_exception = Some(exc);
+                return Err(VmError {
+                    message: format!("Uncaught Error: {}", msg),
+                    line: self.current_line,
+                });
+            }
+        }
         Ok(self.value_to_string(val))
     }
 

@@ -554,18 +554,27 @@ fn explode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
-fn implode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn implode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (glue, pieces) = if args.len() >= 2 {
-        (args[0].to_php_string(), &args[1])
+        // Check if first arg is array (implode(array) or implode(array, separator))
+        if matches!(&args[0], Value::Array(_)) && !matches!(&args[1], Value::Array(_)) {
+            // implode(array, separator) - wrong order, PHP accepts it
+            (args[1].to_php_string(), &args[0])
+        } else {
+            (args[0].to_php_string(), &args[1])
+        }
     } else {
         (PhpString::empty(), args.first().unwrap_or(&Value::Null))
     };
 
     if let Value::Array(arr) = pieces {
-        let arr = arr.borrow();
-        let parts: Vec<Vec<u8>> = arr
-            .values()
-            .map(|v| v.to_php_string().as_bytes().to_vec())
+        let values: Vec<Value> = {
+            let arr = arr.borrow();
+            arr.values().cloned().collect()
+        };
+        let parts: Vec<Vec<u8>> = values
+            .iter()
+            .map(|v| vm.value_to_string(v).as_bytes().to_vec())
             .collect();
         let mut result = Vec::new();
         for (i, part) in parts.iter().enumerate() {
@@ -3997,7 +4006,8 @@ fn quotemeta_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn utf8_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn utf8_decode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_deprecated_at("Function utf8_decode() is deprecated since 8.2, visit the php.net documentation for various alternatives", 0);
     // Convert UTF-8 to ISO-8859-1 (simplified: just keep bytes < 256)
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let utf8 = s.to_string_lossy();
@@ -4012,7 +4022,8 @@ fn utf8_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn utf8_encode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn utf8_encode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_deprecated_at("Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives", 0);
     // Convert ISO-8859-1 to UTF-8
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
