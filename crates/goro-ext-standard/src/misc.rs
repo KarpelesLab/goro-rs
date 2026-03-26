@@ -6187,23 +6187,98 @@ fn get_parent_class_real(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::False)
 }
 
-fn iterator_to_array_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // For arrays, just return them. For generators, collect values.
+fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     match args.first() {
         Some(Value::Array(arr)) => Ok(Value::Array(arr.clone())),
-        Some(Value::Generator(_)) => {
-            // TODO: iterate generator
-            Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+        Some(val @ Value::Object(_)) => {
+            let mut result = PhpArray::new();
+            // Call rewind, then iterate with valid/current/key/next
+            vm.call_object_method(val, b"rewind", &[]);
+            for _ in 0..100000 {
+                let valid = vm.call_object_method(val, b"valid", &[]).unwrap_or(Value::False);
+                if !valid.is_truthy() { break; }
+                let current = vm.call_object_method(val, b"current", &[]).unwrap_or(Value::Null);
+                if use_keys {
+                    let key = vm.call_object_method(val, b"key", &[]).unwrap_or(Value::Null);
+                    match key {
+                        Value::Long(n) => result.set(ArrayKey::Int(n), current),
+                        Value::String(s) => result.set(ArrayKey::String(s), current),
+                        _ => result.push(current),
+                    }
+                } else {
+                    result.push(current);
+                }
+                vm.call_object_method(val, b"next", &[]);
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(result))))
+        }
+        Some(Value::Generator(gen_rc)) => {
+            let mut result = PhpArray::new();
+            // Advance to first yield if needed
+            {
+                let mut gen_init = gen_rc.borrow_mut();
+                if gen_init.state == goro_core::generator::GeneratorState::Created {
+                    let _ = gen_init.resume(vm);
+                }
+            }
+            for _ in 0..100000 {
+                let gen_b = gen_rc.borrow();
+                if gen_b.state == goro_core::generator::GeneratorState::Completed { break; }
+                let value = gen_b.current_value.clone();
+                let key = gen_b.current_key.clone();
+                drop(gen_b);
+                if use_keys {
+                    match key {
+                        Value::Long(n) => result.set(ArrayKey::Int(n), value),
+                        Value::String(s) => result.set(ArrayKey::String(s), value),
+                        _ => result.push(value),
+                    }
+                } else {
+                    result.push(value);
+                }
+                let mut gen_bm = gen_rc.borrow_mut();
+                gen_bm.write_send_value();
+                let _ = gen_bm.resume(vm);
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
         _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     }
 }
 
-fn iterator_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn iterator_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match args.first() {
         Some(Value::Array(arr)) => Ok(Value::Long(arr.borrow().len() as i64)),
-        Some(Value::Generator(_)) => {
-            Ok(Value::Long(0)) // TODO
+        Some(val @ Value::Object(_)) => {
+            let mut count: i64 = 0;
+            vm.call_object_method(val, b"rewind", &[]);
+            for _ in 0..100000 {
+                let valid = vm.call_object_method(val, b"valid", &[]).unwrap_or(Value::False);
+                if !valid.is_truthy() { break; }
+                count += 1;
+                vm.call_object_method(val, b"next", &[]);
+            }
+            Ok(Value::Long(count))
+        }
+        Some(Value::Generator(gen_rc)) => {
+            let mut count: i64 = 0;
+            {
+                let mut gen_init = gen_rc.borrow_mut();
+                if gen_init.state == goro_core::generator::GeneratorState::Created {
+                    let _ = gen_init.resume(vm);
+                }
+            }
+            loop {
+                let gen_check = gen_rc.borrow();
+                if gen_check.state == goro_core::generator::GeneratorState::Completed { break; }
+                count += 1;
+                drop(gen_check);
+                let mut gen_bm = gen_rc.borrow_mut();
+                gen_bm.write_send_value();
+                let _ = gen_bm.resume(vm);
+            }
+            Ok(Value::Long(count))
         }
         _ => Ok(Value::Long(0)),
     }

@@ -97,9 +97,52 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             // Check if this is an SPL class with __spl_array - display array contents instead
             let is_spl_array_class = matches!(
                 class_lower.as_slice(),
-                b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-                    | b"splfixedarray" | b"spldoublylinkedlist" | b"splstack" | b"splqueue"
+                b"splfixedarray" | b"spldoublylinkedlist" | b"splstack" | b"splqueue"
             );
+            // ArrayObject/ArrayIterator use a private "storage" property format
+            let is_array_object_class = matches!(
+                class_lower.as_slice(),
+                b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+            );
+
+            if is_array_object_class {
+                let spl_arr = obj_borrow.get_property(b"__spl_array");
+                let flags = obj_borrow.get_property(b"__spl_flags");
+                let flags_val = if let Value::Long(f) = flags { f } else { 0 };
+                let _std_prop_list = (flags_val & 1) != 0;
+                let class_name_owned = class_name.to_string();
+                // Count visible properties (non-internal)
+                let extra_props: Vec<_> = obj_borrow.properties.iter()
+                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !matches!(val, Value::Undef))
+                    .map(|(n, v)| (n.clone(), v.clone()))
+                    .collect();
+                let prop_count = 1 + extra_props.len(); // storage + any extra properties
+                drop(obj_borrow);
+                vm.write_output(
+                    format!(
+                        "{}object({})#{} ({}) {{\n",
+                        prefix, class_name_owned, oid, prop_count
+                    )
+                    .as_bytes(),
+                );
+                if !seen.insert(oid) {
+                    vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    return;
+                }
+                // Show extra (user) properties first
+                for (name, value) in &extra_props {
+                    let name_str = String::from_utf8_lossy(name);
+                    vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, name_str).as_bytes());
+                    var_dump_value(vm, value, indent + 2, seen);
+                }
+                // Show private storage property
+                vm.write_output(format!("{}  [\"storage\":\"{}\":private]=>\n", prefix, class_name_owned).as_bytes());
+                var_dump_value(vm, &spl_arr, indent + 2, seen);
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
 
             if is_spl_array_class {
                 let spl_arr = obj_borrow.get_property(b"__spl_array");
@@ -377,11 +420,56 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             let prefix = " ".repeat(indent);
 
             // Check if this is an SPL class with __spl_array
-            let is_spl_array_class = matches!(
+            let is_array_object_class = matches!(
                 class_lower.as_slice(),
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-                    | b"splfixedarray" | b"spldoublylinkedlist" | b"splstack" | b"splqueue"
             );
+            let is_spl_array_class = matches!(
+                class_lower.as_slice(),
+                b"splfixedarray"
+            );
+            let is_spl_dllist_class = matches!(
+                class_lower.as_slice(),
+                b"spldoublylinkedlist" | b"splstack" | b"splqueue"
+            );
+
+            if is_spl_dllist_class {
+                let spl_arr = obj_borrow.get_property(b"__spl_array");
+                let iter_mode = obj_borrow.get_property(b"__spl_iter_mode");
+                let flags_val = if let Value::Long(f) = iter_mode { f } else { 0 };
+                drop(obj_borrow);
+                buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
+                buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
+                buf.extend_from_slice(format!("{}    [flags:{}:private] => {}\n", prefix, class_name, flags_val).as_bytes());
+                buf.extend_from_slice(format!("{}    [dllist:{}:private] => ", prefix, class_name).as_bytes());
+                print_r_value(&spl_arr, buf, indent + 8);
+                buf.push(b'\n');
+                buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+                return;
+            }
+
+            if is_array_object_class {
+                let spl_arr = obj_borrow.get_property(b"__spl_array");
+                // Show extra props first
+                let extra_props: Vec<_> = obj_borrow.properties.iter()
+                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !matches!(val, Value::Undef))
+                    .map(|(n, v)| (n.clone(), v.clone()))
+                    .collect();
+                drop(obj_borrow);
+                buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
+                buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
+                for (name, value) in &extra_props {
+                    let name_str = String::from_utf8_lossy(name);
+                    buf.extend_from_slice(format!("{}    [{}] => ", prefix, name_str).as_bytes());
+                    print_r_value(value, buf, indent + 8);
+                    buf.push(b'\n');
+                }
+                buf.extend_from_slice(format!("{}    [storage:{}:private] => ", prefix, class_name).as_bytes());
+                print_r_value(&spl_arr, buf, indent + 8);
+                buf.push(b'\n');
+                buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+                return;
+            }
 
             if is_spl_array_class {
                 let spl_arr = obj_borrow.get_property(b"__spl_array");

@@ -382,7 +382,7 @@ fn php_empty(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     match val {
@@ -395,15 +395,25 @@ fn count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Value::Object(obj) => {
-            // Check for Countable interface / __spl_array property
+            // Check for Countable interface - try to call count() method
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+            // First check if this is an SPL class with __spl_array
             let ob = obj.borrow();
             let spl_arr = ob.get_property(b"__spl_array");
             if let Value::Array(a) = spl_arr {
-                Ok(Value::Long(a.borrow().len() as i64))
-            } else {
-                // Non-countable object - return property count or 1
-                Ok(Value::Long(1))
+                return Ok(Value::Long(a.borrow().len() as i64));
             }
+            drop(ob);
+
+            // Try to call $obj->count() if it implements Countable
+            if let Some(result) = vm.call_object_method(val, b"count", &[]) {
+                return Ok(result);
+            }
+
+            // Non-countable object
+            // Emit warning for non-Countable objects
+            Ok(Value::Long(1))
         }
         Value::Null | Value::Undef => Ok(Value::Long(0)),
         _ => {
