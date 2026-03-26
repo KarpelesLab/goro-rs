@@ -249,6 +249,9 @@ pub enum OpCode {
     ArraySpread,
     /// isset() check: result = True if op1 is not Null and not Undef
     IssetCheck,
+    /// isset() on array dimension: op1 = array/object, op2 = key, result = True/False
+    /// For objects implementing ArrayAccess, calls offsetExists() instead of offsetGet()
+    ArrayIsset,
     /// Make a CV into a reference (wrap in Rc<RefCell>): op1 = CV to make ref
     MakeRef,
     /// Send a value as a reference (for by-ref function args like preg_match &$matches)

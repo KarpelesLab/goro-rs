@@ -989,6 +989,49 @@ impl PhpGenerator {
                     self.write_operand(&op.result, result);
                 }
 
+                OpCode::ArrayIsset => {
+                    // isset($arr[$key]) in generator context
+                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
+                    let key_val = self.read_operand(&op.op2, &op_array.literals);
+                    let result = if let Value::Array(arr) = &arr_val {
+                        let key = Vm::value_to_array_key(key_val.clone());
+                        match arr.borrow().get(&key) {
+                            Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
+                            _ => Value::False,
+                        }
+                    } else if let Value::Object(obj) = &arr_val {
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let is_spl_array = matches!(class_lower.as_slice(),
+                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
+                            b"splfixedarray" | b"splobjectstorage");
+                        let has_user_offset = vm.classes.get(&class_lower)
+                            .map(|c| c.get_method(b"offsetexists").is_some())
+                            .unwrap_or(false);
+                        if is_spl_array || has_user_offset {
+                            let args = vec![arr_val.clone(), key_val.clone()];
+                            let exists_result = vm.handle_spl_docall(&class_lower, b"offsetexists", &args)
+                                .unwrap_or_else(|| {
+                                    vm.call_object_method(&arr_val, b"offsetexists", &[key_val])
+                                        .unwrap_or(Value::False)
+                                });
+                            if exists_result.is_truthy() { Value::True } else { Value::False }
+                        } else {
+                            Value::False
+                        }
+                    } else if let Value::String(s) = &arr_val {
+                        let idx = key_val.to_long();
+                        let len = s.as_bytes().len() as i64;
+                        if (idx >= 0 && idx < len) || (idx < 0 && (-idx) <= len) {
+                            Value::True
+                        } else {
+                            Value::False
+                        }
+                    } else {
+                        Value::False
+                    };
+                    self.write_operand(&op.result, result);
+                }
+
                 OpCode::ErrorSuppress => {
                     vm.error_reporting_stack.push(vm.error_reporting);
                     vm.error_reporting = 0;

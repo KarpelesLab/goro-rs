@@ -3740,6 +3740,131 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: expr.span.line,
                 });
+
+                let result_tmp = self.op_array.alloc_temp();
+
+                // For ArrayAccess on objects, $obj[key] ?? default should call
+                // offsetExists first, then offsetGet only if exists returns true
+                if matches!(left.kind, ExprKind::ArrayAccess { .. }) {
+                    // Flatten the chain of ArrayAccess nodes
+                    let mut chain: Vec<&Expr> = Vec::new();
+                    let mut base_expr: &Expr = left;
+                    while let ExprKind::ArrayAccess { array, index } = &base_expr.kind {
+                        if let Some(idx_expr) = index {
+                            chain.push(idx_expr);
+                        }
+                        base_expr = array;
+                    }
+                    chain.reverse();
+
+                    let base_op = self.compile_expr(base_expr)?;
+                    let mut jmp_to_right: Vec<usize> = Vec::new();
+                    let mut current = base_op;
+
+                    for idx_expr in chain.iter() {
+                        let idx = self.compile_expr(idx_expr)?;
+
+                        // Check offsetExists first
+                        let isset_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayIsset,
+                            op1: current.clone(),
+                            op2: idx.clone(),
+                            result: OperandType::Tmp(isset_tmp),
+                            line: expr.span.line,
+                        });
+                        let jmp_pos = self.op_array.ops.len();
+                        jmp_to_right.push(jmp_pos);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: OperandType::Tmp(isset_tmp),
+                            op2: OperandType::JmpTarget(0), // patched later
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+
+                        // Get the value (only reached if exists)
+                        let get_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayGet,
+                            op1: current,
+                            op2: idx,
+                            result: OperandType::Tmp(get_tmp),
+                            line: expr.span.line,
+                        });
+                        current = OperandType::Tmp(get_tmp);
+                    }
+
+                    // Final value check: even if key exists, the value might be null
+                    let check_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::IssetCheck,
+                        op1: current.clone(),
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(check_tmp),
+                        line: expr.span.line,
+                    });
+                    let jmp_null_pos = self.op_array.ops.len();
+                    jmp_to_right.push(jmp_null_pos);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::JmpZ,
+                        op1: OperandType::Tmp(check_tmp),
+                        op2: OperandType::JmpTarget(0), // patched later
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+
+                    // Not null: use left value
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(result_tmp),
+                        op2: current,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let jmp_end = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+
+                    // Right side: use default value
+                    let right_target = self.op_array.current_offset();
+                    for jmp_pos in jmp_to_right {
+                        self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(right_target as u32);
+                    }
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let right_val = self.compile_expr(right)?;
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(result_tmp),
+                        op2: right_val,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp_end, end);
+
+                    return Ok(OperandType::Tmp(result_tmp));
+                }
+
                 let left_val = self.compile_expr(left)?;
                 self.op_array.emit(Op {
                     opcode: OpCode::ErrorRestore,
@@ -3748,7 +3873,6 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: expr.span.line,
                 });
-                let result_tmp = self.op_array.alloc_temp();
 
                 // Check if left is set (not null and not undef)
                 let check_tmp = self.op_array.alloc_temp();
@@ -4403,7 +4527,110 @@ impl Compiler {
                     );
                     if is_prop_access {
                         if let ExprKind::PropertyAccess { object, property, .. } = &exprs[0].kind {
-                            let obj_operand = self.compile_expr(object)?;
+                            // For isset($aa[0]->foo), the inner object might be an ArrayAccess
+                            // We need to check offsetExists first before calling offsetGet
+                            let obj_operand = if matches!(object.kind, ExprKind::ArrayAccess { .. }) {
+                                // Compile with isset-aware ArrayAccess handling
+                                let mut chain: Vec<&Expr> = Vec::new();
+                                let mut base_expr: &Expr = object;
+                                while let ExprKind::ArrayAccess { array, index } = &base_expr.kind {
+                                    if let Some(idx_expr) = index {
+                                        chain.push(idx_expr);
+                                    }
+                                    base_expr = array;
+                                }
+                                chain.reverse();
+
+                                let base_op = self.compile_expr(base_expr)?;
+                                let result_tmp = self.op_array.alloc_temp();
+                                let mut jmp_patches: Vec<usize> = Vec::new();
+                                let mut current = base_op;
+
+                                for idx_expr in chain.iter() {
+                                    let idx = self.compile_expr(idx_expr)?;
+                                    let isset_tmp = self.op_array.alloc_temp();
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::ArrayIsset,
+                                        op1: current.clone(),
+                                        op2: idx.clone(),
+                                        result: OperandType::Tmp(isset_tmp),
+                                        line: expr.span.line,
+                                    });
+                                    let jmp_pos = self.op_array.ops.len();
+                                    jmp_patches.push(jmp_pos);
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::JmpZ,
+                                        op1: OperandType::Tmp(isset_tmp),
+                                        op2: OperandType::JmpTarget(0),
+                                        result: OperandType::Unused,
+                                        line: expr.span.line,
+                                    });
+                                    let get_tmp = self.op_array.alloc_temp();
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::ArrayGet,
+                                        op1: current,
+                                        op2: idx,
+                                        result: OperandType::Tmp(get_tmp),
+                                        line: expr.span.line,
+                                    });
+                                    current = OperandType::Tmp(get_tmp);
+                                }
+
+                                // Now do PropertyIsset on the result
+                                let prop_operand = self.compile_property_name(property)?;
+                                let tmp = self.op_array.alloc_temp();
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::PropertyIsset,
+                                    op1: current,
+                                    op2: prop_operand,
+                                    result: OperandType::Tmp(tmp),
+                                    line: expr.span.line,
+                                });
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::Assign,
+                                    op1: OperandType::Tmp(result_tmp),
+                                    op2: OperandType::Tmp(tmp),
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+
+                                // Jump past false
+                                let jmp_end_pos = self.op_array.ops.len();
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::Jmp,
+                                    op1: OperandType::JmpTarget(0),
+                                    op2: OperandType::Unused,
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+
+                                // False label
+                                let false_target = self.op_array.ops.len() as u32;
+                                let false_lit = self.op_array.add_literal(Value::False);
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::Assign,
+                                    op1: OperandType::Tmp(result_tmp),
+                                    op2: OperandType::Const(false_lit),
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                                let end_target = self.op_array.ops.len() as u32;
+                                for jmp_pos in jmp_patches {
+                                    self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(false_target);
+                                }
+                                self.op_array.ops[jmp_end_pos].op1 = OperandType::JmpTarget(end_target);
+
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ErrorRestore,
+                                    op1: OperandType::Unused,
+                                    op2: OperandType::Unused,
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                                return Ok(OperandType::Tmp(result_tmp));
+                            } else {
+                                self.compile_expr(object)?
+                            };
                             let prop_operand = self.compile_property_name(property)?;
                             let tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
@@ -4422,6 +4649,123 @@ impl Compiler {
                             });
                             return Ok(OperandType::Tmp(tmp));
                         }
+                    }
+                    // Check if expression is an array access -> use ArrayIsset
+                    // This ensures objects implementing ArrayAccess call offsetExists()
+                    // For nested access like isset($a[0][1][2]), we need to:
+                    // 1. ArrayIsset($a, 0) - if false, jump to false label
+                    // 2. ArrayGet($a, 0) -> tmp1
+                    // 3. ArrayIsset(tmp1, 1) - if false, jump to false label
+                    // 4. ArrayGet(tmp1, 1) -> tmp2
+                    // 5. ArrayIsset(tmp2, 2) - final result
+                    if matches!(exprs[0].kind, ExprKind::ArrayAccess { .. }) {
+                        // Flatten the chain of ArrayAccess nodes
+                        let mut chain: Vec<&Expr> = Vec::new(); // indices
+                        let mut base_expr = &exprs[0];
+                        while let ExprKind::ArrayAccess { array, index } = &base_expr.kind {
+                            if let Some(idx_expr) = index {
+                                chain.push(idx_expr);
+                            }
+                            base_expr = array;
+                        }
+                        chain.reverse(); // now chain[0] is the first index, chain[last] is the last
+
+                        // Also check if base_expr is a PropertyAccess - handle isset($obj->prop[$key])
+                        let base_op = self.compile_expr(base_expr)?;
+
+                        let result_tmp = self.op_array.alloc_temp();
+                        let false_label = self.op_array.ops.len() as u32 + 9999; // placeholder
+
+                        // We'll collect jump positions that need patching to jump to the false label
+                        let mut jmp_patches: Vec<usize> = Vec::new();
+
+                        let mut current = base_op;
+                        for (i, idx_expr) in chain.iter().enumerate() {
+                            let is_last = i == chain.len() - 1;
+                            let idx = self.compile_expr(idx_expr)?;
+
+                            // Emit ArrayIsset
+                            let isset_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayIsset,
+                                op1: current.clone(),
+                                op2: idx.clone(),
+                                result: OperandType::Tmp(isset_tmp),
+                                line: expr.span.line,
+                            });
+
+                            if is_last {
+                                // Final level: the result of ArrayIsset is the final result
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::Assign,
+                                    op1: OperandType::Tmp(result_tmp),
+                                    op2: OperandType::Tmp(isset_tmp),
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                            } else {
+                                // Intermediate level: if false, jump to end
+                                let jmp_pos = self.op_array.ops.len();
+                                jmp_patches.push(jmp_pos);
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::JmpZ,
+                                    op1: OperandType::Tmp(isset_tmp),
+                                    op2: OperandType::JmpTarget(0), // will be patched
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+
+                                // Emit ArrayGet to get the value for the next level
+                                let get_tmp = self.op_array.alloc_temp();
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArrayGet,
+                                    op1: current,
+                                    op2: idx,
+                                    result: OperandType::Tmp(get_tmp),
+                                    line: expr.span.line,
+                                });
+                                current = OperandType::Tmp(get_tmp);
+                            }
+                        }
+
+                        // Jump past the false assignment
+                        let jmp_end_pos = self.op_array.ops.len();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0), // will be patched
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+
+                        // False label: set result to false
+                        let false_target = self.op_array.ops.len() as u32;
+                        let false_lit = self.op_array.add_literal(Value::False);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Tmp(result_tmp),
+                            op2: OperandType::Const(false_lit),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+
+                        // End label
+                        let end_target = self.op_array.ops.len() as u32;
+
+                        // Patch all jump positions
+                        for jmp_pos in jmp_patches {
+                            self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(false_target);
+                        }
+                        self.op_array.ops[jmp_end_pos].op1 = OperandType::JmpTarget(end_target);
+
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ErrorRestore,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(result_tmp));
                     }
                     let val = self.compile_expr(&exprs[0])?;
                     let tmp = self.op_array.alloc_temp();
@@ -4444,15 +4788,36 @@ impl Compiler {
                     // Multiple args: AND all together
                     let mut result_tmp = self.op_array.alloc_temp();
                     for (i, e) in exprs.iter().enumerate() {
-                        let val = self.compile_expr(e)?;
-                        let check_tmp = self.op_array.alloc_temp();
-                        self.op_array.emit(Op {
-                            opcode: OpCode::IssetCheck,
-                            op1: val,
-                            op2: OperandType::Unused,
-                            result: OperandType::Tmp(check_tmp),
-                            line: expr.span.line,
-                        });
+                        // For array access expressions, use ArrayIsset to call offsetExists
+                        let check_tmp = if let ExprKind::ArrayAccess { array, index } = &e.kind {
+                            let arr = self.compile_expr(array)?;
+                            let idx = if let Some(idx_expr) = index {
+                                self.compile_expr(idx_expr)?
+                            } else {
+                                let lit_idx = self.op_array.add_literal(Value::Null);
+                                OperandType::Const(lit_idx)
+                            };
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayIsset,
+                                op1: arr,
+                                op2: idx,
+                                result: OperandType::Tmp(t),
+                                line: expr.span.line,
+                            });
+                            t
+                        } else {
+                            let val = self.compile_expr(e)?;
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::IssetCheck,
+                                op1: val,
+                                op2: OperandType::Unused,
+                                result: OperandType::Tmp(t),
+                                line: expr.span.line,
+                            });
+                            t
+                        };
                         if i == 0 {
                             self.op_array.emit(Op {
                                 opcode: OpCode::Assign,
@@ -4492,6 +4857,120 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: expr.span.line,
                 });
+
+                // For empty($obj[$key]), PHP calls offsetExists first.
+                // If false -> empty is true. If true -> calls offsetGet, checks if value is empty.
+                if matches!(inner.kind, ExprKind::ArrayAccess { .. }) {
+                    let mut chain: Vec<&Expr> = Vec::new();
+                    let mut base_expr: &Expr = inner;
+                    while let ExprKind::ArrayAccess { array, index } = &base_expr.kind {
+                        if let Some(idx_expr) = index {
+                            chain.push(idx_expr);
+                        }
+                        base_expr = array;
+                    }
+                    chain.reverse();
+
+                    let base_op = self.compile_expr(base_expr)?;
+                    let result_tmp = self.op_array.alloc_temp();
+                    let mut jmp_to_true: Vec<usize> = Vec::new(); // jumps when exists=false -> empty=true
+                    let mut current = base_op;
+
+                    for (i, idx_expr) in chain.iter().enumerate() {
+                        let is_last = i == chain.len() - 1;
+                        let idx = self.compile_expr(idx_expr)?;
+
+                        // Check offsetExists
+                        let isset_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayIsset,
+                            op1: current.clone(),
+                            op2: idx.clone(),
+                            result: OperandType::Tmp(isset_tmp),
+                            line: expr.span.line,
+                        });
+                        let jmp_pos = self.op_array.ops.len();
+                        jmp_to_true.push(jmp_pos);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: OperandType::Tmp(isset_tmp),
+                            op2: OperandType::JmpTarget(0), // patched later
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+
+                        // Get the value
+                        let get_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayGet,
+                            op1: current,
+                            op2: idx,
+                            result: OperandType::Tmp(get_tmp),
+                            line: expr.span.line,
+                        });
+                        current = OperandType::Tmp(get_tmp);
+                    }
+
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+
+                    // Value exists: check if it's empty (BooleanNot)
+                    let not_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::BooleanNot,
+                        op1: current,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(not_tmp),
+                        line: expr.span.line,
+                    });
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(result_tmp),
+                        op2: OperandType::Tmp(not_tmp),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let jmp_end_pos = self.op_array.ops.len();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+
+                    // True label (key doesn't exist -> empty is true)
+                    let true_target = self.op_array.ops.len() as u32;
+                    let true_lit = self.op_array.add_literal(Value::True);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(result_tmp),
+                        op2: OperandType::Const(true_lit),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+
+                    let end_target = self.op_array.ops.len() as u32;
+                    for jmp_pos in jmp_to_true {
+                        self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(true_target);
+                    }
+                    self.op_array.ops[jmp_end_pos].op1 = OperandType::JmpTarget(end_target);
+
+                    return Ok(OperandType::Tmp(result_tmp));
+                }
+
                 let val = self.compile_expr(inner)?;
                 self.op_array.emit(Op {
                     opcode: OpCode::ErrorRestore,
