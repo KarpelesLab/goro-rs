@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
 
 /// A parsed PHPT test file
 #[derive(Debug)]
@@ -301,52 +303,147 @@ fn execute_php_with_timeout_and_filename(
     ini_settings: &[(String, String)],
     filename: &str,
 ) -> Result<Vec<u8>, String> {
-    let source = source.to_vec();
-    let dir_path = test_dir.map(|p| p.to_path_buf());
-    let ini = ini_settings.to_vec();
-    let fname = filename.to_string();
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let timed_out2 = timed_out.clone();
+    // Use fork() to isolate each test in a separate process.
+    // This prevents memory accumulation across tests (2GB RLIMIT_AS).
+    #[cfg(unix)]
+    {
+        use std::io::Read as IoRead;
 
-    let handle = std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024) // 32MB stack
-        .spawn(move || {
-            // Memory protection handled by:
-            // - PhpArray memory_alloc tracking against memory_limit (128MB default)
-            // - str_repeat/str_pad 128MB limits
-            // - 5s execution timeout
-            // - call_depth limit (100)
-            // - 5s execution timeout
-            // - call_depth limit (100)
-            // Change to test directory if provided, otherwise use temp dir
-            if let Some(ref dir) = dir_path {
+        // Create a pipe to communicate output from child to parent
+        let (read_fd, write_fd) = {
+            let mut fds = [0i32; 2];
+            let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+            if ret != 0 {
+                return Err("Failed to create pipe".to_string());
+            }
+            (fds[0], fds[1])
+        };
+
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            unsafe { libc::close(read_fd); libc::close(write_fd); }
+            return Err("Failed to fork".to_string());
+        }
+
+        if pid == 0 {
+            // Child process
+            unsafe { libc::close(read_fd); }
+
+            // Change to test directory
+            if let Some(dir) = test_dir {
                 let _ = std::env::set_current_dir(dir);
             } else {
                 let _ = std::env::set_current_dir(std::env::temp_dir());
             }
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source, &ini, &fname)))
-        })
-        .map_err(|e| format!("Thread error: {}", e))?;
 
-    // Wait with timeout
-    let start = std::time::Instant::now();
-    loop {
-        if handle.is_finished() {
-            break;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_php_inner(source, ini_settings, filename)
+            }));
+
+            let (status, output) = match result {
+                Ok(Ok(bytes)) => (0u8, bytes),
+                Ok(Err(e)) => (1u8, format!("ERROR: {}", e).into_bytes()),
+                Err(_) => (2u8, b"PANIC".to_vec()),
+            };
+            let _ = unsafe { libc::write(write_fd, &status as *const u8 as *const libc::c_void, 1) };
+            let len = output.len() as u64;
+            let _ = unsafe { libc::write(write_fd, &len as *const u64 as *const libc::c_void, 8) };
+            if !output.is_empty() {
+                let _ = unsafe { libc::write(write_fd, output.as_ptr() as *const libc::c_void, output.len()) };
+            }
+            unsafe { libc::close(write_fd); }
+            std::process::exit(0);
         }
-        if start.elapsed().as_secs() >= timeout_secs {
-            timed_out2.store(true, Ordering::Relaxed);
-            // We can't kill the thread, so just return timeout error
-            // The thread will eventually be cleaned up when the process exits
-            return Err("Timeout: execution exceeded time limit".to_string());
+
+        // Parent process
+        unsafe { libc::close(write_fd); }
+
+        // Wait for child with timeout
+        let start = std::time::Instant::now();
+        loop {
+            let mut status = 0i32;
+            let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if ret > 0 {
+                break; // Child exited
+            }
+            if ret < 0 {
+                unsafe { libc::close(read_fd); }
+                return Err("waitpid error".to_string());
+            }
+            if start.elapsed().as_secs() >= timeout_secs {
+                // Kill the child
+                unsafe { libc::kill(pid, libc::SIGKILL); }
+                unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0); }
+                unsafe { libc::close(read_fd); }
+                return Err("Timeout: execution exceeded time limit".to_string());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Read result from pipe
+        let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+        let mut buf = Vec::new();
+        let _ = file.read_to_end(&mut buf);
+
+        if buf.is_empty() {
+            return Err("Fatal error: child produced no output".to_string());
+        }
+
+        let status = buf[0];
+        if buf.len() < 9 {
+            return match status {
+                2 => Err("Fatal error: stack overflow or panic".to_string()),
+                _ => Err("Fatal error: child output truncated".to_string()),
+            };
+        }
+        let len = u64::from_ne_bytes(buf[1..9].try_into().unwrap()) as usize;
+        let data = if len > 0 && buf.len() >= 9 + len {
+            buf[9..9+len].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        match status {
+            0 => Ok(data),
+            1 => Err(String::from_utf8_lossy(&data).to_string()),
+            _ => Err("Fatal error: stack overflow or panic".to_string()),
+        }
     }
 
-    match handle.join() {
-        Ok(Ok(r)) => r,
-        Ok(Err(_)) => Err("Fatal error: panic during execution".to_string()),
-        Err(_) => Err("Fatal error: stack overflow or panic".to_string()),
+    #[cfg(not(unix))]
+    {
+        // Fallback to thread-based execution on non-Unix
+        let source = source.to_vec();
+        let dir_path = test_dir.map(|p| p.to_path_buf());
+        let ini = ini_settings.to_vec();
+        let fname = filename.to_string();
+
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                if let Some(ref dir) = dir_path {
+                    let _ = std::env::set_current_dir(dir);
+                } else {
+                    let _ = std::env::set_current_dir(std::env::temp_dir());
+                }
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source, &ini, &fname)))
+            })
+            .map_err(|e| format!("Thread error: {}", e))?;
+
+        let start = std::time::Instant::now();
+        loop {
+            if handle.is_finished() { break; }
+            if start.elapsed().as_secs() >= timeout_secs {
+                return Err("Timeout: execution exceeded time limit".to_string());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        match handle.join() {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("Fatal error: panic during execution".to_string()),
+            Err(_) => Err("Fatal error: stack overflow or panic".to_string()),
+        }
     }
 }
 

@@ -685,21 +685,27 @@ pub fn do_sprintf(args: &[Value]) -> String {
                 }
             }
 
-            // Width
+            // Width (cap at 1MB to prevent OOM)
             let mut width: usize = 0;
             while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                width = width * 10 + (format_bytes[i] - b'0') as usize;
+                width = width.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as usize);
                 i += 1;
             }
+            if width > 1_000_000 {
+                width = 1_000_000;
+            }
 
-            // Precision
+            // Precision (cap at 1MB to prevent OOM)
             let mut precision: Option<usize> = None;
             if i < format_bytes.len() && format_bytes[i] == b'.' {
                 i += 1;
-                let mut prec = 0;
+                let mut prec: usize = 0;
                 while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                    prec = prec * 10 + (format_bytes[i] - b'0') as usize;
+                    prec = prec.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as usize);
                     i += 1;
+                }
+                if prec > 1_000_000 {
+                    prec = 1_000_000;
                 }
                 precision = Some(prec);
             }
@@ -3222,15 +3228,21 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Parse optional repeat count
         let mut count = 0u32;
         let mut has_count = false;
-        if code == b'a' || code == b'A' || code == b'H' || code == b'h' {
-            // For string codes, count means padding length
-            while i < fmt.len() && fmt[i].is_ascii_digit() {
-                count = count * 10 + (fmt[i] - b'0') as u32;
+        if code == b'a' || code == b'A' || code == b'H' || code == b'h' || code == b'Z' {
+            // For string codes, count means padding length; * means full string
+            if i < fmt.len() && fmt[i] == b'*' {
+                count = u32::MAX;
                 has_count = true;
                 i += 1;
-            }
-            if !has_count && code != b'*' as u8 {
-                count = 1;
+            } else {
+                while i < fmt.len() && fmt[i].is_ascii_digit() {
+                    count = count * 10 + (fmt[i] - b'0') as u32;
+                    has_count = true;
+                    i += 1;
+                }
+                if !has_count {
+                    count = 1;
+                }
             }
         } else if i < fmt.len() && fmt[i] == b'*' {
             count = u32::MAX; // Repeat for all remaining args
@@ -3332,13 +3344,18 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     .unwrap_or_else(PhpString::empty);
                 arg_idx += 1;
                 let pad = if code == b'A' { b' ' } else { b'\0' };
-                let len = count as usize;
-                if s.len() >= len {
-                    result.extend_from_slice(&s.as_bytes()[..len]);
-                } else {
+                if count == u32::MAX {
+                    // a*/A* = full string length
                     result.extend_from_slice(s.as_bytes());
-                    for _ in 0..(len - s.len()) {
-                        result.push(pad);
+                } else {
+                    let len = count as usize;
+                    if s.len() >= len {
+                        result.extend_from_slice(&s.as_bytes()[..len]);
+                    } else {
+                        result.extend_from_slice(s.as_bytes());
+                        for _ in 0..(len - s.len()) {
+                            result.push(pad);
+                        }
                     }
                 }
             }
@@ -3374,20 +3391,28 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             b'Z' => {
-                // NUL-padded string
+                // NUL-padded string (NUL terminated)
                 let s = args
                     .get(arg_idx)
                     .map(|v| v.to_php_string())
                     .unwrap_or_else(PhpString::empty);
                 arg_idx += 1;
-                let len = count as usize;
-                if s.len() >= len {
-                    result.extend_from_slice(&s.as_bytes()[..len.saturating_sub(1)]);
+                if count == u32::MAX {
+                    // Z* = full string + NUL terminator
+                    result.extend_from_slice(s.as_bytes());
                     result.push(0);
                 } else {
-                    result.extend_from_slice(s.as_bytes());
-                    for _ in 0..(len - s.len()) {
+                    let len = count as usize;
+                    if len == 0 {
+                        // Z0 = empty (no output)
+                    } else if s.len() >= len {
+                        result.extend_from_slice(&s.as_bytes()[..len - 1]);
                         result.push(0);
+                    } else {
+                        result.extend_from_slice(s.as_bytes());
+                        for _ in 0..(len - s.len()) {
+                            result.push(0);
+                        }
                     }
                 }
             }
@@ -3428,20 +3453,28 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
         // Parse count
         let mut count = 1u32;
+        let mut overflow = false;
         if i < fmt.len() && fmt[i] == b'*' {
             count = u32::MAX;
             i += 1;
         } else {
             let mut has_digits = false;
-            let mut n = 0u32;
+            let mut n = 0u64;
             while i < fmt.len() && fmt[i].is_ascii_digit() {
-                n = n * 10 + (fmt[i] - b'0') as u32;
+                n = n.saturating_mul(10).saturating_add((fmt[i] - b'0') as u64);
                 has_digits = true;
                 i += 1;
             }
             if has_digits {
-                count = n;
+                if n > i32::MAX as u64 {
+                    overflow = true;
+                }
+                count = n as u32;
             }
+        }
+        if overflow {
+            _vm.emit_warning(&format!("unpack(): Type {}: integer overflow", code as char));
+            return Ok(Value::False);
         }
 
         // Parse optional name
@@ -3785,7 +3818,14 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 let bytes_needed = (len + 1) / 2;
                 let end = (pos + bytes_needed).min(bytes.len());
-                let mut hex = String::with_capacity(len);
+                let actual_capacity = ((end - pos) * 2).min(len);
+                if bytes_needed > bytes.len().saturating_sub(pos) {
+                    _vm.emit_warning(&format!(
+                        "unpack(): Type {}: not enough input values, need {} values but only {} were provided",
+                        code as char, bytes_needed, bytes.len()
+                    ));
+                }
+                let mut hex = String::with_capacity(actual_capacity);
                 for idx in pos..end {
                     let byte = bytes[idx];
                     if code == b'H' {

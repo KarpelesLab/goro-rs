@@ -9758,6 +9758,20 @@ impl Vm {
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[$key] -> offsetGet($key)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_name_orig = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                        // Check if class implements ArrayAccess
+                        let is_spl_array = matches!(class_lower.as_slice(),
+                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
+                            b"splfixedarray" | b"splobjectstorage");
+                        let has_user_offset = self.classes.get(&class_lower)
+                            .map(|c| c.get_method(b"offsetget").is_some())
+                            .unwrap_or(false);
+                        if !is_spl_array && !has_user_offset {
+                            return Err(VmError {
+                                message: format!("Cannot use object of type {} as array", class_name_orig),
+                                line: op.line,
+                            });
+                        }
                         let args = vec![arr_val.clone(), key_val.clone()];
                         self.handle_spl_docall(&class_lower, b"offsetget", &args)
                             .unwrap_or_else(|| {
@@ -9951,7 +9965,16 @@ impl Vm {
                         if pos > 0 {
                             let mut gen_borrow = gen_rc.borrow_mut();
                             gen_borrow.write_send_value();
-                            let _ = gen_borrow.resume(self);
+                            match gen_borrow.resume(self) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    drop(gen_borrow);
+                                    // Propagate generator error
+                                    let exc_val = self.create_exception(b"Error", &e.message, e.line);
+                                    self.current_exception = Some(exc_val);
+                                    return Err(e);
+                                }
+                            }
                         }
 
                         let gen_borrow = gen_rc.borrow();

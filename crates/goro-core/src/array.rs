@@ -38,7 +38,7 @@ impl std::fmt::Display for ArrayKey {
 ///
 /// Preserves insertion order. Supports both integer and string keys.
 /// Packed optimization: when keys are sequential integers 0..n, uses a simple Vec.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PhpArray {
     /// Current storage mode
     entries: Vec<(ArrayKey, Value)>,
@@ -46,6 +46,21 @@ pub struct PhpArray {
     next_int_key: i64,
     /// Internal array pointer position (for current/next/prev/reset/end)
     pub pointer: usize,
+}
+
+impl Clone for PhpArray {
+    fn clone(&self) -> Self {
+        // Track memory for the cloned entries
+        let bytes = self.entries.len() * Self::ENTRY_SIZE;
+        if bytes > 0 {
+            memory_alloc(bytes); // Track even if over limit - we're cloning existing data
+        }
+        Self {
+            entries: self.entries.clone(),
+            next_int_key: self.next_int_key,
+            pointer: self.pointer,
+        }
+    }
 }
 
 impl PhpArray {
@@ -152,7 +167,10 @@ impl PhpArray {
 
     /// Remove and return the last element (like array_pop)
     pub fn pop(&mut self) -> Option<Value> {
-        self.entries.pop().map(|(_, v)| v)
+        self.entries.pop().map(|(_, v)| {
+            memory_free(Self::ENTRY_SIZE);
+            v
+        })
     }
 
     /// Remove and return the first element (like array_shift)
@@ -160,12 +178,16 @@ impl PhpArray {
         if self.entries.is_empty() {
             None
         } else {
+            memory_free(Self::ENTRY_SIZE);
             Some(self.entries.remove(0).1)
         }
     }
 
     /// Insert a value at the beginning with key 0 (like array_unshift)
     pub fn unshift(&mut self, value: Value) {
+        if !memory_alloc(Self::ENTRY_SIZE) {
+            return;
+        }
         self.entries.insert(0, (ArrayKey::Int(0), value));
         // Re-key all integer-keyed entries
         let mut next = 0i64;
@@ -181,6 +203,7 @@ impl PhpArray {
     /// Remove an entry by key
     pub fn remove(&mut self, key: &ArrayKey) -> Option<Value> {
         if let Some(pos) = self.entries.iter().position(|(k, _)| k == key) {
+            memory_free(Self::ENTRY_SIZE);
             Some(self.entries.remove(pos).1)
         } else {
             None

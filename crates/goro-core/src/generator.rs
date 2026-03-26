@@ -1063,10 +1063,106 @@ impl PhpGenerator {
                     }
                 }
 
-                // For any unhandled opcode, just skip it
-                _ => {
-                    // Skip unimplemented opcodes in generator context
+                OpCode::InitMethodCall => {
+                    // Set up method call from generator context
+                    let obj_val = self.read_operand(&op.op1, &op_array.literals);
+                    let method_name = self.read_operand(&op.op2, &op_array.literals).to_php_string();
+                    if let Value::Object(obj) = &obj_val {
+                        let class_name_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        // Check if method exists in user classes
+                        let has_method = vm.classes.get(&class_name_lower)
+                            .map(|c| c.get_method(&method_lower).is_some())
+                            .unwrap_or(false);
+                        if has_method {
+                            // Set up as a method call: name = "class::method", first arg = $this
+                            let mut func_name = class_name_lower.clone();
+                            func_name.extend_from_slice(b"::");
+                            func_name.extend_from_slice(&method_lower);
+                            vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
+                            vm.generator_send_val(obj_val.clone());
+                        } else {
+                            // Check for __call magic method
+                            let has_call = vm.classes.get(&class_name_lower)
+                                .map(|c| c.get_method(b"__call").is_some())
+                                .unwrap_or(false);
+                            if has_call {
+                                let mut func_name = class_name_lower.clone();
+                                func_name.extend_from_slice(b"::__call");
+                                vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
+                                vm.generator_send_val(obj_val.clone());
+                                // __call receives (method_name, args_array) - will need special handling
+                            } else {
+                                let class_name_vec = obj.borrow().class_name.clone();
+                                let class_name_str = String::from_utf8_lossy(&class_name_vec);
+                                let method_str = method_name.to_string_lossy();
+                                self.state = GeneratorState::Completed;
+                                self.ip = ip;
+                                return Err(VmError {
+                                    message: format!("Call to undefined method {}::{}()", class_name_str, method_str),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                    } else {
+                        self.state = GeneratorState::Completed;
+                        self.ip = ip;
+                        return Err(VmError {
+                            message: format!("Call to a member function {}() on {}", method_name.to_string_lossy(), Vm::value_type_name(&obj_val)),
+                            line: op.line,
+                        });
+                    }
                 }
+
+                OpCode::NewObject => {
+                    // Create new object from generator context
+                    let class_name = self.read_operand(&op.op1, &op_array.literals).to_php_string();
+                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let obj = crate::object::PhpObject::new(
+                        if let Some(cls) = vm.classes.get(&class_lower) {
+                            cls.name.clone()
+                        } else {
+                            class_name.as_bytes().to_vec()
+                        },
+                        0,
+                    );
+                    let obj_val = Value::Object(Rc::new(RefCell::new(obj)));
+                    self.write_operand(&op.result, obj_val);
+                    // Initialize pending call for constructor
+                    let mut func_name = class_lower.clone();
+                    func_name.extend_from_slice(b"::__construct");
+                    vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
+                }
+
+                OpCode::SendRef | OpCode::MakeRef | OpCode::SendUnpack => {
+                    // Handle SendRef like SendVal in generator context
+                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    vm.generator_send_val(val);
+                }
+
+                OpCode::FastConcat => {
+                    let a = self.read_operand(&op.op1, &op_array.literals);
+                    let b = self.read_operand(&op.op2, &op_array.literals);
+                    let a_str = a.to_php_string();
+                    let b_str = b.to_php_string();
+                    let mut result = a_str.as_bytes().to_vec();
+                    result.extend_from_slice(b_str.as_bytes());
+                    self.write_operand(&op.result, Value::String(PhpString::from_vec(result)));
+                }
+
+                OpCode::GetClassName => {
+                    let obj = self.read_operand(&op.op1, &op_array.literals);
+                    let name = match &obj {
+                        Value::Object(o) => {
+                            Value::String(PhpString::from_vec(o.borrow().class_name.clone()))
+                        }
+                        _ => Value::String(PhpString::empty()),
+                    };
+                    self.write_operand(&op.result, name);
+                }
+
+                // For any unhandled opcode, skip it silently
+                _ => {}
             }
         }
     }
