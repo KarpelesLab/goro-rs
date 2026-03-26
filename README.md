@@ -4,36 +4,32 @@ A PHP 8.5 implementation in Rust.
 
 ## Status
 
-Active development. Core language features, OOP, generators, exceptions, closures, and references work.
+Active development. Core language features, OOP, generators, exceptions, closures, namespaces, enums, and references work.
 
 **Test Suite Progress** (PHP 8.5.4 official tests):
 
 | Test Directory | Pass | Total | Rate |
 |---|---|---|---|
-| Zend/tests (top-level) | 292 | 871 | 33.5% |
-| All tests (Zend+ext+standard) | ~3117 | ~11950 | ~26.1% |
+| Zend/tests (top-level) | 296 | 871 | 34.0% |
+| All tests (Zend+ext+standard) | ~3224 | ~11950 | ~27.0% |
 
 **Key directory pass rates:**
-- ext/standard/strings: 185/730 (25.3%)
-- ext/standard/math: 70/171 (40.9%)
-- ext/standard/array: 316/842 (37.5%)
-- ext/standard/general_functions: 57/324 (17.6%)
-- ext/standard/file: 41/897 (4.6%)
-- ext/ctype: 35/49 (71.4%)
-- ext/date: 26/688 (3.8%)
-- ext/spl: 68/781 (8.7%)
-- Zend/traits: 58/216 (26.9%)
-- Zend/type_declarations: 86/496 (17.3%)
-- Zend/try: 20/80 (25.0%)
-- Zend/match: 20/35 (57.1%)
-- Zend/closures: 32/135 (23.7%)
-- Zend/magic_methods: 29/157 (18.5%)
-- Zend/inheritance: 25/70 (35.7%)
-- Zend/generators: 46/184 (25.0%)
-- Zend/return_types: 20/89 (22.5%)
-- Zend/foreach: 14/58 (24.1%)
-
-Best categories: ctype (71%), match (57%), nullable_types (64%), math (41%), inheritance (36%), temporary_cleaning (59%).
+- ext/standard/array: 473/842 (56.2%)
+- ext/standard/strings: 323/730 (44.2%)
+- ext/standard/math: 112/171 (65.5%)
+- ext/spl: 152/781 (19.5%)
+- ext/date: 111/688 (16.1%)
+- ext/reflection: 97/493 (19.7%)
+- ext/pcre: 63/163 (38.7%)
+- ext/hash: 16/80 (20.0%)
+- ext/json: 32/88 (36.4%)
+- ext/ctype: 38/49 (77.6%)
+- Zend/type_declarations: 138/496 (27.8%)
+- Zend/traits: 85/216 (39.4%)
+- Zend/enum: 80/151 (53.0%)
+- Zend/namespaces: 76/114 (66.7%)
+- Zend/generators: 51/184 (27.7%)
+- Zend/closures: 45/135 (33.3%)
 
 *Test runner supports recursive directories, SKIPIF sections, EXPECTF pattern matching with backtracking, and timeout protection.*
 
@@ -42,50 +38,44 @@ Best categories: ctype (71%), match (57%), nullable_types (64%), math (41%), inh
 ### Working
 - Full execution pipeline: PHP source -> lexer -> parser -> AST -> bytecode -> VM
 - Types: null, bool, int, float, string (binary-safe), array (ordered hash map), object, reference
-- Arithmetic, comparison, bitwise, logical operators with short-circuit evaluation
-- String interpolation (`"$var"`, `"$obj->prop"`, `"$arr[key]"`), concatenation, type juggling, cast operators
-- Control flow: if/elseif/else, while, do-while, for, foreach, switch, match, break N/continue N
-- **OOP**: classes, inheritance, static properties/methods, class constants, instanceof, abstract classes
-- **Magic methods**: `__construct`, `__toString`, `__get`, `__set`, `__call`, `__invoke`, `clone`
-- **Closures** (`function() use ($x) { }`) with variable capture, arrow functions (`fn() =>`)
-- **Generators**: `yield`, `yield $key => $value`, foreach over generators, Generator methods
-- **References**: `$b = &$a`, shared value mutation through `Rc<RefCell<Value>>`
-- **Exceptions**: try/catch/finally with cross-function propagation, built-in Exception/Error classes
-- **Variadic parameters**: `function foo(...$args)`, `function bar($x, ...$rest)`
-- **List destructuring**: `list($a, $b) = $arr`, `[$x, $y] = [1, 2]`
-- parent::method() and self::method() with correct hierarchy resolution
-- Magic constants: `__CLASS__`, `__METHOD__`, `__FUNCTION__`, `__LINE__`
-- Function/class hoisting (forward references via two-pass compilation)
-- include/require with runtime compilation
-- define()/defined()/constant() with runtime constant table
-- Static variables in functions, global variables (`global $var`)
-- Low-precedence `and`/`or`/`xor` operators
-- 450+ built-in functions with callback support:
-  - Array: array_map/filter/reduce/walk/sort/usort/splice/shift/unshift/keys/values/merge/diff/intersect/chunk/combine/search/unique/reverse/flip etc.
-  - String: strlen/strpos/substr/str_replace/explode/implode/trim/strtolower/strtoupper/sprintf (with arg positions)/addslashes/strtr/soundex/levenshtein etc.
-  - Math: abs/ceil/floor/round/sin/cos/tan/log/sqrt/pow/pi/random_int etc.
-  - Type: gettype/settype/is_*/intval/floatval/strval/boolval etc.
-  - Output: echo/print/var_dump/print_r/var_export/printf with PHP-compatible formatting
-  - JSON: json_encode (full), json_decode (stub)
-  - OOP: get_class/get_parent_class/get_class_methods/get_object_vars/class_exists/method_exists/property_exists/interface_exists/spl_object_hash/spl_object_id
-  - Misc: call_user_func/call_user_func_array/define/defined/error_reporting/ini_set/ini_get/serialize etc.
-- PHP-compatible float formatting (14 significant digits, scientific notation for large/small values)
-- Fatal error output to stdout in PHP format
-- CLI SAPI (`-r` code execution, file execution)
-- PHPT test runner with EXPECTF pattern matching
-- Virtual filesystem abstraction for security sandboxing
+- Arithmetic, comparison, bitwise, logical operators with PHP 8 semantics
+- String interpolation, concatenation, type juggling, cast operators
+- Control flow: if/elseif/else, while, do-while, for, foreach, switch, match, break/continue, goto
+- **OOP**: classes, inheritance, interfaces, abstract classes, final classes/methods
+- **Traits**: use, insteadof, as, conflict resolution
+- **Enums**: backed values, from/tryFrom/cases, methods, interface implementation
+- **Namespaces**: use/as imports, group imports, name resolution
+- **Visibility**: public/protected/private enforcement for properties and methods
+- **Readonly**: readonly properties and classes (PHP 8.1/8.2)
+- **Magic methods**: `__construct`, `__toString`, `__get`, `__set`, `__isset`, `__unset`, `__call`, `__callStatic`, `__invoke`, `__clone`
+- **Closures**: variable capture, arrow functions, Closure::bind/bindTo/call
+- **Generators**: yield, yield from, send, throw, return, finally
+- **Exceptions**: try/catch/finally, exception chaining, stack traces
+- **Type system**: parameter types, return types, typed properties, union/intersection/DNF types
+- **Named parameters**: positional+named mixing, builtin param registry
+- **First-class callables**: `strlen(...)`, `$obj->method(...)`, `Foo::method(...)`
+- **Throw expressions**: throw in &&, ||, ??, ternary
+- **Reflection API**: ReflectionClass, ReflectionMethod, ReflectionFunction, ReflectionProperty, ReflectionParameter
+- **SPL**: ArrayObject, SplFixedArray, SplDoublyLinkedList, SplStack, SplQueue, SplHeap, SplPriorityQueue, SplObjectStorage + iterator classes
+- **ArrayAccess**: `[]` operator on objects calls offsetGet/offsetSet/offsetExists/offsetUnset
+- **Iterator/IteratorAggregate**: foreach on objects implementing Iterator
+- **DateTime**: DateTime, DateTimeImmutable, DateInterval, DateTimeZone with format/modify/diff
+- **Regex**: Hand-written PCRE-compatible engine (preg_match/replace/split/grep)
+- **Hash**: MD5, SHA1, SHA-256/384/512, CRC32, HMAC, streaming API
+- eval(), list destructuring, foreach by-reference, dynamic calls
+- Memory limit tracking with allocation/deallocation
+- 500+ built-in functions, 300+ constants
+- CLI SAPI, PHPT test runner
 
 ### Not Yet Implemented
-- Full interface/trait enforcement
-- Enums (parsed but not enforced)
-- `__isset`, `__unset`, `__debugInfo` magic methods
-- Full visibility enforcement (protected/private access checks)
+- Fibers (PHP 8.1)
+- Property hooks (PHP 8.4)
+- Pipe operator (PHP 8.5)
+- Lazy objects (PHP 8.4)
+- Asymmetric visibility (PHP 8.4)
+- Stream wrappers / file resources
 - `declare(strict_types=1)` enforcement
-- Fibers
-- Many extensions (pcre, pdo, curl, etc.)
-- Full error/warning message output
-- `foreach` by-reference modification
-- Namespace resolution at runtime
+- Many extensions (pdo, curl, etc.)
 
 ## Building
 
@@ -115,7 +105,11 @@ Workspace crates:
 - `goro-core` - Bytecode compiler and register-based VM
 - `goro-vfs` - Virtual filesystem abstraction
 - `goro-sapi` - Server API trait and CLI implementation
-- `goro-ext-standard` - PHP standard library functions (450+)
+- `goro-ext-standard` - PHP standard library (500+ functions, regex engine)
+- `goro-ext-date` - Date/time extension (DateTime, DateInterval, etc.)
+- `goro-ext-json` - JSON extension (json_encode/decode)
+- `goro-ext-ctype` - Character type extension
+- `goro-ext-hash` - Hash extension (MD5, SHA, CRC32, HMAC)
 - `goro-phpt` - PHPT test file runner
 
 ## Design Goals
