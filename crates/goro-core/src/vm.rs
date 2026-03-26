@@ -6206,10 +6206,15 @@ impl Vm {
         result
     }
 
+    /// Max output buffer size (64MB) to prevent OOM from infinite echo loops
+    const MAX_OUTPUT_SIZE: usize = 64 * 1024 * 1024;
+
     pub fn write_output(&mut self, data: &[u8]) {
         if let Some(buf) = self.ob_stack.last_mut() {
-            buf.extend_from_slice(data);
-        } else {
+            if buf.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
+                buf.extend_from_slice(data);
+            }
+        } else if self.output.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
             self.output.extend_from_slice(data);
         }
     }
@@ -13683,13 +13688,7 @@ fn check_inc_dec_type(_val: &Value, _is_increment: bool) -> Option<String> {
 }
 
 /// Emit deprecation/warning for inc/dec on non-numeric strings and booleans
-fn emit_inc_dec_warnings(_vm: &mut Vm, _val: &Value, _is_increment: bool, _line: u32) {
-    // Warnings disabled temporarily to avoid regressions in SPL/Reflection tests.
-    // The warnings interact badly with tests that do property ++ on objects.
-}
-
-#[allow(dead_code)]
-fn _emit_inc_dec_warnings_impl(vm: &mut Vm, val: &Value, is_increment: bool, line: u32) {
+fn emit_inc_dec_warnings(vm: &mut Vm, val: &Value, is_increment: bool, line: u32) {
     match val {
         Value::True | Value::False => {
             let op = if is_increment { "Increment" } else { "Decrement" };

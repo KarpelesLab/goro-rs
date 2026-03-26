@@ -2581,13 +2581,13 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         err_obj.set_property(b"message".to_vec(), Value::String(PhpString::from_string(msg.clone())));
         err_obj.set_property(b"code".to_vec(), Value::Long(0));
         err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_string(vm.current_file.clone())));
-        err_obj.set_property(b"line".to_vec(), Value::Long(0));
+        err_obj.set_property(b"line".to_vec(), Value::Long(vm.current_line as i64));
         err_obj.set_property(b"previous".to_vec(), Value::Null);
         let exc = Value::Object(Rc::new(RefCell::new(err_obj)));
         vm.current_exception = Some(exc);
         Err(VmError {
             message: format!("assert(): {} failed", msg),
-            line: 0,
+            line: vm.current_line,
         })
     }
 }
@@ -4702,9 +4702,15 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
         }
-        Ok(Value::False)
+        // PHP 8: TypeError for non-object
+        let type_name = Vm::value_type_name(val);
+        _vm.throw_type_error(format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name));
+        Ok(Value::Null)
     } else {
-        Ok(Value::False)
+        // PHP 8: TypeError for non-object
+        let type_name = Vm::value_type_name(val);
+        _vm.throw_type_error(format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name));
+        Ok(Value::Null)
     }
 }
 fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -6120,10 +6126,25 @@ fn var_dump_direct(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_name = match args.first() {
-        Some(Value::String(s)) => s.as_bytes().to_vec(),
-        Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
-        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    let val = args.first().unwrap_or(&Value::Null);
+    let class_name = match val {
+        Value::String(s) => {
+            let name = s.as_bytes().to_vec();
+            let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Check if class exists - if not, emit TypeError
+            if !vm.classes.contains_key(&lower) {
+                let type_name = Vm::value_type_name(val);
+                vm.throw_type_error(format!("get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", type_name));
+                return Ok(Value::Null);
+            }
+            name
+        }
+        Value::Object(obj) => obj.borrow().class_name.clone(),
+        _ => {
+            let type_name = Vm::value_type_name(val);
+            vm.throw_type_error(format!("get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", type_name));
+            return Ok(Value::Null);
+        }
     };
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 

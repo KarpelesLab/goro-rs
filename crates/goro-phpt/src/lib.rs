@@ -409,7 +409,14 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
                 || err_msg.contains("Can't use")
                 || err_msg.contains("Abstract function")
                 || err_msg.contains("Non-abstract method")
-                || err_msg.contains("cannot be part of an intersection type");
+                || err_msg.contains("cannot be part of an intersection type")
+                || err_msg.contains("cannot be a reference")
+                || err_msg.contains("Cannot redeclare")
+                || err_msg.contains("cannot take arguments")
+                || err_msg.contains("must take exactly")
+                || err_msg.contains("cannot be static")
+                || err_msg.contains("may not be nested")
+                || err_msg.contains("cannot accept");
             let msg = if is_fatal {
                 format!(
                     "\nFatal error: {} in {} on line {}\n",

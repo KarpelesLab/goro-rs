@@ -954,6 +954,49 @@ pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_abbrev: &str, 
                 let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
                 result.push_str(&format!("{}", leap));
             }
+            b'S' => {
+                // English ordinal suffix
+                let suffix = match day % 10 {
+                    1 if day != 11 => "st",
+                    2 if day != 12 => "nd",
+                    3 if day != 13 => "rd",
+                    _ => "th",
+                };
+                result.push_str(suffix);
+            }
+            b'z' => {
+                // Day of the year (0..365)
+                let days_in_months = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+                let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
+                let mut doy = days_in_months[((month - 1).max(0) as usize).min(11)] + day - 1;
+                if month > 2 { doy += leap; }
+                result.push_str(&format!("{}", doy));
+            }
+            b'W' => {
+                // ISO 8601 week number
+                let jan1_days = ymd_to_days(year, 1, 1);
+                let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7; // 0=Sun
+                let iso_jan1_dow = if jan1_dow == 0 { 7 } else { jan1_dow }; // 1=Mon..7=Sun
+                let ordinal_day = {
+                    let days_in_months = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+                    let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
+                    let mut d = days_in_months[((month - 1).max(0) as usize).min(11)] + day;
+                    if month > 2 { d += leap; }
+                    d
+                };
+                let wk = (ordinal_day as i64 - 1 + (iso_jan1_dow - 1) as i64) / 7;
+                let iso_week = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
+                let iso_week = if iso_week == 0 { 52 } else { iso_week };
+                result.push_str(&format!("{:02}", iso_week));
+            }
+            b'B' => {
+                // Swatch Internet Time
+                let utc_secs = local_secs - offset_secs;
+                let bmt_secs = utc_secs + 3600; // BMT = UTC+1
+                let day_secs = ((bmt_secs % 86400) + 86400) % 86400;
+                let beats = day_secs as f64 / 86.4;
+                result.push_str(&format!("{:03}", beats as i64 % 1000));
+            }
             b'c' => {
                 let sign = if offset_secs < 0 { '-' } else { '+' };
                 let abs = offset_secs.unsigned_abs();
@@ -1092,6 +1135,44 @@ pub fn format_timestamp(format: &str, secs: i64) -> String {
             b'L' => {
                 let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
                 result.push_str(&format!("{}", leap));
+            }
+            b'S' => {
+                let suffix = match day % 10 {
+                    1 if day != 11 => "st",
+                    2 if day != 12 => "nd",
+                    3 if day != 13 => "rd",
+                    _ => "th",
+                };
+                result.push_str(suffix);
+            }
+            b'z' => {
+                let days_in_months = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+                let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
+                let mut doy = days_in_months[((month - 1).max(0) as usize).min(11)] + day - 1;
+                if month > 2 { doy += leap; }
+                result.push_str(&format!("{}", doy));
+            }
+            b'W' => {
+                let jan1_days = ymd_to_days(year, 1, 1);
+                let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7;
+                let iso_jan1_dow = if jan1_dow == 0 { 7 } else { jan1_dow };
+                let ordinal_day = {
+                    let days_in_months = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+                    let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
+                    let mut d = days_in_months[((month - 1).max(0) as usize).min(11)] + day;
+                    if month > 2 { d += leap; }
+                    d
+                };
+                let wk = (ordinal_day as i64 - 1 + (iso_jan1_dow - 1) as i64) / 7;
+                let iso_week = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
+                let iso_week = if iso_week == 0 { 52 } else { iso_week };
+                result.push_str(&format!("{:02}", iso_week));
+            }
+            b'B' => {
+                let bmt_secs = secs + 3600; // BMT = UTC+1
+                let day_secs = ((bmt_secs % 86400) + 86400) % 86400;
+                let beats = day_secs as f64 / 86.4;
+                result.push_str(&format!("{:03}", beats as i64 % 1000));
             }
             b'e' | b'T' => result.push_str("UTC"),
             b'O' => result.push_str("+0000"),

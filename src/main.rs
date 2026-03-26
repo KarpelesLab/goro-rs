@@ -3,6 +3,19 @@ use std::path::Path;
 use std::process;
 
 fn main() {
+    // HARD memory limit: 2GB virtual address space.
+    // This MUST be set before anything else to prevent OOM kills.
+    // Without this, runaway PHP scripts can allocate 100GB+ and crash the machine.
+    #[cfg(unix)]
+    unsafe {
+        unsafe extern "C" {
+            fn setrlimit(resource: i32, rlim: *const [u64; 2]) -> i32;
+        }
+        let limit: u64 = 2 * 1024 * 1024 * 1024; // 2GB
+        let rlim: [u64; 2] = [limit, limit]; // [soft, hard]
+        setrlimit(9, &rlim); // 9 = RLIMIT_AS on Linux
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {

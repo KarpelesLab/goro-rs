@@ -931,6 +931,13 @@ impl Parser {
         let first = self.parse_expression()?;
 
         let (key, value, by_ref) = if self.eat(&TokenKind::DoubleArrow) {
+            // Key was marked as by-ref - this is an error
+            if by_ref {
+                return Err(ParseError {
+                    message: "Key element cannot be a reference".to_string(),
+                    span,
+                });
+            }
             let by_ref_val = self.eat(&TokenKind::Ampersand);
             let value = self.parse_expression()?;
             (Some(first), value, by_ref_val)

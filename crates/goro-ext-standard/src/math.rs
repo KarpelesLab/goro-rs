@@ -71,8 +71,37 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mt_srand", srand_fn);
 }
 
-fn abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// Check math function argument for null deprecation warning or type error.
+/// Returns true if processing should continue (value was acceptable), false if error was thrown.
+fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<bool, VmError> {
+    match val {
+        Value::Null => {
+            vm.emit_deprecated_at(
+                &format!("{}(): Passing null to parameter #{} (${}) of type int|float is deprecated", func_name, param_num, param_name),
+                vm.current_line,
+            );
+            Ok(true)
+        }
+        Value::True | Value::False => Ok(true),
+        Value::Long(_) | Value::Double(_) => Ok(true),
+        Value::String(_) => Ok(true), // strings are coerced to numbers
+        Value::Reference(r) => {
+            let inner = r.borrow().clone();
+            check_math_num_arg(vm, &inner, func_name, param_name, param_num)
+        }
+        _ => {
+            let type_name = Vm::value_type_name(val);
+            vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
+            Ok(false)
+        }
+    }
+}
+
+fn abs(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    if !check_math_num_arg(vm, val, "abs", "num", 1)? {
+        return Ok(Value::Null);
+    }
     Ok(match val {
         Value::Long(n) => {
             // i64::MIN.abs() would overflow, return as float in that case
@@ -105,18 +134,30 @@ fn abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn ceil(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let f = args.first().unwrap_or(&Value::Null).to_double();
+fn ceil(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    if !check_math_num_arg(vm, val, "ceil", "num", 1)? {
+        return Ok(Value::Null);
+    }
+    let f = val.to_double();
     Ok(Value::Double(f.ceil()))
 }
 
-fn floor(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let f = args.first().unwrap_or(&Value::Null).to_double();
+fn floor(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    if !check_math_num_arg(vm, val, "floor", "num", 1)? {
+        return Ok(Value::Null);
+    }
+    let f = val.to_double();
     Ok(Value::Double(f.floor()))
 }
 
-fn round(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let f = args.first().unwrap_or(&Value::Null).to_double();
+fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    if !check_math_num_arg(vm, val, "round", "num", 1)? {
+        return Ok(Value::Null);
+    }
+    let f = val.to_double();
     let precision = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let factor = 10f64.powi(precision as i32);
     Ok(Value::Double((f * factor).round() / factor))

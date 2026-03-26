@@ -152,6 +152,50 @@ impl Compiler {
     ///    - Check use imports first
     ///    - Otherwise prefix with current namespace
     /// Special names like "self", "parent", "static" are not resolved.
+    /// Resolve a magic constant or known constant name in class constant context.
+    fn resolve_class_const_magic(&self, name_lower: &[u8], class_name: &[u8], line: u32) -> Value {
+        match name_lower {
+            b"__method__" | b"__function__" => {
+                // In class constant context (not a method), __METHOD__ and __FUNCTION__ are ""
+                Value::String(PhpString::empty())
+            }
+            b"__class__" => {
+                Value::String(PhpString::from_vec(class_name.to_vec()))
+            }
+            b"__line__" => {
+                Value::Long(line as i64)
+            }
+            b"__file__" => {
+                Value::String(PhpString::from_vec(self.source_file.clone()))
+            }
+            b"__dir__" => {
+                let path = String::from_utf8_lossy(&self.source_file);
+                let dir = if let Some(pos) = path.rfind('/') {
+                    &path[..pos]
+                } else {
+                    "."
+                };
+                Value::String(PhpString::from_string(dir.to_string()))
+            }
+            b"__namespace__" => {
+                Value::String(PhpString::from_vec(self.current_namespace.clone()))
+            }
+            b"__trait__" => {
+                Value::String(PhpString::empty())
+            }
+            b"true" => Value::True,
+            b"false" => Value::False,
+            b"null" => Value::Null,
+            b"php_eol" => Value::String(PhpString::from_bytes(b"\n")),
+            b"php_int_max" => Value::Long(i64::MAX),
+            b"php_int_min" => Value::Long(i64::MIN),
+            b"php_int_size" => Value::Long(8),
+            b"php_major_version" => Value::Long(8),
+            b"php_minor_version" => Value::Long(5),
+            _ => Value::Null,
+        }
+    }
+
     fn resolve_class_name(&self, name: &[u8]) -> Vec<u8> {
         // Special names are never resolved
         if name.eq_ignore_ascii_case(b"self")
@@ -1363,6 +1407,12 @@ impl Compiler {
                     match &expr.kind {
                         ExprKind::ArrayAccess { array, index } => {
                             // unset($arr[$key]) - remove element from array
+                            if index.is_none() {
+                                return Err(CompileError {
+                                    message: "Cannot use [] for unsetting".into(),
+                                    line: stmt.span.line,
+                                });
+                            }
                             let arr_operand = self.compile_expr(array)?;
                             if let Some(idx_expr) = index {
                                 let idx_operand = self.compile_expr(idx_expr)?;
@@ -1950,6 +2000,10 @@ impl Compiler {
                                         } else {
                                             Value::Null
                                         }
+                                    }
+                                    ExprKind::Identifier(cname) => {
+                                        let lower: Vec<u8> = cname.iter().map(|c| c.to_ascii_lowercase()).collect();
+                                        self.resolve_class_const_magic(&lower, &qualified_name, expr.span.line)
                                     }
                                     _ => Value::Null,
                                 }
@@ -2542,6 +2596,16 @@ impl Compiler {
                                         } else {
                                             Value::Null
                                         }
+                                    }
+                                    ExprKind::ConstantAccess(parts) => {
+                                        // Handle magic constants and known constants in class constant context
+                                        let name_lower: Vec<u8> = parts.iter().flat_map(|p| p.iter()).copied().collect();
+                                        let name_lower_lc: Vec<u8> = name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
+                                        self.resolve_class_const_magic(&name_lower_lc, &qualified_name, const_expr.span.line)
+                                    }
+                                    ExprKind::Identifier(name) => {
+                                        let name_lower_lc: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
+                                        self.resolve_class_const_magic(&name_lower_lc, &qualified_name, const_expr.span.line)
                                     }
                                     _ => Value::Null,
                                 }
@@ -5279,6 +5343,15 @@ impl Compiler {
             }
 
             ExprKind::AssignRef { target, value } => {
+                // Check for $this = &$value
+                if let ExprKind::Variable(target_name) = &target.kind {
+                    if target_name == b"this" && self.current_class.is_some() {
+                        return Err(CompileError {
+                            message: "Cannot re-assign $this".into(),
+                            line: expr.span.line,
+                        });
+                    }
+                }
                 // $target = &$value  — both CVs share the same reference
                 match (&target.kind, &value.kind) {
                     (ExprKind::Variable(target_name), ExprKind::Variable(value_name)) => {
@@ -5767,6 +5840,22 @@ impl Compiler {
             // UnaryOp::Plus (+)
             ExprKind::UnaryOp { op: UnaryOp::Plus, operand, .. } => {
                 Self::eval_const_expr(operand)
+            }
+            // Handle Identifier constants (TRUE, FALSE, NULL, PHP_INT_MAX, etc.)
+            ExprKind::Identifier(name) => {
+                let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                match lower.as_slice() {
+                    b"true" => Some(Value::True),
+                    b"false" => Some(Value::False),
+                    b"null" => Some(Value::Null),
+                    b"php_eol" => Some(Value::String(PhpString::from_bytes(b"\n"))),
+                    b"php_int_max" => Some(Value::Long(i64::MAX)),
+                    b"php_int_min" => Some(Value::Long(i64::MIN)),
+                    b"php_int_size" => Some(Value::Long(8)),
+                    b"php_major_version" => Some(Value::Long(8)),
+                    b"php_minor_version" => Some(Value::Long(5)),
+                    _ => None,
+                }
             }
             _ => None,
         }
