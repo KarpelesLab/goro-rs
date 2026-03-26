@@ -3476,6 +3476,36 @@ impl Compiler {
             }
 
             ExprKind::FunctionCall { name, args } => {
+                // Special case: compact() - build array from variable names
+                if let ExprKind::Identifier(n) = &name.kind {
+                    let func_lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if func_lower == b"compact" && !args.is_empty() {
+                        // compact("foo", "bar") => ["foo" => $foo, "bar" => $bar]
+                        let arr_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayNew,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(arr_tmp),
+                            line: expr.span.line,
+                        });
+                        for arg in args {
+                            if let ExprKind::String(s) = &arg.value.kind {
+                                let cv = self.op_array.get_or_create_cv(s);
+                                let key_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(s.clone())));
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArraySet,
+                                    op1: OperandType::Tmp(arr_tmp),
+                                    op2: OperandType::Cv(cv),
+                                    result: OperandType::Const(key_idx),
+                                    line: expr.span.line,
+                                });
+                            }
+                        }
+                        return Ok(OperandType::Tmp(arr_tmp));
+                    }
+                }
+
                 // Compile the function name
                 let resolved_name = match &name.kind {
                     ExprKind::Identifier(n) => Some(self.resolve_function_name(n)),

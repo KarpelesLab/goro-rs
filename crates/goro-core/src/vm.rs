@@ -1513,7 +1513,19 @@ impl Vm {
                             _ => false,
                         }
                     }
-                    b"iterable" => matches!(value, Value::Array(_) | Value::Generator(_)),
+                    b"iterable" => match value {
+                        Value::Array(_) | Value::Generator(_) => true,
+                        Value::Object(obj) => {
+                            let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            self.class_implements_interface(&obj_class_lower, b"traversable")
+                                || self.class_implements_interface(&obj_class_lower, b"iterator")
+                                || self.class_implements_interface(&obj_class_lower, b"iteratoraggregate")
+                                || self.builtin_implements_interface(&obj_class_lower, b"traversable")
+                                || self.builtin_implements_interface(&obj_class_lower, b"iterator")
+                                || self.builtin_implements_interface(&obj_class_lower, b"iteratoraggregate")
+                        }
+                        _ => false,
+                    },
                     b"mixed" => true,
                     b"null" => matches!(value, Value::Null),
                     b"void" => true, // void is for return types, skip checking
@@ -13106,7 +13118,10 @@ impl Vm {
                 val.deref()
             }
             OperandType::Const(idx) => literals.get(*idx as usize).cloned().unwrap_or(Value::Null),
-            OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned().unwrap_or(Value::Null),
+            OperandType::Tmp(idx) => {
+                let val = tmps.get(*idx as usize).cloned().unwrap_or(Value::Null);
+                if matches!(val, Value::Undef) { Value::Null } else { val }
+            }
             OperandType::Unused => Value::Null,
             OperandType::JmpTarget(_) => Value::Null,
         }

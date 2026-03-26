@@ -801,15 +801,48 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Check if first element is a class name (string) or object
             match &vals[0] {
                 Value::String(class_name) => {
-                    // Static method call: ['ClassName', 'method']
-                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if let Some(class) = vm.classes.get(&class_lower).cloned() {
-                        if let Some(method) = class.methods.get(&method_lower) {
-                            let op = method.op_array.clone();
-                            return vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                    let class_bytes = class_name.as_bytes();
+                    // Check if this is a closure with captures (not a class::method call)
+                    if !class_bytes.starts_with(b"__closure_") && !class_bytes.starts_with(b"__arrow_") {
+                        // Static method call: ['ClassName', 'method']
+                        let class_lower: Vec<u8> = class_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        // Check for "Class::method" in the class name itself
+                        if let Some(pos) = class_lower.iter().position(|&b| b == b':') {
+                            if pos + 1 < class_lower.len() && class_lower[pos + 1] == b':' {
+                                let real_class = &class_lower[..pos];
+                                let real_method = &class_lower[pos + 2..];
+                                if let Some(class) = vm.classes.get(real_class).cloned() {
+                                    if let Some(method) = class.methods.get(real_method) {
+                                        let op = method.op_array.clone();
+                                        return vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                                    }
+                                }
+                                return Ok(Value::Null);
+                            }
                         }
+                        if let Some(class) = vm.classes.get(&class_lower).cloned() {
+                            if let Some(method) = class.methods.get(&method_lower) {
+                                let op = method.op_array.clone();
+                                return vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                            }
+                            // Method not found - check for __callStatic magic method
+                            if let Some(call_static) = class.get_method(b"__callstatic") {
+                                let op = call_static.op_array.clone();
+                                let mut args_array = goro_core::array::PhpArray::new();
+                                for arg in &call_args {
+                                    args_array.push(arg.clone());
+                                }
+                                let magic_args = vec![
+                                    Value::String(PhpString::from_vec(method_name.as_bytes().to_vec())),
+                                    Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
+                                ];
+                                return vm.execute_fn_with_named_args(&op, magic_args, vec![], None);
+                            }
+                            return Ok(Value::Null);
+                        }
+                        // Not a closure, not a class - fall through to closure path below
                     }
-                    return Ok(Value::Null);
+                    // Fall through to closure handling below
                 }
                 Value::Object(obj) => {
                     // Object method call: [$obj, 'method']
@@ -822,6 +855,21 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         if let Some(method) = class.methods.get(&method_lower) {
                             let op = method.op_array.clone();
                             return vm.execute_fn_with_named_args(&op, call_args, named_args, Some(Value::Object(obj.clone())));
+                        }
+                        // Method not found - check for __call magic method
+                        if let Some(call_method) = class.get_method(b"__call") {
+                            let op = call_method.op_array.clone();
+                            // __call($name, $arguments) - pack call_args into an array for the second param
+                            let mut args_array = goro_core::array::PhpArray::new();
+                            for arg in &call_args {
+                                args_array.push(arg.clone());
+                            }
+                            let magic_args = vec![
+                                Value::Object(obj.clone()),
+                                Value::String(PhpString::from_vec(method_name.as_bytes().to_vec())),
+                                Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
+                            ];
+                            return vm.execute_fn_with_named_args(&op, magic_args, vec![], Some(Value::Object(obj.clone())));
                         }
                     }
                     return Ok(Value::Null);
@@ -880,6 +928,34 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Try user function
         if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
             return vm.execute_fn_with_named_args(&user_fn, call_args, named_args, None);
+        }
+
+        // Try "Class::method" syntax
+        if let Some(pos) = func_lower.iter().position(|&b| b == b':') {
+            if pos + 1 < func_lower.len() && func_lower[pos + 1] == b':' {
+                let class_lower = &func_lower[..pos];
+                let method_lower = &func_lower[pos + 2..];
+                if let Some(class) = vm.classes.get(class_lower).cloned() {
+                    if let Some(method) = class.methods.get(method_lower) {
+                        let op = method.op_array.clone();
+                        return vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                    }
+                    // Check __callStatic
+                    if let Some(call_static) = class.get_method(b"__callstatic") {
+                        let op = call_static.op_array.clone();
+                        let orig_method = &func_name[pos + 2..];
+                        let mut args_array = goro_core::array::PhpArray::new();
+                        for arg in &call_args {
+                            args_array.push(arg.clone());
+                        }
+                        let magic_args = vec![
+                            Value::String(PhpString::from_vec(orig_method.to_vec())),
+                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
+                        ];
+                        return vm.execute_fn_with_named_args(&op, magic_args, vec![], None);
+                    }
+                }
+            }
         }
     }
 
@@ -1084,11 +1160,19 @@ fn array_merge(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_reverse(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        let preserve_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
         let arr = arr.borrow();
-        let entries: Vec<_> = arr.iter().map(|(_, v)| v.clone()).collect();
+        let entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut result = PhpArray::new();
-        for val in entries.into_iter().rev() {
-            result.push(val);
+        for (key, val) in entries.into_iter().rev() {
+            if preserve_keys {
+                result.set(key, val);
+            } else {
+                match key {
+                    goro_core::array::ArrayKey::Int(_) => result.push(val),
+                    goro_core::array::ArrayKey::String(s) => result.set(goro_core::array::ArrayKey::String(s), val),
+                }
+            }
         }
         Ok(Value::Array(Rc::new(RefCell::new(result))))
     } else {
@@ -2935,8 +3019,63 @@ fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
     }
 }
-fn array_rand(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+fn array_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arr = match args.first() {
+        Some(Value::Array(a)) => a.clone(),
+        _ => return Ok(Value::Null),
+    };
+    let num = args.get(1).map(|v| v.to_long()).unwrap_or(1);
+    let arr_borrow = arr.borrow();
+    let len = arr_borrow.len();
+    if len == 0 {
+        vm.emit_warning("array_rand(): Array is empty");
+        return Ok(Value::Null);
+    }
+    if num < 1 || num as usize > len {
+        vm.emit_warning("array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)");
+        return Ok(Value::Null);
+    }
+    let keys: Vec<goro_core::array::ArrayKey> = arr_borrow.iter().map(|(k, _)| k.clone()).collect();
+    drop(arr_borrow);
+
+    use std::time::SystemTime;
+    let mut seed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+
+    if num == 1 {
+        // xorshift64
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let idx = (seed as usize) % len;
+        match &keys[idx] {
+            goro_core::array::ArrayKey::Int(n) => Ok(Value::Long(*n)),
+            goro_core::array::ArrayKey::String(s) => Ok(Value::String(s.clone())),
+        }
+    } else {
+        // Return an array of random keys (sorted by their position in original array)
+        let num = num as usize;
+        let mut indices: Vec<usize> = (0..len).collect();
+        for i in (1..len).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let j = (seed as usize) % (i + 1);
+            indices.swap(i, j);
+        }
+        let mut selected: Vec<usize> = indices[..num].to_vec();
+        selected.sort();
+        let mut result = PhpArray::new();
+        for idx in selected {
+            match &keys[idx] {
+                goro_core::array::ArrayKey::Int(n) => result.push(Value::Long(*n)),
+                goro_core::array::ArrayKey::String(s) => result.push(Value::String(s.clone())),
+            }
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    }
 }
 
 // === String extras ===
@@ -3509,8 +3648,72 @@ fn str_contains_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::False)
 }
-fn wordwrap(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
+fn wordwrap(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let str_val = args.first().unwrap_or(&Value::Null).to_php_string();
+    let width = args.get(1).map(|v| v.to_long()).unwrap_or(75) as usize;
+    let break_str = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"\n"));
+    let cut_long_words = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
+
+    if width == 0 && cut_long_words {
+        // Cannot cut long words with width 0
+        return Ok(Value::False);
+    }
+
+    let input = str_val.as_bytes();
+    let brk = break_str.as_bytes();
+
+    if input.is_empty() {
+        return Ok(Value::String(PhpString::empty()));
+    }
+
+    let mut result: Vec<u8> = Vec::with_capacity(input.len() + input.len() / width.max(1) * brk.len());
+    let mut line_len = 0;
+    let mut last_space = None;
+    let mut last_space_out = None;
+    let mut i = 0;
+
+    while i < input.len() {
+        if input[i] == b'\n' {
+            result.push(b'\n');
+            line_len = 0;
+            last_space = None;
+            last_space_out = None;
+            i += 1;
+            continue;
+        }
+
+        if input[i] == b' ' {
+            last_space = Some(i);
+            last_space_out = Some(result.len());
+        }
+
+        if line_len >= width && width > 0 {
+            if let Some(sp_out) = last_space_out {
+                // Replace the space with break
+                let tail: Vec<u8> = result[sp_out + 1..].to_vec();
+                result.truncate(sp_out);
+                result.extend_from_slice(brk);
+                result.extend_from_slice(&tail);
+                line_len = result.len() - sp_out - brk.len();
+                // Actually recalculate line_len properly
+                // It should be the length since the last break was inserted
+                let last_brk_pos = result.len() - tail.len();
+                line_len = tail.len();
+                let _ = last_brk_pos; // suppress warning
+                last_space = None;
+                last_space_out = None;
+            } else if cut_long_words {
+                result.extend_from_slice(brk);
+                line_len = 0;
+            }
+        }
+
+        result.push(input[i]);
+        line_len += 1;
+        i += 1;
+    }
+
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 fn printf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Use the sprintf implementation from strings module
@@ -3519,16 +3722,35 @@ fn printf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.write_output(formatted.as_bytes());
     Ok(Value::Long(len as i64))
 }
-fn fprintf_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // fprintf($handle, $format, ...$args) - write formatted to file handle
-    // Simplified: just return 0 (we don't support file handles properly)
-    Ok(Value::Long(0))
+    // For now, treat any handle as stdout and use the sprintf logic
+    if args.len() < 2 {
+        return Ok(Value::Long(0));
+    }
+    let format_args = &args[1..]; // skip the handle, pass format + args
+    let formatted = crate::strings::do_sprintf(format_args);
+    let len = formatted.len();
+    vm.write_output(formatted.as_bytes());
+    Ok(Value::Long(len as i64))
 }
 
-fn vfprintf_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // vfprintf($handle, $format, $args_array)
-    // Simplified: just return 0
-    Ok(Value::Long(0))
+    if args.len() < 3 {
+        return Ok(Value::Long(0));
+    }
+    let format = args[1].to_php_string();
+    let mut format_args = vec![Value::String(format)];
+    if let Value::Array(arr) = &args[2] {
+        for (_, v) in arr.borrow().iter() {
+            format_args.push(v.clone());
+        }
+    }
+    let formatted = crate::strings::do_sprintf(&format_args);
+    let len = formatted.len();
+    vm.write_output(formatted.as_bytes());
+    Ok(Value::Long(len as i64))
 }
 
 fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
