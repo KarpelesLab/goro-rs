@@ -409,6 +409,11 @@ impl Vm {
                 c.insert(b"SORT_LOCALE_STRING".to_vec(), Value::Long(5));
                 c.insert(b"SORT_NATURAL".to_vec(), Value::Long(6));
                 c.insert(b"SORT_FLAG_CASE".to_vec(), Value::Long(8));
+                // Round constants
+                c.insert(b"PHP_ROUND_HALF_UP".to_vec(), Value::Long(0));
+                c.insert(b"PHP_ROUND_HALF_DOWN".to_vec(), Value::Long(1));
+                c.insert(b"PHP_ROUND_HALF_EVEN".to_vec(), Value::Long(2));
+                c.insert(b"PHP_ROUND_HALF_ODD".to_vec(), Value::Long(3));
                 c.insert(b"ARRAY_FILTER_USE_BOTH".to_vec(), Value::Long(1));
                 c.insert(b"ARRAY_FILTER_USE_KEY".to_vec(), Value::Long(2));
                 c.insert(b"ARRAY_UNIQUE_REGULAR".to_vec(), Value::Long(0));
@@ -16229,9 +16234,26 @@ fn remap_cv_operand(operand: &mut OperandType, old_pos: u32) {
 /// Check if inc/dec on this value should throw a TypeError (PHP 8.3+)
 /// Note: We skip object TypeError checks because they can false-positive
 /// when incrementing a property value via $obj->prop++ (where the op reads the property value).
-fn check_inc_dec_type(_val: &Value, _is_increment: bool) -> Option<String> {
-    // Only check for array, not object (object ++ is typically property access)
-    None
+fn check_inc_dec_type(val: &Value, is_increment: bool) -> Option<String> {
+    let val = match val {
+        Value::Reference(r) => r.borrow().clone(),
+        v => v.clone(),
+    };
+    match &val {
+        Value::Object(obj) => {
+            let class_name = {
+                let o = obj.borrow();
+                String::from_utf8_lossy(&o.class_name).to_string()
+            };
+            let op = if is_increment { "increment" } else { "decrement" };
+            Some(format!("Cannot {} {}", op, class_name))
+        }
+        Value::Array(_) => {
+            let op = if is_increment { "increment" } else { "decrement" };
+            Some(format!("Cannot {} array", op))
+        }
+        _ => None,
+    }
 }
 
 /// Emit deprecation/warning for inc/dec on non-numeric strings and booleans
@@ -16293,14 +16315,14 @@ fn php_increment(val: &Value) -> Value {
             if bytes.is_empty() {
                 return Value::String(PhpString::from_bytes(b"1"));
             }
-            // Check if string has any alphanumeric characters
-            let has_alnum = bytes.iter().any(|b| b.is_ascii_alphanumeric());
-            if !has_alnum {
-                // No alphanumeric characters (e.g. " ", "!", "🐘"): no change
+            // Check if ALL characters are alphanumeric - PHP only does
+            // alphabetic increment on purely alphanumeric strings
+            let all_alnum = bytes.iter().all(|b| b.is_ascii_alphanumeric());
+            if !all_alnum {
+                // Contains non-alphanumeric characters: no change (deprecated warning already emitted)
                 return val.clone();
             }
             // Alphabetic increment: "a" -> "b", "z" -> "aa", "Az" -> "Ba"
-            // For mixed strings like "Hello world", only increment alphanumeric chars
             let mut result: Vec<u8> = bytes.to_vec();
             let mut carry = true;
             for i in (0..result.len()).rev() {

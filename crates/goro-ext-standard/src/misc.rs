@@ -227,6 +227,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"fputcsv", fputcsv_fn);
     vm.register_function(b"fgetcsv", fgetcsv_fn);
     vm.register_function(b"fpassthru", fpassthru_fn);
+    vm.register_function(b"fgetc", fgetc_fn);
+    vm.register_function(b"flock", flock_fn);
+    vm.register_function(b"fstat", fstat_fn);
+    vm.register_function(b"stream_get_contents", stream_get_contents_fn);
+    vm.register_function(b"fputs", fwrite_fn); // fputs is an alias for fwrite
+    vm.register_function(b"fscanf", fscanf_fn);
     vm.register_function(b"linkinfo", linkinfo_fn);
     vm.register_function(b"parse_ini_file", parse_ini_file_fn);
     vm.register_function(b"header", header_fn);
@@ -3723,14 +3729,29 @@ fn printf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // fprintf($handle, $format, ...$args) - write formatted to file handle
-    // For now, treat any handle as stdout and use the sprintf logic
     if args.len() < 2 {
         return Ok(Value::Long(0));
     }
+    let fid = args[0].to_long();
     let format_args = &args[1..]; // skip the handle, pass format + args
     let formatted = crate::strings::do_sprintf(format_args);
     let len = formatted.len();
-    vm.write_output(formatted.as_bytes());
+
+    // Check if it's a real file handle
+    let written = FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            fh.file.write_all(formatted.as_bytes()).ok();
+            true
+        } else {
+            false
+        }
+    });
+
+    if !written {
+        // Fallback to stdout for STDOUT handle or unknown handles
+        vm.write_output(formatted.as_bytes());
+    }
     Ok(Value::Long(len as i64))
 }
 
@@ -3739,6 +3760,7 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 3 {
         return Ok(Value::Long(0));
     }
+    let fid = args[0].to_long();
     let format = args[1].to_php_string();
     let mut format_args = vec![Value::String(format)];
     if let Value::Array(arr) = &args[2] {
@@ -3748,7 +3770,19 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let formatted = crate::strings::do_sprintf(&format_args);
     let len = formatted.len();
-    vm.write_output(formatted.as_bytes());
+
+    let written = FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            fh.file.write_all(formatted.as_bytes()).ok();
+            true
+        } else {
+            false
+        }
+    });
+    if !written {
+        vm.write_output(formatted.as_bytes());
+    }
     Ok(Value::Long(len as i64))
 }
 
@@ -5532,50 +5566,287 @@ fn highlight_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn fopen_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False) // stub
+// ============= File I/O implementation using thread-local file handle storage =============
+
+use std::collections::HashMap as StdHashMap;
+use std::io::{Read as IoRead, Write as IoWrite, Seek, SeekFrom, BufRead, BufReader};
+
+thread_local! {
+    static FILE_HANDLES: RefCell<StdHashMap<i64, FileHandle>> = RefCell::new(StdHashMap::new());
+    static NEXT_FILE_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(100) }; // Start at 100 to avoid clashing with STDIN/STDOUT/STDERR
 }
-fn fclose_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+
+struct FileHandle {
+    file: std::fs::File,
+    #[allow(dead_code)]
+    mode: String,
+    eof: bool,
+}
+
+fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
+    NEXT_FILE_ID.with(|id| {
+        let fid = id.get();
+        id.set(fid + 1);
+        FILE_HANDLES.with(|handles| {
+            handles.borrow_mut().insert(fid, FileHandle {
+                file,
+                mode: mode.to_string(),
+                eof: false,
+            });
+        });
+        fid
+    })
+}
+
+fn fopen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let mode = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
+
+    let file = match mode.as_str() {
+        "r" | "rb" => std::fs::File::open(&filename),
+        "r+" | "r+b" | "rb+" => std::fs::OpenOptions::new().read(true).write(true).open(&filename),
+        "w" | "wb" => std::fs::File::create(&filename),
+        "w+" | "w+b" | "wb+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&filename),
+        "a" | "ab" => std::fs::OpenOptions::new().write(true).append(true).create(true).open(&filename),
+        "a+" | "a+b" | "ab+" => std::fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(&filename),
+        "x" | "xb" => std::fs::OpenOptions::new().write(true).create_new(true).open(&filename),
+        "x+" | "x+b" | "xb+" => std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&filename),
+        "c" | "cb" => std::fs::OpenOptions::new().write(true).create(true).open(&filename),
+        "c+" | "c+b" | "cb+" => std::fs::OpenOptions::new().read(true).write(true).create(true).open(&filename),
+        "wt" => std::fs::File::create(&filename),
+        "rt" => std::fs::File::open(&filename),
+        _ => std::fs::File::open(&filename), // default to read
+    };
+
+    match file {
+        Ok(f) => {
+            let fid = alloc_file_handle(f, &mode);
+            Ok(Value::Long(fid))
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn fclose_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    FILE_HANDLES.with(|handles| {
+        handles.borrow_mut().remove(&fid);
+    });
     Ok(Value::True)
 }
-fn fread_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+
+fn fread_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let length = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
+    if length == 0 {
+        return Ok(Value::String(PhpString::from_bytes(b"")));
+    }
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            let mut buf = vec![0u8; length];
+            match fh.file.read(&mut buf) {
+                Ok(0) => {
+                    fh.eof = true;
+                    Ok(Value::String(PhpString::from_bytes(b"")))
+                }
+                Ok(n) => {
+                    buf.truncate(n);
+                    Ok(Value::String(PhpString::from_vec(buf)))
+                }
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
-fn fwrite_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+
+fn fwrite_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let bytes = data.as_bytes();
+    let length = args.get(2).map(|v| v.to_long() as usize).unwrap_or(bytes.len());
+    let to_write = &bytes[..length.min(bytes.len())];
+
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            match fh.file.write(to_write) {
+                Ok(n) => Ok(Value::Long(n as i64)),
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
-fn fgets_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+
+fn fgets_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let max_length = args.get(1).map(|v| v.to_long() as usize);
+
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            let mut buf = Vec::new();
+            let limit = max_length.unwrap_or(1024);
+            let mut byte = [0u8; 1];
+            for _ in 0..limit {
+                match fh.file.read(&mut byte) {
+                    Ok(0) => {
+                        fh.eof = true;
+                        break;
+                    }
+                    Ok(_) => {
+                        buf.push(byte[0]);
+                        if byte[0] == b'\n' {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if buf.is_empty() && fh.eof {
+                Ok(Value::False)
+            } else {
+                Ok(Value::String(PhpString::from_vec(buf)))
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
-fn feof_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+
+fn feof_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    FILE_HANDLES.with(|handles| {
+        let handles = handles.borrow();
+        if let Some(fh) = handles.get(&fid) {
+            if fh.eof { Ok(Value::True) } else { Ok(Value::False) }
+        } else {
+            Ok(Value::True)
+        }
+    })
 }
-fn rewind_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+
+fn rewind_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            fh.eof = false;
+            match fh.file.seek(SeekFrom::Start(0)) {
+                Ok(_) => Ok(Value::True),
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
-fn fseek_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+
+fn fseek_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let whence = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            fh.eof = false;
+            let seek = match whence {
+                0 => SeekFrom::Start(offset as u64), // SEEK_SET
+                1 => SeekFrom::Current(offset),       // SEEK_CUR
+                2 => SeekFrom::End(offset),            // SEEK_END
+                _ => SeekFrom::Start(offset as u64),
+            };
+            match fh.file.seek(seek) {
+                Ok(_) => Ok(Value::Long(0)),
+                Err(_) => Ok(Value::Long(-1)),
+            }
+        } else {
+            Ok(Value::Long(-1))
+        }
+    })
 }
-fn ftell_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+
+fn ftell_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            match fh.file.seek(SeekFrom::Current(0)) {
+                Ok(pos) => Ok(Value::Long(pos as i64)),
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
-fn fflush_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+
+fn fflush_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            match fh.file.flush() {
+                Ok(_) => Ok(Value::True),
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
-fn unlink_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+
+fn unlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    match std::fs::remove_file(&filename) {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
 }
-fn rename_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+
+fn rename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let from = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let to = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    match std::fs::rename(&from, &to) {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
 }
-fn copy_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+
+fn copy_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let from = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let to = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    match std::fs::copy(&from, &to) {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
 }
-fn mkdir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+
+fn mkdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let recursive = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+    let result = if recursive {
+        std::fs::create_dir_all(&path)
+    } else {
+        std::fs::create_dir(&path)
+    };
+    match result {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
 }
-fn rmdir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+
+fn rmdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    match std::fs::remove_dir(&path) {
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
 }
 fn glob_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
@@ -6500,8 +6771,82 @@ fn walk_recursive_inner(
     Ok(())
 }
 
-fn fgetcsv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False) // Stub - needs file handle support
+fn fgetcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let _length = args.get(1).map(|v| v.to_long());
+    let separator = args.get(2).map(|v| {
+        let s = v.to_php_string();
+        let b = s.as_bytes();
+        if b.is_empty() { b',' } else { b[0] }
+    }).unwrap_or(b',');
+    let enclosure = args.get(3).map(|v| {
+        let s = v.to_php_string();
+        let b = s.as_bytes();
+        if b.is_empty() { b'"' } else { b[0] }
+    }).unwrap_or(b'"');
+    let escape = args.get(4).map(|v| {
+        let s = v.to_php_string();
+        let b = s.as_bytes();
+        if b.is_empty() { None } else { Some(b[0]) }
+    }).unwrap_or(Some(b'\\'));
+
+    // Read a line from the file
+    let line = FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            let mut in_quotes = false;
+            loop {
+                match fh.file.read(&mut byte) {
+                    Ok(0) => {
+                        fh.eof = true;
+                        break;
+                    }
+                    Ok(_) => {
+                        if byte[0] == enclosure {
+                            in_quotes = !in_quotes;
+                        }
+                        if byte[0] == b'\n' && !in_quotes {
+                            break;
+                        }
+                        buf.push(byte[0]);
+                    }
+                    Err(_) => break,
+                }
+            }
+            if buf.is_empty() && fh.eof {
+                None
+            } else {
+                // Remove trailing \r
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                Some(buf)
+            }
+        } else {
+            None
+        }
+    });
+
+    match line {
+        None => Ok(Value::False),
+        Some(line_bytes) => {
+            // Parse CSV line
+            let line_str = String::from_utf8_lossy(&line_bytes);
+            let csv_args = vec![
+                Value::String(PhpString::from_string(line_str.to_string())),
+                Value::String(PhpString::from_bytes(&[separator])),
+                Value::String(PhpString::from_bytes(&[enclosure])),
+                if let Some(e) = escape {
+                    Value::String(PhpString::from_bytes(&[e]))
+                } else {
+                    Value::String(PhpString::from_bytes(b""))
+                },
+            ];
+            crate::strings::str_getcsv_fn(_vm, &csv_args)
+        }
+    }
 }
 
 fn fileperms_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -7339,8 +7684,19 @@ fn assert_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn ftruncate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // ftruncate($handle, $size) - stub
-    Ok(Value::True)
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let size = args.get(1).map(|v| v.to_long()).unwrap_or(0) as u64;
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            match fh.file.set_len(size) {
+                Ok(_) => Ok(Value::True),
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
 
 fn tmpfile_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -7429,12 +7785,80 @@ fn chown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
-fn fputcsv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn fputcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let fields = match args.get(1) {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => return Ok(Value::False),
+    };
+    let separator = args.get(2).map(|v| {
+        let s = v.to_php_string();
+        let b = s.as_bytes();
+        if b.is_empty() { b',' } else { b[0] }
+    }).unwrap_or(b',');
+    let enclosure = args.get(3).map(|v| {
+        let s = v.to_php_string();
+        let b = s.as_bytes();
+        if b.is_empty() { b'"' } else { b[0] }
+    }).unwrap_or(b'"');
+
+    let mut line = String::new();
+    let arr = fields.borrow();
+    let mut first = true;
+    for (_, val) in arr.iter() {
+        if !first {
+            line.push(separator as char);
+        }
+        first = false;
+        let s = val.to_php_string().to_string_lossy();
+        // Check if we need to enclose
+        let needs_enclosure = s.contains(separator as char) || s.contains(enclosure as char) || s.contains('\n') || s.contains('\r');
+        if needs_enclosure {
+            line.push(enclosure as char);
+            for c in s.chars() {
+                if c == enclosure as char {
+                    line.push(enclosure as char);
+                }
+                line.push(c);
+            }
+            line.push(enclosure as char);
+        } else {
+            line.push_str(&s);
+        }
+    }
+    line.push('\n');
+
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            let _ = fh.file.write_all(bytes);
+        }
+    });
+
+    Ok(Value::Long(len as i64))
 }
 
-fn fpassthru_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            let mut buf = Vec::new();
+            match fh.file.read_to_end(&mut buf) {
+                Ok(n) => {
+                    fh.eof = true;
+                    vm.write_output(&buf);
+                    Ok(Value::Long(n as i64))
+                }
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
 
 fn linkinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -7890,4 +8314,165 @@ fn parse_memory_value(val: &Value) -> i64 {
         (s, 1i64)
     };
     num_str.parse::<i64>().unwrap_or(128 * 1024 * 1024) * multiplier
+}
+
+fn fscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // fscanf($handle, $format, ...$vars) - read line from file and parse with sscanf
+    if args.len() < 2 {
+        return Ok(Value::Null);
+    }
+    let fid = args[0].to_long();
+    // Read a line from the file
+    let line = FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                match fh.file.read(&mut byte) {
+                    Ok(0) => {
+                        fh.eof = true;
+                        break;
+                    }
+                    Ok(_) => {
+                        buf.push(byte[0]);
+                        if byte[0] == b'\n' {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if buf.is_empty() && fh.eof {
+                None
+            } else {
+                Some(String::from_utf8_lossy(&buf).to_string())
+            }
+        } else {
+            None
+        }
+    });
+
+    match line {
+        None => Ok(Value::False),
+        Some(line_str) => {
+            // Call sscanf with the line and remaining args
+            let mut sscanf_args = vec![Value::String(PhpString::from_string(line_str))];
+            sscanf_args.extend_from_slice(&args[1..]);
+            sscanf_fn(vm, &sscanf_args)
+        }
+    }
+}
+
+fn fgetc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            let mut buf = [0u8; 1];
+            match fh.file.read(&mut buf) {
+                Ok(0) => {
+                    fh.eof = true;
+                    Ok(Value::False)
+                }
+                Ok(_) => Ok(Value::String(PhpString::from_bytes(&buf))),
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
+}
+
+fn flock_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // flock($handle, $operation) - stub that always succeeds
+    // Real file locking would need libc::flock
+    let _fid = args.first().unwrap_or(&Value::Null).to_long();
+    let _op = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    Ok(Value::True)
+}
+
+fn fstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    FILE_HANDLES.with(|handles| {
+        let handles = handles.borrow();
+        if let Some(fh) = handles.get(&fid) {
+            match fh.file.metadata() {
+                Ok(meta) => {
+                    let mut arr = PhpArray::new();
+                    let len = meta.len() as i64;
+                    // Numeric indices (0-12)
+                    arr.push(Value::Long(0)); // dev
+                    arr.push(Value::Long(0)); // ino
+                    arr.push(Value::Long(0o100644)); // mode
+                    arr.push(Value::Long(1)); // nlink
+                    arr.push(Value::Long(0)); // uid
+                    arr.push(Value::Long(0)); // gid
+                    arr.push(Value::Long(0)); // rdev
+                    arr.push(Value::Long(len)); // size
+                    arr.push(Value::Long(0)); // atime
+                    arr.push(Value::Long(0)); // mtime
+                    arr.push(Value::Long(0)); // ctime
+                    arr.push(Value::Long(-1)); // blksize
+                    arr.push(Value::Long(-1)); // blocks
+                    // Named indices
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"dev")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"ino")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"mode")), Value::Long(0o100644));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"nlink")), Value::Long(1));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"uid")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"gid")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"rdev")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"size")), Value::Long(len));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"atime")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"mtime")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"ctime")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"blksize")), Value::Long(-1));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"blocks")), Value::Long(-1));
+                    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+                }
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
+}
+
+fn stream_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let max_length = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+
+    FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            // Seek to offset if specified
+            if offset >= 0 {
+                let _ = fh.file.seek(SeekFrom::Start(offset as u64));
+            }
+            let mut buf = Vec::new();
+            if max_length >= 0 {
+                buf.resize(max_length as usize, 0);
+                match fh.file.read(&mut buf) {
+                    Ok(n) => {
+                        buf.truncate(n);
+                        if n == 0 { fh.eof = true; }
+                        Ok(Value::String(PhpString::from_vec(buf)))
+                    }
+                    Err(_) => Ok(Value::False),
+                }
+            } else {
+                match fh.file.read_to_end(&mut buf) {
+                    Ok(_) => {
+                        fh.eof = true;
+                        Ok(Value::String(PhpString::from_vec(buf)))
+                    }
+                    Err(_) => Ok(Value::False),
+                }
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }

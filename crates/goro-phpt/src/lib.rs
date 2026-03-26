@@ -991,6 +991,10 @@ fn collect_phpt_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                // Skip symlinked directories to avoid infinite recursion
+                if path.is_symlink() {
+                    continue;
+                }
                 collect_phpt_files(&path, files);
             } else if path.extension().is_some_and(|e| e == "phpt") {
                 files.push(path);

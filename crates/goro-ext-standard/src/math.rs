@@ -159,8 +159,87 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let f = val.to_double();
     let precision = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    // mode: 0=HALF_UP(default), 1=HALF_DOWN, 2=HALF_EVEN, 3=HALF_ODD
+    // Also support RoundingMode enum backed values
+    let mode = if let Some(mode_val) = args.get(2) {
+        let mode_val = mode_val.deref();
+        match &mode_val {
+            Value::Object(obj) => {
+                // RoundingMode enum - get the backed value
+                let obj_ref = obj.borrow();
+                let class = String::from_utf8_lossy(&obj_ref.class_name).to_string();
+                if class == "RoundingMode" {
+                    let val = obj_ref.get_property(b"value");
+                    val.to_long()
+                } else {
+                    vm.throw_type_error(format!(
+                        "round(): Argument #3 ($mode) must be of type RoundingMode|int, {} given",
+                        class
+                    ));
+                    return Ok(Value::Null);
+                }
+            }
+            _ => mode_val.to_long(),
+        }
+    } else {
+        0 // PHP_ROUND_HALF_UP
+    };
     let factor = 10f64.powi(precision as i32);
-    Ok(Value::Double((f * factor).round() / factor))
+    let scaled = f * factor;
+    let rounded = match mode {
+        0 => scaled.round(), // HALF_UP (PHP default, rounds .5 away from zero)
+        1 => { // HALF_DOWN (rounds .5 toward zero)
+            let frac = scaled.fract().abs();
+            if (frac - 0.5).abs() < 1e-9 {
+                scaled.trunc()
+            } else {
+                scaled.round()
+            }
+        }
+        2 => { // HALF_EVEN (rounds .5 to nearest even)
+            let frac = scaled.fract().abs();
+            if (frac - 0.5).abs() < 1e-9 {
+                let t = scaled.trunc();
+                if t as i64 % 2 == 0 {
+                    t
+                } else {
+                    if scaled > 0.0 { t + 1.0 } else { t - 1.0 }
+                }
+            } else {
+                scaled.round()
+            }
+        }
+        3 => { // HALF_ODD (rounds .5 to nearest odd)
+            let frac = scaled.fract().abs();
+            if (frac - 0.5).abs() < 1e-9 {
+                let t = scaled.trunc();
+                if t as i64 % 2 != 0 {
+                    t
+                } else {
+                    if scaled > 0.0 { t + 1.0 } else { t - 1.0 }
+                }
+            } else {
+                scaled.round()
+            }
+        }
+        4 => { // TowardsZero / HALF_TOWARD_ZERO (PHP 8.4 RoundingMode::TowardsZero)
+            scaled.trunc()
+        }
+        5 => { // AwayFromZero / HALF_AWAY_FROM_ZERO (PHP 8.4 RoundingMode::AwayFromZero)
+            if scaled > 0.0 { scaled.ceil() } else { scaled.floor() }
+        }
+        6 => { // NegativeInfinity (PHP 8.4 RoundingMode::NegativeInfinity)
+            scaled.floor()
+        }
+        7 => { // PositiveInfinity (PHP 8.4 RoundingMode::PositiveInfinity)
+            scaled.ceil()
+        }
+        _ => {
+            vm.throw_type_error("round(): Argument #3 ($mode) must be a valid rounding mode (PHP_ROUND_HALF_*)".to_string());
+            return Ok(Value::Null);
+        }
+    };
+    Ok(Value::Double(rounded / factor))
 }
 
 fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
