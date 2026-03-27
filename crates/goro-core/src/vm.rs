@@ -1433,7 +1433,76 @@ impl Vm {
         err_obj.set_property(b"code".to_vec(), Value::Long(0));
         err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_string(self.current_file.clone())));
         err_obj.set_property(b"line".to_vec(), Value::Long(line as i64));
+        // Capture stack trace
+        let trace = self.build_exception_trace();
+        err_obj.set_property(b"trace".to_vec(), trace);
+        err_obj.set_property(b"previous".to_vec(), Value::Null);
         Value::Object(Rc::new(RefCell::new(err_obj)))
+    }
+
+    /// Build a trace array for exceptions from the current call stack
+    fn build_exception_trace(&self) -> Value {
+        let mut trace_arr = PhpArray::new();
+        // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
+        for (idx, (func_name, file, line, args, is_method)) in self.call_stack.iter().rev().enumerate() {
+            let mut frame = PhpArray::new();
+            if !file.is_empty() {
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"file")),
+                    Value::String(PhpString::from_string(file.clone())),
+                );
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"line")),
+                    Value::Long(*line as i64),
+                );
+            }
+            // Parse class::method from func_name
+            if let Some(sep) = func_name.find("::") {
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"class")),
+                    Value::String(PhpString::from_string(func_name[..sep].to_string())),
+                );
+                // Use -> for instance methods, :: for static methods
+                let type_str = if *is_method { b"->" as &[u8] } else { b"::" };
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"type")),
+                    Value::String(PhpString::from_bytes(type_str)),
+                );
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"function")),
+                    Value::String(PhpString::from_string(func_name[sep+2..].to_string())),
+                );
+            } else if let Some(sep) = func_name.find("->") {
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"class")),
+                    Value::String(PhpString::from_string(func_name[..sep].to_string())),
+                );
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"type")),
+                    Value::String(PhpString::from_bytes(b"->")),
+                );
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"function")),
+                    Value::String(PhpString::from_string(func_name[sep+2..].to_string())),
+                );
+            } else {
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"function")),
+                    Value::String(PhpString::from_string(func_name.clone())),
+                );
+            }
+            // Add args array
+            let mut args_arr = PhpArray::new();
+            for arg in args {
+                args_arr.push(arg.clone());
+            }
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"args")),
+                Value::Array(Rc::new(RefCell::new(args_arr))),
+            );
+            trace_arr.set(ArrayKey::Int(idx as i64), Value::Array(Rc::new(RefCell::new(frame))));
+        }
+        Value::Array(Rc::new(RefCell::new(trace_arr)))
     }
 
     /// Check if a return value matches the declared return type
@@ -2484,6 +2553,21 @@ impl Vm {
         false
     }
 
+    /// Get the current class scope name (lowercase), if any
+    pub fn get_current_class_name(&self) -> Option<Vec<u8>> {
+        self.class_scope_stack.last().cloned()
+    }
+
+    /// Get a class definition by lowercase name
+    pub fn get_class_def(&self, class_name_lower: &[u8]) -> Option<&ClassEntry> {
+        self.classes.get(class_name_lower)
+    }
+
+    /// Check if class_a is a subclass of class_b (both lowercase)
+    pub fn is_subclass_of(&self, class_a: &[u8], class_b: &[u8]) -> bool {
+        self.class_extends(class_a, class_b)
+    }
+
     /// Check if a class (by lowercase name) implements a given interface (by lowercase name).
     /// Walks up the parent chain and checks each class's interfaces list.
     fn class_implements_interface(&self, class_name: &[u8], iface_name: &[u8]) -> bool {
@@ -2696,7 +2780,7 @@ impl Vm {
                 match method_lower {
                     b"gettimestamp" => {
                         let ob = obj.borrow();
-                        Some(ob.get_property(b"timestamp"))
+                        Some(ob.get_property(b"__timestamp"))
                     }
                     b"getoffset" => Some(Value::Long(0)), // UTC
                     b"gettimezone" => {
@@ -4675,13 +4759,13 @@ impl Vm {
                         b"format" => {
                             let format_str = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
                             let ob = obj.borrow();
-                            let timestamp = ob.get_property(b"timestamp").to_long();
+                            let timestamp = ob.get_property(b"__timestamp").to_long();
                             let result = self.format_datetime_timestamp(&format_str, timestamp);
                             Some(Value::String(PhpString::from_string(result)))
                         }
                         b"gettimestamp" => {
                             let ob = obj.borrow();
-                            Some(ob.get_property(b"timestamp"))
+                            Some(ob.get_property(b"__timestamp"))
                         }
                         b"settimestamp" => {
                             let ts = args.get(1).cloned().unwrap_or(Value::Null).to_long();
@@ -4690,25 +4774,25 @@ impl Vm {
                                 let obj_id = self.next_object_id;
                                 self.next_object_id += 1;
                                 let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
-                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+                                new_obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
-                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(ts));
+                                obj.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(ts));
                                 Some(this.clone())
                             }
                         }
                         b"modify" => {
                             let modifier = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
-                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            let ts = obj.borrow().get_property(b"__timestamp").to_long();
                             if let Some(new_ts) = vm_apply_relative_modification(&modifier, ts) {
                                 if is_immutable {
                                     let obj_id = self.next_object_id;
                                     self.next_object_id += 1;
                                     let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
-                                    new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                    new_obj.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                     Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                                 } else {
-                                    obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                    obj.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                     Some(this.clone())
                                 }
                             } else {
@@ -4720,9 +4804,9 @@ impl Vm {
                             if is_immutable {
                                 let obj_id = self.next_object_id;
                                 self.next_object_id += 1;
-                                let ts = obj.borrow().get_property(b"timestamp").to_long();
+                                let ts = obj.borrow().get_property(b"__timestamp").to_long();
                                 let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
-                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+                                new_obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
                                 Some(this.clone())
@@ -4739,7 +4823,7 @@ impl Vm {
                             let year = args.get(1).cloned().unwrap_or(Value::Null).to_long();
                             let month = args.get(2).cloned().unwrap_or(Value::Null).to_long() as u32;
                             let day = args.get(3).cloned().unwrap_or(Value::Null).to_long() as u32;
-                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            let ts = obj.borrow().get_property(b"__timestamp").to_long();
                             let time_of_day = ((ts % 86400) + 86400) % 86400;
                             let new_days = vm_ymd_to_days(year, month, day);
                             let new_ts = new_days * 86400 + time_of_day;
@@ -4747,10 +4831,10 @@ impl Vm {
                                 let obj_id = self.next_object_id;
                                 self.next_object_id += 1;
                                 let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
-                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                new_obj.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
-                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                obj.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                 Some(this.clone())
                             }
                         }
@@ -4758,26 +4842,26 @@ impl Vm {
                             let hour = args.get(1).cloned().unwrap_or(Value::Null).to_long();
                             let minute = args.get(2).cloned().unwrap_or(Value::Null).to_long();
                             let second = args.get(3).map(|v| v.to_long()).unwrap_or(0);
-                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            let ts = obj.borrow().get_property(b"__timestamp").to_long();
                             let days = ts / 86400;
                             let new_ts = days * 86400 + hour * 3600 + minute * 60 + second;
                             if is_immutable {
                                 let obj_id = self.next_object_id;
                                 self.next_object_id += 1;
                                 let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
-                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                new_obj.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
-                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                obj.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                 Some(this.clone())
                             }
                         }
                         b"diff" => {
                             let other = args.get(1).cloned().unwrap_or(Value::Null);
                             let absolute = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
-                            let ts1 = obj.borrow().get_property(b"timestamp").to_long();
+                            let ts1 = obj.borrow().get_property(b"__timestamp").to_long();
                             let ts2 = if let Value::Object(o2) = &other {
-                                o2.borrow().get_property(b"timestamp").to_long()
+                                o2.borrow().get_property(b"__timestamp").to_long()
                             } else {
                                 0
                             };
@@ -4786,7 +4870,7 @@ impl Vm {
                         b"add" => {
                             // DateTime::add(DateInterval $interval) - add interval
                             let interval = args.get(1).cloned().unwrap_or(Value::Null);
-                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            let ts = obj.borrow().get_property(b"__timestamp").to_long();
                             let new_ts = if let Value::Object(iv) = &interval {
                                 let iv = iv.borrow();
                                 let y = iv.get_property(b"y").to_long();
@@ -4820,17 +4904,17 @@ impl Vm {
                                 let obj_id = self.next_object_id;
                                 self.next_object_id += 1;
                                 let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
-                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                new_obj.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
-                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                obj.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                 Some(this.clone())
                             }
                         }
                         b"sub" => {
                             // DateTime::sub(DateInterval $interval) - subtract interval
                             let interval = args.get(1).cloned().unwrap_or(Value::Null);
-                            let ts = obj.borrow().get_property(b"timestamp").to_long();
+                            let ts = obj.borrow().get_property(b"__timestamp").to_long();
                             let new_ts = if let Value::Object(iv) = &interval {
                                 let iv = iv.borrow();
                                 let y = iv.get_property(b"y").to_long();
@@ -4863,10 +4947,10 @@ impl Vm {
                                 let obj_id = self.next_object_id;
                                 self.next_object_id += 1;
                                 let mut new_obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
-                                new_obj.set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                new_obj.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
-                                obj.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+                                obj.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
                                 Some(this.clone())
                             }
                         }
@@ -7653,6 +7737,46 @@ impl Vm {
     }
 
     /// Format a timestamp using PHP date format characters
+    /// Format a UTC timestamp as "Y-m-d H:i:s.000000" for DateTime var_dump display
+    fn format_utc_datetime(secs: i64) -> String {
+        let days_since_epoch = if secs >= 0 { secs / 86400 } else { (secs - 86399) / 86400 };
+        let time_of_day = ((secs % 86400) + 86400) % 86400;
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+
+        fn dty(days: i64) -> (i64, u32, u32) {
+            let mut y = 1970i64;
+            let mut d = days;
+            if d >= 0 {
+                loop {
+                    let dy = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+                    if d < dy { break; }
+                    d -= dy;
+                    y += 1;
+                }
+            } else {
+                loop {
+                    y -= 1;
+                    let dy = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+                    d += dy;
+                    if d >= 0 { break; }
+                }
+            }
+            let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+            let mdays = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            let mut m = 0u32;
+            for md in &mdays {
+                if d < *md as i64 { break; }
+                d -= *md as i64;
+                m += 1;
+            }
+            (y, m + 1, d as u32 + 1)
+        }
+        let (year, month, day) = dty(days_since_epoch);
+        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.000000", year, month, day, hours, minutes, seconds)
+    }
+
     fn format_datetime_timestamp(&self, format: &str, secs: i64) -> String {
         let days_since_epoch = secs / 86400;
         let time_of_day = ((secs % 86400) + 86400) % 86400;
@@ -9894,7 +10018,7 @@ impl Vm {
                                 let obj_id = self.next_object_id();
                                 let class_name = if is_immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() };
                                 let mut obj = PhpObject::new(class_name, obj_id);
-                                obj.set_property(b"timestamp".to_vec(), Value::Long(timestamp));
+                                obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
                                 Value::Object(Rc::new(RefCell::new(obj)))
                             }
                             None => Value::False,
@@ -9907,7 +10031,7 @@ impl Vm {
                         let obj_id = self.next_object_id();
                         let class_name = if is_immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() };
                         let mut obj = PhpObject::new(class_name, obj_id);
-                        obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+                        obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
                         let result = Value::Object(Rc::new(RefCell::new(obj)));
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower == b"datetime::createfromimmutable"
@@ -9916,14 +10040,14 @@ impl Vm {
                         || func_name_lower == b"datetimeimmutable::createfrominterface" {
                         let is_immutable = func_name_lower.starts_with(b"datetimeimmutable");
                         let ts = if let Some(Value::Object(o)) = call.args.first() {
-                            o.borrow().get_property(b"timestamp").to_long()
+                            o.borrow().get_property(b"__timestamp").to_long()
                         } else {
                             std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
                         };
                         let obj_id = self.next_object_id();
                         let class_name = if is_immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() };
                         let mut obj = PhpObject::new(class_name, obj_id);
-                        obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+                        obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
                         let result = Value::Object(Rc::new(RefCell::new(obj)));
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower == b"dateinterval::createfromdatestring" {
@@ -11198,7 +11322,12 @@ impl Vm {
                                                     }
                                                 }
                                             };
-                                            obj_mut.set_property(b"timestamp".to_vec(), Value::Long(timestamp));
+                                            obj_mut.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
+                                            // Set display properties for var_dump
+                                            let date_str = Self::format_utc_datetime(timestamp);
+                                            obj_mut.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
+                                            obj_mut.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                                            obj_mut.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
                                         }
                                         b"dateinterval" => {
                                             // DateInterval::__construct($duration) - ISO 8601 duration
@@ -11259,6 +11388,10 @@ impl Vm {
                                                     obj_mut.set_property(b"previous".to_vec(), call.args[6].clone());
                                                 }
                                             } else if is_exc {
+                                                // Capture stack trace for exceptions
+                                                let trace = self.build_exception_trace();
+                                                obj_mut.set_property(b"trace".to_vec(), trace);
+                                                obj_mut.set_property(b"previous".to_vec(), Value::Null);
                                                 // Default exception/error constructor: ($message, $code, $previous)
                                                 if call.args.len() > 1 {
                                                     let msg_val = &call.args[1];
@@ -11864,7 +11997,7 @@ impl Vm {
                             .unwrap_or(false);
                         if !is_spl_array && !has_user_offset {
                             return Err(VmError {
-                                message: format!("Cannot use object of type {} as array", class_name_orig),
+                                message: format!("Uncaught Error: Cannot use object of type {} as array", class_name_orig),
                                 line: op.line,
                             });
                         }
@@ -11878,7 +12011,8 @@ impl Vm {
                     } else {
                         // Emit warning for non-array types
                         let type_name = match &arr_val {
-                            Value::True | Value::False => "bool",
+                            Value::True => "true",
+                            Value::False => "false",
                             Value::Long(_) => "int",
                             Value::Double(_) => "float",
                             Value::Null | Value::Undef => "", // null silently returns null

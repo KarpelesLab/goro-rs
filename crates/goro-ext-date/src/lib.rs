@@ -405,7 +405,13 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let obj_id = _vm.next_object_id();
     let mut obj = PhpObject::new(b"DateTime".to_vec(), obj_id);
-    obj.set_property(b"timestamp".to_vec(), Value::Long(timestamp));
+    // Store timestamp internally (used by date functions)
+    obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
+    // Format the date for var_dump display (PHP format)
+    let date_str = format_timestamp("Y-m-d H:i:s", timestamp) + ".000000";
+    obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
+    obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
@@ -778,7 +784,7 @@ fn date_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let (timestamp, tz_name) = if let Value::Object(o) = obj {
         let obj_borrow = o.borrow();
-        let ts = obj_borrow.get_property(b"timestamp").to_long();
+        let ts = obj_borrow.get_property(b"__timestamp").to_long();
         let tz = obj_borrow.get_property(b"timezone").to_php_string().to_string_lossy();
         (ts, if tz.is_empty() { get_default_tz(_vm) } else { tz })
     } else {
@@ -1049,7 +1055,7 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
 
     let obj_id = _vm.next_object_id();
     let mut obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
-    obj.set_property(b"timestamp".to_vec(), Value::Long(timestamp));
+    obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
@@ -1684,9 +1690,9 @@ fn date_modify_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let modifier = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
 
     if let Value::Object(o) = obj {
-        let ts = o.borrow().get_property(b"timestamp").to_long();
+        let ts = o.borrow().get_property(b"__timestamp").to_long();
         if let Some(new_ts) = apply_relative_modification(&modifier, ts) {
-            o.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+            o.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
             Ok(obj.clone())
         } else {
             Ok(Value::False)
@@ -1700,7 +1706,7 @@ fn date_modify_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn date_timestamp_get_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let obj = args.first().unwrap_or(&Value::Null);
     if let Value::Object(o) = obj {
-        Ok(o.borrow().get_property(b"timestamp"))
+        Ok(o.borrow().get_property(b"__timestamp"))
     } else {
         Ok(Value::False)
     }
@@ -1711,7 +1717,7 @@ fn date_timestamp_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     let obj = args.first().unwrap_or(&Value::Null);
     let ts = args.get(1).unwrap_or(&Value::Null).to_long();
     if let Value::Object(o) = obj {
-        o.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(ts));
+        o.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(ts));
         Ok(obj.clone())
     } else {
         Ok(Value::False)
@@ -1725,12 +1731,12 @@ fn date_diff_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let absolute = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
 
     let ts1 = if let Value::Object(o) = obj1 {
-        o.borrow().get_property(b"timestamp").to_long()
+        o.borrow().get_property(b"__timestamp").to_long()
     } else {
         return Ok(Value::False);
     };
     let ts2 = if let Value::Object(o) = obj2 {
-        o.borrow().get_property(b"timestamp").to_long()
+        o.borrow().get_property(b"__timestamp").to_long()
     } else {
         return Ok(Value::False);
     };
@@ -1831,7 +1837,7 @@ fn date_create_from_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
         Some(ts) => {
             let obj_id = _vm.next_object_id();
             let mut obj = PhpObject::new(b"DateTime".to_vec(), obj_id);
-            obj.set_property(b"timestamp".to_vec(), Value::Long(ts));
+            obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
             Ok(Value::Object(Rc::new(RefCell::new(obj))))
         }
         None => Ok(Value::False),
@@ -2011,11 +2017,11 @@ fn date_date_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let day = args.get(3).unwrap_or(&Value::Null).to_long() as u32;
 
     if let Value::Object(o) = obj {
-        let ts = o.borrow().get_property(b"timestamp").to_long();
+        let ts = o.borrow().get_property(b"__timestamp").to_long();
         let time_of_day = ((ts % 86400) + 86400) % 86400;
         let new_days = ymd_to_days(year, month, day);
         let new_ts = new_days * 86400 + time_of_day;
-        o.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+        o.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
         Ok(obj.clone())
     } else {
         Ok(Value::False)
@@ -2030,10 +2036,10 @@ fn date_time_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let second = args.get(3).map(|v| v.to_long()).unwrap_or(0);
 
     if let Value::Object(o) = obj {
-        let ts = o.borrow().get_property(b"timestamp").to_long();
+        let ts = o.borrow().get_property(b"__timestamp").to_long();
         let days = ts / 86400;
         let new_ts = days * 86400 + hour * 3600 + minute * 60 + second;
-        o.borrow_mut().set_property(b"timestamp".to_vec(), Value::Long(new_ts));
+        o.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
         Ok(obj.clone())
     } else {
         Ok(Value::False)

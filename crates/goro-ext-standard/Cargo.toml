@@ -7,3 +7,4 @@ description = "PHP standard extension for goro-rs"
 [dependencies]
 goro-core = { path = "../goro-core" }
 goro-vfs = { path = "../goro-vfs" }
+libc = "0.2"

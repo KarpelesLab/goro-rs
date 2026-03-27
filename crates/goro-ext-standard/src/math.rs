@@ -976,12 +976,12 @@ fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn intval_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     let base = args.get(1).map(|v| v.to_long()).unwrap_or(10);
-    if base != 10 {
+    if base != 10 && base >= 2 && base <= 36 {
         if let Value::String(s) = val {
             let s = s.to_string_lossy();
             let s = s.trim();
             let result = i64::from_str_radix(
-                s.trim_start_matches("0x").trim_start_matches("0X"),
+                s.trim_start_matches("0x").trim_start_matches("0X").trim_start_matches("0b").trim_start_matches("0B").trim_start_matches("0o").trim_start_matches("0O"),
                 base as u32,
             )
             .unwrap_or(0);

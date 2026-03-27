@@ -48,15 +48,23 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             );
         }
         Value::String(s) => {
-            vm.write_output(
-                format!(
-                    "{}string({}) \"{}\"\n",
-                    prefix,
-                    s.len(),
-                    s.to_string_lossy()
-                )
-                .as_bytes(),
-            );
+            let b = s.as_bytes();
+            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                // Closures should be displayed as Closure objects
+                vm.write_output(
+                    format!("{}object(Closure)#0 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
+                );
+            } else {
+                vm.write_output(
+                    format!(
+                        "{}string({}) \"{}\"\n",
+                        prefix,
+                        s.len(),
+                        s.to_string_lossy()
+                    )
+                    .as_bytes(),
+                );
+            }
         }
         Value::Array(arr) => {
             let arr = arr.borrow();
@@ -80,13 +88,13 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             let obj_borrow = obj.borrow();
             // Check if this is an enum case object
             if obj_borrow.has_property(b"__enum_case") {
-                let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+                let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
                 let case_name = obj_borrow.get_property(b"name");
                 let case_name_str = case_name.to_php_string().to_string_lossy();
                 vm.write_output(format!("{}enum({}::{})\n", prefix, class_name, case_name_str).as_bytes());
                 return;
             }
-            let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+            let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
             let class_lower: Vec<u8> = obj_borrow
                 .class_name
                 .iter()
@@ -113,7 +121,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let class_name_owned = class_name.to_string();
                 // Count visible properties (non-internal)
                 let extra_props: Vec<_> = obj_borrow.properties.iter()
-                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !matches!(val, Value::Undef))
+                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !matches!(val, Value::Undef))
                     .map(|(n, v)| (n.clone(), v.clone()))
                     .collect();
                 let prop_count = 1 + extra_props.len(); // storage + any extra properties
@@ -185,7 +193,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
 
             // Don't count uninitialized (Undef) properties or internal __spl_/__reflection_ properties
             let prop_count = obj_borrow.properties.iter()
-                .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !matches!(val, Value::Undef))
+                .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !matches!(val, Value::Undef))
                 .count();
             vm.write_output(
                 format!(
@@ -212,7 +220,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             drop(obj_borrow);
             for (name, value) in &props {
                 // Skip internal SPL/Reflection properties and uninitialized (Undef) properties
-                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || matches!(value, Value::Undef) {
+                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") || matches!(value, Value::Undef) {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);
@@ -452,7 +460,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                 let spl_arr = obj_borrow.get_property(b"__spl_array");
                 // Show extra props first
                 let extra_props: Vec<_> = obj_borrow.properties.iter()
-                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !matches!(val, Value::Undef))
+                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !matches!(val, Value::Undef))
                     .map(|(n, v)| (n.clone(), v.clone()))
                     .collect();
                 drop(obj_borrow);
@@ -501,7 +509,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (name, value) in &obj_borrow.properties {
                 // Skip internal SPL/Reflection properties
-                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") {
+                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);

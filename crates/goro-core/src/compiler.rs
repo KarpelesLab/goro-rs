@@ -32,6 +32,8 @@ struct LoopContext {
     continue_jumps: Vec<u32>,
     /// The offset to jump to for continue (set when known)
     continue_target: Option<u32>,
+    /// Whether this is a switch statement (for "continue targeting switch" warning)
+    is_switch: bool,
 }
 
 /// Compiles an AST into bytecode
@@ -349,13 +351,14 @@ impl Compiler {
     /// Extract the numeric level from a break/continue expression.
     /// `break` and `break 1` both return 1 (innermost loop).
     /// `break 2` returns 2 (two levels out), etc.
-    fn extract_break_continue_level(level_expr: &Option<Expr>) -> usize {
+    /// Returns (level, is_non_integer). level=0 means invalid (0 literal), is_non_integer=true means variable/expr operand.
+    fn extract_break_continue_level(level_expr: &Option<Expr>) -> (usize, bool) {
         match level_expr {
             Some(expr) => match &expr.kind {
-                ExprKind::Int(n) => *n as usize,
-                _ => 0, // Non-integer operand, will trigger error
+                ExprKind::Int(n) => (*n as usize, false),
+                _ => (0, true), // Non-integer operand (variable expression)
             },
-            None => 1,
+            None => (1, false),
         }
     }
 
@@ -637,6 +640,7 @@ impl Compiler {
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
+                    is_switch: false,
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -683,6 +687,7 @@ impl Compiler {
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
+                    is_switch: false,
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -725,6 +730,7 @@ impl Compiler {
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
+                    is_switch: false,
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -820,6 +826,7 @@ impl Compiler {
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
+                    is_switch: false,
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -962,6 +969,7 @@ impl Compiler {
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
+                    is_switch: true,
                 });
 
                 // Switch compilation strategy:
@@ -1053,7 +1061,13 @@ impl Compiler {
             }
 
             StmtKind::Break(level_expr) => {
-                let level = Self::extract_break_continue_level(level_expr);
+                let (level, is_non_integer) = Self::extract_break_continue_level(level_expr);
+                if is_non_integer {
+                    return Err(CompileError {
+                        message: "'break' operator with non-integer operand is no longer supported".into(),
+                        line: stmt.span.line,
+                    });
+                }
                 if level == 0 {
                     return Err(CompileError {
                         message: "'break' operator accepts only positive integers".into(),
@@ -1086,7 +1100,13 @@ impl Compiler {
             }
 
             StmtKind::Continue(level_expr) => {
-                let level = Self::extract_break_continue_level(level_expr);
+                let (level, is_non_integer) = Self::extract_break_continue_level(level_expr);
+                if is_non_integer {
+                    return Err(CompileError {
+                        message: "'continue' operator with non-integer operand is no longer supported".into(),
+                        line: stmt.span.line,
+                    });
+                }
                 if level == 0 {
                     return Err(CompileError {
                         message: "'continue' operator accepts only positive integers".into(),
@@ -1746,14 +1766,16 @@ impl Compiler {
                 // Check for reserved class names
                 let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if name_lower == b"self" || name_lower == b"parent" || name_lower == b"static" {
-                    let kind = if modifiers.is_interface {
-                        "interface"
+                    let (article, kind) = if modifiers.is_interface {
+                        ("an", "interface")
+                    } else if modifiers.is_trait {
+                        ("a", "trait")
                     } else {
-                        "class"
+                        ("a", "class")
                     };
                     return Err(CompileError {
-                        message: format!("Cannot use \"{}\" as {} name as it is reserved",
-                            String::from_utf8_lossy(name), if kind == "interface" { "an interface" } else { "a class" }),
+                        message: format!("Cannot use \"{}\" as {} {} name as it is reserved",
+                            String::from_utf8_lossy(name), article, kind),
                         line: stmt.span.line,
                     });
                 }
@@ -1762,9 +1784,10 @@ impl Compiler {
                 if let Some(p) = extends.as_ref() {
                     let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
                     if p_lower == b"self" || p_lower == b"parent" || p_lower == b"static" {
+                        let kind_name = if modifiers.is_interface { "interface" } else { "class" };
                         return Err(CompileError {
-                            message: format!("Cannot use \"{}\" as class name, as it is reserved",
-                                String::from_utf8_lossy(p)),
+                            message: format!("Cannot use \"{}\" as {} name, as it is reserved",
+                                String::from_utf8_lossy(p), kind_name),
                             line: stmt.span.line,
                         });
                     }

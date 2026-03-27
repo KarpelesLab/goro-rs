@@ -225,7 +225,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"chown", chown_fn);
     vm.register_function(b"clearstatcache", clearstatcache_fn);
     vm.register_function(b"fputcsv", fputcsv_fn);
-    vm.register_function(b"fgetcsv", fgetcsv_fn);
+    vm.register_function_with_params(b"fgetcsv", fgetcsv_fn, &[b"stream", b"length", b"separator", b"enclosure", b"escape"]);
     vm.register_function(b"fpassthru", fpassthru_fn);
     vm.register_function(b"fgetc", fgetc_fn);
     vm.register_function(b"flock", flock_fn);
@@ -328,7 +328,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"is_numeric", is_numeric_fn);
     vm.register_function(b"clearstatcache", clearstatcache_fn);
     vm.register_function(b"array_walk_recursive", array_walk_recursive_fn);
-    vm.register_function(b"fgetcsv", fgetcsv_fn);
+    vm.register_function_with_params(b"fgetcsv", fgetcsv_fn, &[b"stream", b"length", b"separator", b"enclosure", b"escape"]);
     vm.register_function(b"fileperms", fileperms_fn);
     vm.register_function(b"filetype", filetype_fn);
     vm.register_function(b"opendir", opendir_fn);
@@ -359,6 +359,14 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"class_uses", class_uses_fn);
     vm.register_function(b"str_increment", str_increment_fn);
     vm.register_function(b"str_decrement", str_decrement_fn);
+    vm.register_function(b"get_error_handler", get_error_handler_fn);
+    vm.register_function(b"get_exception_handler", get_exception_handler_fn);
+    vm.register_function(b"get_included_files", get_included_files_fn);
+    vm.register_function(b"get_required_files", get_included_files_fn);
+    vm.register_function(b"iterator_apply", iterator_apply_fn);
+    vm.register_function(b"property_exists", property_exists_fn);
+    vm.register_function(b"get_mangled_object_vars", get_mangled_object_vars_fn);
+    vm.register_function(b"get_resource_id", get_resource_id_fn);
 
     // Regex functions are now in the regex module (regex.rs)
 }
@@ -4407,20 +4415,66 @@ fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn stat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::metadata(&*path.to_string_lossy() as &str) {
-        Ok(m) => {
-            let mut result = PhpArray::new();
-            result.set(
-                goro_core::array::ArrayKey::String(PhpString::from_bytes(b"size")),
-                Value::Long(m.len() as i64),
-            );
-            result.set(
-                goro_core::array::ArrayKey::Int(7),
-                Value::Long(m.len() as i64),
-            );
-            Ok(Value::Array(Rc::new(RefCell::new(result))))
+    let path_str = path.to_string_lossy();
+    stat_path(&path_str, false)
+}
+
+fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let c_path = CString::new(path_str.as_bytes()).unwrap_or_default();
+        let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+        let ret = if is_lstat {
+            unsafe { libc::lstat(c_path.as_ptr(), &mut stat_buf) }
+        } else {
+            unsafe { libc::stat(c_path.as_ptr(), &mut stat_buf) }
+        };
+        if ret != 0 {
+            return Ok(Value::False);
         }
-        Err(_) => Ok(Value::False),
+        let mut result = PhpArray::new();
+        let fields: [(i64, &[u8], i64); 13] = [
+            (0, b"dev", stat_buf.st_dev as i64),
+            (1, b"ino", stat_buf.st_ino as i64),
+            (2, b"mode", stat_buf.st_mode as i64),
+            (3, b"nlink", stat_buf.st_nlink as i64),
+            (4, b"uid", stat_buf.st_uid as i64),
+            (5, b"gid", stat_buf.st_gid as i64),
+            (6, b"rdev", stat_buf.st_rdev as i64),
+            (7, b"size", stat_buf.st_size as i64),
+            (8, b"atime", stat_buf.st_atime as i64),
+            (9, b"mtime", stat_buf.st_mtime as i64),
+            (10, b"ctime", stat_buf.st_ctime as i64),
+            (11, b"blksize", stat_buf.st_blksize as i64),
+            (12, b"blocks", stat_buf.st_blocks as i64),
+        ];
+        for (idx, name, val) in &fields {
+            result.set(ArrayKey::Int(*idx), Value::Long(*val));
+            result.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    }
+    #[cfg(not(unix))]
+    {
+        match std::fs::metadata(path_str) {
+            Ok(m) => {
+                let mut result = PhpArray::new();
+                let size = m.len() as i64;
+                let fields: [(i64, &[u8], i64); 13] = [
+                    (0, b"dev", 0), (1, b"ino", 0), (2, b"mode", 0), (3, b"nlink", 0),
+                    (4, b"uid", 0), (5, b"gid", 0), (6, b"rdev", 0), (7, b"size", size),
+                    (8, b"atime", 0), (9, b"mtime", 0), (10, b"ctime", 0),
+                    (11, b"blksize", -1), (12, b"blocks", -1),
+                ];
+                for (idx, name, val) in &fields {
+                    result.set(ArrayKey::Int(*idx), Value::Long(*val));
+                    result.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
+                }
+                Ok(Value::Array(Rc::new(RefCell::new(result))))
+            }
+            Err(_) => Ok(Value::False),
+        }
     }
 }
 fn is_numeric_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -4696,15 +4750,54 @@ fn gc_enable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         .insert(b"zend.enable_gc".to_vec(), Value::Long(1));
     Ok(Value::Null)
 }
-fn get_object_vars_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(obj)) = args.first() {
         let obj = obj.borrow();
+        let class_name_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+        // Get the calling class context to determine visibility
+        let calling_class = vm.get_current_class_name();
+        let calling_class_lower: Option<Vec<u8>> = calling_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect());
+
+        // Build a map of property visibility from the class definition
+        let prop_visibility: std::collections::HashMap<Vec<u8>, goro_core::object::Visibility> =
+            if let Some(class_def) = vm.get_class_def(&class_name_lower) {
+                class_def.properties.iter()
+                    .map(|p| (p.name.clone(), p.visibility))
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+
         let mut arr = PhpArray::new();
         for (name, val) in &obj.properties {
-            arr.set(
-                goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
-                val.clone(),
-            );
+            // Check visibility
+            let vis = prop_visibility.get(name).copied().unwrap_or(goro_core::object::Visibility::Public);
+            let accessible = match vis {
+                goro_core::object::Visibility::Public => true,
+                goro_core::object::Visibility::Protected => {
+                    // Accessible if calling from same class or subclass
+                    if let Some(ref cc) = calling_class_lower {
+                        cc == &class_name_lower || vm.is_subclass_of(cc, &class_name_lower) || vm.is_subclass_of(&class_name_lower, cc)
+                    } else {
+                        false
+                    }
+                }
+                goro_core::object::Visibility::Private => {
+                    // Only accessible from the same class
+                    if let Some(ref cc) = calling_class_lower {
+                        cc == &class_name_lower
+                    } else {
+                        false
+                    }
+                }
+            };
+            if accessible {
+                arr.set(
+                    goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
+                    val.clone(),
+                );
+            }
         }
         Ok(Value::Array(Rc::new(RefCell::new(arr))))
     } else {
@@ -4715,7 +4808,8 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     if let Value::Object(obj) = val {
         let obj = obj.borrow();
-        Ok(Value::String(PhpString::from_vec(obj.class_name.clone())))
+        let display = goro_core::value::display_class_name(&obj.class_name);
+        Ok(Value::String(PhpString::from_vec(display.into_bytes())))
     } else if let Value::Generator(_) = val {
         Ok(Value::String(PhpString::from_bytes(b"Generator")))
     } else if let Value::String(s) = val {
@@ -7049,8 +7143,9 @@ fn file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn lstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Same as stat for now
-    stat_fn(_vm, args)
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = path.to_string_lossy();
+    stat_path(&path_str, true)
 }
 
 fn is_executable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -8397,41 +8492,57 @@ fn fstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     FILE_HANDLES.with(|handles| {
         let handles = handles.borrow();
         if let Some(fh) = handles.get(&fid) {
-            match fh.file.metadata() {
-                Ok(meta) => {
-                    let mut arr = PhpArray::new();
-                    let len = meta.len() as i64;
-                    // Numeric indices (0-12)
-                    arr.push(Value::Long(0)); // dev
-                    arr.push(Value::Long(0)); // ino
-                    arr.push(Value::Long(0o100644)); // mode
-                    arr.push(Value::Long(1)); // nlink
-                    arr.push(Value::Long(0)); // uid
-                    arr.push(Value::Long(0)); // gid
-                    arr.push(Value::Long(0)); // rdev
-                    arr.push(Value::Long(len)); // size
-                    arr.push(Value::Long(0)); // atime
-                    arr.push(Value::Long(0)); // mtime
-                    arr.push(Value::Long(0)); // ctime
-                    arr.push(Value::Long(-1)); // blksize
-                    arr.push(Value::Long(-1)); // blocks
-                    // Named indices
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"dev")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"ino")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"mode")), Value::Long(0o100644));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"nlink")), Value::Long(1));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"uid")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"gid")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"rdev")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"size")), Value::Long(len));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"atime")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"mtime")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"ctime")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"blksize")), Value::Long(-1));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"blocks")), Value::Long(-1));
-                    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                let fd = fh.file.as_raw_fd();
+                let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+                let ret = unsafe { libc::fstat(fd, &mut stat_buf) };
+                if ret != 0 {
+                    return Ok(Value::False);
                 }
-                Err(_) => Ok(Value::False),
+                let mut result = PhpArray::new();
+                let fields: [(i64, &[u8], i64); 13] = [
+                    (0, b"dev", stat_buf.st_dev as i64),
+                    (1, b"ino", stat_buf.st_ino as i64),
+                    (2, b"mode", stat_buf.st_mode as i64),
+                    (3, b"nlink", stat_buf.st_nlink as i64),
+                    (4, b"uid", stat_buf.st_uid as i64),
+                    (5, b"gid", stat_buf.st_gid as i64),
+                    (6, b"rdev", stat_buf.st_rdev as i64),
+                    (7, b"size", stat_buf.st_size as i64),
+                    (8, b"atime", stat_buf.st_atime as i64),
+                    (9, b"mtime", stat_buf.st_mtime as i64),
+                    (10, b"ctime", stat_buf.st_ctime as i64),
+                    (11, b"blksize", stat_buf.st_blksize as i64),
+                    (12, b"blocks", stat_buf.st_blocks as i64),
+                ];
+                for (idx, name, val) in &fields {
+                    result.set(ArrayKey::Int(*idx), Value::Long(*val));
+                    result.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
+                }
+                Ok(Value::Array(Rc::new(RefCell::new(result))))
+            }
+            #[cfg(not(unix))]
+            {
+                match fh.file.metadata() {
+                    Ok(meta) => {
+                        let mut arr = PhpArray::new();
+                        let len = meta.len() as i64;
+                        let fields: [(i64, &[u8], i64); 13] = [
+                            (0, b"dev", 0), (1, b"ino", 0), (2, b"mode", 0o100644),
+                            (3, b"nlink", 1), (4, b"uid", 0), (5, b"gid", 0), (6, b"rdev", 0),
+                            (7, b"size", len), (8, b"atime", 0), (9, b"mtime", 0),
+                            (10, b"ctime", 0), (11, b"blksize", -1), (12, b"blocks", -1),
+                        ];
+                        for (idx, name, val) in &fields {
+                            arr.set(ArrayKey::Int(*idx), Value::Long(*val));
+                            arr.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
+                        }
+                        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+                    }
+                    Err(_) => Ok(Value::False),
+                }
             }
         } else {
             Ok(Value::False)
@@ -8475,4 +8586,131 @@ fn stream_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             Ok(Value::False)
         }
     })
+}
+
+fn get_error_handler_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(vm.error_handler.clone().unwrap_or(Value::Null))
+}
+
+fn get_exception_handler_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // We don't track exception handler separately yet, return null
+    let _ = vm;
+    Ok(Value::Null)
+}
+
+fn get_included_files_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Return empty array for now
+    let arr = PhpArray::new();
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let iterator = args.first().unwrap_or(&Value::Null).clone();
+    let callback = args.get(1).unwrap_or(&Value::Null).clone();
+    let cb_args = args.get(2).cloned();
+
+    // Iterate over the iterator and call the callback for each element
+    if let Value::Object(_) = &iterator {
+        // Call rewind on the iterator
+        let _ = vm.call_object_method(&iterator, b"rewind", &[iterator.clone()]);
+
+        let mut count = 0i64;
+        loop {
+            // Check valid()
+            let valid = vm.call_object_method(&iterator, b"valid", &[iterator.clone()]);
+            match valid {
+                Some(v) if !v.is_truthy() => break,
+                None => break,
+                _ => {}
+            }
+
+            // Call the callback
+            let mut call_fn_args = vec![callback.clone()];
+            if let Some(Value::Array(extra)) = &cb_args {
+                let extra_borrow = extra.borrow();
+                for (_, v) in extra_borrow.iter() {
+                    call_fn_args.push(v.clone());
+                }
+            }
+            let result = call_user_func(vm, &call_fn_args)?;
+            count += 1;
+
+            if !result.is_truthy() {
+                break;
+            }
+
+            // Call next()
+            let _ = vm.call_object_method(&iterator, b"next", &[iterator.clone()]);
+        }
+        Ok(Value::Long(count))
+    } else {
+        Ok(Value::Long(0))
+    }
+}
+
+fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let obj_or_class = args.first().unwrap_or(&Value::Null);
+    let prop_name = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+    let prop_bytes = prop_name.as_bytes();
+
+    match obj_or_class {
+        Value::Object(obj) => {
+            let obj_borrow = obj.borrow();
+            // Check instance properties
+            if obj_borrow.has_property(prop_bytes) {
+                return Ok(Value::True);
+            }
+            // Check class definition
+            let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            drop(obj_borrow);
+            if let Some(class_def) = vm.get_class_def(&class_lower) {
+                for prop in &class_def.properties {
+                    if prop.name == prop_bytes {
+                        return Ok(Value::True);
+                    }
+                }
+            }
+            Ok(Value::False)
+        }
+        Value::String(s) => {
+            let class_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(class_def) = vm.get_class_def(&class_lower) {
+                for prop in &class_def.properties {
+                    if prop.name == prop_bytes {
+                        return Ok(Value::True);
+                    }
+                }
+            }
+            Ok(Value::False)
+        }
+        _ => Ok(Value::Null),
+    }
+}
+
+fn get_mangled_object_vars_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(obj)) = args.first() {
+        let obj = obj.borrow();
+        let mut arr = PhpArray::new();
+        for (name, val) in &obj.properties {
+            if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__enum_") {
+                continue;
+            }
+            arr.set(
+                ArrayKey::String(PhpString::from_vec(name.clone())),
+                val.clone(),
+            );
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+    } else {
+        Ok(Value::Null)
+    }
+}
+
+fn get_resource_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Resources are represented as Long (file handle IDs)
+    if let Some(Value::Long(id)) = args.first() {
+        Ok(Value::Long(*id))
+    } else {
+        Ok(Value::Long(0))
+    }
 }

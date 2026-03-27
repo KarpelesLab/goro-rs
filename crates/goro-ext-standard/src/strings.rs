@@ -4376,9 +4376,20 @@ pub fn str_getcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let separator = args.get(1).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b',')).unwrap_or(b',');
     let enclosure = args.get(2).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b'"')).unwrap_or(b'"');
-    
+
     let mut result = PhpArray::new();
-    let bytes = s.as_bytes();
+    let raw_bytes = s.as_bytes();
+    // Strip trailing newline like PHP does
+    let bytes = if raw_bytes.last() == Some(&b'\n') {
+        let end = if raw_bytes.len() >= 2 && raw_bytes[raw_bytes.len()-2] == b'\r' {
+            raw_bytes.len() - 2
+        } else {
+            raw_bytes.len() - 1
+        };
+        &raw_bytes[..end]
+    } else {
+        raw_bytes
+    };
     let mut field = Vec::new();
     let mut in_enclosure = false;
     let mut i = 0;

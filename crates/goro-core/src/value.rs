@@ -7,6 +7,26 @@ use crate::generator::PhpGenerator;
 use crate::object::PhpObject;
 use crate::string::PhpString;
 
+/// Convert an internal class name to a display name.
+/// Transforms `__anonymous_class_N` to `class@anonymous` for display purposes.
+pub fn display_class_name(name: &[u8]) -> String {
+    let s = String::from_utf8_lossy(name);
+    if s.contains("__anonymous_class_") {
+        // Replace the __anonymous_class_N part with class@anonymous
+        // Handle namespaced anon classes like "Foo\__anonymous_class_1"
+        let result = s.as_ref().to_string();
+        // Find and replace the __anonymous_class_N pattern
+        if let Some(pos) = result.find("__anonymous_class_") {
+            let prefix = &result[..pos];
+            format!("{}class@anonymous", prefix)
+        } else {
+            result
+        }
+    } else {
+        s.into_owned()
+    }
+}
+
 thread_local! {
     /// PHP `precision` ini setting. Default 14. -1 means shortest roundtrip.
     static PHP_PRECISION: Cell<i32> = const { Cell::new(14) };
