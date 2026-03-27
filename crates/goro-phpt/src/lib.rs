@@ -136,6 +136,20 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     // Parse INI settings
     let ini_settings = parse_ini_settings(test.ini_section());
 
+    // Handle EXTENSIONS section - skip tests requiring unsupported extensions
+    if let Some(extensions) = test.sections.get("EXTENSIONS") {
+        let supported = [
+            "ctype", "date", "json", "hash", "pcre", "spl", "standard",
+            "mbstring", "reflection",
+        ];
+        for ext in extensions.lines() {
+            let ext = ext.trim().to_lowercase();
+            if !ext.is_empty() && !supported.contains(&ext.as_str()) {
+                return TestResult::Skip(format!("Required extension {} not available", ext));
+            }
+        }
+    }
+
     // Handle SKIPIF section
     if let Some(skipif) = test.skipif_section() {
         let skipif_trimmed = skipif.trim();

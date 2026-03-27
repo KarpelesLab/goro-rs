@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use indexmap::IndexMap;
 
 use crate::opcode::OpArray;
 use crate::value::Value;
@@ -30,9 +31,9 @@ pub struct ClassEntry {
     pub traits: Vec<Vec<u8>>,
     pub trait_adaptations: Vec<TraitAdaptation>,
     pub properties: Vec<PropertyDef>,
-    pub methods: HashMap<Vec<u8>, MethodDef>,
-    pub constants: HashMap<Vec<u8>, Value>,
-    pub static_properties: HashMap<Vec<u8>, Value>,
+    pub methods: IndexMap<Vec<u8>, MethodDef>,
+    pub constants: IndexMap<Vec<u8>, Value>,
+    pub static_properties: IndexMap<Vec<u8>, Value>,
     pub is_abstract: bool,
     pub is_final: bool,
     pub is_readonly: bool,
@@ -88,9 +89,9 @@ impl ClassEntry {
             traits: Vec::new(),
             trait_adaptations: Vec::new(),
             properties: Vec::new(),
-            methods: HashMap::new(),
-            constants: HashMap::new(),
-            static_properties: HashMap::new(),
+            methods: IndexMap::new(),
+            constants: IndexMap::new(),
+            static_properties: IndexMap::new(),
             is_abstract: false,
             is_final: false,
             is_readonly: false,

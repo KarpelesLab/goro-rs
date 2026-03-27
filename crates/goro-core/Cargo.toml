@@ -6,3 +6,4 @@ description = "PHP engine core: values, compiler, and VM for goro-rs"
 
 [dependencies]
 goro-parser = { path = "../goro-parser" }
+indexmap = "2"

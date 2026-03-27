@@ -2763,13 +2763,8 @@ fn strripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let replacement = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let start = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    let length = args.get(3).map(|v| v.to_long());
-    let bytes = s.as_bytes();
-    let len = bytes.len() as i64;
+fn substr_replace_single(s: &[u8], replacement: &[u8], start: i64, length: Option<i64>) -> Vec<u8> {
+    let len = s.len() as i64;
     let start_idx = if start < 0 {
         (len + start).max(0) as usize
     } else {
@@ -2777,15 +2772,75 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let end_idx = match length {
         Some(l) if l < 0 => (len + l).max(start_idx as i64) as usize,
-        Some(l) => (start_idx + l as usize).min(bytes.len()),
-        None => bytes.len(),
+        Some(l) => (start_idx + l as usize).min(s.len()),
+        None => s.len(),
     };
-    let mut result = bytes[..start_idx].to_vec();
-    result.extend_from_slice(replacement.as_bytes());
-    if end_idx < bytes.len() {
-        result.extend_from_slice(&bytes[end_idx..]);
+    let mut result = s[..start_idx].to_vec();
+    result.extend_from_slice(replacement);
+    if end_idx < s.len() {
+        result.extend_from_slice(&s[end_idx..]);
     }
-    Ok(Value::String(PhpString::from_vec(result)))
+    result
+}
+
+fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let string_arg = args.first().unwrap_or(&Value::Null);
+    let replacement_arg = args.get(1).unwrap_or(&Value::Null);
+    let start_arg = args.get(2).unwrap_or(&Value::Null);
+    let length_arg = args.get(3);
+
+    // If first argument is an array, process each element
+    if let Value::Array(arr) = string_arg {
+        let arr = arr.borrow();
+        let mut result = PhpArray::new();
+
+        for (i, (key, val)) in arr.iter().enumerate() {
+            let s = val.to_php_string();
+
+            // Get replacement for this element
+            let repl = if let Value::Array(repl_arr) = replacement_arg {
+                let repl_arr = repl_arr.borrow();
+                repl_arr.iter().nth(i)
+                    .map(|(_, v)| v.to_php_string())
+                    .unwrap_or(PhpString::empty())
+            } else {
+                replacement_arg.to_php_string()
+            };
+
+            // Get start for this element
+            let start = if let Value::Array(start_arr) = start_arg {
+                let start_arr = start_arr.borrow();
+                start_arr.iter().nth(i)
+                    .map(|(_, v)| v.to_long())
+                    .unwrap_or(0)
+            } else {
+                start_arg.to_long()
+            };
+
+            // Get length for this element
+            let length = length_arg.map(|la| {
+                if let Value::Array(len_arr) = la {
+                    let len_arr = len_arr.borrow();
+                    len_arr.iter().nth(i)
+                        .map(|(_, v)| v.to_long())
+                } else {
+                    Some(la.to_long())
+                }
+            }).flatten();
+
+            let replaced = substr_replace_single(s.as_bytes(), repl.as_bytes(), start, length);
+            result.set(key.clone(), Value::String(PhpString::from_vec(replaced)));
+        }
+
+        Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(result))))
+    } else {
+        let s = string_arg.to_php_string();
+        let replacement = replacement_arg.to_php_string();
+        let start = start_arg.to_long();
+        let length = length_arg.map(|v| v.to_long());
+        let result = substr_replace_single(s.as_bytes(), replacement.as_bytes(), start, length);
+        Ok(Value::String(PhpString::from_vec(result)))
+    }
 }
 
 fn mb_detect_encoding(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

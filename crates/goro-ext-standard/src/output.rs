@@ -568,7 +568,14 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
         Value::Null | Value::Undef => buf.extend_from_slice(b"NULL"),
         Value::True => buf.extend_from_slice(b"true"),
         Value::False => buf.extend_from_slice(b"false"),
-        Value::Long(n) => buf.extend_from_slice(n.to_string().as_bytes()),
+        Value::Long(n) => {
+            // PHP_INT_MIN must be represented as (-9223372036854775807-1) to be parsable
+            if *n == i64::MIN {
+                buf.extend_from_slice(b"(-9223372036854775807-1)");
+            } else {
+                buf.extend_from_slice(n.to_string().as_bytes());
+            }
+        }
         Value::Double(f) => {
             // var_export uses a representation that can be parsed back
             let s = format_float(*f);

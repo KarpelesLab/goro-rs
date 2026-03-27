@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use indexmap::IndexMap;
 
 use crate::array::{ArrayKey, PhpArray};
 use crate::object::{ClassEntry, MethodDef, PhpObject, PropertyDef, Visibility};
@@ -195,8 +196,8 @@ pub struct Vm {
     static_vars: HashMap<Vec<u8>, Value>,
     /// Global variables
     globals: HashMap<Vec<u8>, Value>,
-    /// Class table
-    pub classes: HashMap<Vec<u8>, ClassEntry>,
+    /// Class table (preserves insertion order)
+    pub classes: IndexMap<Vec<u8>, ClassEntry>,
     /// Next object ID
     next_object_id: u64,
     /// Pending class definitions (from compiler, indexed by position)
@@ -255,7 +256,7 @@ impl Vm {
             pending_calls: Vec::new(),
             static_vars: HashMap::new(),
             globals: HashMap::new(),
-            classes: HashMap::new(),
+            classes: IndexMap::new(),
             next_object_id: 1,
             pending_classes: Vec::new(),
             is_global_scope: true,
@@ -8354,9 +8355,14 @@ impl Vm {
         let result = self.execute_op_array(op_array, cvs)?;
 
         // Call __destruct on all tracked objects in reverse creation order
+        // Skip objects whose constructor threw (marked with __ctor_pending)
         let destructibles = std::mem::take(&mut self.destructible_objects);
         for obj_val in destructibles.iter().rev() {
             if let Value::Object(obj_rc) = obj_val {
+                // Skip objects whose constructor did not complete
+                if matches!(obj_rc.borrow().get_property(b"__ctor_pending"), Value::True) {
+                    continue;
+                }
                 let class_lower: Vec<u8> = obj_rc
                     .borrow()
                     .class_name
@@ -10872,16 +10878,30 @@ impl Vm {
                             }
                         }
 
-                        // Auto-inject $this for parent:: / static method calls in instance context
+                        // Auto-inject $this for parent:: / non-static method calls in instance context
                         // When calling ClassName::method() (e.g. parent::show()), the method expects
                         // $this as CV[0], but InitFCall doesn't pass it. Inject from current scope.
+                        // Do NOT inject $this for static methods.
                         if pushed_called_class
                             && user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
                             && !matches!(call.args.first(), Some(Value::Object(_)))
                         {
-                            // Check if current scope has $this
-                            if let Some(this_val @ Value::Object(_)) = cvs.first() {
-                                call.args.insert(0, this_val.clone());
+                            // Check if the method is static - if so, don't inject $this
+                            let method_is_static = if let Some(pos) = func_name_lower.iter().position(|&b| b == b':') {
+                                let class_part = &func_name_lower[..pos];
+                                let method_part = &func_name_lower[pos + 2..];
+                                self.classes.get(class_part)
+                                    .and_then(|c| c.get_method(method_part))
+                                    .map(|m| m.is_static)
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
+                            if !method_is_static {
+                                // Check if current scope has $this
+                                if let Some(this_val @ Value::Object(_)) = cvs.first() {
+                                    call.args.insert(0, this_val.clone());
+                                }
                             }
                         }
 
@@ -10926,6 +10946,13 @@ impl Vm {
                         let call_failed = call_result.is_err();
                         if !call_failed {
                             self.call_stack.pop();
+                            // If this was a constructor call that succeeded,
+                            // clear the __ctor_pending flag so the destructor runs at shutdown.
+                            if func_name_lower.ends_with(b"::__construct") {
+                                if let Some(Value::Object(obj_rc)) = call.args.first() {
+                                    obj_rc.borrow_mut().properties.retain(|(k, _)| k != b"__ctor_pending");
+                                }
+                            }
                         }
 
                         // Pop the called class stack and scope stack
@@ -13348,11 +13375,42 @@ impl Vm {
                     let prop_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
                     let result = if let Value::Object(obj) = &obj_val {
                         let ob = obj.borrow();
-                        if ob.has_property(prop_name.as_bytes()) {
+                        let class_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_name_orig = ob.class_name.clone();
+                        // Check if property exists AND is accessible from current scope
+                        let prop_accessible = if ob.has_property(prop_name.as_bytes()) {
+                            // Check visibility
+                            let current_scope = self.class_scope_stack.last().cloned().unwrap_or_default();
+                            let prop_visibility = self.classes.get(&class_lower)
+                                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                                .map(|p| p.visibility);
+                            match prop_visibility {
+                                Some(crate::object::Visibility::Private) => {
+                                    // Private: only accessible from the declaring class
+                                    let declaring = self.classes.get(&class_lower)
+                                        .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                                        .map(|p| p.declaring_class.clone())
+                                        .unwrap_or_else(|| class_lower.clone());
+                                    current_scope == declaring
+                                }
+                                Some(crate::object::Visibility::Protected) => {
+                                    // Protected: accessible from same class or subclass
+                                    if current_scope.is_empty() {
+                                        false
+                                    } else {
+                                        current_scope == class_lower || self.class_extends(&current_scope, &class_lower) || self.class_extends(&class_lower, &current_scope)
+                                    }
+                                }
+                                _ => true, // Public or no visibility info (dynamic property)
+                            }
+                        } else {
+                            false
+                        };
+                        if prop_accessible {
                             let val = ob.get_property(prop_name.as_bytes());
+                            drop(ob);
                             if matches!(val, Value::Null) { Value::False } else { Value::True }
                         } else {
-                            let class_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             drop(ob);
                             // Try __isset magic
                             let has_isset = self.classes.get(&class_lower)
@@ -13360,11 +13418,17 @@ impl Vm {
                                 .unwrap_or(false);
                             if has_isset && self.magic_depth < 5 {
                                 self.magic_depth += 1;
-                                let method = self.classes.get(&class_lower).unwrap().get_method(b"__isset").unwrap().op_array.clone();
+                                let magic_method_def = self.classes.get(&class_lower).unwrap().get_method(b"__isset").unwrap();
+                                let method = magic_method_def.op_array.clone();
+                                let magic_declaring = magic_method_def.declaring_class.clone();
                                 let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
                                 if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
                                 if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); }
+                                self.class_scope_stack.push(magic_declaring);
+                                self.called_class_stack.push(class_name_orig);
                                 let isset_result = self.execute_op_array(&method, fn_cvs).unwrap_or(Value::False);
+                                self.called_class_stack.pop();
+                                self.class_scope_stack.pop();
                                 self.magic_depth -= 1;
                                 if isset_result.is_truthy() { Value::True } else { Value::False }
                             } else {
@@ -13429,16 +13493,23 @@ impl Vm {
                         } else {
                             // Try __unset magic method
                             let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let class_name_orig = obj.borrow().class_name.clone();
                             let has_unset = self.classes.get(&class_lower)
                                 .map(|c| c.methods.contains_key(&b"__unset".to_vec()))
                                 .unwrap_or(false);
                             if has_unset && self.magic_depth < 5 {
                                 self.magic_depth += 1;
-                                let method = self.classes.get(&class_lower).unwrap().get_method(b"__unset").unwrap().op_array.clone();
+                                let magic_method_def = self.classes.get(&class_lower).unwrap().get_method(b"__unset").unwrap();
+                                let method = magic_method_def.op_array.clone();
+                                let magic_declaring = magic_method_def.declaring_class.clone();
                                 let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
                                 if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
                                 if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); }
+                                self.class_scope_stack.push(magic_declaring);
+                                self.called_class_stack.push(class_name_orig);
                                 let _ = self.execute_op_array(&method, fn_cvs);
+                                self.called_class_stack.pop();
+                                self.class_scope_stack.pop();
                                 self.magic_depth -= 1;
                             }
                         }
@@ -14284,7 +14355,21 @@ impl Vm {
                                             None
                                         };
                                         if let Some(val) = resolved {
-                                            prop.default = val;
+                                            // If the resolved value is an enum case marker, resolve it to an actual enum object
+                                            if let Value::String(s2) = &val {
+                                                if s2.as_bytes().starts_with(b"__enum_case__::") {
+                                                    let case_name = &s2.as_bytes()[15..];
+                                                    if let Some(enum_obj) = self.get_enum_case(&ref_class_lower, case_name) {
+                                                        prop.default = enum_obj;
+                                                    } else {
+                                                        prop.default = val;
+                                                    }
+                                                } else {
+                                                    prop.default = val;
+                                                }
+                                            } else {
+                                                prop.default = val;
+                                            }
                                         }
                                     }
                                 }
@@ -14309,7 +14394,21 @@ impl Vm {
                                             None
                                         };
                                         if let Some(val) = resolved {
-                                            class.static_properties.insert(prop_name, val);
+                                            // If the resolved value is an enum case marker, resolve it
+                                            if let Value::String(s2) = &val {
+                                                if s2.as_bytes().starts_with(b"__enum_case__::") {
+                                                    let case_name = &s2.as_bytes()[15..];
+                                                    if let Some(enum_obj) = self.get_enum_case(&ref_class_lower, case_name) {
+                                                        class.static_properties.insert(prop_name, enum_obj);
+                                                    } else {
+                                                        class.static_properties.insert(prop_name, val);
+                                                    }
+                                                } else {
+                                                    class.static_properties.insert(prop_name, val);
+                                                }
+                                            } else {
+                                                class.static_properties.insert(prop_name, val);
+                                            }
                                         }
                                     }
                                 }
@@ -14649,12 +14748,27 @@ impl Vm {
                     let obj_value = Value::Object(Rc::new(RefCell::new(obj)));
 
                     // Track objects with __destruct for shutdown-time destruction
+                    // Note: we track the object here, but mark it with __ctor_pending.
+                    // After the constructor completes (InitMethodCall + DoFCall),
+                    // the DoFCall handler for __construct removes this flag.
+                    // At shutdown, only objects without __ctor_pending get destructed.
                     let has_destruct = self
                         .classes
                         .get(&name_lower)
                         .map(|c| c.methods.contains_key(&b"__destruct".to_vec()))
                         .unwrap_or(false);
                     if has_destruct {
+                        // Check if there's a constructor - if so, mark as pending
+                        let has_ctor = self
+                            .classes
+                            .get(&name_lower)
+                            .map(|c| c.methods.contains_key(&b"__construct".to_vec()))
+                            .unwrap_or(false);
+                        if has_ctor {
+                            if let Value::Object(ref rc) = obj_value {
+                                rc.borrow_mut().set_property(b"__ctor_pending".to_vec(), Value::True);
+                            }
+                        }
                         self.destructible_objects.push(obj_value.clone());
                     }
 
@@ -15702,8 +15816,42 @@ impl Vm {
         val.to_php_string()
     }
 
+    /// Check if a value is a closure (stored as string or array with closure name)
+    fn is_closure_value(val: &Value) -> bool {
+        match val {
+            Value::String(s) => {
+                let bytes = s.as_bytes();
+                bytes.starts_with(b"__closure_") || bytes.starts_with(b"__arrow_") || bytes.starts_with(b"__bound_closure_") || bytes.starts_with(b"__closure_fcc_")
+            }
+            Value::Array(arr) => {
+                let arr_borrow = arr.borrow();
+                if let Some(first) = arr_borrow.values().next() {
+                    if let Value::String(s) = first {
+                        let bytes = s.as_bytes();
+                        bytes.starts_with(b"__closure_") || bytes.starts_with(b"__arrow_") || bytes.starts_with(b"__bound_closure_") || bytes.starts_with(b"__closure_fcc_")
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Convert a value to string, but throw an Error for objects without __toString
     pub fn value_to_string_checked(&mut self, val: &Value) -> Result<PhpString, VmError> {
+        // Check for closures stored as strings/arrays
+        if Self::is_closure_value(val) {
+            let msg = "Object of class Closure could not be converted to string";
+            let exc = self.create_exception(b"Error", msg, self.current_line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught Error: {}", msg),
+                line: self.current_line,
+            });
+        }
         if let Value::Object(obj) = val {
             let class_name = {
                 let obj_ref = obj.borrow();
@@ -16416,11 +16564,14 @@ fn emit_inc_dec_warnings(vm: &mut Vm, val: &Value, is_increment: bool, line: u32
         }
         Value::String(s) if is_increment => {
             let bytes = s.as_bytes();
-            // Only warn for non-numeric strings that would be incremented
-            if crate::value::parse_numeric_string(bytes).is_none() && !bytes.is_empty() {
-                vm.emit_deprecated_at("Increment on non-numeric string is deprecated, use str_increment() instead", line);
-            } else if bytes.is_empty() {
-                vm.emit_deprecated_at("Increment on non-numeric string is deprecated, use str_increment() instead", line);
+            // Only warn for non-numeric, non-purely-alphanumeric strings
+            // Purely alphanumeric strings use the magic increment (no deprecation)
+            if crate::value::parse_numeric_string(bytes).is_none() {
+                if bytes.is_empty() {
+                    vm.emit_deprecated_at("Increment on non-numeric string is deprecated, use str_increment() instead", line);
+                } else if !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
+                    vm.emit_deprecated_at("Increment on non-numeric string is deprecated, use str_increment() instead", line);
+                }
             }
         }
         Value::String(s) if !is_increment => {
@@ -16468,8 +16619,7 @@ fn php_increment(val: &Value) -> Value {
             let all_alnum = bytes.iter().all(|b| b.is_ascii_alphanumeric());
             if !all_alnum {
                 // Contains non-alphanumeric characters: perform increment on
-                // rightmost alphanumeric characters (PHP 8.3+ behavior)
-                // This is deprecated but still works
+                // rightmost alphanumeric characters (PHP 8.3+ emits deprecation but still increments)
                 let has_alnum = bytes.iter().any(|b| b.is_ascii_alphanumeric());
                 if !has_alnum {
                     return val.clone();

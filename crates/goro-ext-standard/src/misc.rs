@@ -1454,6 +1454,30 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let max_len = arrays.iter().map(|a| a.len()).max().unwrap_or(0);
         let mut result = PhpArray::new();
 
+        // Handle Object callbacks with __invoke (multi-array case)
+        if let Value::Object(obj) = &callback {
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let method = vm.classes.get(&class_lower)
+                .and_then(|c| c.get_method(b"__invoke"))
+                .map(|m| m.op_array.clone());
+            if let Some(op) = method {
+                for i in 0..max_len {
+                    let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
+                    if !fn_cvs.is_empty() { fn_cvs[0] = callback.clone(); } // $this
+                    let mut arg_idx = 1;
+                    for arr in &arrays {
+                        if arg_idx < fn_cvs.len() {
+                            fn_cvs[arg_idx] = arr.get(i).cloned().unwrap_or(Value::Null);
+                            arg_idx += 1;
+                        }
+                    }
+                    let mapped = vm.execute_fn(&op, fn_cvs)?;
+                    result.push(mapped);
+                }
+                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+            }
+        }
+
         // Get callback info
         let (func_name, captured_args) = match &callback {
             Value::String(s) => (s.as_bytes().to_vec(), vec![]),
@@ -1525,14 +1549,28 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if vals.len() >= 2 {
                     let method_name = vals[1].to_php_string();
                     let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if let Value::String(class_name) = &vals[0] {
-                        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    // Get the class name from either a string or an object
+                    let (class_lower, this_val) = if let Value::String(class_name) = &vals[0] {
+                        (class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(), None)
+                    } else if let Value::Object(obj) = &vals[0] {
+                        (obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(), Some(vals[0].clone()))
+                    } else {
+                        (vec![], None)
+                    };
+                    if !class_lower.is_empty() {
                         if let Some(class) = vm.classes.get(&class_lower).cloned() {
                             if let Some(method) = class.methods.get(&method_lower) {
                                 let op = method.op_array.clone();
                                 for (key, val) in arr.iter() {
                                     let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
-                                    if !fn_cvs.is_empty() { fn_cvs[0] = val.clone(); }
+                                    if let Some(ref this) = this_val {
+                                        // Instance method: $this is the object, first user arg is the element
+                                        if !fn_cvs.is_empty() { fn_cvs[0] = this.clone(); }
+                                        if fn_cvs.len() > 1 { fn_cvs[1] = val.clone(); }
+                                    } else {
+                                        // Static method: first user arg is the element
+                                        if !fn_cvs.is_empty() { fn_cvs[0] = val.clone(); }
+                                    }
                                     let mapped = vm.execute_fn(&op, fn_cvs)?;
                                     result.set(key.clone(), mapped);
                                 }
@@ -1543,6 +1581,29 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             _ => {}
+        }
+
+        // Handle Object callbacks with __invoke
+        if let Value::Object(obj) = &callback {
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let has_invoke = vm.classes.get(&class_lower)
+                .map(|c| c.methods.contains_key(&b"__invoke".to_vec()))
+                .unwrap_or(false);
+            if has_invoke {
+                let method = vm.classes.get(&class_lower)
+                    .and_then(|c| c.get_method(b"__invoke"))
+                    .map(|m| m.op_array.clone());
+                if let Some(op) = method {
+                    for (key, val) in arr.iter() {
+                        let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
+                        if !fn_cvs.is_empty() { fn_cvs[0] = callback.clone(); } // $this
+                        if fn_cvs.len() > 1 { fn_cvs[1] = val.clone(); }
+                        let mapped = vm.execute_fn(&op, fn_cvs)?;
+                        result.set(key.clone(), mapped);
+                    }
+                    return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                }
+            }
         }
 
         let (func_name, captured_args) = match &callback {
@@ -2436,15 +2497,21 @@ fn next_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn prev_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
-        if arr.pointer > 0 {
+        let len = arr.len();
+        if arr.pointer == 0 || arr.pointer > len {
+            // Already at (or before) beginning or past end: return false
+            // Move pointer past end so current() also returns false
+            arr.pointer = len;
+            Ok(Value::False)
+        } else {
             arr.pointer -= 1;
+            let pos = arr.pointer;
+            Ok(arr
+                .iter()
+                .nth(pos)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(Value::False))
         }
-        let pos = arr.pointer;
-        Ok(arr
-            .iter()
-            .nth(pos)
-            .map(|(_, v)| v.clone())
-            .unwrap_or(Value::False))
     } else {
         Ok(Value::False)
     }

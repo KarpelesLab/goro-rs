@@ -1831,6 +1831,14 @@ impl Compiler {
                 class.is_enum = modifiers.is_enum;
                 class.enum_backing_type = enum_backing_type.clone();
 
+                // Enums automatically implement UnitEnum (and BackedEnum if backed)
+                if modifiers.is_enum {
+                    class.interfaces.push(b"UnitEnum".to_vec());
+                    if enum_backing_type.is_some() {
+                        class.interfaces.push(b"BackedEnum".to_vec());
+                    }
+                }
+
                 // Validate enum backing type
                 if let Some(bt) = &enum_backing_type {
                     if !bt.eq_ignore_ascii_case(b"int") && !bt.eq_ignore_ascii_case(b"string") {
@@ -2573,33 +2581,43 @@ impl Compiler {
                             } else {
                                 // Handle class constant references like self::B, ClassName::CONST
                                 match &const_expr.kind {
-                                    ExprKind::ClassConstAccess { class, constant } => {
-                                        // Store as a deferred constant reference marker
-                                        // Format: __deferred_const__::ClassName::CONSTANT_NAME
-                                        let class_name = match &class.kind {
-                                            ExprKind::Identifier(name) => {
-                                                let resolved = self.resolve_class_name(name);
-                                                if resolved.eq_ignore_ascii_case(b"self") {
-                                                    qualified_name.clone()
-                                                } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                                    extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
-                                                } else {
-                                                    resolved
+                                    ExprKind::ClassConstAccess { class: class_expr, constant } => {
+                                        // First try to resolve from the same class's already-compiled constants
+                                        if let Some(val) = Self::eval_class_const_expr(const_expr, &class, &qualified_name, extends.as_deref(), self) {
+                                            val
+                                        } else {
+                                            // Store as a deferred constant reference marker
+                                            // Format: __deferred_const__::ClassName::CONSTANT_NAME
+                                            let class_name = match &class_expr.kind {
+                                                ExprKind::Identifier(name) => {
+                                                    let resolved = self.resolve_class_name(name);
+                                                    if resolved.eq_ignore_ascii_case(b"self") {
+                                                        qualified_name.clone()
+                                                    } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                                        extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                    } else {
+                                                        resolved
+                                                    }
                                                 }
-                                            }
-                                            _ => qualified_name.clone(),
-                                        };
-                                        let mut marker = b"__deferred_const__::".to_vec();
-                                        marker.extend_from_slice(&class_name);
-                                        marker.push(b':');
-                                        marker.push(b':');
-                                        marker.extend_from_slice(constant);
-                                        Value::String(PhpString::from_vec(marker))
+                                                _ => qualified_name.clone(),
+                                            };
+                                            let mut marker = b"__deferred_const__::".to_vec();
+                                            marker.extend_from_slice(&class_name);
+                                            marker.push(b':');
+                                            marker.push(b':');
+                                            marker.extend_from_slice(constant);
+                                            Value::String(PhpString::from_vec(marker))
+                                        }
                                     }
                                     ExprKind::BinaryOp { op, left, right, .. } => {
                                         // Handle simple binary ops on constants
-                                        let l = Self::eval_const_expr(left);
-                                        let r = Self::eval_const_expr(right);
+                                        // Try resolving with class context first (for self::CONST references)
+                                        let l = Self::eval_const_expr(left).or_else(|| {
+                                            Self::eval_class_const_expr(left, &class, &qualified_name, extends.as_deref(), self)
+                                        });
+                                        let r = Self::eval_const_expr(right).or_else(|| {
+                                            Self::eval_class_const_expr(right, &class, &qualified_name, extends.as_deref(), self)
+                                        });
                                         if let (Some(lv), Some(rv)) = (l, r) {
                                             match op {
                                                 BinaryOp::Add => lv.add(&rv),
@@ -2617,6 +2635,7 @@ impl Compiler {
                                                 _ => Value::Null,
                                             }
                                         } else {
+                                            // Create a deferred marker for the entire expression
                                             Value::Null
                                         }
                                     }
@@ -6409,6 +6428,46 @@ impl Compiler {
                     b"php_minor_version" => Some(Value::Long(5)),
                     _ => None,
                 }
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to resolve an expression as a class constant reference.
+    /// This handles `self::CONST`, `ClassName::CONST` etc. during class compilation.
+    fn eval_class_const_expr(expr: &Expr, class: &ClassEntry, qualified_name: &[u8], extends: Option<&[u8]>, compiler: &Compiler) -> Option<Value> {
+        match &expr.kind {
+            ExprKind::ClassConstAccess { class: class_expr, constant } => {
+                let target_class = match &class_expr.kind {
+                    ExprKind::Identifier(name) => {
+                        let resolved = compiler.resolve_class_name(name);
+                        let lower: Vec<u8> = resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if lower == b"self" || lower == b"static" {
+                            qualified_name.to_vec()
+                        } else if lower == b"parent" {
+                            extends.map(|p| compiler.resolve_class_name(p)).unwrap_or(resolved)
+                        } else {
+                            resolved
+                        }
+                    }
+                    _ => return None,
+                };
+                // Check if this references the same class
+                let target_lower: Vec<u8> = target_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let self_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if target_lower == self_lower {
+                    // Look up the constant in the class being compiled
+                    if let Some(val) = class.constants.get(constant) {
+                        // Make sure the value isn't a deferred marker
+                        if let Value::String(s) = val {
+                            if s.as_bytes().starts_with(b"__deferred_const__::") {
+                                return None;
+                            }
+                        }
+                        return Some(val.clone());
+                    }
+                }
+                None
             }
             _ => None,
         }

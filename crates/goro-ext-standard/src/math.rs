@@ -71,6 +71,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mt_srand", srand_fn);
 }
 
+/// Throw a TypeError for a math function argument and set the current exception
+fn throw_math_type_error(vm: &mut Vm, message: String) {
+    let exc = vm.throw_type_error(message);
+    vm.current_exception = Some(exc);
+}
+
 /// Check math function argument for null deprecation warning or type error.
 /// Returns true if processing should continue (value was acceptable), false if error was thrown.
 fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<bool, VmError> {
@@ -98,7 +104,7 @@ fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &st
                     Ok(true) // leading numeric string, will be coerced
                 } else {
                     let type_name = Vm::value_type_name(val);
-                    vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
+                    throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
                     Ok(false)
                 }
             }
@@ -109,13 +115,15 @@ fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &st
         }
         _ => {
             let type_name = Vm::value_type_name(val);
-            vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
+            throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
             Ok(false)
         }
     }
 }
 
-/// Check math function argument for int type only (rejects float/string/etc.)
+/// Check math function argument for int type only.
+/// In PHP 8, floats that fit in int are silently coerced. Floats with fractional parts
+/// emit a deprecation. Very large floats that don't fit throw TypeError.
 fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<bool, VmError> {
     match val {
         Value::Null => {
@@ -125,24 +133,45 @@ fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, pa
         Value::True | Value::False => Ok(true),
         Value::Long(_) => Ok(true),
         Value::Double(f) => {
-            // PHP 8: float is rejected for int params
-            let type_name = Vm::value_type_name(val);
-            vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
-            Ok(false)
+            // PHP 8: floats that fit in int range are coerced (with deprecation if fractional)
+            // i64 range: -2^63 to 2^63-1
+            // i64::MIN as f64 is exact (-9223372036854775808.0)
+            // i64::MAX as f64 rounds up to 9223372036854775808.0 (= 2^63)
+            // So we reject any float >= 2^63 or < -2^63
+            let upper_bound = 9223372036854775808.0_f64; // 2^63
+            let lower_bound = -9223372036854775808.0_f64; // -2^63
+            let fits_in_int = !f.is_nan() && !f.is_infinite()
+                && *f >= lower_bound
+                && *f < upper_bound;
+            if !fits_in_int {
+                let type_name = Vm::value_type_name(val);
+                throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
+                Ok(false)
+            } else {
+                if f.fract() != 0.0 {
+                    vm.emit_deprecated_at(
+                        &format!("Implicit conversion from float {} to int loses precision", goro_core::value::format_php_float(*f)),
+                        vm.current_line,
+                    );
+                }
+                Ok(true) // coerced to int via to_long()
+            }
         }
         Value::String(s) => {
             // Numeric strings accepted, non-numeric rejected
             let bytes = s.as_bytes();
             if let Some(n) = goro_core::value::parse_numeric_string(bytes) {
-                if n.fract() == 0.0 {
-                    Ok(true)
-                } else {
-                    // Float string - handle like a float
-                    Ok(true) // PHP actually accepts float strings for int params
+                if n.fract() != 0.0 {
+                    // Float string with fractional part - deprecated
+                    vm.emit_deprecated_at(
+                        &format!("Implicit conversion from float {} to int loses precision", n),
+                        vm.current_line,
+                    );
                 }
+                Ok(true)
             } else {
                 let type_name = Vm::value_type_name(val);
-                vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
+                throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
                 Ok(false)
             }
         }
@@ -152,7 +181,7 @@ fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, pa
         }
         _ => {
             let type_name = Vm::value_type_name(val);
-            vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
+            throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
             Ok(false)
         }
     }
