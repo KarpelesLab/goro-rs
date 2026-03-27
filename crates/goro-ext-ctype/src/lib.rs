@@ -31,6 +31,7 @@ fn ctype_get_bytes(vm: &mut Vm, args: &[Value], func_name: &str) -> Vec<u8> {
                 let c = if *n < 0 { (*n + 256) as u8 } else { *n as u8 };
                 vec![c]
             } else {
+                // Large integers: convert to string representation
                 val.to_php_string().as_bytes().to_vec()
             }
         }
@@ -45,7 +46,8 @@ fn ctype_get_bytes(vm: &mut Vm, args: &[Value], func_name: &str) -> Vec<u8> {
                 let c = if n < 0 { (n + 256) as u8 } else { n as u8 };
                 vec![c]
             } else {
-                val.to_php_string().as_bytes().to_vec()
+                // Values outside -128..255 return false (empty vec triggers false)
+                vec![]
             }
         }
         Value::Null | Value::Undef => {

@@ -78,6 +78,18 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         return Ok(Value::False);
     }
+    if s.contains("\x00UTF8_ERROR") {
+        vm.json_last_error = 5; // JSON_ERROR_UTF8
+        if throw_on_error {
+            let exc = vm.create_exception(b"JsonException", "Malformed UTF-8 characters, possibly incorrectly encoded", 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: "Uncaught JsonException: Malformed UTF-8 characters, possibly incorrectly encoded".to_string(), line: 0 });
+        }
+        if flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
+            return Ok(Value::String(PhpString::from_bytes(b"null")));
+        }
+        return Ok(Value::False);
+    }
     Ok(Value::String(PhpString::from_string(s)))
 }
 
@@ -320,8 +332,8 @@ fn json_encode_string(bytes: &[u8], flags: i64) -> String {
                     i += len;
                     continue;
                 } else {
-                    // Invalid UTF-8: skip byte
-                    result.push_str(&format!("\\u{:04x}", b));
+                    // Invalid UTF-8: return special error marker
+                    return format!("\x00UTF8_ERROR");
                 }
             }
         }

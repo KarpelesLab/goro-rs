@@ -752,19 +752,23 @@ impl PhpGenerator {
                         arr.borrow_mut().set(key, val);
                     }
                 }
-                OpCode::ArrayGet => {
+                OpCode::ArrayGet | OpCode::ListGet => {
                     let arr_val = self.read_operand(&op.op1, &op_array.literals);
                     let key_val = self.read_operand(&op.op2, &op_array.literals);
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = Vm::value_to_array_key(key_val.clone());
                         arr.borrow().get(&key).cloned().unwrap_or(Value::Null)
-                    } else if let Value::String(s) = &arr_val {
-                        let idx = key_val.to_long();
-                        let bytes = s.as_bytes();
-                        if idx >= 0 && (idx as usize) < bytes.len() {
-                            Value::String(PhpString::from_bytes(&[bytes[idx as usize]]))
+                    } else if matches!(op.opcode, OpCode::ArrayGet) {
+                        if let Value::String(s) = &arr_val {
+                            let idx = key_val.to_long();
+                            let bytes = s.as_bytes();
+                            if idx >= 0 && (idx as usize) < bytes.len() {
+                                Value::String(PhpString::from_bytes(&[bytes[idx as usize]]))
+                            } else {
+                                Value::String(PhpString::empty())
+                            }
                         } else {
-                            Value::String(PhpString::empty())
+                            Value::Null
                         }
                     } else {
                         Value::Null

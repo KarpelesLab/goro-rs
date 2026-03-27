@@ -2679,8 +2679,74 @@ impl Compiler {
                             }
                             // Enum cases: store the backing value for backed enums
                             let backing_value = if let Some(val_expr) = value {
-                                Self::eval_const_expr(&val_expr)
-                                    .unwrap_or(Value::Null)
+                                if let Some(v) = Self::eval_const_expr(&val_expr) {
+                                    v
+                                } else {
+                                    // Handle class constant references and magic constants like class constant defaults
+                                    match &val_expr.kind {
+                                        ExprKind::ClassConstAccess { class: class_expr, constant } => {
+                                            // Try to resolve from same class or other classes
+                                            if let Some(val) = Self::eval_class_const_expr(&val_expr, &class, &qualified_name, extends.as_deref(), self) {
+                                                val
+                                            } else {
+                                                let class_name = match &class_expr.kind {
+                                                    ExprKind::Identifier(cn) => {
+                                                        let resolved = self.resolve_class_name(cn);
+                                                        if resolved.eq_ignore_ascii_case(b"self") {
+                                                            qualified_name.clone()
+                                                        } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                                            extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                        } else {
+                                                            resolved
+                                                        }
+                                                    }
+                                                    _ => qualified_name.clone(),
+                                                };
+                                                let mut marker = b"__deferred_const__::".to_vec();
+                                                marker.extend_from_slice(&class_name);
+                                                marker.push(b':');
+                                                marker.push(b':');
+                                                marker.extend_from_slice(constant);
+                                                Value::String(PhpString::from_vec(marker))
+                                            }
+                                        }
+                                        ExprKind::ConstantAccess(parts) => {
+                                            let name_lower: Vec<u8> = parts.iter().flat_map(|p| p.iter()).copied().collect();
+                                            let name_lower_lc: Vec<u8> = name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
+                                            self.resolve_class_const_magic(&name_lower_lc, &qualified_name, val_expr.span.line)
+                                        }
+                                        ExprKind::Identifier(ident_name) => {
+                                            let name_lower_lc: Vec<u8> = ident_name.iter().map(|c| c.to_ascii_lowercase()).collect();
+                                            self.resolve_class_const_magic(&name_lower_lc, &qualified_name, val_expr.span.line)
+                                        }
+                                        ExprKind::BinaryOp { op, left, right, .. } => {
+                                            let l = Self::eval_const_expr(left).or_else(|| {
+                                                Self::eval_class_const_expr(left, &class, &qualified_name, extends.as_deref(), self)
+                                            });
+                                            let r = Self::eval_const_expr(right).or_else(|| {
+                                                Self::eval_class_const_expr(right, &class, &qualified_name, extends.as_deref(), self)
+                                            });
+                                            if let (Some(lv), Some(rv)) = (l, r) {
+                                                match op {
+                                                    BinaryOp::Add => lv.add(&rv),
+                                                    BinaryOp::Sub => lv.sub(&rv),
+                                                    BinaryOp::Mul => lv.mul(&rv),
+                                                    BinaryOp::Concat => {
+                                                        let mut result = lv.to_php_string().as_bytes().to_vec();
+                                                        result.extend_from_slice(rv.to_php_string().as_bytes());
+                                                        Value::String(PhpString::from_vec(result))
+                                                    }
+                                                    BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
+                                                    BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
+                                                    _ => Value::Null,
+                                                }
+                                            } else {
+                                                Value::Null
+                                            }
+                                        }
+                                        _ => Value::Null,
+                                    }
+                                }
                             } else {
                                 Value::Null
                             };
@@ -2927,7 +2993,7 @@ impl Compiler {
                 let cv = self.op_array.get_or_create_cv(name);
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
-                    opcode: OpCode::ArrayGet,
+                    opcode: OpCode::ListGet,
                     op1: arr_op,
                     op2: idx_op,
                     result: OperandType::Tmp(tmp),
@@ -2963,7 +3029,7 @@ impl Compiler {
                 if let Some(nested) = nested_elems {
                     let sub_arr = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
-                        opcode: OpCode::ArrayGet,
+                        opcode: OpCode::ListGet,
                         op1: arr_op,
                         op2: idx_op,
                         result: OperandType::Tmp(sub_arr),

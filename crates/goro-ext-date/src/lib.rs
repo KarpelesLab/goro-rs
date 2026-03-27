@@ -113,6 +113,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"date_date_set", date_date_set_fn);
     vm.register_function(b"date_time_set", date_time_set_fn);
     vm.register_function(b"date_interval_create_from_date_string", date_interval_create_from_date_string_fn);
+    vm.register_function(b"timezone_open", timezone_open_fn);
+    vm.register_function(b"gettimeofday", gettimeofday_fn);
+    vm.register_function(b"date_timezone_get", date_timezone_get_fn);
+    vm.register_function(b"date_timezone_set", date_timezone_set_fn);
 }
 
 fn date_default_timezone_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2103,4 +2107,94 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
     obj.set_property(b"invert".to_vec(), Value::Long(0));
 
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
+}
+
+/// timezone_open() - alias for new DateTimeZone($timezone)
+fn timezone_open_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let tz_str = args.first().unwrap_or(&Value::Null).to_php_string();
+    let tz_bytes = tz_str.as_bytes();
+    let tz_name = String::from_utf8_lossy(tz_bytes);
+
+    // Basic validation - check if it resolves to a known timezone or offset
+    let (offset, _) = timezone_offset_and_abbrev(&tz_name, 0);
+    let is_known = offset != 0 || tz_name == "UTC" || tz_name == "utc"
+        || tz_name == "GMT" || tz_name.starts_with('+') || tz_name.starts_with('-')
+        || tz_name.contains('/');
+
+    if !is_known && tz_bytes.is_empty() {
+        vm.emit_warning_at("timezone_open(): Unknown or bad timezone ()", vm.current_line);
+        return Ok(Value::False);
+    }
+
+    let obj_id = vm.next_object_id();
+    let mut obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
+    obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+    obj.set_property(
+        b"timezone".to_vec(),
+        Value::String(PhpString::from_vec(tz_bytes.to_vec())),
+    );
+    Ok(Value::Object(Rc::new(RefCell::new(obj))))
+}
+
+/// date_timezone_get() - Return the timezone of a DateTime object
+fn date_timezone_get_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let dt_obj = args.first().unwrap_or(&Value::Null);
+    if let Value::Object(obj) = dt_obj {
+        let obj_borrow = obj.borrow();
+        let tz_prop = obj_borrow.get_property(b"timezone");
+        if let Value::String(tz_str) = &tz_prop {
+            let tz_bytes = tz_str.as_bytes().to_vec();
+            drop(obj_borrow);
+            let obj_id = vm.next_object_id();
+            let mut tz_obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
+            tz_obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+            tz_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_vec(tz_bytes)));
+            return Ok(Value::Object(Rc::new(RefCell::new(tz_obj))));
+        }
+        drop(obj_borrow);
+    }
+    Ok(Value::False)
+}
+
+/// date_timezone_set() - Set the timezone for a DateTime object
+fn date_timezone_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let dt_obj = args.first().unwrap_or(&Value::Null);
+    let tz_obj = args.get(1).unwrap_or(&Value::Null);
+    if let (Value::Object(dt), Value::Object(tz)) = (dt_obj, tz_obj) {
+        let tz_name = {
+            let tz_borrow = tz.borrow();
+            if let Value::String(s) = tz_borrow.get_property(b"timezone") {
+                s.as_bytes().to_vec()
+            } else {
+                b"UTC".to_vec()
+            }
+        };
+        let mut dt_borrow = dt.borrow_mut();
+        dt_borrow.set_property(b"timezone".to_vec(), Value::String(PhpString::from_vec(tz_name)));
+        drop(dt_borrow);
+        return Ok(dt_obj.clone());
+    }
+    Ok(Value::False)
+}
+
+/// gettimeofday() - Get current time
+fn gettimeofday_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let as_float = args.first().map(|v| v.is_truthy()).unwrap_or(false);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    if as_float {
+        Ok(Value::Double(now.as_secs_f64()))
+    } else {
+        let mut arr = goro_core::array::PhpArray::new();
+        let secs = now.as_secs() as i64;
+        let usecs = now.subsec_micros() as i64;
+        arr.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"sec")), Value::Long(secs));
+        arr.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"usec")), Value::Long(usecs));
+        arr.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"minuteswest")), Value::Long(0));
+        arr.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"dsttime")), Value::Long(0));
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+    }
 }

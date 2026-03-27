@@ -170,6 +170,8 @@ pub enum OpCode {
     ArraySet,
     /// Read array element: result = op1[op2]
     ArrayGet,
+    /// List destructure array element: result = op1[op2] (emits "Cannot use X as array" instead of "Trying to access array offset")
+    ListGet,
 
     // ---- Foreach ----
     /// Initialize foreach: op1 = array, result = iterator state (tmp)

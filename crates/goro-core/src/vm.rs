@@ -8324,6 +8324,9 @@ impl Vm {
         let case_entry = class.enum_cases.iter().find(|(n, _)| n == case_name)?;
         let backing_value = case_entry.1.clone();
 
+        // Resolve any deferred constants in the backing value
+        let backing_value = self.resolve_deferred_value(&backing_value);
+
         // Create the enum case object
         let obj_id = self.next_object_id;
         self.next_object_id += 1;
@@ -9047,6 +9050,17 @@ impl Vm {
                 OpCode::ShiftLeft => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // Check for unsupported operand types
+                    if matches!(&a, Value::Array(_)) || matches!(&b, Value::Array(_)) {
+                        let err = format!("Unsupported operand types: {} << {}", Vm::value_type_name(&a), Vm::value_type_name(&b));
+                        let exc = self.create_exception(b"TypeError", &err, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: err, line: op.line });
+                    }
                     self.write_operand(
                         &op.result,
                         Value::Long(a.to_long().wrapping_shl(b.to_long() as u32)),
@@ -9058,6 +9072,17 @@ impl Vm {
                 OpCode::ShiftRight => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // Check for unsupported operand types
+                    if matches!(&a, Value::Array(_)) || matches!(&b, Value::Array(_)) {
+                        let err = format!("Unsupported operand types: {} >> {}", Vm::value_type_name(&a), Vm::value_type_name(&b));
+                        let exc = self.create_exception(b"TypeError", &err, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: err, line: op.line });
+                    }
                     self.write_operand(
                         &op.result,
                         Value::Long(a.to_long().wrapping_shr(b.to_long() as u32)),
@@ -9572,6 +9597,17 @@ impl Vm {
                 OpCode::AssignShiftLeft => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // Check for unsupported operand types
+                    if matches!(&cv_val, Value::Array(_)) || matches!(&rhs, Value::Array(_)) {
+                        let err = format!("Unsupported operand types: {} << {}", Vm::value_type_name(&cv_val), Vm::value_type_name(&rhs));
+                        let exc = self.create_exception(b"TypeError", &err, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: err, line: op.line });
+                    }
                     self.write_operand(
                         &op.op1,
                         Value::Long(cv_val.to_long().wrapping_shl(rhs.to_long() as u32)),
@@ -9583,6 +9619,17 @@ impl Vm {
                 OpCode::AssignShiftRight => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // Check for unsupported operand types
+                    if matches!(&cv_val, Value::Array(_)) || matches!(&rhs, Value::Array(_)) {
+                        let err = format!("Unsupported operand types: {} >> {}", Vm::value_type_name(&cv_val), Vm::value_type_name(&rhs));
+                        let exc = self.create_exception(b"TypeError", &err, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: err, line: op.line });
+                    }
                     self.write_operand(
                         &op.op1,
                         Value::Long(cv_val.to_long().wrapping_shr(rhs.to_long() as u32)),
@@ -12186,6 +12233,68 @@ impl Vm {
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::ListGet => {
+                    // Like ArrayGet but for list() destructuring: emits "Cannot use X as array"
+                    // instead of "Trying to access array offset on X", and strings are not indexable.
+                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let result = if let Value::Array(arr) = &arr_val {
+                        let key = Self::value_to_array_key(key_val.clone());
+                        match arr.borrow().get(&key).cloned() {
+                            Some(v) => v,
+                            None => {
+                                // Emit "Undefined array key" warning
+                                match &key {
+                                    crate::array::ArrayKey::Int(i) => {
+                                        self.emit_warning_at(&format!("Undefined array key {}", i), op.line);
+                                    }
+                                    crate::array::ArrayKey::String(s) => {
+                                        self.emit_warning_at(&format!("Undefined array key \"{}\"", s.to_string_lossy()), op.line);
+                                    }
+                                }
+                                Value::Null
+                            }
+                        }
+                    } else if let Value::Object(obj) = &arr_val {
+                        // ArrayAccess: $obj[$key] -> offsetGet($key)
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_name_orig = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                        let is_spl_array = matches!(class_lower.as_slice(),
+                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
+                            b"splfixedarray" | b"splobjectstorage");
+                        let has_user_offset = self.classes.get(&class_lower)
+                            .map(|c| c.get_method(b"offsetget").is_some())
+                            .unwrap_or(false);
+                        if !is_spl_array && !has_user_offset {
+                            return Err(VmError {
+                                message: format!("Uncaught Error: Cannot use object of type {} as array", class_name_orig),
+                                line: op.line,
+                            });
+                        }
+                        let args = vec![arr_val.clone(), key_val.clone()];
+                        self.handle_spl_docall(&class_lower, b"offsetget", &args)
+                            .unwrap_or_else(|| {
+                                self.call_object_method(&arr_val, b"offsetget", &[key_val.clone()])
+                                    .unwrap_or(Value::Null)
+                            })
+                    } else {
+                        // For list() destructuring, emit "Cannot use X as array" warning
+                        let type_name = match &arr_val {
+                            Value::True | Value::False => "bool",
+                            Value::Long(_) => "int",
+                            Value::Double(_) => "float",
+                            Value::String(_) => "string",
+                            Value::Null | Value::Undef => "null",
+                            _ => "",
+                        };
+                        if !type_name.is_empty() {
+                            self.emit_warning_at(&format!("Cannot use {} as array", type_name), op.line);
+                        }
+                        Value::Null
+                    };
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
                 OpCode::ForeachInit => {
                     let arr_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, &op_array, op.line);
 
@@ -13077,25 +13186,33 @@ impl Vm {
                                     // Extract the case name from the marker
                                     let case_name_bytes = s.as_bytes()[15..].to_vec(); // skip "__enum_case__::"
                                     // Check for type mismatch before creating the enum case
-                                    let type_error = if let Some(class_def) = self.classes.get(&class_lower) {
+                                    // Extract the needed data from the class first to avoid borrow conflicts
+                                    let type_check_info = if let Some(class_def) = self.classes.get(&class_lower) {
                                         if let Some(ref bt) = class_def.enum_backing_type {
                                             if let Some((_, case_val)) = class_def.enum_cases.iter().find(|(n, _)| *n == case_name_bytes) {
-                                                let ok = if bt.eq_ignore_ascii_case(b"int") {
-                                                    matches!(case_val, Value::Long(_))
-                                                } else if bt.eq_ignore_ascii_case(b"string") {
-                                                    matches!(case_val, Value::String(_))
-                                                } else {
-                                                    true
-                                                };
-                                                if !ok {
-                                                    Some(format!("Enum case type {} does not match enum backing type {}",
-                                                        case_val.type_name(), String::from_utf8_lossy(bt)))
-                                                } else {
-                                                    None
-                                                }
+                                                Some((bt.clone(), case_val.clone()))
                                             } else {
                                                 None
                                             }
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    let type_error = if let Some((bt, case_val)) = type_check_info {
+                                        // Resolve deferred constants before type checking
+                                        let resolved_val = self.resolve_deferred_value(&case_val);
+                                        let ok = if bt.eq_ignore_ascii_case(b"int") {
+                                            matches!(resolved_val, Value::Long(_))
+                                        } else if bt.eq_ignore_ascii_case(b"string") {
+                                            matches!(resolved_val, Value::String(_))
+                                        } else {
+                                            true
+                                        };
+                                        if !ok {
+                                            Some(format!("Enum case type {} does not match enum backing type {}",
+                                                resolved_val.type_name(), String::from_utf8_lossy(&bt)))
                                         } else {
                                             None
                                         }

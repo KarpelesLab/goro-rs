@@ -150,6 +150,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"unserialize", unserialize_fn);
     vm.register_function(b"memory_get_usage", memory_get_usage_fn);
     vm.register_function(b"memory_get_peak_usage", memory_get_peak_fn);
+    vm.register_function(b"memory_reset_peak_usage", memory_reset_peak_usage_fn);
     vm.register_function(b"sleep", sleep_fn);
     vm.register_function(b"usleep", usleep_fn);
     vm.register_function(b"uniqid", uniqid_fn);
@@ -5327,6 +5328,10 @@ fn memory_get_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
 fn memory_get_peak_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // We don't track peak separately yet, return current
     Ok(Value::Long(goro_core::value::memory_get_usage() as i64))
+}
+fn memory_reset_peak_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // No-op stub, we don't track peak usage
+    Ok(Value::Null)
 }
 fn sleep_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
