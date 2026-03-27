@@ -1256,6 +1256,11 @@ impl Vm {
     }
 
     /// Emit a PHP deprecated warning
+    pub fn emit_deprecated(&mut self, msg: &str) {
+        let line = self.current_line;
+        self.emit_deprecated_at(msg, line);
+    }
+
     pub fn emit_deprecated_at(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8192 != 0 {
             // E_DEPRECATED = 8192
@@ -11692,6 +11697,9 @@ impl Vm {
                 }
                 OpCode::CastString => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if matches!(&val, Value::Array(_)) || matches!(&val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_))) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
                     let str_val = match self.value_to_string_checked(&val) {
                         Ok(s) => s,
                         Err(e) => {
@@ -11832,6 +11840,9 @@ impl Vm {
                         }
                     } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
                         // Auto-initialize null/undef/false to array and append
+                        if matches!(&arr_val, Value::False) {
+                            self.emit_deprecated_at("Automatic conversion of false to array is deprecated", op.line);
+                        }
                         let mut arr = PhpArray::new();
                         arr.push(val);
                         let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
@@ -11859,6 +11870,9 @@ impl Vm {
                         arr.borrow_mut().set(key, val);
                     } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
                         // Auto-initialize null/undef/false to array
+                        if matches!(&arr_val, Value::False) {
+                            self.emit_deprecated_at("Automatic conversion of false to array is deprecated", op.line);
+                        }
                         let mut arr = PhpArray::new();
                         let key = Self::value_to_array_key(key_val);
                         arr.set(key, val);
@@ -12015,10 +12029,10 @@ impl Vm {
                             Value::False => "false",
                             Value::Long(_) => "int",
                             Value::Double(_) => "float",
-                            Value::Null | Value::Undef => "", // null silently returns null
+                            Value::Null | Value::Undef => "null",
                             _ => "",
                         };
-                        if !type_name.is_empty() {
+                        if !type_name.is_empty() && type_name != "null" {
                             self.emit_warning_at(&format!("Trying to access array offset on {}", type_name), op.line);
                         }
                         Value::Null
@@ -16453,8 +16467,31 @@ fn php_increment(val: &Value) -> Value {
             // alphabetic increment on purely alphanumeric strings
             let all_alnum = bytes.iter().all(|b| b.is_ascii_alphanumeric());
             if !all_alnum {
-                // Contains non-alphanumeric characters: no change (deprecated warning already emitted)
-                return val.clone();
+                // Contains non-alphanumeric characters: perform increment on
+                // rightmost alphanumeric characters (PHP 8.3+ behavior)
+                // This is deprecated but still works
+                let has_alnum = bytes.iter().any(|b| b.is_ascii_alphanumeric());
+                if !has_alnum {
+                    return val.clone();
+                }
+                let mut result: Vec<u8> = bytes.to_vec();
+                let mut carry = true;
+                for i in (0..result.len()).rev() {
+                    if !carry {
+                        break;
+                    }
+                    if !result[i].is_ascii_alphanumeric() {
+                        continue;
+                    }
+                    carry = false;
+                    match result[i] {
+                        b'z' => { result[i] = b'a'; carry = true; }
+                        b'Z' => { result[i] = b'A'; carry = true; }
+                        b'9' => { result[i] = b'0'; carry = true; }
+                        _ => { result[i] += 1; }
+                    }
+                }
+                return Value::String(PhpString::from_vec(result));
             }
             // Alphabetic increment: "a" -> "b", "z" -> "aa", "Az" -> "Ba"
             let mut result: Vec<u8> = bytes.to_vec();

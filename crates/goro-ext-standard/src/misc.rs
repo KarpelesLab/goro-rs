@@ -367,6 +367,11 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"property_exists", property_exists_fn);
     vm.register_function(b"get_mangled_object_vars", get_mangled_object_vars_fn);
     vm.register_function(b"get_resource_id", get_resource_id_fn);
+    vm.register_function(b"ip2long", ip2long_fn);
+    vm.register_function(b"long2ip", long2ip_fn);
+    vm.register_function(b"hrtime", hrtime_fn);
+    vm.register_function(b"gethostname", gethostname_fn);
+    vm.register_function(b"umask", umask_fn);
 
     // Regex functions are now in the regex module (regex.rs)
 }
@@ -6474,12 +6479,84 @@ fn gc_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn debug_zval_dump_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Similar to var_dump but shows refcount
     for arg in args {
-        let s = format!("{:?}\n", arg);
-        vm.write_output(s.as_bytes());
+        debug_zval_dump_value(vm, arg, 0);
     }
     Ok(Value::Null)
+}
+
+fn debug_zval_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
+    let prefix = " ".repeat(indent);
+    match val {
+        Value::Null | Value::Undef => {
+            vm.write_output(format!("{}NULL\n", prefix).as_bytes());
+        }
+        Value::True => {
+            vm.write_output(format!("{}bool(true)\n", prefix).as_bytes());
+        }
+        Value::False => {
+            vm.write_output(format!("{}bool(false)\n", prefix).as_bytes());
+        }
+        Value::Long(n) => {
+            vm.write_output(format!("{}int({})\n", prefix, n).as_bytes());
+        }
+        Value::Double(f) => {
+            let formatted = goro_core::value::format_php_float(*f);
+            vm.write_output(format!("{}float({})\n", prefix, formatted).as_bytes());
+        }
+        Value::String(s) => {
+            vm.write_output(
+                format!("{}string({}) \"{}\" refcount({})\n", prefix, s.len(), s.to_string_lossy(), 1).as_bytes(),
+            );
+        }
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            vm.write_output(format!("{}array({}) refcount({}){{\n", prefix, arr.len(), 2).as_bytes());
+            for (key, value) in arr.iter() {
+                match key {
+                    goro_core::array::ArrayKey::Int(n) => {
+                        vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
+                    }
+                    goro_core::array::ArrayKey::String(s) => {
+                        vm.write_output(
+                            format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes(),
+                        );
+                    }
+                }
+                debug_zval_dump_value(vm, value, indent + 2);
+            }
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
+        }
+        Value::Object(obj) => {
+            let obj_borrow = obj.borrow();
+            let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
+            let oid = obj_borrow.object_id;
+            let prop_count = obj_borrow.properties.iter()
+                .filter(|(name, val)| !name.starts_with(b"__") && !matches!(val, Value::Undef))
+                .count();
+            vm.write_output(
+                format!("{}object({})#{} ({}) refcount({}){{\n", prefix, class_name, oid, prop_count, 2).as_bytes(),
+            );
+            for (name, value) in &obj_borrow.properties {
+                if name.starts_with(b"__") || matches!(value, Value::Undef) {
+                    continue;
+                }
+                let name_str = String::from_utf8_lossy(name);
+                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, name_str).as_bytes());
+                debug_zval_dump_value(vm, value, indent + 2);
+            }
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
+        }
+        Value::Reference(r) => {
+            let inner = r.borrow();
+            vm.write_output(format!("{}reference refcount({}){{\n", prefix, 2).as_bytes());
+            debug_zval_dump_value(vm, &inner, indent + 2);
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
+        }
+        _ => {
+            vm.write_output(format!("{}NULL\n", prefix).as_bytes());
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -7765,7 +7842,12 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn assert_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    _vm.emit_deprecated("Function assert_options() is deprecated since 8.3");
     let option = args.first().map(|v| v.to_long()).unwrap_or(0);
+    // Also emit deprecated for ASSERT_CALLBACK constant
+    if option == 5 && args.len() > 1 {
+        _vm.emit_deprecated("Constant ASSERT_CALLBACK is deprecated since 8.3, as assert_options() is deprecated");
+    }
     // Return previous value for the option
     match option {
         1 => Ok(Value::Long(1)),  // ASSERT_ACTIVE
@@ -8714,3 +8796,88 @@ fn get_resource_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::Long(0))
     }
 }
+
+fn ip2long_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ip = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() != 4 {
+        return Ok(Value::False);
+    }
+    let mut result: u32 = 0;
+    for (i, part) in parts.iter().enumerate() {
+        match part.parse::<u32>() {
+            Ok(n) if n <= 255 => {
+                result |= n << (8 * (3 - i));
+            }
+            _ => return Ok(Value::False),
+        }
+    }
+    // PHP returns signed long
+    Ok(Value::Long(result as i64))
+}
+
+fn long2ip_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ip = args.first().unwrap_or(&Value::Null).to_long() as u32;
+    let s = format!("{}.{}.{}.{}",
+        (ip >> 24) & 0xFF,
+        (ip >> 16) & 0xFF,
+        (ip >> 8) & 0xFF,
+        ip & 0xFF,
+    );
+    Ok(Value::String(PhpString::from_string(s)))
+}
+
+fn hrtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let as_number = args.first().map(|v| v.is_truthy()).unwrap_or(false);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let nanos = now.as_nanos() as i64;
+    if as_number {
+        Ok(Value::Long(nanos))
+    } else {
+        let mut arr = PhpArray::new();
+        arr.push(Value::Long(now.as_secs() as i64));
+        arr.push(Value::Long(now.subsec_nanos() as i64));
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+    }
+}
+
+fn gethostname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut i8, buf.len()) };
+        if ret == 0 {
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            Ok(Value::String(PhpString::from_bytes(&buf[..len])))
+        } else {
+            Ok(Value::False)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::String(PhpString::from_bytes(b"localhost")))
+    }
+}
+
+fn umask_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    #[cfg(unix)]
+    {
+        if let Some(mask) = args.first() {
+            let new_mask = mask.to_long() as u32;
+            let old = unsafe { libc::umask(new_mask as libc::mode_t) };
+            Ok(Value::Long(old as i64))
+        } else {
+            // Get current umask by setting and restoring
+            let current = unsafe { libc::umask(0o022) };
+            unsafe { libc::umask(current) };
+            Ok(Value::Long(current as i64))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::Long(0))
+    }
+}
+

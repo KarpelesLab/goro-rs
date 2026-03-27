@@ -3136,6 +3136,7 @@ fn hex2bin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let hex = s.as_bytes();
     if hex.len() % 2 != 0 {
+        _vm.emit_warning("hex2bin(): Hexadecimal input string must have an even length");
         return Ok(Value::False);
     }
     let mut result = Vec::new();

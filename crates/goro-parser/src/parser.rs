@@ -101,7 +101,7 @@ impl Parser {
             Ok(span)
         } else {
             Err(ParseError {
-                message: format!("expected {:?}, found {:?}", expected, self.peek()),
+                message: format!("syntax error, unexpected token {}, expecting {}", self.peek().to_php_name(), expected.to_php_name()),
                 span: self.span(),
             })
         }
@@ -119,7 +119,7 @@ impl Parser {
                 Ok(())
             }
             _ => Err(ParseError {
-                message: format!("expected ';', found {:?}", self.peek()),
+                message: format!("syntax error, unexpected token {}", self.peek().to_php_name()),
                 span: self.span(),
             }),
         }

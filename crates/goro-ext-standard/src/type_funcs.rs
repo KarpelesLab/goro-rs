@@ -282,9 +282,11 @@ fn floatval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn strval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(
-        args.first().unwrap_or(&Value::Null).to_php_string(),
-    ))
+    let val = args.first().unwrap_or(&Value::Null);
+    if matches!(val, Value::Array(_)) || matches!(val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_))) {
+        _vm.emit_warning("Array to string conversion");
+    }
+    Ok(Value::String(val.to_php_string()))
 }
 
 fn boolval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

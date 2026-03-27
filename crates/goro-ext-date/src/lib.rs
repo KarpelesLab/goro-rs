@@ -94,7 +94,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mktime", mktime);
     vm.register_function(b"gmmktime", gmmktime_fn);
     vm.register_function(b"strftime", strftime_fn);
-    vm.register_function(b"gmstrftime", strftime_fn); // Same as strftime for now (UTC not separately handled)
+    vm.register_function(b"gmstrftime", gmstrftime_fn);
     vm.register_function(b"strtotime", strtotime);
     vm.register_function(b"date_create", date_create_fn);
     vm.register_function(b"getdate", getdate_fn);
@@ -279,6 +279,8 @@ fn gmmktime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// strftime - format a timestamp using strftime-style format codes
 fn strftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // PHP 8.1: strftime() is deprecated
+    _vm.emit_deprecated("Function strftime() is deprecated since 8.1, use IntlDateFormatter::format() instead");
     let format = args
         .first()
         .unwrap_or(&Value::Null)
@@ -374,6 +376,13 @@ fn strftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     Ok(Value::String(PhpString::from_string(result)))
+}
+
+/// gmstrftime - format a timestamp using strftime-style format codes (UTC)
+fn gmstrftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // PHP 8.1: gmstrftime() is deprecated
+    _vm.emit_deprecated("Function gmstrftime() is deprecated since 8.1, use IntlDateFormatter::format() instead");
+    strftime_fn(_vm, args)
 }
 
 /// date_create - create a DateTime-like value (returns DateTime object with timestamp property)

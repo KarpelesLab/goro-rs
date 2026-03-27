@@ -84,7 +84,25 @@ fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &st
         }
         Value::True | Value::False => Ok(true),
         Value::Long(_) | Value::Double(_) => Ok(true),
-        Value::String(_) => Ok(true), // strings are coerced to numbers
+        Value::String(s) => {
+            // PHP 8: Only numeric strings are accepted for int|float params
+            // Non-numeric strings throw TypeError
+            let bytes = s.as_bytes();
+            if goro_core::value::parse_numeric_string(bytes).is_some() || bytes.is_empty() {
+                Ok(true) // numeric strings are coerced to numbers
+            } else {
+                // Check if it's a leading-numeric string (has trailing non-numeric chars)
+                let trimmed = s.to_string_lossy();
+                let trimmed = trimmed.trim();
+                if !trimmed.is_empty() && (trimmed.bytes().next().map(|b| b.is_ascii_digit() || b == b'-' || b == b'+' || b == b'.').unwrap_or(false)) {
+                    Ok(true) // leading numeric string, will be coerced
+                } else {
+                    let type_name = Vm::value_type_name(val);
+                    vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
+                    Ok(false)
+                }
+            }
+        }
         Value::Reference(r) => {
             let inner = r.borrow().clone();
             check_math_num_arg(vm, &inner, func_name, param_name, param_num)
@@ -92,6 +110,49 @@ fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &st
         _ => {
             let type_name = Vm::value_type_name(val);
             vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
+            Ok(false)
+        }
+    }
+}
+
+/// Check math function argument for int type only (rejects float/string/etc.)
+fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<bool, VmError> {
+    match val {
+        Value::Null => {
+            // null is accepted with deprecation
+            Ok(true)
+        }
+        Value::True | Value::False => Ok(true),
+        Value::Long(_) => Ok(true),
+        Value::Double(f) => {
+            // PHP 8: float is rejected for int params
+            let type_name = Vm::value_type_name(val);
+            vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
+            Ok(false)
+        }
+        Value::String(s) => {
+            // Numeric strings accepted, non-numeric rejected
+            let bytes = s.as_bytes();
+            if let Some(n) = goro_core::value::parse_numeric_string(bytes) {
+                if n.fract() == 0.0 {
+                    Ok(true)
+                } else {
+                    // Float string - handle like a float
+                    Ok(true) // PHP actually accepts float strings for int params
+                }
+            } else {
+                let type_name = Vm::value_type_name(val);
+                vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
+                Ok(false)
+            }
+        }
+        Value::Reference(r) => {
+            let inner = r.borrow().clone();
+            check_int_arg(vm, &inner, func_name, param_name, param_num)
+        }
+        _ => {
+            let type_name = Vm::value_type_name(val);
+            vm.throw_type_error(format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
             Ok(false)
         }
     }
@@ -742,18 +803,30 @@ fn parse_base_string(s: &str, base: u32) -> Value {
     }
 }
 fn decbin_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    if !check_int_arg(_vm, val, "decbin", "num", 1)? {
+        return Ok(Value::Null);
+    }
     Ok(Value::String(goro_core::string::PhpString::from_string(
-        format!("{:b}", args.first().unwrap_or(&Value::Null).to_long()),
+        format!("{:b}", val.to_long()),
     )))
 }
 fn decoct_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    if !check_int_arg(_vm, val, "decoct", "num", 1)? {
+        return Ok(Value::Null);
+    }
     Ok(Value::String(goro_core::string::PhpString::from_string(
-        format!("{:o}", args.first().unwrap_or(&Value::Null).to_long()),
+        format!("{:o}", val.to_long()),
     )))
 }
 fn dechex_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    if !check_int_arg(_vm, val, "dechex", "num", 1)? {
+        return Ok(Value::Null);
+    }
     Ok(Value::String(goro_core::string::PhpString::from_string(
-        format!("{:x}", args.first().unwrap_or(&Value::Null).to_long()),
+        format!("{:x}", val.to_long()),
     )))
 }
 fn is_nan_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

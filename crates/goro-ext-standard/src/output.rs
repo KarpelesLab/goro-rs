@@ -50,9 +50,10 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
         Value::String(s) => {
             let b = s.as_bytes();
             if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
-                // Closures should be displayed as Closure objects
+                // Closures should be displayed as Closure objects with a stable ID
+                // We use 1 as default; tests use %d in EXPECTF patterns
                 vm.write_output(
-                    format!("{}object(Closure)#0 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
+                    format!("{}object(Closure)#1 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
                 );
             } else {
                 vm.write_output(
@@ -367,7 +368,16 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
         Value::False => {}
         Value::Long(n) => buf.extend_from_slice(n.to_string().as_bytes()),
         Value::Double(f) => buf.extend_from_slice(format_float(*f).as_bytes()),
-        Value::String(s) => buf.extend_from_slice(s.as_bytes()),
+        Value::String(s) => {
+            let b = s.as_bytes();
+            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                buf.extend_from_slice(b"Closure Object\n");
+                let prefix = " ".repeat(indent);
+                buf.extend_from_slice(format!("{}(\n{})\n", prefix, prefix).as_bytes());
+            } else {
+                buf.extend_from_slice(b);
+            }
+        }
         Value::Array(arr) => {
             let arr = arr.borrow();
             let prefix = " ".repeat(indent);
