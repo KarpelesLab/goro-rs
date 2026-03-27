@@ -2613,6 +2613,28 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let limit = parse_memory_value(&value);
         goro_core::value::set_memory_limit(limit);
     }
+    // Handle error_reporting
+    if key == b"error_reporting" {
+        let level = match &value {
+            Value::Long(n) => *n,
+            Value::String(s) => {
+                let s_str = s.to_string_lossy();
+                if let Ok(n) = s_str.parse::<i64>() { n } else { vm.error_reporting }
+            }
+            _ => value.to_long(),
+        };
+        vm.error_reporting = level;
+    }
+    // Handle serialize_precision
+    if key == b"serialize_precision" {
+        if let Value::Long(p) = &value {
+            goro_core::value::set_php_serialize_precision(*p as i32);
+        } else if let Value::String(s) = &value {
+            if let Ok(p) = s.to_string_lossy().parse::<i32>() {
+                goro_core::value::set_php_serialize_precision(p);
+            }
+        }
+    }
     // Actually update the value
     vm.constants.insert(key, value);
     // Return old value or false if not previously set
@@ -3321,6 +3343,7 @@ fn hex2bin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let hex = s.as_bytes();
     if hex.len() % 2 != 0 {
+        _vm.emit_warning("hex2bin(): Hexadecimal input string must have an even length");
         return Ok(Value::False);
     }
     let mut result = Vec::with_capacity(hex.len() / 2);
@@ -4163,19 +4186,117 @@ fn parse_str_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if pair.is_empty() {
             continue;
         }
-        let (key, val) = if let Some(eq_pos) = pair.find('=') {
+        let (raw_key, raw_val) = if let Some(eq_pos) = pair.find('=') {
             (&pair[..eq_pos], &pair[eq_pos + 1..])
         } else {
             (pair, "")
         };
-        result.set(
-            goro_core::array::ArrayKey::String(PhpString::from_string(key.to_string())),
-            Value::String(PhpString::from_string(val.to_string())),
-        );
+        let key = php_urldecode(raw_key);
+        let val = php_urldecode(raw_val);
+        let val_value = Value::String(PhpString::from_string(val));
+
+        // Handle array bracket syntax: key[subkey], key[], key[a][b]
+        if let Some(bracket_pos) = key.find('[') {
+            let base_key = &key[..bracket_pos];
+            let brackets = &key[bracket_pos..];
+            // Parse bracket keys
+            let mut keys: Vec<Option<String>> = Vec::new();
+            let mut rest = brackets;
+            while rest.starts_with('[') {
+                if let Some(close) = rest.find(']') {
+                    let inner = &rest[1..close];
+                    keys.push(if inner.is_empty() { None } else { Some(inner.to_string()) });
+                    rest = &rest[close + 1..];
+                } else {
+                    break;
+                }
+            }
+            // Navigate/create nested arrays
+            let base_arr_key = goro_core::array::ArrayKey::String(PhpString::from_string(base_key.to_string()));
+            if !matches!(result.get(&base_arr_key), Some(Value::Array(_))) {
+                result.set(base_arr_key.clone(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+            }
+            let mut current = result.get(&base_arr_key).unwrap().clone();
+            for (i, sub_key) in keys.iter().enumerate() {
+                let is_last = i == keys.len() - 1;
+                if is_last {
+                    if let Value::Array(arr) = &current {
+                        let mut arr_borrow = arr.borrow_mut();
+                        match sub_key {
+                            None => { arr_borrow.push(val_value.clone()); }
+                            Some(k) => {
+                                if let Ok(n) = k.parse::<i64>() {
+                                    arr_borrow.set(goro_core::array::ArrayKey::Int(n), val_value.clone());
+                                } else {
+                                    arr_borrow.set(goro_core::array::ArrayKey::String(PhpString::from_string(k.clone())), val_value.clone());
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if let Value::Array(arr) = &current {
+                        let sub_arr_key = match sub_key {
+                            None => {
+                                let mut arr_borrow = arr.borrow_mut();
+                                let next_idx = arr_borrow.len() as i64;
+                                arr_borrow.push(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                goro_core::array::ArrayKey::Int(next_idx)
+                            }
+                            Some(k) => {
+                                let key = if let Ok(n) = k.parse::<i64>() {
+                                    goro_core::array::ArrayKey::Int(n)
+                                } else {
+                                    goro_core::array::ArrayKey::String(PhpString::from_string(k.clone()))
+                                };
+                                if !matches!(arr.borrow().get(&key), Some(Value::Array(_))) {
+                                    arr.borrow_mut().set(key.clone(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                }
+                                key
+                            }
+                        };
+                        let next = arr.borrow().get(&sub_arr_key).unwrap().clone();
+                        current = next;
+                    }
+                }
+            }
+        } else {
+            result.set(
+                goro_core::array::ArrayKey::String(PhpString::from_string(key)),
+                val_value,
+            );
+        }
     }
-    // PHP 8 requires the second parameter (result variable)
-    // For now, just return the parsed array
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
+    // PHP 8: parse_str($string, &$result) sets $result and returns null
+    let result_val = Value::Array(Rc::new(RefCell::new(result)));
+    if let Some(Value::Reference(r)) = args.get(1) {
+        *r.borrow_mut() = result_val;
+        Ok(Value::Null)
+    } else {
+        // If no second parameter, return the array (non-standard but compatible with our VM)
+        Ok(result_val)
+    }
+}
+
+fn php_urldecode(s: &str) -> String {
+    let mut result = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => { result.push(b' '); i += 1; }
+            b'%' if i + 2 < bytes.len() => {
+                if let Ok(byte) = u8::from_str_radix(&s[i+1..i+3], 16) {
+                    result.push(byte);
+                    i += 3;
+                } else {
+                    result.push(b'%');
+                    i += 1;
+                }
+            }
+            c => { result.push(c); i += 1; }
+        }
+    }
+    String::from_utf8_lossy(&result).to_string()
 }
 
 // === URL ===
@@ -4945,8 +5066,83 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
-    let s = serialize_value_depth(val, 0);
+    let s = serialize_value_with_vm(val, 0, _vm);
     Ok(Value::String(PhpString::from_string(s)))
+}
+fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
+    if depth > 128 {
+        return "N;".to_string();
+    }
+    match val {
+        Value::Object(obj) => {
+            let class_name_bytes = obj.borrow().class_name.clone();
+            let class_lower: Vec<u8> = class_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_name = String::from_utf8_lossy(&class_name_bytes).to_string();
+
+            // Check for __serialize first (PHP 7.4+)
+            let has_serialize = vm.classes.get(&class_lower)
+                .map(|c| c.get_method(b"__serialize").is_some())
+                .unwrap_or(false);
+            if has_serialize {
+                let result = vm.call_object_method(val, b"__serialize", &[]);
+                if let Some(Value::Array(arr)) = result {
+                    let arr = arr.borrow();
+                    let mut s = format!("O:{}:\"{}\":{}:{{", class_name.len(), class_name, arr.len());
+                    for (key, v) in arr.iter() {
+                        match key {
+                            goro_core::array::ArrayKey::Int(n) => s.push_str(&format!("i:{};", n)),
+                            goro_core::array::ArrayKey::String(k) => {
+                                s.push_str(&format!("s:{}:\"{}\";", k.len(), k.to_string_lossy()));
+                            }
+                        }
+                        s.push_str(&serialize_value_with_vm(v, depth + 1, vm));
+                    }
+                    s.push('}');
+                    return s;
+                }
+            }
+
+            // Check for __sleep
+            let has_sleep = vm.classes.get(&class_lower)
+                .map(|c| c.get_method(b"__sleep").is_some())
+                .unwrap_or(false);
+            if has_sleep {
+                let result = vm.call_object_method(val, b"__sleep", &[]);
+                if let Some(Value::Array(arr)) = result {
+                    let arr_borrow = arr.borrow();
+                    let prop_names: Vec<Vec<u8>> = arr_borrow.values().map(|v| {
+                        v.to_php_string().as_bytes().to_vec()
+                    }).collect();
+                    drop(arr_borrow);
+                    let obj_borrow = obj.borrow();
+                    let mut s = format!("O:{}:\"{}\":{}:{{", class_name.len(), class_name, prop_names.len());
+                    for prop_name in &prop_names {
+                        let prop_str = String::from_utf8_lossy(prop_name);
+                        if let Some(v) = obj_borrow.properties.iter().find(|(k, _)| k == prop_name).map(|(_, v)| v) {
+                            s.push_str(&format!("s:{}:\"{}\";", prop_name.len(), prop_str));
+                            s.push_str(&serialize_value_depth(v, depth + 1));
+                        } else {
+                            // Property doesn't exist, emit warning and skip
+                            vm.emit_warning(&format!(
+                                "serialize(): \"{}\" returned as member variable from __sleep() but does not exist",
+                                prop_str
+                            ));
+                        }
+                    }
+                    s.push('}');
+                    return s;
+                } else if let Some(Value::Null) = result {
+                    // __sleep returned null
+                    return "N;".to_string();
+                }
+            }
+
+            // Default serialization
+            serialize_value_depth(val, depth)
+        }
+        Value::Reference(r) => serialize_value_with_vm(&r.borrow(), depth, vm),
+        _ => serialize_value_depth(val, depth),
+    }
 }
 fn serialize_value_depth(val: &Value, depth: usize) -> String {
     if depth > 128 {
@@ -5228,33 +5424,62 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
                 }
             }
 
+            // Check for __unserialize first (PHP 7.4+)
+            let has_unserialize = vm.classes.get(&class_lower)
+                .map(|c| c.get_method(b"__unserialize").is_some())
+                .unwrap_or(false);
+
+            // Parse properties - keep as raw array for __unserialize
+            let mut raw_data = PhpArray::new();
             for _ in 0..prop_count {
                 let key = unserialize_value(data, pos, vm)?;
                 let value = unserialize_value(data, pos, vm)?;
-                if let Value::String(s) = &key {
-                    // Handle private/protected property names
-                    // Private: \0ClassName\0propName
-                    // Protected: \0*\0propName
-                    let name_bytes = s.as_bytes();
-                    let prop_name = if !name_bytes.is_empty() && name_bytes[0] == 0 {
-                        // Find the second \0
-                        if let Some(end) = name_bytes[1..].iter().position(|&b| b == 0) {
-                            name_bytes[end + 2..].to_vec()
+                if has_unserialize {
+                    // For __unserialize, keep original keys (including int keys)
+                    match &key {
+                        Value::Long(n) => raw_data.set(ArrayKey::Int(*n), value),
+                        Value::String(s) => raw_data.set(ArrayKey::String(s.clone()), value),
+                        _ => {}
+                    }
+                } else {
+                    if let Value::String(s) = &key {
+                        // Handle private/protected property names
+                        // Private: \0ClassName\0propName
+                        // Protected: \0*\0propName
+                        let name_bytes = s.as_bytes();
+                        let prop_name = if !name_bytes.is_empty() && name_bytes[0] == 0 {
+                            // Find the second \0
+                            if let Some(end) = name_bytes[1..].iter().position(|&b| b == 0) {
+                                name_bytes[end + 2..].to_vec()
+                            } else {
+                                name_bytes.to_vec()
+                            }
                         } else {
                             name_bytes.to_vec()
-                        }
-                    } else {
-                        name_bytes.to_vec()
-                    };
-                    obj.set_property(prop_name, value);
+                        };
+                        obj.set_property(prop_name, value);
+                    }
                 }
             }
             if *pos < data.len() && data[*pos] == b'}' {
                 *pos += 1;
             }
 
-            // Call __unserialize or __wakeup if they exist
             let obj_val = Value::Object(Rc::new(RefCell::new(obj)));
+
+            if has_unserialize {
+                let data_val = Value::Array(Rc::new(RefCell::new(raw_data)));
+                let _ = vm.call_object_method(&obj_val, b"__unserialize", &[data_val]);
+            } else {
+                // Check for __wakeup
+                let has_wakeup = vm.classes.get(&class_lower)
+                    .map(|c| c.get_method(b"__wakeup").is_some())
+                    .unwrap_or(false);
+                if has_wakeup {
+                    let _ = vm.call_object_method(&obj_val, b"__wakeup", &[]);
+                }
+            }
+
             Some(obj_val)
         }
         b'R' | b'r' => {

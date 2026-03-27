@@ -1507,6 +1507,18 @@ fn convert_uudecode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let len_byte = if bytes[i] == b'`' { 0u8 } else { bytes[i].wrapping_sub(32) & 0x3F };
         if len_byte == 0 { break; }
         i += 1;
+        // Validate: check that we have enough encoded data on this line
+        let expected_encoded = ((len_byte as usize + 2) / 3) * 4;
+        let line_start = i;
+        let mut line_end = i;
+        while line_end < bytes.len() && bytes[line_end] != b'\n' && bytes[line_end] != b'\r' {
+            line_end += 1;
+        }
+        let available = line_end - line_start;
+        if available < expected_encoded {
+            _vm.emit_warning("convert_uudecode(): Argument #1 ($data) is not a valid uuencoded string");
+            return Ok(Value::False);
+        }
         let mut decoded = 0usize;
         while decoded < len_byte as usize && i + 3 < bytes.len() {
             let c0 = if bytes[i] == b'`' { 0 } else { (bytes[i] - 32) & 0x3F };
@@ -1664,18 +1676,24 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let start = if offset < 0 {
         let resolved = main_len + offset;
         if resolved < 0 {
-            vm.emit_warning(&format!(
-                "substr_compare(): Starting position cannot exceed initial string length"
-            ));
-            return Ok(Value::False);
+            let msg = "substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($haystack)".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            if let Value::Object(obj) = &exc {
+                obj.borrow_mut().class_name = b"ValueError".to_vec();
+            }
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
         }
         resolved as usize
     } else {
         if offset > main_len {
-            vm.emit_warning(&format!(
-                "substr_compare(): Starting position cannot exceed initial string length"
-            ));
-            return Ok(Value::False);
+            let msg = "substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($haystack)".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            if let Value::Object(obj) = &exc {
+                obj.borrow_mut().class_name = b"ValueError".to_vec();
+            }
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
         }
         offset as usize
     };
@@ -3945,12 +3963,12 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             b'X' => {
                 // X = back up one byte
-                let repeat = if count == u32::MAX {
-                    pos
+                if count == u32::MAX {
+                    _vm.emit_warning("unpack(): Type X: '*' ignored");
+                    // Don't move position
                 } else {
-                    count as usize
-                };
-                pos = pos.saturating_sub(repeat);
+                    pos = pos.saturating_sub(count as usize);
+                }
             }
             b'@' => {
                 // @ = NUL-fill to absolute position
@@ -4567,14 +4585,14 @@ fn quoted_printable_encode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
             line_len = 0;
         } else if b == b'\t' || (b >= 32 && b <= 126 && b != b'=') {
             if line_len >= 75 {
-                result.extend_from_slice(b"=\r\n");
+                result.extend_from_slice(b"=\n");
                 line_len = 0;
             }
             result.push(b);
             line_len += 1;
         } else {
             if line_len >= 73 {
-                result.extend_from_slice(b"=\r\n");
+                result.extend_from_slice(b"=\n");
                 line_len = 0;
             }
             result.push(b'=');

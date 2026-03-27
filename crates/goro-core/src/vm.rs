@@ -2395,6 +2395,8 @@ impl Vm {
             (_, ParamType::Simple(b)) if b.eq_ignore_ascii_case(b"mixed") => true,
             // Nullable types: ?T is compatible with ?T
             (ParamType::Nullable(a), ParamType::Nullable(b)) => Self::is_return_type_compatible(a, b),
+            // ?T is NOT compatible with T for return types (widening is forbidden)
+            (ParamType::Nullable(_), ParamType::Simple(b)) if !b.eq_ignore_ascii_case(b"mixed") => false,
             // T is compatible with ?T (covariant - narrowing)
             (_, ParamType::Nullable(inner)) => Self::is_return_type_compatible(child_rt, inner),
             // For intersection types, union types, and class types, we can't easily check
@@ -11792,26 +11794,17 @@ impl Vm {
                                 } else {
                                     format!("Call to undefined function {}()", func_display)
                                 };
-                                // Throw as Error exception for method calls
-                                if func_display.contains("::") {
-                                    let err_id = self.next_object_id;
-                                    self.next_object_id += 1;
-                                    let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
-                                    err_obj.set_property(
-                                        b"message".to_vec(),
-                                        Value::String(PhpString::from_string(err_msg.clone())),
-                                    );
-                                    err_obj.set_property(b"code".to_vec(), Value::Long(0));
-                                    err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
-                                    err_obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
-                                    self.current_exception = Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                // Throw as Error exception
+                                {
+                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                    self.current_exception = Some(exc);
                                     if let Some((catch_target, _, _)) = exception_handlers.last() {
                                         ip = *catch_target as usize;
                                         continue;
                                     }
                                 }
                                 return Err(VmError {
-                                    message: err_msg,
+                                    message: format!("Uncaught Error: {}", err_msg),
                                     line: op.line,
                                 });
                             }
@@ -12279,12 +12272,12 @@ impl Vm {
                             })
                     } else {
                         // For list() destructuring, emit "Cannot use X as array" warning
+                        // null is silently ignored (no warning for null)
                         let type_name = match &arr_val {
                             Value::True | Value::False => "bool",
                             Value::Long(_) => "int",
                             Value::Double(_) => "float",
                             Value::String(_) => "string",
-                            Value::Null | Value::Undef => "null",
                             _ => "",
                         };
                         if !type_name.is_empty() {
@@ -13022,6 +13015,12 @@ impl Vm {
 
                 OpCode::Throw => {
                     let exc_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+
+                    // Restore error_reporting if we're inside an @ expression
+                    // (The ErrorRestore opcode won't be reached due to the throw)
+                    if let Some(saved) = self.error_reporting_stack.pop() {
+                        self.error_reporting = saved;
+                    }
 
                     // Check that we're throwing an object
                     if !matches!(&exc_val, Value::Object(_)) {
@@ -14710,7 +14709,13 @@ impl Vm {
                         } else {
                             class_name_raw.as_bytes().to_vec()
                         };
-                    let class_name = PhpString::from_vec(resolved_bytes);
+                    // Strip leading backslash for fully-qualified names
+                    let resolved_stripped = if resolved_bytes.first() == Some(&b'\\') {
+                        resolved_bytes[1..].to_vec()
+                    } else {
+                        resolved_bytes
+                    };
+                    let class_name = PhpString::from_vec(resolved_stripped);
                     let name_lower: Vec<u8> = class_name
                         .as_bytes()
                         .iter()

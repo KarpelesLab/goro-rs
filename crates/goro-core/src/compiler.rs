@@ -97,6 +97,8 @@ impl Compiler {
                     (b"similar_text", 2) => true,
                     // settype(&$var, $type)
                     (b"settype", 0) => true,
+                    // parse_str($string, &$result)
+                    (b"parse_str", 1) => true,
                     _ => false,
                 }
             }

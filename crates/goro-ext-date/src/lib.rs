@@ -765,19 +765,35 @@ fn idate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         b'U' => secs,
         b'w' => dow,
         b'W' => {
-            // ISO week number
-            let iso_dow = if dow == 0 { 7 } else { dow }; // Monday=1
+            // ISO week number - use the ISO year to compute correctly
+            let current_days = ymd_to_days(year, month, day);
+            // Try computing with the current year first
             let jan1_days = ymd_to_days(year, 1, 1);
             let jan1_dow = (((jan1_days % 7) + 4) % 7 + 7) % 7;
             let jan1_iso_dow = if jan1_dow == 0 { 7 } else { jan1_dow };
             let iso_week_one_start = jan1_days - (jan1_iso_dow - 1) + if jan1_iso_dow <= 4 { 0 } else { 7 };
-            let current_days = ymd_to_days(year, month, day);
             let diff = current_days - iso_week_one_start;
             if diff < 0 {
-                // In last week of previous year - compute that year's last week
-                52 // simplified
+                // Before ISO week 1 of this year - belongs to last week of previous year
+                let prev_jan1_days = ymd_to_days(year - 1, 1, 1);
+                let prev_jan1_dow = (((prev_jan1_days % 7) + 4) % 7 + 7) % 7;
+                let prev_jan1_iso_dow = if prev_jan1_dow == 0 { 7 } else { prev_jan1_dow };
+                let prev_iso_week_one_start = prev_jan1_days - (prev_jan1_iso_dow - 1) + if prev_jan1_iso_dow <= 4 { 0 } else { 7 };
+                let prev_diff = current_days - prev_iso_week_one_start;
+                (prev_diff / 7 + 1) as i64
             } else {
-                (diff / 7 + 1) as i64
+                let week = (diff / 7 + 1) as i64;
+                // Check if this is actually week 1 of next year
+                let next_jan1_days = ymd_to_days(year + 1, 1, 1);
+                let next_jan1_dow = (((next_jan1_days % 7) + 4) % 7 + 7) % 7;
+                let next_jan1_iso_dow = if next_jan1_dow == 0 { 7 } else { next_jan1_dow };
+                let next_iso_week_one_start = next_jan1_days - (next_jan1_iso_dow - 1) + if next_jan1_iso_dow <= 4 { 0 } else { 7 };
+                if current_days >= next_iso_week_one_start {
+                    let next_diff = current_days - next_iso_week_one_start;
+                    (next_diff / 7 + 1) as i64
+                } else {
+                    week
+                }
             }
         }
         b'y' => year % 100,
