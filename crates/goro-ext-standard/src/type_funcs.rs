@@ -417,6 +417,10 @@ fn count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Emit warning for non-Countable objects
             Ok(Value::Long(1))
         }
+        Value::Generator(_) => {
+            vm.throw_type_error("count(): Argument #1 ($value) must be of type Countable|array, Generator given".to_string());
+            Ok(Value::Long(0))
+        }
         Value::Null | Value::Undef => Ok(Value::Long(0)),
         _ => {
             Ok(Value::Long(1))

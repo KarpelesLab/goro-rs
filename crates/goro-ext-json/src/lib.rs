@@ -140,6 +140,22 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: 
             }
         }
         Value::String(s) => {
+            // JSON_NUMERIC_CHECK: encode numeric strings as numbers
+            if flags & JSON_NUMERIC_CHECK != 0 {
+                let sv = s.to_string_lossy();
+                let trimmed = sv.trim();
+                if !trimmed.is_empty() {
+                    if let Ok(n) = trimmed.parse::<i64>() {
+                        return n.to_string();
+                    }
+                    if let Ok(f) = trimmed.parse::<f64>() {
+                        if !f.is_infinite() && !f.is_nan() {
+                            let formatted = format!("{}", f);
+                            return formatted;
+                        }
+                    }
+                }
+            }
             json_encode_string(s.as_bytes(), flags)
         }
         Value::Array(arr) => {

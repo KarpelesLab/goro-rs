@@ -140,7 +140,7 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     if let Some(extensions) = test.sections.get("EXTENSIONS") {
         let supported = [
             "ctype", "date", "json", "hash", "pcre", "spl", "standard",
-            "mbstring", "reflection",
+            "mbstring", "reflection", "core", "tokenizer",
         ];
         for ext in extensions.lines() {
             let ext = ext.trim().to_lowercase();

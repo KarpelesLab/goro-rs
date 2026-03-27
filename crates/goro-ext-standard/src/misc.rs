@@ -1240,8 +1240,35 @@ fn array_unique(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let arr = arr.borrow();
         let mut result = PhpArray::new();
         let mut seen: Vec<Vec<u8>> = Vec::new();
+        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(2); // SORT_STRING = 2 default
         for (key, val) in arr.iter() {
-            let s = val.to_php_string().as_bytes().to_vec();
+            let s = match val {
+                Value::Object(obj) => {
+                    // For objects (including enums), use class name + identity-based key
+                    let obj_ref = obj.borrow();
+                    if obj_ref.has_property(b"__enum_case") {
+                        // Enum: use class_name::case_name as unique key
+                        let mut k = obj_ref.class_name.clone();
+                        k.extend_from_slice(b"::");
+                        let case_name = obj_ref.get_property(b"name");
+                        k.extend_from_slice(case_name.to_php_string().as_bytes());
+                        k
+                    } else {
+                        // Regular objects: use pointer as unique key
+                        let ptr = Rc::as_ptr(obj) as usize;
+                        format!("__obj_{}", ptr).into_bytes()
+                    }
+                }
+                _ => {
+                    if flags == 1 {
+                        // SORT_NUMERIC
+                        let n = val.to_double();
+                        format!("{}", n).into_bytes()
+                    } else {
+                        val.to_php_string().as_bytes().to_vec()
+                    }
+                }
+            };
             if !seen.contains(&s) {
                 seen.push(s);
                 result.set(key.clone(), val.clone());
@@ -4889,7 +4916,10 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
             Ok(Value::String(PhpString::from_bytes(b"Closure")))
         } else {
-            Ok(Value::False)
+            // PHP 8: TypeError for non-object
+            let type_name = Vm::value_type_name(val);
+            _vm.throw_type_error(format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name));
+            Ok(Value::Null)
         }
     } else if let Value::Array(arr) = val {
         let arr = arr.borrow();

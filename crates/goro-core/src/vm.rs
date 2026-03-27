@@ -5751,10 +5751,13 @@ impl Vm {
                 let mut new_obj = PhpObject::new(canonical, obj_id);
                 // Set default property values
                 if let Some(ce) = self.classes.get(&class_lower) {
-                    for prop in &ce.properties {
-                        if !prop.is_static {
-                            new_obj.set_property(prop.name.clone(), prop.default.clone());
-                        }
+                    let props: Vec<_> = ce.properties.iter()
+                        .filter(|p| !p.is_static)
+                        .map(|p| (p.name.clone(), p.default.clone()))
+                        .collect();
+                    for (name, default) in props {
+                        let resolved = self.resolve_deferred_value(&default);
+                        new_obj.set_property(name, resolved);
                     }
                 }
                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
@@ -6089,10 +6092,13 @@ impl Vm {
                     let mut new_obj = PhpObject::new(canonical, obj_id);
                     // Set default property values
                     if let Some(ce) = self.classes.get(&class_lower) {
-                        for prop in &ce.properties {
-                            if !prop.is_static {
-                                new_obj.set_property(prop.name.clone(), prop.default.clone());
-                            }
+                        let props: Vec<_> = ce.properties.iter()
+                            .filter(|p| !p.is_static)
+                            .map(|p| (p.name.clone(), p.default.clone()))
+                            .collect();
+                        for (name, default) in props {
+                            let resolved = self.resolve_deferred_value(&default);
+                            new_obj.set_property(name, resolved);
                         }
                     }
                     let new_val = Value::Object(Rc::new(RefCell::new(new_obj)));
@@ -6146,10 +6152,13 @@ impl Vm {
 
                     let mut new_obj = PhpObject::new(canonical, obj_id);
                     if let Some(ce) = self.classes.get(&class_lower) {
-                        for prop in &ce.properties {
-                            if !prop.is_static {
-                                new_obj.set_property(prop.name.clone(), prop.default.clone());
-                            }
+                        let props: Vec<_> = ce.properties.iter()
+                            .filter(|p| !p.is_static)
+                            .map(|p| (p.name.clone(), p.default.clone()))
+                            .collect();
+                        for (name, default) in props {
+                            let resolved = self.resolve_deferred_value(&default);
+                            new_obj.set_property(name, resolved);
                         }
                     }
                     let new_val = Value::Object(Rc::new(RefCell::new(new_obj)));
@@ -8348,6 +8357,38 @@ impl Vm {
         }
     }
 
+    /// Resolve a deferred constant reference value at runtime
+    pub fn resolve_deferred_value(&mut self, val: &Value) -> Value {
+        if let Value::String(s) = val {
+            let s_bytes = s.as_bytes();
+            if s_bytes.starts_with(b"__deferred_const__::") {
+                let rest = &s_bytes[b"__deferred_const__::".len()..];
+                if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                    let ref_class_name = &rest[..sep_pos];
+                    let ref_const_name = &rest[sep_pos + 2..];
+                    let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let resolved = if let Some(ref_class) = self.classes.get(&ref_class_lower) {
+                        ref_class.constants.get(ref_const_name).cloned()
+                    } else {
+                        None
+                    };
+                    if let Some(resolved_val) = resolved {
+                        if let Value::String(s2) = &resolved_val {
+                            if s2.as_bytes().starts_with(b"__enum_case__::") {
+                                let case_name = &s2.as_bytes()[15..];
+                                if let Some(enum_obj) = self.get_enum_case(&ref_class_lower, case_name) {
+                                    return enum_obj;
+                                }
+                            }
+                        }
+                        return resolved_val;
+                    }
+                }
+            }
+        }
+        val.clone()
+    }
+
     /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
@@ -10503,6 +10544,84 @@ impl Vm {
                                                     false,
                                                     caller_scope.as_deref(),
                                                 ) {
+                                                    // Before throwing visibility error, check if class has __callStatic or __call
+                                                    // If so, we should fall through to magic method dispatch
+                                                    let has_callstatic = self.classes.get(class_part_lower)
+                                                        .map(|c| c.get_method(b"__callstatic").is_some())
+                                                        .unwrap_or(false);
+                                                    let has_call = self.classes.get(class_part_lower)
+                                                        .map(|c| c.get_method(b"__call").is_some())
+                                                        .unwrap_or(false);
+                                                    if has_callstatic || has_call {
+                                                        // Clone needed values before borrowing ends
+                                                        let class_part_owned: Vec<u8> = class_part_lower.to_vec();
+                                                        let method_part_owned: Vec<u8> = method_part_lower.to_vec();
+                                                        let class_display_owned: Vec<u8> = class_display.to_vec();
+                                                        let result_val = 'magic_dispatch: {
+                                                            // We need to jump to the magic method dispatch code below
+                                                            // For now, we'll directly dispatch here
+                                                            if has_callstatic {
+                                                                if let Some(cs_method) = self.classes.get(&class_part_owned).and_then(|c| c.get_method(b"__callstatic")) {
+                                                                    let cs_op = cs_method.op_array.clone();
+                                                                    let cs_declaring = cs_method.declaring_class.clone();
+                                                                    let mut fn_cvs = vec![Value::Undef; cs_op.cv_names.len()];
+                                                                    if fn_cvs.len() > 0 {
+                                                                        fn_cvs[0] = Value::String(PhpString::from_vec(method_part_owned.clone()));
+                                                                    }
+                                                                    if fn_cvs.len() > 1 {
+                                                                        let mut args_arr = crate::array::PhpArray::new();
+                                                                        for arg in &call.args {
+                                                                            args_arr.push(arg.clone());
+                                                                        }
+                                                                        fn_cvs[1] = Value::Array(Rc::new(RefCell::new(args_arr)));
+                                                                    }
+                                                                    self.called_class_stack.push(class_display_owned.clone());
+                                                                    self.class_scope_stack.push(cs_declaring);
+                                                                    let r = self.execute_op_array(&cs_op, fn_cvs);
+                                                                    self.called_class_stack.pop();
+                                                                    self.class_scope_stack.pop();
+                                                                    break 'magic_dispatch Some(r);
+                                                                }
+                                                            }
+                                                            if has_call && matches!(cvs.first(), Some(Value::Object(_))) {
+                                                                if let Some(call_method) = self.classes.get(&class_part_owned).and_then(|c| c.get_method(b"__call")) {
+                                                                    let call_op = call_method.op_array.clone();
+                                                                    let call_declaring = call_method.declaring_class.clone();
+                                                                    let mut fn_cvs = vec![Value::Undef; call_op.cv_names.len()];
+                                                                    if fn_cvs.len() > 0 {
+                                                                        fn_cvs[0] = cvs[0].clone(); // $this
+                                                                    }
+                                                                    if fn_cvs.len() > 1 {
+                                                                        fn_cvs[1] = Value::String(PhpString::from_vec(method_part_owned.clone()));
+                                                                    }
+                                                                    if fn_cvs.len() > 2 {
+                                                                        let mut args_arr = crate::array::PhpArray::new();
+                                                                        for arg in &call.args {
+                                                                            args_arr.push(arg.clone());
+                                                                        }
+                                                                        fn_cvs[2] = Value::Array(Rc::new(RefCell::new(args_arr)));
+                                                                    }
+                                                                    self.called_class_stack.push(class_display_owned.clone());
+                                                                    self.class_scope_stack.push(call_declaring);
+                                                                    let r = self.execute_op_array(&call_op, fn_cvs);
+                                                                    self.called_class_stack.pop();
+                                                                    self.class_scope_stack.pop();
+                                                                    break 'magic_dispatch Some(r);
+                                                                }
+                                                            }
+                                                            None
+                                                        };
+                                                        if let Some(result) = result_val {
+                                                            self.write_operand(
+                                                                &op.result,
+                                                                result?,
+                                                                &mut cvs,
+                                                                &mut tmps,
+                                                                &static_cv_keys,
+                                                            );
+                                                            continue;
+                                                        }
+                                                    }
                                                     let err_id = self.next_object_id;
                                                     self.next_object_id += 1;
                                                     let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
@@ -14415,6 +14534,33 @@ impl Vm {
                             }
                         }
 
+                        // Check for duplicate class declaration
+                        let is_builtin_class = matches!(name_lower.as_slice(),
+                            b"stdclass" | b"exception" | b"error" | b"typeerror" | b"valueerror"
+                            | b"runtimeexception" | b"logicexception" | b"invalidargumentexception"
+                            | b"badmethodcallexception" | b"badfunctioncallexception"
+                            | b"overflowexception" | b"underflowexception" | b"rangeerror"
+                            | b"arithmeticerror" | b"divisionbyzeroerror" | b"argumentcounterror"
+                            | b"errorexception" | b"closedgeneratorexception" | b"generator"
+                            | b"closure" | b"arrayobject" | b"arrayiterator"
+                            | b"__php_incomplete_class"
+                        );
+                        if (self.classes.contains_key(&name_lower) || is_builtin_class)
+                            && !class.name.starts_with(b"class@anonymous")
+                        {
+                            // Use the canonical (original case) name from the existing class or builtin table
+                            let canonical = if let Some(existing) = self.classes.get(&name_lower) {
+                                String::from_utf8_lossy(&existing.name).to_string()
+                            } else {
+                                // Builtin class - use proper casing
+                                match name_lower.as_slice() {
+                                    b"stdclass" => "stdClass".to_string(),
+                                    _ => String::from_utf8_lossy(&class.name).to_string(),
+                                }
+                            };
+                            let msg = format!("Cannot redeclare class {}", canonical);
+                            return Err(VmError { message: msg, line: op.line });
+                        }
                         self.classes.insert(name_lower, class);
                     }
                 }
@@ -14673,14 +14819,16 @@ impl Vm {
 
                     // Initialize properties from class definition
                     if let Some(class) = self.classes.get(&name_lower) {
-                        for prop in &class.properties {
-                            if !prop.is_static {
-                                if prop.is_readonly {
-                                    // Readonly properties start as Undef to allow first assignment
-                                    obj.set_property(prop.name.clone(), Value::Undef);
-                                } else {
-                                    obj.set_property(prop.name.clone(), prop.default.clone());
-                                }
+                        let props: Vec<_> = class.properties.iter()
+                            .filter(|p| !p.is_static)
+                            .map(|p| (p.name.clone(), p.default.clone(), p.is_readonly))
+                            .collect();
+                        for (name, default, is_readonly) in props {
+                            if is_readonly {
+                                obj.set_property(name, Value::Undef);
+                            } else {
+                                let resolved = self.resolve_deferred_value(&default);
+                                obj.set_property(name, resolved);
                             }
                         }
                     }

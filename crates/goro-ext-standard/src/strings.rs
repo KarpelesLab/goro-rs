@@ -4357,6 +4357,45 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     while i < bytes.len() {
         if bytes[i] == b'<' {
+            // Check for PHP tags: <?php ... ?>, <? ... ?>, <?= ... ?>
+            if i + 1 < bytes.len() && bytes[i + 1] == b'?' {
+                // PHP tag - skip until ?>
+                i += 2;
+                while i < bytes.len() {
+                    if bytes[i] == b'?' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Check for HTML comments: <!-- ... -->
+            if i + 3 < bytes.len() && bytes[i + 1] == b'!' && bytes[i + 2] == b'-' && bytes[i + 3] == b'-' {
+                // HTML comment - skip until -->
+                i += 4;
+                while i < bytes.len() {
+                    if bytes[i] == b'-' && i + 2 < bytes.len() && bytes[i + 1] == b'-' && bytes[i + 2] == b'>' {
+                        i += 3;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Check for SGML/XML declarations: <! ... >
+            if i + 1 < bytes.len() && bytes[i + 1] == b'!' {
+                // Skip until >
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'>' {
+                    i += 1;
+                }
+                if i < bytes.len() { i += 1; }
+                continue;
+            }
+
             let tag_start = i;
             i += 1;
             let is_closing = i < bytes.len() && bytes[i] == b'/';
@@ -4370,18 +4409,18 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let tag_name_lower = tag_name.to_ascii_lowercase();
 
             // Skip attributes, handling quoted strings
-            while i < bytes.len() && bytes[i] != b'>' {
-                if bytes[i] == b'"' {
-                    i += 1;
-                    while i < bytes.len() && bytes[i] != b'"' { i += 1; }
-                    if i < bytes.len() { i += 1; }
-                } else if bytes[i] == b'\'' {
-                    i += 1;
-                    while i < bytes.len() && bytes[i] != b'\'' { i += 1; }
-                    if i < bytes.len() { i += 1; }
-                } else {
-                    i += 1;
+            let mut in_quote: u8 = 0;
+            while i < bytes.len() {
+                if in_quote != 0 {
+                    if bytes[i] == in_quote {
+                        in_quote = 0;
+                    }
+                } else if bytes[i] == b'"' || bytes[i] == b'\'' {
+                    in_quote = bytes[i];
+                } else if bytes[i] == b'>' {
+                    break;
                 }
+                i += 1;
             }
             if i < bytes.len() { i += 1; }
 
