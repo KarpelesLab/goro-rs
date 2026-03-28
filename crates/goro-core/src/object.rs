@@ -58,6 +58,12 @@ pub struct PropertyDef {
     pub declaring_class: Vec<u8>,
     /// Optional type constraint for the property
     pub property_type: Option<crate::opcode::ParamType>,
+    /// Whether this property has a get hook (PHP 8.4)
+    pub has_get_hook: bool,
+    /// Whether this property has a set hook (PHP 8.4)
+    pub has_set_hook: bool,
+    /// Whether this property is virtual (hooks don't access the backing store)
+    pub is_virtual: bool,
 }
 
 #[derive(Debug, Clone)]

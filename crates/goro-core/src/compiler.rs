@@ -1861,6 +1861,8 @@ impl Compiler {
                             visibility,
                             is_static,
                             is_readonly,
+                            get_hook,
+                            set_hook,
                         } => {
                             // Enums cannot include properties
                             if modifiers.is_enum {
@@ -2065,15 +2067,137 @@ impl Compiler {
                                     line: stmt.span.line,
                                 });
                             }
+                            // Determine if property is virtual (hooks don't access backing store)
+                            let prop_is_virtual = if get_hook.is_some() || set_hook.is_some() {
+                                let get_uses_backing = get_hook.as_ref()
+                                    .map(|body| stmts_reference_backing_store(body, prop_name))
+                                    .unwrap_or(false);
+                                let set_uses_backing = set_hook.as_ref()
+                                    .map(|(_, body)| stmts_reference_backing_store(body, prop_name))
+                                    .unwrap_or(false);
+                                // Virtual if neither hook accesses the backing store AND no default value
+                                !get_uses_backing && !set_uses_backing && default.is_none()
+                            } else {
+                                false
+                            };
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
                                 default: default_val,
                                 is_static: *is_static,
                                 visibility: vis,
-                                declaring_class: declaring_class_lower,
+                                declaring_class: declaring_class_lower.clone(),
                                 is_readonly: prop_is_readonly,
                                 property_type: prop_type,
+                                has_get_hook: get_hook.is_some(),
+                                has_set_hook: set_hook.is_some(),
+                                is_virtual: prop_is_virtual,
                             });
+
+                            // Compile property get hook as a method: __property_get_$propname
+                            if let Some(hook_body) = get_hook {
+                                let hook_method_name = format!("__property_get_{}", String::from_utf8_lossy(prop_name));
+                                // Display name for __METHOD__: $prop::get
+                                let hook_display_name = format!("${}::get", String::from_utf8_lossy(prop_name));
+                                let mut hook_compiler = Compiler::new();
+                                hook_compiler.current_namespace = self.current_namespace.clone();
+                                hook_compiler.use_map = self.use_map.clone();
+                                hook_compiler.use_function_map = self.use_function_map.clone();
+                                hook_compiler.use_const_map = self.use_const_map.clone();
+                                hook_compiler.op_array.name = hook_display_name.into_bytes();
+                                hook_compiler.op_array.decl_line = stmt.span.line;
+                                hook_compiler.source_file = self.source_file.clone();
+                                hook_compiler.current_class = Some(qualified_name.clone());
+                                hook_compiler.current_parent_class = class.parent.clone();
+                                hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+
+                                // $this is CV 0
+                                hook_compiler.op_array.get_or_create_cv(b"this");
+                                hook_compiler.op_array.param_count = 1; // just $this
+                                hook_compiler.op_array.required_param_count = 0;
+
+                                for s in hook_body {
+                                    hook_compiler.compile_stmt(s)?;
+                                }
+
+                                // Implicit return null
+                                let null_idx = hook_compiler.op_array.add_literal(Value::Null);
+                                hook_compiler.op_array.emit(Op {
+                                    opcode: OpCode::Return,
+                                    op1: OperandType::Const(null_idx),
+                                    op2: OperandType::Unused,
+                                    result: OperandType::Unused,
+                                    line: 0,
+                                });
+
+                                let lower_hook_name: Vec<u8> = hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                                class.methods.insert(
+                                    lower_hook_name,
+                                    MethodDef {
+                                        name: hook_method_name.into_bytes(),
+                                        op_array: hook_compiler.op_array,
+                                        param_count: 0,
+                                        is_static: false,
+                                        is_abstract: false,
+                                        is_final: false,
+                                        visibility: ObjVisibility::Public,
+                                        declaring_class: declaring_class_lower.clone(),
+                                    },
+                                );
+                            }
+
+                            // Compile property set hook as a method: __property_set_$propname
+                            if let Some((param_name, hook_body)) = set_hook {
+                                let hook_method_name = format!("__property_set_{}", String::from_utf8_lossy(prop_name));
+                                // Display name for __METHOD__: $prop::set
+                                let hook_display_name = format!("${}::set", String::from_utf8_lossy(prop_name));
+                                let mut hook_compiler = Compiler::new();
+                                hook_compiler.current_namespace = self.current_namespace.clone();
+                                hook_compiler.use_map = self.use_map.clone();
+                                hook_compiler.use_function_map = self.use_function_map.clone();
+                                hook_compiler.use_const_map = self.use_const_map.clone();
+                                hook_compiler.op_array.name = hook_display_name.into_bytes();
+                                hook_compiler.op_array.decl_line = stmt.span.line;
+                                hook_compiler.source_file = self.source_file.clone();
+                                hook_compiler.current_class = Some(qualified_name.clone());
+                                hook_compiler.current_parent_class = class.parent.clone();
+                                hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+
+                                // $this is CV 0
+                                hook_compiler.op_array.get_or_create_cv(b"this");
+                                // $value (or custom param name) is CV 1
+                                hook_compiler.op_array.get_or_create_cv(param_name);
+                                hook_compiler.op_array.param_count = 2; // $this + $value
+                                hook_compiler.op_array.required_param_count = 1; // $value is required
+
+                                for s in hook_body {
+                                    hook_compiler.compile_stmt(s)?;
+                                }
+
+                                // Implicit return null
+                                let null_idx = hook_compiler.op_array.add_literal(Value::Null);
+                                hook_compiler.op_array.emit(Op {
+                                    opcode: OpCode::Return,
+                                    op1: OperandType::Const(null_idx),
+                                    op2: OperandType::Unused,
+                                    result: OperandType::Unused,
+                                    line: 0,
+                                });
+
+                                let lower_hook_name: Vec<u8> = hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                                class.methods.insert(
+                                    lower_hook_name,
+                                    MethodDef {
+                                        name: hook_method_name.into_bytes(),
+                                        op_array: hook_compiler.op_array,
+                                        param_count: 1, // $value
+                                        is_static: false,
+                                        is_abstract: false,
+                                        is_final: false,
+                                        visibility: ObjVisibility::Public,
+                                        declaring_class: declaring_class_lower,
+                                    },
+                                );
+                            }
                         }
                         ClassMember::Method {
                             name: method_name,
@@ -2364,6 +2488,9 @@ impl Compiler {
                                                 declaring_class: declaring_class_lower,
                                                 is_readonly: param.readonly || modifiers.is_readonly,
                                                 property_type: promoted_prop_type,
+                                                has_get_hook: false,
+                                                has_set_hook: false,
+                                                is_virtual: false,
                                             });
                                         }
                                     }
@@ -6872,6 +6999,109 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::ThrowExpr(e) => expr_contains_yield(e),
         ExprKind::PropertyAccess { object, .. } => expr_contains_yield(object),
         ExprKind::Include { path, .. } => expr_contains_yield(path),
+        _ => false,
+    }
+}
+
+/// Check if a list of statements references $this->propname (indicating a backed property)
+fn stmts_reference_backing_store(stmts: &[Statement], prop_name: &[u8]) -> bool {
+    stmts.iter().any(|stmt| stmt_references_backing_store(stmt, prop_name))
+}
+
+fn stmt_references_backing_store(stmt: &Statement, prop_name: &[u8]) -> bool {
+    match &stmt.kind {
+        StmtKind::Expression(e) => expr_references_backing_store(e, prop_name),
+        StmtKind::Return(Some(e)) => expr_references_backing_store(e, prop_name),
+        StmtKind::Echo(exprs) => exprs.iter().any(|e| expr_references_backing_store(e, prop_name)),
+        StmtKind::If { condition, body, elseif_clauses, else_body } => {
+            expr_references_backing_store(condition, prop_name)
+                || stmts_reference_backing_store(body, prop_name)
+                || elseif_clauses.iter().any(|(c, b)| expr_references_backing_store(c, prop_name) || stmts_reference_backing_store(b, prop_name))
+                || else_body.as_ref().is_some_and(|b| stmts_reference_backing_store(b, prop_name))
+        }
+        StmtKind::While { condition, body } | StmtKind::DoWhile { body, condition } => {
+            expr_references_backing_store(condition, prop_name) || stmts_reference_backing_store(body, prop_name)
+        }
+        StmtKind::For { init, condition, update, body } => {
+            init.iter().any(|e| expr_references_backing_store(e, prop_name))
+                || condition.iter().any(|e| expr_references_backing_store(e, prop_name))
+                || update.iter().any(|e| expr_references_backing_store(e, prop_name))
+                || stmts_reference_backing_store(body, prop_name)
+        }
+        StmtKind::Foreach { expr, body, .. } => {
+            expr_references_backing_store(expr, prop_name) || stmts_reference_backing_store(body, prop_name)
+        }
+        StmtKind::TryCatch { try_body, catches, finally_body } => {
+            stmts_reference_backing_store(try_body, prop_name)
+                || catches.iter().any(|c| stmts_reference_backing_store(&c.body, prop_name))
+                || finally_body.as_ref().is_some_and(|b| stmts_reference_backing_store(b, prop_name))
+        }
+        StmtKind::Throw(e) => expr_references_backing_store(e, prop_name),
+        _ => false,
+    }
+}
+
+fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
+    match &expr.kind {
+        ExprKind::PropertyAccess { object, property, .. } => {
+            // Check if this is $this->propname
+            if let ExprKind::Variable(var) = &object.kind {
+                if var == b"this" {
+                    if let ExprKind::Identifier(name) = &property.kind {
+                        if name == prop_name {
+                            return true;
+                        }
+                    }
+                }
+            }
+            expr_references_backing_store(object, prop_name) || expr_references_backing_store(property, prop_name)
+        }
+        ExprKind::Assign { target, value } | ExprKind::AssignRef { target, value } => {
+            expr_references_backing_store(target, prop_name) || expr_references_backing_store(value, prop_name)
+        }
+        ExprKind::CompoundAssign { target, value, .. } => {
+            expr_references_backing_store(target, prop_name) || expr_references_backing_store(value, prop_name)
+        }
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_references_backing_store(left, prop_name) || expr_references_backing_store(right, prop_name)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_references_backing_store(operand, prop_name),
+        ExprKind::FunctionCall { name, args, .. } => {
+            expr_references_backing_store(name, prop_name) || args.iter().any(|a| expr_references_backing_store(&a.value, prop_name))
+        }
+        ExprKind::MethodCall { object, args, .. } => {
+            expr_references_backing_store(object, prop_name) || args.iter().any(|a| expr_references_backing_store(&a.value, prop_name))
+        }
+        ExprKind::Ternary { condition, if_true, if_false } => {
+            expr_references_backing_store(condition, prop_name)
+                || if_true.as_ref().is_some_and(|e| expr_references_backing_store(e, prop_name))
+                || expr_references_backing_store(if_false, prop_name)
+        }
+        ExprKind::NullCoalesce { left, right } => {
+            expr_references_backing_store(left, prop_name) || expr_references_backing_store(right, prop_name)
+        }
+        ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) => {
+            expr_references_backing_store(e, prop_name)
+        }
+        ExprKind::Array(elements) => {
+            elements.iter().any(|el| {
+                expr_references_backing_store(&el.value, prop_name)
+                    || el.key.as_ref().is_some_and(|k| expr_references_backing_store(k, prop_name))
+            })
+        }
+        ExprKind::Isset(exprs) => exprs.iter().any(|e| expr_references_backing_store(e, prop_name)),
+        ExprKind::ArrayAccess { array, index } => {
+            expr_references_backing_store(array, prop_name) || index.as_ref().is_some_and(|i| expr_references_backing_store(i, prop_name))
+        }
+        ExprKind::New { args, .. } => args.iter().any(|a| expr_references_backing_store(&a.value, prop_name)),
+        ExprKind::Instanceof { expr, .. } => expr_references_backing_store(expr, prop_name),
+        ExprKind::Match { subject, arms } => {
+            expr_references_backing_store(subject, prop_name)
+                || arms.iter().any(|arm| {
+                    expr_references_backing_store(&arm.body, prop_name)
+                        || arm.conditions.as_ref().is_some_and(|conds| conds.iter().any(|c| expr_references_backing_store(c, prop_name)))
+                })
+        }
         _ => false,
     }
 }

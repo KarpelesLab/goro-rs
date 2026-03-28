@@ -499,6 +499,10 @@ pub enum ClassMember {
         visibility: Visibility,
         is_static: bool,
         is_readonly: bool,
+        /// Property get hook body (PHP 8.4)
+        get_hook: Option<Vec<Statement>>,
+        /// Property set hook: (parameter_name, body) (PHP 8.4)
+        set_hook: Option<(Vec<u8>, Vec<Statement>)>,
     },
     Method {
         name: Vec<u8>,

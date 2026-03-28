@@ -2050,18 +2050,24 @@ impl Parser {
                 } else {
                     None
                 };
-                // Skip comma-separated additional properties
-                while self.eat(&TokenKind::Comma) {
-                    if let TokenKind::Variable(_) = self.peek().clone() {
-                        self.advance();
-                        if self.eat(&TokenKind::Assign) {
-                            let _ = self.parse_expression()?;
+                // Check for property hooks { get { ... } set(...) { ... } }
+                let (get_hook, set_hook) = if matches!(self.peek(), TokenKind::OpenBrace) {
+                    self.parse_property_hooks(&name)?
+                } else {
+                    // Skip comma-separated additional properties
+                    while self.eat(&TokenKind::Comma) {
+                        if let TokenKind::Variable(_) = self.peek().clone() {
+                            self.advance();
+                            if self.eat(&TokenKind::Assign) {
+                                let _ = self.parse_expression()?;
+                            }
+                        } else {
+                            break;
                         }
-                    } else {
-                        break;
                     }
-                }
-                self.expect_semicolon()?;
+                    self.expect_semicolon()?;
+                    (None, None)
+                };
                 Ok(ClassMember::Property {
                     name,
                     type_hint: None,
@@ -2069,6 +2075,8 @@ impl Parser {
                     visibility,
                     is_static,
                     is_readonly,
+                    get_hook,
+                    set_hook,
                 })
             }
             _ => {
@@ -2091,20 +2099,26 @@ impl Parser {
                 } else {
                     None
                 };
-                // Check for comma-separated additional properties
-                // For now, just skip the comma and additional names
-                while self.eat(&TokenKind::Comma) {
-                    // Parse and discard additional property names (they share the same type)
-                    if let TokenKind::Variable(_) = self.peek().clone() {
-                        self.advance(); // skip variable name
-                        if self.eat(&TokenKind::Assign) {
-                            let _ = self.parse_expression()?; // skip default value
+                // Check for property hooks { get { ... } set(...) { ... } }
+                let (get_hook, set_hook) = if matches!(self.peek(), TokenKind::OpenBrace) {
+                    self.parse_property_hooks(&name)?
+                } else {
+                    // Check for comma-separated additional properties
+                    // For now, just skip the comma and additional names
+                    while self.eat(&TokenKind::Comma) {
+                        // Parse and discard additional property names (they share the same type)
+                        if let TokenKind::Variable(_) = self.peek().clone() {
+                            self.advance(); // skip variable name
+                            if self.eat(&TokenKind::Assign) {
+                                let _ = self.parse_expression()?; // skip default value
+                            }
+                        } else {
+                            break;
                         }
-                    } else {
-                        break;
                     }
-                }
-                self.expect_semicolon()?;
+                    self.expect_semicolon()?;
+                    (None, None)
+                };
                 Ok(ClassMember::Property {
                     name,
                     type_hint: Some(type_hint),
@@ -2112,9 +2126,140 @@ impl Parser {
                     visibility,
                     is_static,
                     is_readonly,
+                    get_hook,
+                    set_hook,
                 })
             }
         }
+    }
+
+    /// Parse property hooks: { get { ... } set($value) { ... } }
+    /// Returns (get_hook, set_hook)
+    fn parse_property_hooks(&mut self, prop_name: &[u8]) -> ParseResult<(Option<Vec<Statement>>, Option<(Vec<u8>, Vec<Statement>)>)> {
+        self.expect(&TokenKind::OpenBrace)?;
+        let mut get_hook = None;
+        let mut set_hook = None;
+
+        while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+            // Skip optional modifiers: final, public, protected, private, &
+            while matches!(self.peek(), TokenKind::Final | TokenKind::Public | TokenKind::Protected | TokenKind::Private | TokenKind::Ampersand) {
+                self.advance();
+            }
+            // Look for "get" or "set" identifier
+            let hook_name = match self.peek().clone() {
+                TokenKind::Identifier(name) => name,
+                _ => {
+                    return Err(ParseError {
+                        message: "expected 'get' or 'set' in property hook".into(),
+                        span: self.span(),
+                    });
+                }
+            };
+
+            if hook_name.eq_ignore_ascii_case(b"get") {
+                self.advance(); // consume 'get'
+                if matches!(self.peek(), TokenKind::OpenBrace) {
+                    // get { ... }
+                    let body = self.parse_block()?;
+                    get_hook = Some(body);
+                } else if self.eat(&TokenKind::DoubleArrow) {
+                    // get => expr;
+                    let span = self.span();
+                    let expr = self.parse_expression()?;
+                    self.expect_semicolon()?;
+                    let return_stmt = Statement {
+                        kind: StmtKind::Return(Some(expr)),
+                        span,
+                    };
+                    get_hook = Some(vec![return_stmt]);
+                } else if self.eat(&TokenKind::Semicolon) {
+                    // get; (abstract hook)
+                    get_hook = Some(vec![]);
+                } else {
+                    return Err(ParseError {
+                        message: "expected '{' or '=>' after 'get' in property hook".into(),
+                        span: self.span(),
+                    });
+                }
+            } else if hook_name.eq_ignore_ascii_case(b"set") {
+                self.advance(); // consume 'set'
+                // Optional parameter: set(Type $value) or set($value) or just set
+                let param_name = if self.eat(&TokenKind::OpenParen) {
+                    // Skip optional type hint before $value
+                    // We need to handle: set($value), set(string $value), set(Type $value)
+                    let pname = loop {
+                        match self.peek().clone() {
+                            TokenKind::Variable(name) => {
+                                self.advance();
+                                break name;
+                            }
+                            TokenKind::CloseParen => {
+                                // set() with no param -- use default "value"
+                                break b"value".to_vec();
+                            }
+                            _ => {
+                                // Skip type hint tokens
+                                self.advance();
+                            }
+                        }
+                    };
+                    self.expect(&TokenKind::CloseParen)?;
+                    pname
+                } else {
+                    b"value".to_vec()
+                };
+                if matches!(self.peek(), TokenKind::OpenBrace) {
+                    // set { ... } or set($value) { ... }
+                    let body = self.parse_block()?;
+                    set_hook = Some((param_name, body));
+                } else if self.eat(&TokenKind::DoubleArrow) {
+                    // set => expr; is shorthand for set { $this->propname = expr; }
+                    let span = self.span();
+                    let expr = self.parse_expression()?;
+                    self.expect_semicolon()?;
+                    // Generate: $this->propname = expr;
+                    let this_expr = Expr { kind: ExprKind::Variable(b"this".to_vec()), span: span.clone() };
+                    let prop_ident = Expr { kind: ExprKind::Identifier(prop_name.to_vec()), span: span.clone() };
+                    let prop_access = Expr {
+                        kind: ExprKind::PropertyAccess {
+                            object: Box::new(this_expr),
+                            property: Box::new(prop_ident),
+                            nullsafe: false,
+                        },
+                        span: span.clone(),
+                    };
+                    let assign = Expr {
+                        kind: ExprKind::Assign {
+                            target: Box::new(prop_access),
+                            value: Box::new(expr),
+                        },
+                        span: span.clone(),
+                    };
+                    let assign_stmt = Statement {
+                        kind: StmtKind::Expression(assign),
+                        span,
+                    };
+                    set_hook = Some((param_name, vec![assign_stmt]));
+                } else if self.eat(&TokenKind::Semicolon) {
+                    // set; (abstract hook)
+                    set_hook = Some((param_name, vec![]));
+                } else {
+                    return Err(ParseError {
+                        message: "expected '{' or '=>' after 'set' in property hook".into(),
+                        span: self.span(),
+                    });
+                }
+            } else {
+                return Err(ParseError {
+                    message: format!("expected 'get' or 'set' in property hook, got '{}'",
+                        String::from_utf8_lossy(&hook_name)),
+                    span: self.span(),
+                });
+            }
+        }
+
+        self.expect(&TokenKind::CloseBrace)?;
+        Ok((get_hook, set_hook))
     }
 
     fn parse_try_catch(&mut self) -> ParseResult<Statement> {

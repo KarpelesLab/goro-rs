@@ -260,6 +260,8 @@ pub struct Vm {
     pub current_fiber: Option<Value>,
     /// Stack of fiber objects for nested fibers
     fiber_stack: Vec<Option<Value>>,
+    /// Stack of property names whose hooks are currently executing (recursion guard)
+    property_hook_stack: Vec<Vec<u8>>,
 }
 
 impl Vm {
@@ -303,6 +305,7 @@ impl Vm {
             fiber_depth: 0,
             current_fiber: None,
             fiber_stack: Vec::new(),
+            property_hook_stack: Vec::new(),
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -15258,9 +15261,13 @@ impl Vm {
                     if let Some(class) = self.classes.get(&name_lower) {
                         let props: Vec<_> = class.properties.iter()
                             .filter(|p| !p.is_static)
-                            .map(|p| (p.name.clone(), p.default.clone(), p.is_readonly))
+                            .map(|p| (p.name.clone(), p.default.clone(), p.is_readonly, p.is_virtual))
                             .collect();
-                        for (name, default, is_readonly) in props {
+                        for (name, default, is_readonly, is_virtual) in props {
+                            // Virtual properties have no backing store and should not be initialized
+                            if is_virtual {
+                                continue;
+                            }
                             if is_readonly {
                                 obj.set_property(name, Value::Undef);
                             } else {
@@ -15372,6 +15379,78 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
+
+                        // Check for property get hook (PHP 8.4)
+                        let prop_name_bytes = prop_name.as_bytes();
+                        let hook_method_name = format!("__property_get_{}", String::from_utf8_lossy(prop_name_bytes));
+                        let hook_method_lower: Vec<u8> = hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                        let has_get_hook = self.classes.get(&class_lower)
+                            .map(|c| c.methods.contains_key(&hook_method_lower))
+                            .unwrap_or(false);
+                        let hook_key = {
+                            let mut k = class_lower.clone();
+                            k.push(b':');
+                            k.push(b':');
+                            k.extend_from_slice(prop_name_bytes);
+                            k.extend_from_slice(b"::get");
+                            k
+                        };
+                        let in_hook = self.property_hook_stack.iter().any(|s| *s == hook_key);
+
+                        // Check for write-only virtual property (has set hook but no get hook)
+                        if !in_hook && !has_get_hook {
+                            // Check if property is virtual and set-only
+                            let is_virtual_write_only = self.classes.get(&class_lower)
+                                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name_bytes))
+                                .map(|p| p.has_set_hook && !p.has_get_hook && p.is_virtual)
+                                .unwrap_or(false);
+                            if is_virtual_write_only {
+                                let class_display = String::from_utf8_lossy(&class_name_orig);
+                                let prop_display = String::from_utf8_lossy(prop_name_bytes);
+                                let msg = format!("Property {}::${} is write-only", class_display, prop_display);
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                    exception_handlers.pop();
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                            }
+                        }
+                        if has_get_hook && !in_hook {
+                            // Call the get hook method
+                            let method_def = self.classes.get(&class_lower).unwrap().get_method(hook_method_lower.as_slice()).unwrap();
+                            let method = method_def.op_array.clone();
+                            let hook_declaring = method_def.declaring_class.clone();
+                            let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+                            if !fn_cvs.is_empty() {
+                                fn_cvs[0] = obj_val.clone(); // $this
+                            }
+                            self.property_hook_stack.push(hook_key);
+                            self.class_scope_stack.push(hook_declaring);
+                            self.called_class_stack.push(class_name_orig.clone());
+                            let hook_result = self.execute_op_array(&method, fn_cvs);
+                            self.called_class_stack.pop();
+                            self.class_scope_stack.pop();
+                            self.property_hook_stack.pop();
+                            match hook_result {
+                                Ok(val) => {
+                                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                            exception_handlers.pop();
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                    }
+                                    return Err(e);
+                                }
+                            }
+                        }
 
                         // Check visibility before accessing the property
                         let mut visibility_error: Option<String> = None;
@@ -15545,6 +15624,76 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
+
+                        // Check for property set hook (PHP 8.4)
+                        let prop_name_bytes_set = prop_name.as_bytes();
+                        let set_hook_method_name = format!("__property_set_{}", String::from_utf8_lossy(prop_name_bytes_set));
+                        let set_hook_method_lower: Vec<u8> = set_hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                        let has_set_hook = self.classes.get(&class_lower)
+                            .map(|c| c.methods.contains_key(&set_hook_method_lower))
+                            .unwrap_or(false);
+                        let set_hook_key = {
+                            let mut k = class_lower.clone();
+                            k.push(b':');
+                            k.push(b':');
+                            k.extend_from_slice(prop_name_bytes_set);
+                            k.extend_from_slice(b"::set");
+                            k
+                        };
+                        let in_set_hook = self.property_hook_stack.iter().any(|s| *s == set_hook_key);
+
+                        // Check for read-only virtual property (has get hook but no set hook)
+                        if !in_set_hook && !has_set_hook {
+                            // Check if property is virtual and get-only
+                            let is_virtual_read_only = self.classes.get(&class_lower)
+                                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name_bytes_set))
+                                .map(|p| p.has_get_hook && !p.has_set_hook && p.is_virtual)
+                                .unwrap_or(false);
+                            if is_virtual_read_only {
+                                let class_display = String::from_utf8_lossy(&class_name_orig);
+                                let prop_display = String::from_utf8_lossy(prop_name_bytes_set);
+                                let msg = format!("Property {}::${} is read-only", class_display, prop_display);
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                    exception_handlers.pop();
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                            }
+                        }
+                        if has_set_hook && !in_set_hook {
+                            // Call the set hook method
+                            let method_def = self.classes.get(&class_lower).unwrap().get_method(set_hook_method_lower.as_slice()).unwrap();
+                            let method = method_def.op_array.clone();
+                            let hook_declaring = method_def.declaring_class.clone();
+                            let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+                            if !fn_cvs.is_empty() {
+                                fn_cvs[0] = obj_val.clone(); // $this
+                            }
+                            if fn_cvs.len() > 1 {
+                                fn_cvs[1] = value; // $value
+                            }
+                            self.property_hook_stack.push(set_hook_key);
+                            self.class_scope_stack.push(hook_declaring);
+                            self.called_class_stack.push(class_name_orig.clone());
+                            let hook_result = self.execute_op_array(&method, fn_cvs);
+                            self.called_class_stack.pop();
+                            self.class_scope_stack.pop();
+                            self.property_hook_stack.pop();
+                            if let Err(e) = hook_result {
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                        exception_handlers.pop();
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                }
+                                return Err(e);
+                            }
+                            continue;
+                        }
 
                         // Enums cannot have properties set
                         if obj.borrow().has_property(b"__enum_case") {
