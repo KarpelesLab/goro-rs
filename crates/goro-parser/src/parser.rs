@@ -2600,7 +2600,7 @@ impl Parser {
     }
 
     fn parse_bitwise_and(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_equality()?;
+        let mut left = self.parse_pipe()?;
         while matches!(self.peek(), TokenKind::Ampersand) {
             self.advance();
             let right = self.parse_equality()?;
@@ -2610,6 +2610,24 @@ impl Parser {
                     op: BinaryOp::BitwiseAnd,
                     left: Box::new(left),
                     right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    /// Parse pipe operator (|>), left-associative
+    /// Precedence between equality and comparison
+    fn parse_pipe(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_equality()?;
+        while matches!(self.peek(), TokenKind::PipeGreater) {
+            self.advance();
+            let right = self.parse_equality()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::Pipe {
+                    value: Box::new(left),
+                    callable: Box::new(right),
                 },
             };
         }

@@ -33,6 +33,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"error_clear_last", error_clear_last_fn);
     vm.register_function(b"set_exception_handler", set_exception_handler);
     vm.register_function(b"restore_exception_handler", restore_exception_handler);
+    vm.register_function(b"get_error_handler", get_error_handler);
+    vm.register_function(b"get_exception_handler", get_exception_handler);
     vm.register_function(b"trigger_error", trigger_error);
     vm.register_function(b"user_error", trigger_error);
 
@@ -402,12 +404,27 @@ fn restore_error_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
     Ok(Value::True)
 }
 
-fn set_exception_handler(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
+fn set_exception_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let prev = vm.exception_handler.take();
+    if let Some(handler) = args.first() {
+        if !matches!(handler, Value::Null) {
+            vm.exception_handler = Some(handler.clone());
+        }
+    }
+    Ok(prev.unwrap_or(Value::Null))
 }
 
-fn restore_exception_handler(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn restore_exception_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.exception_handler = None;
     Ok(Value::True)
+}
+
+fn get_error_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(vm.error_handler.clone().unwrap_or(Value::Null))
+}
+
+fn get_exception_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(vm.exception_handler.clone().unwrap_or(Value::Null))
 }
 
 fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2768,11 +2785,17 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             | b"reflectiongenerator"
             | b"reflectionattribute"
     );
-    Ok(if is_builtin || vm.classes.contains_key(&name_lower) {
-        Value::True
-    } else {
-        Value::False
-    })
+    if is_builtin {
+        return Ok(Value::True);
+    }
+    // class_exists() returns false for interfaces and traits (but true for enums)
+    if let Some(class) = vm.classes.get(&name_lower) {
+        if class.is_interface || class.is_trait {
+            return Ok(Value::False);
+        }
+        return Ok(Value::True);
+    }
+    Ok(Value::False)
 }
 fn get_class(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);

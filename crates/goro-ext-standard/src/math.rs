@@ -127,7 +127,11 @@ fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &st
 fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<bool, VmError> {
     match val {
         Value::Null => {
-            // null is accepted with deprecation
+            // null is accepted with deprecation in PHP 8.1+
+            vm.emit_deprecated_at(
+                &format!("{}(): Passing null to parameter #{} (${}) of type int is deprecated", func_name, param_num, param_name),
+                vm.current_line,
+            );
             Ok(true)
         }
         Value::True | Value::False => Ok(true),
@@ -163,8 +167,9 @@ fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, pa
             if let Some(n) = goro_core::value::parse_numeric_string(bytes) {
                 if n.fract() != 0.0 {
                     // Float string with fractional part - deprecated
+                    let str_val = s.to_string_lossy();
                     vm.emit_deprecated_at(
-                        &format!("Implicit conversion from float {} to int loses precision", n),
+                        &format!("Implicit conversion from float-string \"{}\" to int loses precision", str_val),
                         vm.current_line,
                     );
                 }
@@ -486,13 +491,52 @@ fn simple_random(min: i64, max: i64) -> i64 {
     min + (seed % range) as i64
 }
 
-fn array_sum(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_sum(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     if let Value::Array(arr) = val {
         let arr = arr.borrow();
         let mut sum = Value::Long(0);
         for (_, v) in arr.iter() {
-            sum = sum.add(v);
+            let val = match v {
+                Value::Reference(r) => r.borrow().clone(),
+                other => other.clone(),
+            };
+            match &val {
+                Value::Long(_) | Value::Double(_) | Value::True | Value::False | Value::Null => {
+                    sum = sum.add(&val);
+                }
+                Value::String(s) => {
+                    // Only numeric strings are summed, others emit warning
+                    if goro_core::value::parse_numeric_string(s.as_bytes()).is_some() {
+                        sum = sum.add(&val);
+                    } else {
+                        vm.emit_warning_at(
+                            "array_sum(): Addition is not supported on type string",
+                            vm.current_line,
+                        );
+                    }
+                }
+                Value::Array(_) => {
+                    vm.emit_warning_at(
+                        "array_sum(): Addition is not supported on type array",
+                        vm.current_line,
+                    );
+                }
+                Value::Object(obj) => {
+                    let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                    vm.emit_warning_at(
+                        &format!("array_sum(): Addition is not supported on type {}", class_name),
+                        vm.current_line,
+                    );
+                }
+                _ => {
+                    let type_name = Vm::value_type_name(&val);
+                    vm.emit_warning_at(
+                        &format!("array_sum(): Addition is not supported on type {}", type_name),
+                        vm.current_line,
+                    );
+                }
+            }
         }
         Ok(sum)
     } else {
@@ -534,13 +578,9 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    // Check if the function is registered (we need access to the function table)
-    // For now, return false for unknown functions
-    // The VM stores functions in its HashMap, but we can't access it from here directly
-    // through the builtin fn signature. This will be fixed when we refactor.
-    let _ = name_lower;
-    let _ = vm;
-    Ok(Value::False)
+    let exists = vm.functions.contains_key(&name_lower)
+        || vm.user_functions.contains_key(&name_lower);
+    Ok(if exists { Value::True } else { Value::False })
 }
 
 fn sin_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -890,12 +930,51 @@ fn is_finite_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         },
     )
 }
-fn array_product(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_product(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
         let mut product = Value::Long(1);
         for (_, v) in arr.iter() {
-            product = product.mul(v);
+            let val = match v {
+                Value::Reference(r) => r.borrow().clone(),
+                other => other.clone(),
+            };
+            match &val {
+                Value::Long(_) | Value::Double(_) | Value::True | Value::False | Value::Null => {
+                    product = product.mul(&val);
+                }
+                Value::String(s) => {
+                    // Only numeric strings are multiplied, others emit warning
+                    if goro_core::value::parse_numeric_string(s.as_bytes()).is_some() {
+                        product = product.mul(&val);
+                    } else {
+                        vm.emit_warning_at(
+                            "array_product(): Multiplication is not supported on type string",
+                            vm.current_line,
+                        );
+                    }
+                }
+                Value::Array(_) => {
+                    vm.emit_warning_at(
+                        "array_product(): Multiplication is not supported on type array",
+                        vm.current_line,
+                    );
+                }
+                Value::Object(obj) => {
+                    let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                    vm.emit_warning_at(
+                        &format!("array_product(): Multiplication is not supported on type {}", class_name),
+                        vm.current_line,
+                    );
+                }
+                _ => {
+                    let type_name = Vm::value_type_name(&val);
+                    vm.emit_warning_at(
+                        &format!("array_product(): Multiplication is not supported on type {}", type_name),
+                        vm.current_line,
+                    );
+                }
+            }
         }
         Ok(product)
     } else {

@@ -229,6 +229,8 @@ pub struct Vm {
     pending_return: Option<Value>,
     /// User error handler callback (from set_error_handler)
     pub error_handler: Option<Value>,
+    /// User exception handler callback (from set_exception_handler)
+    pub exception_handler: Option<Value>,
     /// Next ID for bound closure names
     next_bound_closure_id: u64,
     /// JSON last error code (0 = no error)
@@ -271,6 +273,7 @@ impl Vm {
             error_reporting_stack: Vec::new(),
             pending_return: None,
             error_handler: None,
+            exception_handler: None,
             next_bound_closure_id: 0,
             json_last_error: 0,
             pending_named_args: Vec::new(),
@@ -1578,11 +1581,20 @@ impl Vm {
                 String::from_utf8_lossy(name).to_string()
             }
             ParamType::Nullable(inner) => format!("?{}", self.param_type_name_inner(inner, false)),
-            ParamType::Union(types) => types
-                .iter()
-                .map(|t| self.param_type_name_inner(t, true))
-                .collect::<Vec<_>>()
-                .join("|"),
+            ParamType::Union(types) => {
+                // PHP normalizes union types: null/false/true go to the end,
+                // everything else preserves source order
+                let mut parts: Vec<String> = types
+                    .iter()
+                    .map(|t| self.param_type_name_inner(t, true))
+                    .collect();
+                parts.sort_by_key(|s| match s.as_str() {
+                    "null" => 2,
+                    "false" | "true" => 1,
+                    _ => 0,
+                });
+                parts.join("|")
+            }
             ParamType::Intersection(types) => {
                 let s = types
                     .iter()
@@ -1880,11 +1892,20 @@ impl Vm {
                 String::from_utf8_lossy(name).to_string()
             }
             ParamType::Nullable(inner) => format!("?{}", self.param_type_display_inner(inner, false)),
-            ParamType::Union(types) => types
-                .iter()
-                .map(|t| self.param_type_display_inner(t, true))
-                .collect::<Vec<_>>()
-                .join("|"),
+            ParamType::Union(types) => {
+                // PHP normalizes union types: null/false/true go to the end,
+                // everything else preserves source order
+                let mut parts: Vec<String> = types
+                    .iter()
+                    .map(|t| self.param_type_display_inner(t, true))
+                    .collect();
+                parts.sort_by_key(|s| match s.as_str() {
+                    "null" => 2,
+                    "false" | "true" => 1,
+                    _ => 0,
+                });
+                parts.join("|")
+            }
             ParamType::Intersection(types) => {
                 let s = types
                     .iter()
@@ -8468,8 +8489,8 @@ impl Vm {
                     // Include class name in the function display name for methods
                     let func_name = if let Some(ref scope) = op_array.scope_class {
                         let class_display = self.classes.get(scope)
-                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                            .unwrap_or_else(|| String::from_utf8_lossy(scope).to_string());
+                            .map(|c| crate::value::display_class_name(&c.name))
+                            .unwrap_or_else(|| crate::value::display_class_name(scope));
                         format!("{}::{}", class_display, raw_name)
                     } else {
                         raw_name.to_string()
@@ -8614,7 +8635,7 @@ impl Vm {
                 }
 
                 OpCode::Assign => {
-                    let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, &op_array, op.line);
                     self.write_operand(&op.op1, val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
@@ -8660,8 +8681,8 @@ impl Vm {
                 }
 
                 OpCode::Add => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     self.check_leading_numeric_warning(&a, op.line);
                     self.check_leading_numeric_warning(&b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "+") {
@@ -8680,8 +8701,8 @@ impl Vm {
                     self.write_operand(&op.result, a.add(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Sub => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     self.check_leading_numeric_warning(&a, op.line);
                     self.check_leading_numeric_warning(&b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "-") {
@@ -8700,8 +8721,8 @@ impl Vm {
                     self.write_operand(&op.result, a.sub(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Mul => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     self.check_leading_numeric_warning(&a, op.line);
                     self.check_leading_numeric_warning(&b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "*") {
@@ -8720,8 +8741,8 @@ impl Vm {
                     self.write_operand(&op.result, a.mul(&b), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::Div => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "/") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8769,8 +8790,8 @@ impl Vm {
                     }
                 }
                 OpCode::Mod => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "%") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8827,8 +8848,8 @@ impl Vm {
                     }
                 }
                 OpCode::Pow => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "**") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8895,6 +8916,38 @@ impl Vm {
                         &static_cv_keys,
                     );
                 }
+                OpCode::UnaryPlus => {
+                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = match &a {
+                        Value::Long(_) | Value::Double(_) => a,
+                        Value::True => Value::Long(1),
+                        Value::False | Value::Null | Value::Undef => Value::Long(0),
+                        Value::String(s) => {
+                            if let Some(n) = crate::value::parse_numeric_string(s.as_bytes()) {
+                                let bytes = s.as_bytes();
+                                let is_float = bytes.iter().any(|&b| b == b'.' || b == b'e' || b == b'E');
+                                if is_float || n.fract() != 0.0 || n > i64::MAX as f64 || n < i64::MIN as f64 {
+                                    Value::Double(n)
+                                } else {
+                                    Value::Long(n as i64)
+                                }
+                            } else {
+                                // Non-numeric string: warn and convert to 0
+                                self.emit_warning_at("A non-numeric value encountered", op.line);
+                                Value::Long(0)
+                            }
+                        }
+                        _ => Value::Long(0),
+                    };
+                    self.write_operand(
+                        &op.result,
+                        val,
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
+                }
+
                 OpCode::Negate => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.write_operand(
@@ -8907,8 +8960,8 @@ impl Vm {
                 }
 
                 OpCode::BitwiseAnd => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "&") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8942,8 +8995,8 @@ impl Vm {
                     );
                 }
                 OpCode::BitwiseOr => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "|") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8981,8 +9034,8 @@ impl Vm {
                     );
                 }
                 OpCode::BitwiseXor => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "^") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -9656,6 +9709,14 @@ impl Vm {
                     }
                     // Emit deprecation warnings for non-numeric string increment
                     emit_inc_dec_warnings(self, &val, true, op.line);
+                    // Check if the warning handler threw an exception
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: "Uncaught exception from error handler".to_string(), line: op.line });
+                    }
                     let new_val = php_increment(&val);
                     self.write_operand(
                         &op.op1,
@@ -9678,6 +9739,13 @@ impl Vm {
                         return Err(VmError { message: format!("Uncaught TypeError: {}", err), line: op.line });
                     }
                     emit_inc_dec_warnings(self, &val, false, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: "Uncaught exception from error handler".to_string(), line: op.line });
+                    }
                     let new_val = php_decrement(&val);
                     self.write_operand(
                         &op.op1,
@@ -9700,6 +9768,13 @@ impl Vm {
                         return Err(VmError { message: format!("Uncaught TypeError: {}", err), line: op.line });
                     }
                     emit_inc_dec_warnings(self, &val, true, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: "Uncaught exception from error handler".to_string(), line: op.line });
+                    }
                     let new_val = php_increment(&val);
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps, &static_cv_keys);
@@ -9716,6 +9791,13 @@ impl Vm {
                         return Err(VmError { message: format!("Uncaught TypeError: {}", err), line: op.line });
                     }
                     emit_inc_dec_warnings(self, &val, false, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: "Uncaught exception from error handler".to_string(), line: op.line });
+                    }
                     let new_val = php_decrement(&val);
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps, &static_cv_keys);
@@ -9840,7 +9922,7 @@ impl Vm {
                     });
                 }
                 OpCode::SendVal => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.args.push(val);
                     }
@@ -10543,6 +10625,27 @@ impl Vm {
                         }
                         match func(self, &call.args) {
                             Ok(result) => {
+                                // Check if the builtin set an exception (e.g. TypeError)
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        // Extract exception message for uncaught error
+                                        let msg = if let Some(Value::Object(exc_obj)) = &self.current_exception {
+                                            let exc = exc_obj.borrow();
+                                            let class = String::from_utf8_lossy(&exc.class_name).to_string();
+                                            let message = exc.get_property(b"message").to_php_string().to_string_lossy();
+                                            format!("Uncaught {}: {}", class, message)
+                                        } else {
+                                            "Uncaught exception".to_string()
+                                        };
+                                        return Err(VmError {
+                                            message: msg,
+                                            line: op.line,
+                                        });
+                                    }
+                                }
                                 self.write_operand(
                                     &op.result,
                                     result,
@@ -13721,6 +13824,33 @@ impl Vm {
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
                     if let Value::Object(obj) = &obj_val {
+                        // Enum readonly property protection
+                        if obj.borrow().has_property(b"__enum_case") {
+                            let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                            let is_readonly = prop_str == "name"
+                                || (prop_str == "value" && obj.borrow().has_property(b"__enum_backing_type"));
+                            if is_readonly {
+                                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let msg = format!("Cannot unset readonly property {}::${}", class_name, prop_str);
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: msg, line: op.line });
+                            } else {
+                                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let msg = format!("Cannot unset dynamic property {}::${}", class_name, prop_str);
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: msg, line: op.line });
+                            }
+                        }
                         let has_prop = obj.borrow().has_property(prop_name.as_bytes());
                         if has_prop {
                             obj.borrow_mut().properties
@@ -14007,15 +14137,9 @@ impl Vm {
                     };
                     let msg = format!("Unhandled match case {}", subject_repr);
 
-                    let err_id = self.next_object_id;
-                    self.next_object_id += 1;
-                    let mut err_obj = PhpObject::new(b"UnhandledMatchError".to_vec(), err_id);
-                    err_obj.set_property(
-                        b"message".to_vec(),
-                        Value::String(PhpString::from_string(msg)),
-                    );
+                    let exc_val = self.create_exception(b"UnhandledMatchError", &msg, op.line);
 
-                    let exc_val = Value::Object(Rc::new(RefCell::new(err_obj)));
+
 
                     if let Some((catch_target, _finally_target, _exc_tmp)) =
                         exception_handlers.pop()
@@ -14142,8 +14266,35 @@ impl Vm {
                                                 line: op.line,
                                             });
                                         }
-                                        // Skip __construct compatibility checks
+                                        // Check visibility: child must have same or weaker visibility
                                         let mn_lower = method_name.as_slice();
+                                        if mn_lower != b"__construct" && method.visibility != Visibility::Private {
+                                            let parent_vis_level = match method.visibility {
+                                                Visibility::Public => 0,
+                                                Visibility::Protected => 1,
+                                                Visibility::Private => 2,
+                                            };
+                                            let child_vis_level = match child_method.visibility {
+                                                Visibility::Public => 0,
+                                                Visibility::Protected => 1,
+                                                Visibility::Private => 2,
+                                            };
+                                            if child_vis_level > parent_vis_level {
+                                                let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                                let method_display = String::from_utf8_lossy(&method.name).to_string();
+                                                let vis_str = match method.visibility {
+                                                    Visibility::Public => "public",
+                                                    Visibility::Protected => "protected",
+                                                    Visibility::Private => "private",
+                                                };
+                                                return Err(VmError {
+                                                    message: format!("Access level to {}::{}() must be {} (as in class {}) or weaker", child_display, method_display, vis_str, parent_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                        // Skip __construct compatibility checks
                                         if mn_lower != b"__construct" && !method.is_abstract
                                             && method.visibility != Visibility::Private
                                             && child_method.visibility != Visibility::Private {
@@ -14165,6 +14316,37 @@ impl Vm {
                                 // Inherit properties (parent properties come first, child overrides take precedence)
                                 let child_prop_names: Vec<Vec<u8>> =
                                     class.properties.iter().map(|p| p.name.clone()).collect();
+                                // Check property visibility compatibility
+                                for parent_prop in &parent.properties {
+                                    if parent_prop.visibility != Visibility::Private {
+                                        if let Some(child_prop) = class.properties.iter().find(|p| p.name == parent_prop.name) {
+                                            let parent_vis_level = match parent_prop.visibility {
+                                                Visibility::Public => 0,
+                                                Visibility::Protected => 1,
+                                                Visibility::Private => 2,
+                                            };
+                                            let child_vis_level = match child_prop.visibility {
+                                                Visibility::Public => 0,
+                                                Visibility::Protected => 1,
+                                                Visibility::Private => 2,
+                                            };
+                                            if child_vis_level > parent_vis_level {
+                                                let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                                let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                                let vis_str = match parent_prop.visibility {
+                                                    Visibility::Public => "public",
+                                                    Visibility::Protected => "protected",
+                                                    Visibility::Private => "private",
+                                                };
+                                                return Err(VmError {
+                                                    message: format!("Access level to {}::${} must be {} (as in class {}) or weaker", child_display, prop_display, vis_str, parent_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
                                 let mut new_props = Vec::new();
                                 for prop in &parent.properties {
                                     if !child_prop_names.contains(&prop.name) {
@@ -15235,7 +15417,14 @@ impl Vm {
                         if obj.borrow().has_property(b"__enum_case") {
                             let class_name = String::from_utf8_lossy(&class_name_orig).to_string();
                             let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
-                            let msg = format!("Cannot create dynamic property {}::${}", class_name, prop_str);
+                            // name and value are readonly properties on enums
+                            let is_readonly_prop = prop_str == "name"
+                                || (prop_str == "value" && obj.borrow().has_property(b"__enum_backing_type"));
+                            let msg = if is_readonly_prop {
+                                format!("Cannot modify readonly property {}::${}", class_name, prop_str)
+                            } else {
+                                format!("Cannot create dynamic property {}::${}", class_name, prop_str)
+                            };
                             let exc = self.create_exception(b"Error", &msg, op.line);
                             self.current_exception = Some(exc);
                             if let Some((catch_target, _, _)) = exception_handlers.pop() {

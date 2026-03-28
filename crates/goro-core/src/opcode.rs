@@ -105,6 +105,10 @@ pub enum OpCode {
     AssignShiftLeft,
     AssignShiftRight,
 
+    // ---- Unary numeric ----
+    /// Unary plus: coerce to number, preserving negative zero
+    UnaryPlus,
+
     // ---- Increment/Decrement ----
     PreIncrement,
     PreDecrement,

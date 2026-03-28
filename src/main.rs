@@ -102,7 +102,8 @@ fn run_code(source: &[u8], filename: &str) {
     let (op_array, compiled_classes) = match compiler.compile(&program) {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("{}", e);
+            // Output as Fatal error to match PHP error format
+            eprintln!("Fatal error: {} in {} on line {}", e.message, filename, e.line);
             process::exit(255);
         }
     };

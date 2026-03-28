@@ -2925,6 +2925,14 @@ impl Compiler {
             }
 
             StmtKind::Label(name) => {
+                // Check for duplicate labels
+                if self.label_offsets.contains_key(name) {
+                    let label_display = String::from_utf8_lossy(name);
+                    return Err(CompileError {
+                        message: format!("Label '{}' already defined", label_display),
+                        line: stmt.span.line,
+                    });
+                }
                 let offset = self.op_array.current_offset();
                 self.label_offsets.insert(name.clone(), offset);
                 // Patch any pending gotos that reference this label
@@ -3556,15 +3564,13 @@ impl Compiler {
                 // Unary plus just coerces to number - return the operand directly
                 if matches!(op, UnaryOp::Plus) {
                     let val = self.compile_expr(operand)?;
-                    // Emit CastInt/CastDouble to coerce to numeric
-                    // Actually PHP unary + just returns the value coerced to number
-                    // For simplicity, add 0 to force numeric coercion
+                    // PHP unary + coerces to number but preserves negative zero
+                    // Use a dedicated UnaryPlus opcode
                     let tmp = self.op_array.alloc_temp();
-                    let zero_idx = self.op_array.add_literal(Value::Long(0));
                     self.op_array.emit(Op {
-                        opcode: OpCode::Add,
+                        opcode: OpCode::UnaryPlus,
                         op1: val,
-                        op2: OperandType::Const(zero_idx),
+                        op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
                         line: expr.span.line,
                     });
@@ -3858,6 +3864,24 @@ impl Compiler {
                 self.op_array.patch_jump(jmp_end, end);
 
                 Ok(OperandType::Tmp(result_tmp))
+            }
+
+            ExprKind::Pipe { value, callable } => {
+                // $x |> $f compiles as $f($x)
+                // Desugar into a FunctionCall expression
+                let arg = Argument {
+                    name: None,
+                    value: (**value).clone(),
+                    unpack: false,
+                };
+                let synthetic_call = Expr {
+                    kind: ExprKind::FunctionCall {
+                        name: callable.clone(),
+                        args: vec![arg],
+                    },
+                    span: expr.span,
+                };
+                return self.compile_expr(&synthetic_call);
             }
 
             ExprKind::NullCoalesce { left, right } => {

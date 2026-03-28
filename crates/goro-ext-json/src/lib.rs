@@ -451,7 +451,7 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 error_code = 4;
                 error_msg = "Syntax error";
             } else if parser.depth > parser.max_depth {
-                error_code = 6;
+                error_code = 1; // JSON_ERROR_DEPTH
                 error_msg = "Maximum stack depth exceeded";
             } else {
                 error_code = 4;
