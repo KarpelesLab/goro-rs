@@ -57,6 +57,9 @@ pub struct PhpGenerator {
     pub yield_from_source: Option<Value>,
     /// Yield from: position within array iteration
     pub yield_from_pos: usize,
+    /// When fiber suspension happens during DoFCall, this stores the result operand
+    /// that should receive the resume value when the fiber resumes
+    pub fiber_suspend_result: Option<crate::opcode::OperandType>,
 }
 
 impl PhpGenerator {
@@ -80,6 +83,7 @@ impl PhpGenerator {
             return_value: Value::Null,
             yield_from_source: None,
             yield_from_pos: 0,
+            fiber_suspend_result: None,
         }
     }
 
@@ -678,8 +682,34 @@ impl PhpGenerator {
                     vm.generator_send_named_val(name, val);
                 }
                 OpCode::DoFCall => {
-                    let result = vm.generator_do_fcall(op.line)?;
-                    self.write_operand(&op.result, result);
+                    match vm.generator_do_fcall(op.line) {
+                        Ok(result) => {
+                            self.write_operand(&op.result, result);
+                        }
+                        Err(e) => {
+                            if vm.fiber_suspended {
+                                // Fiber::suspend() was called from within a nested function.
+                                // Save the generator state so we can resume later.
+                                // ip currently points past the DoFCall; we save it there
+                                // because on resume, the send_value will be written to
+                                // the result operand as the return value of Fiber::suspend().
+                                self.ip = ip;
+                                // Store which operand should receive the resume value
+                                self.fiber_suspend_result = Some(op.result);
+                                return Err(e);
+                            }
+                            // Check for exception handling in the generator
+                            if vm.current_exception.is_some() {
+                                if let Some((catch_target, _, _)) = self.exception_handlers.last() {
+                                    let ct = *catch_target as usize;
+                                    self.exception_handlers.pop();
+                                    ip = ct;
+                                    continue;
+                                }
+                            }
+                            return Err(e);
+                        }
+                    }
                 }
 
                 // Casts
@@ -1121,7 +1151,67 @@ impl PhpGenerator {
                         let has_method = vm.classes.get(&class_name_lower)
                             .map(|c| c.get_method(&method_lower).is_some())
                             .unwrap_or(false);
-                        if has_method {
+                        // Handle built-in Throwable methods in generator context
+                        let is_throwable = class_name_lower == b"exception"
+                            || class_name_lower == b"error"
+                            || crate::vm::is_builtin_subclass(&class_name_lower, b"exception")
+                            || crate::vm::is_builtin_subclass(&class_name_lower, b"error")
+                            || vm.class_extends(&class_name_lower, b"exception")
+                            || vm.class_extends(&class_name_lower, b"error");
+                        if is_throwable && !has_method {
+                            let obj_borrow = obj.borrow();
+                            let builtin_result = match method_lower.as_slice() {
+                                b"getmessage" => Some(obj_borrow.get_property(b"message")),
+                                b"getcode" => Some(obj_borrow.get_property(b"code")),
+                                b"getfile" => Some(obj_borrow.get_property(b"file")),
+                                b"getline" => Some(obj_borrow.get_property(b"line")),
+                                b"gettrace" => Some(obj_borrow.get_property(b"trace")),
+                                b"getprevious" => Some(obj_borrow.get_property(b"previous")),
+                                _ => None,
+                            };
+                            drop(obj_borrow);
+                            if let Some(result) = builtin_result {
+                                vm.generator_init_fcall(Value::String(PhpString::from_bytes(b"__builtin_return")));
+                                vm.generator_send_val(result);
+                            } else {
+                                // Fall through to general handling
+                                let mut func_name = class_name_lower.clone();
+                                func_name.extend_from_slice(b"::");
+                                func_name.extend_from_slice(&method_lower);
+                                vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
+                                vm.generator_send_val(obj_val.clone());
+                            }
+                        } else
+                        // Handle Fiber methods in generator context
+                        if class_name_lower == b"fiber" {
+                            match method_lower.as_slice() {
+                                b"__construct" => {
+                                    // Fiber constructor - set up as fiber::__construct
+                                    vm.generator_init_fcall(Value::String(PhpString::from_bytes(b"fiber::__construct")));
+                                    vm.generator_send_val(obj_val.clone());
+                                }
+                                b"isstarted" | b"isrunning" | b"issuspended" | b"isterminated" | b"getreturn" => {
+                                    let mut fiber_name = b"__fiber::".to_vec();
+                                    fiber_name.extend_from_slice(&method_lower);
+                                    vm.generator_init_fcall(Value::String(PhpString::from_vec(fiber_name)));
+                                    vm.generator_send_val(obj_val.clone());
+                                }
+                                b"start" | b"resume" | b"throw" => {
+                                    let mut fiber_name = b"__fiber::".to_vec();
+                                    fiber_name.extend_from_slice(&method_lower);
+                                    vm.generator_init_fcall(Value::String(PhpString::from_vec(fiber_name)));
+                                    vm.generator_send_val(obj_val.clone());
+                                }
+                                _ => {
+                                    self.state = GeneratorState::Completed;
+                                    self.ip = ip;
+                                    return Err(VmError {
+                                        message: format!("Call to undefined method Fiber::{}()", method_name.to_string_lossy()),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                        } else if has_method {
                             // Set up as a method call: name = "class::method", first arg = $this
                             let mut func_name = class_name_lower.clone();
                             func_name.extend_from_slice(b"::");
@@ -1165,20 +1255,43 @@ impl PhpGenerator {
                     // Create new object from generator context
                     let class_name = self.read_operand(&op.op1, &op_array.literals).to_php_string();
                     let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                    let obj = crate::object::PhpObject::new(
+                    let canonical = vm.builtin_canonical_name(&class_lower);
+                    let mut obj = crate::object::PhpObject::new(
                         if let Some(cls) = vm.classes.get(&class_lower) {
                             cls.name.clone()
                         } else {
-                            class_name.as_bytes().to_vec()
+                            canonical.as_bytes().to_vec()
                         },
-                        0,
+                        vm.next_object_id(),
                     );
+                    // Initialize exception/error properties
+                    let is_throwable = class_lower == b"exception"
+                        || class_lower == b"error"
+                        || crate::vm::is_builtin_subclass(&class_lower, b"exception")
+                        || crate::vm::is_builtin_subclass(&class_lower, b"error")
+                        || vm.class_extends(&class_lower, b"exception")
+                        || vm.class_extends(&class_lower, b"error");
+                    if is_throwable {
+                        obj.set_property(b"message".to_vec(), Value::String(PhpString::empty()));
+                        obj.set_property(b"code".to_vec(), Value::Long(0));
+                        obj.set_property(b"file".to_vec(), Value::String(PhpString::from_string(vm.current_file.clone())));
+                        obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
+                        obj.set_property(b"trace".to_vec(), Value::Array(Rc::new(RefCell::new(crate::array::PhpArray::new()))));
+                        obj.set_property(b"previous".to_vec(), Value::Null);
+                    }
+                    // Initialize properties from class definition
+                    if let Some(class) = vm.classes.get(&class_lower) {
+                        let props: Vec<_> = class.properties.iter()
+                            .filter(|p| !p.is_static)
+                            .map(|p| (p.name.clone(), p.default.clone()))
+                            .collect();
+                        for (name, default) in props {
+                            obj.set_property(name, default);
+                        }
+                    }
                     let obj_val = Value::Object(Rc::new(RefCell::new(obj)));
                     self.write_operand(&op.result, obj_val);
-                    // Initialize pending call for constructor
-                    let mut func_name = class_lower.clone();
-                    func_name.extend_from_slice(b"::__construct");
-                    vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
+                    // Note: constructor call will be set up by the subsequent InitMethodCall opcode
                 }
 
                 OpCode::SendRef | OpCode::MakeRef | OpCode::SendUnpack => {
@@ -1215,7 +1328,13 @@ impl PhpGenerator {
     }
 
     /// Write the send_value to the result operand of the last Yield instruction
+    /// or to the fiber_suspend_result operand if resuming from a fiber suspension
     pub fn write_send_value(&mut self) {
+        // Check if we're resuming from a fiber suspension (Fiber::suspend() in nested call)
+        if let Some(result_op) = self.fiber_suspend_result.take() {
+            self.write_operand(&result_op, self.send_value.clone());
+            return;
+        }
         // After resuming, if the previous Yield had a result operand, write the send value there
         if self.ip > 0 {
             let prev_ip = self.ip - 1;
@@ -1227,6 +1346,34 @@ impl PhpGenerator {
                 }
             }
         }
+    }
+
+    /// Resume the generator with an exception (for Fiber::throw)
+    /// The exception should already be set in vm.current_exception
+    pub fn resume_with_exception(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
+        if self.state == GeneratorState::Completed {
+            return Ok(false);
+        }
+
+        vm.enter_generator_resume(0)?;
+
+        // If we have a fiber_suspend_result, we're resuming from a nested call
+        // Clear it since we're throwing instead
+        self.fiber_suspend_result = None;
+
+        // Try to find an exception handler in the generator
+        if let Some((catch_target, _, _)) = self.exception_handlers.last() {
+            let ct = *catch_target as usize;
+            self.exception_handlers.pop();
+            self.ip = ct;
+        }
+        // If no handler, the exception will propagate out
+
+        let result = self.resume_inner(vm);
+
+        vm.leave_generator_resume();
+
+        result
     }
 
     fn read_operand(&self, operand: &OperandType, literals: &[Value]) -> Value {

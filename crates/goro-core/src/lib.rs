@@ -1,5 +1,6 @@
 pub mod array;
 pub mod compiler;
+pub mod fiber;
 pub mod function;
 pub mod generator;
 pub mod object;

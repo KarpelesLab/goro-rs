@@ -4,6 +4,7 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 
 use crate::array::{ArrayKey, PhpArray};
+use crate::fiber::{FiberState, FIBER_SUSPEND_SENTINEL};
 use crate::object::{ClassEntry, MethodDef, PhpObject, PropertyDef, Visibility};
 use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
 use crate::string::PhpString;
@@ -245,6 +246,20 @@ pub struct Vm {
     pub current_line: u32,
     /// Cached enum case singleton objects: key = "classname_lower::CaseName"
     pub enum_case_cache: HashMap<Vec<u8>, Value>,
+    /// Whether a fiber is currently suspended (set by Fiber::suspend())
+    pub fiber_suspended: bool,
+    /// The value passed to Fiber::suspend()
+    pub fiber_suspend_value: Value,
+    /// The value passed to Fiber::resume() or returned from Fiber::suspend() on resume
+    pub fiber_resume_value: Value,
+    /// Storage for fiber generators keyed by fiber object ID
+    pub fiber_generators: HashMap<u64, crate::generator::PhpGenerator>,
+    /// Depth of fiber execution (0 = not in fiber, >0 = inside fiber start/resume)
+    pub fiber_depth: u32,
+    /// The currently executing Fiber object (for Fiber::getCurrent())
+    pub current_fiber: Option<Value>,
+    /// Stack of fiber objects for nested fibers
+    fiber_stack: Vec<Option<Value>>,
 }
 
 impl Vm {
@@ -281,6 +296,13 @@ impl Vm {
             last_return_line: 0,
             current_line: 0,
             enum_case_cache: HashMap::new(),
+            fiber_suspended: false,
+            fiber_suspend_value: Value::Null,
+            fiber_resume_value: Value::Null,
+            fiber_generators: HashMap::new(),
+            fiber_depth: 0,
+            current_fiber: None,
+            fiber_stack: Vec::new(),
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -5181,11 +5203,12 @@ impl Vm {
                 | b"seekableiterator" | b"outeriterator" | b"recursiveiterator"
                 | b"splobserver" | b"splsubject"
                 | b"reflectiontype" | b"reflectionreference" | b"reflectionconstant"
+                | b"fiber" | b"fibererror"
         )
     }
 
     /// Get canonical (properly cased) name for built-in class
-    fn builtin_canonical_name(&self, class_lower: &[u8]) -> String {
+    pub fn builtin_canonical_name(&self, class_lower: &[u8]) -> String {
         let canonical = match class_lower {
             b"stdclass" => "stdClass",
             b"exception" => "Exception",
@@ -5232,6 +5255,8 @@ impl Vm {
             b"reflectionclassconstant" => "ReflectionClassConstant",
             b"reflectiongenerator" => "ReflectionGenerator",
             b"reflectionattribute" => "ReflectionAttribute",
+            b"fiber" => "Fiber",
+            b"fibererror" => "FiberError",
             b"arrayobject" => "ArrayObject",
             b"arrayiterator" => "ArrayIterator",
             b"recursivearrayiterator" => "RecursiveArrayIterator",
@@ -10109,8 +10134,83 @@ impl Vm {
                         }
                     }
 
-                    // Handle Closure static methods
-                    if func_name_lower == b"closure::fromcallable" {
+                    // Handle Fiber static methods
+                    if func_name_lower == b"fiber::suspend" {
+                        let suspend_val = call.args.first().cloned().unwrap_or(Value::Null);
+                        if self.fiber_depth == 0 {
+                            // Not inside a fiber
+                            let msg = "Cannot suspend outside of a fiber";
+                            let exc = self.create_exception(b"FiberError", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught FiberError: {}", msg), line: op.line });
+                        }
+                        // Signal fiber suspension
+                        self.fiber_suspended = true;
+                        self.fiber_suspend_value = suspend_val;
+                        // Return a special error to unwind the call stack
+                        return Err(VmError {
+                            message: FIBER_SUSPEND_SENTINEL.to_string(),
+                            line: op.line,
+                        });
+                    } else if func_name_lower == b"fiber::getcurrent" {
+                        let result = self.current_fiber.clone().unwrap_or(Value::Null);
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower.starts_with(b"__fiber::") {
+                        // Handle Fiber instance method calls (start, resume, throw)
+                        let method = &func_name_lower[9..]; // skip "__fiber::"
+                        let fiber_obj = call.args.first().cloned().unwrap_or(Value::Null);
+                        let extra_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+
+                        // Push call stack entry for fiber methods
+                        let method_display = match method {
+                            b"start" => "Fiber->start",
+                            b"resume" => "Fiber->resume",
+                            b"throw" => "Fiber->throw",
+                            b"getreturn" => "Fiber->getReturn",
+                            _ => "Fiber->?",
+                        };
+                        self.call_stack.push((
+                            method_display.to_string(),
+                            self.current_file.clone(),
+                            op.line,
+                            extra_args.clone(),
+                            true,
+                        ));
+
+                        let result = self.fiber_dispatch_method(&fiber_obj, method, &extra_args, op.line);
+                        match result {
+                            Ok(val) => {
+                                self.call_stack.pop();
+                                // Check if there's a current exception from the fiber
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        return Err(VmError {
+                                            message: "Uncaught exception from fiber".into(),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
+                                self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                            }
+                            Err(e) => {
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        self.call_stack.pop();
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                }
+                                return Err(e);
+                            }
+                        }
+                    } else if func_name_lower == b"closure::fromcallable" {
                         // Closure::fromCallable($callable) - return the callable as-is
                         // For string callables and closures, this is basically identity
                         let callable = call.args.first().cloned().unwrap_or(Value::Null);
@@ -11240,6 +11340,20 @@ impl Vm {
                         let result = match call_result {
                             Ok(v) => v,
                             Err(e) => {
+                                // Check for fiber suspension - propagate without saving frame
+                                // (Frame saving is done in the generator mini-VM)
+                                if self.fiber_suspended {
+                                    if call_failed { self.call_stack.pop(); }
+                                    if pushed_called_class {
+                                        self.called_class_stack.pop();
+                                        self.class_scope_stack.pop();
+                                    }
+                                    if pushed_scope_from_fn {
+                                        self.class_scope_stack.pop();
+                                    }
+                                    self.is_global_scope = was_global;
+                                    return Err(e);
+                                }
                                 // Check if we have an exception handler for uncaught exceptions
                                 if let Some(exc) = self.current_exception.take() {
                                     if let Some((catch_target, _, _)) = exception_handlers.pop() {
@@ -11655,6 +11769,23 @@ impl Vm {
                                                 obj_mut.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz)));
                                             } else {
                                                 obj_mut.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
+                                            }
+                                        }
+                                        b"fiber" => {
+                                            // Fiber::__construct(callable $callback)
+                                            if call.args.len() > 1 {
+                                                obj_mut.set_property(b"__fiber_callback".to_vec(), call.args[1].clone());
+                                                obj_mut.set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Created as i64));
+                                            } else {
+                                                drop(obj_mut);
+                                                let msg = "Fiber::__construct() expects exactly 1 argument, 0 given".to_string();
+                                                let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: op.line });
                                             }
                                         }
                                         _ => {
@@ -14905,7 +15036,7 @@ impl Vm {
                         .collect();
 
                     // Check for reserved internal classes
-                    if name_lower == b"generator" || name_lower == b"closure" {
+                    if name_lower == b"generator" || name_lower == b"closure" || name_lower == b"fibererror" {
                         let err_msg = format!(
                             "The \"{}\" class is reserved for internal use and cannot be manually instantiated",
                             class_name.to_string_lossy()
@@ -15032,6 +15163,8 @@ impl Vm {
                             b"reflectiongenerator" => b"ReflectionGenerator".to_vec(),
                             b"reflectionfiber" => b"ReflectionFiber".to_vec(),
                             b"reflectionattribute" => b"ReflectionAttribute".to_vec(),
+                            b"fiber" => b"Fiber".to_vec(),
+                            b"fibererror" => b"FiberError".to_vec(),
                             b"reflectionfunctionabstract" => b"ReflectionFunctionAbstract".to_vec(),
                             _ => class_name.as_bytes().to_vec(),
                         }
@@ -15661,6 +15794,94 @@ impl Vm {
                             .get(&class_name_lower)
                             .map(|c| c.methods.contains_key(&method_name_lower))
                             .unwrap_or(false);
+
+                        // Handle Fiber methods before the main dispatch
+                        if class_name_lower == b"fiber" && !has_user_method {
+                            match method_name_lower.as_slice() {
+                                b"isstarted" => {
+                                    let state = obj.borrow().get_property(b"__fiber_state").to_long();
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        args: vec![if state > FiberState::Created as i64 { Value::True } else { Value::False }],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                b"isrunning" => {
+                                    let state = obj.borrow().get_property(b"__fiber_state").to_long();
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        args: vec![if state == FiberState::Running as i64 { Value::True } else { Value::False }],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                b"issuspended" => {
+                                    let state = obj.borrow().get_property(b"__fiber_state").to_long();
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        args: vec![if state == FiberState::Suspended as i64 { Value::True } else { Value::False }],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                b"isterminated" => {
+                                    let state = obj.borrow().get_property(b"__fiber_state").to_long();
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        args: vec![if state == FiberState::Terminated as i64 { Value::True } else { Value::False }],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                b"getreturn" => {
+                                    let state = obj.borrow().get_property(b"__fiber_state").to_long();
+                                    if state != FiberState::Terminated as i64 {
+                                        let msg = if state == FiberState::Created as i64 {
+                                            "Cannot get fiber return value: The fiber has not been started"
+                                        } else {
+                                            "Cannot get fiber return value: The fiber has not returned"
+                                        };
+                                        let exc = self.create_exception(b"FiberError", msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught FiberError: {}", msg), line: op.line });
+                                    }
+                                    let threw = obj.borrow().get_property(b"__fiber_threw");
+                                    if matches!(threw, Value::True) {
+                                        let msg = "Cannot get fiber return value: The fiber threw an exception";
+                                        let exc = self.create_exception(b"FiberError", msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught FiberError: {}", msg), line: op.line });
+                                    }
+                                    let ret_val = obj.borrow().get_property(b"__fiber_return_value");
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        args: vec![ret_val],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                b"start" | b"resume" | b"throw" => {
+                                    let mut fiber_name = b"__fiber::".to_vec();
+                                    fiber_name.extend_from_slice(&method_name_lower);
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_vec(fiber_name),
+                                        args: vec![obj_val.clone()],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
 
                         let builtin_result = if is_throwable && !has_user_method {
                             let obj_borrow = obj.borrow();
@@ -16555,6 +16776,36 @@ impl Vm {
             .map(|b| b.to_ascii_lowercase())
             .collect();
 
+        // Handle Fiber::suspend() in generator context
+        if func_name_lower == b"fiber::suspend" {
+            let suspend_val = call.args.first().cloned().unwrap_or(Value::Null);
+            if self.fiber_depth == 0 {
+                let msg = "Cannot suspend outside of a fiber";
+                let exc = self.create_exception(b"FiberError", msg, line);
+                self.current_exception = Some(exc);
+                return Err(VmError { message: format!("Uncaught FiberError: {}", msg), line });
+            }
+            self.fiber_suspended = true;
+            self.fiber_suspend_value = suspend_val;
+            return Err(VmError {
+                message: FIBER_SUSPEND_SENTINEL.to_string(),
+                line,
+            });
+        }
+
+        // Handle Fiber::getCurrent() in generator context
+        if func_name_lower == b"fiber::getcurrent" {
+            return Ok(self.current_fiber.clone().unwrap_or(Value::Null));
+        }
+
+        // Handle __fiber:: method calls in generator context
+        if func_name_lower.starts_with(b"__fiber::") {
+            let method = &func_name_lower[9..];
+            let fiber_obj = call.args.first().cloned().unwrap_or(Value::Null);
+            let extra_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+            return self.fiber_dispatch_method(&fiber_obj, method, &extra_args, line);
+        }
+
         if func_name_lower == b"__builtin_return" {
             Ok(call.args.first().cloned().unwrap_or(Value::Null))
         } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
@@ -16624,6 +16875,35 @@ impl Vm {
         } else {
             let name_bytes = call.name.as_bytes();
             if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
+                // Handle Fiber constructor in generator context
+                if name_bytes == b"fiber::__construct" {
+                    if let Some(Value::Object(obj_rc)) = call.args.first() {
+                        if call.args.len() > 1 {
+                            obj_rc.borrow_mut().set_property(b"__fiber_callback".to_vec(), call.args[1].clone());
+                            obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Created as i64));
+                        }
+                    }
+                }
+                // Handle Exception/Error constructors in generator context
+                if let Some(Value::Object(obj_rc)) = call.args.first() {
+                    let class_lower: Vec<u8> = obj_rc.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let is_throwable = class_lower == b"exception"
+                        || class_lower == b"error"
+                        || is_builtin_subclass(&class_lower, b"exception")
+                        || is_builtin_subclass(&class_lower, b"error")
+                        || self.class_extends(&class_lower, b"exception")
+                        || self.class_extends(&class_lower, b"error");
+                    if is_throwable && call.args.len() > 1 {
+                        let mut obj_mut = obj_rc.borrow_mut();
+                        obj_mut.set_property(b"message".to_vec(), call.args[1].clone());
+                        if call.args.len() > 2 {
+                            obj_mut.set_property(b"code".to_vec(), call.args[2].clone());
+                        }
+                        if call.args.len() > 3 {
+                            obj_mut.set_property(b"previous".to_vec(), call.args[3].clone());
+                        }
+                    }
+                }
                 Ok(Value::Null)
             } else {
                 Err(VmError {
@@ -16658,6 +16938,411 @@ impl Vm {
     /// Get a global variable value
     pub fn get_global(&self, name: &[u8]) -> Option<Value> {
         self.globals.get(name).cloned()
+    }
+
+    /// Dispatch a Fiber instance method (start, resume, throw)
+    fn fiber_dispatch_method(
+        &mut self,
+        fiber_obj: &Value,
+        method: &[u8],
+        extra_args: &[Value],
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let obj_rc = match fiber_obj {
+            Value::Object(rc) => rc.clone(),
+            _ => {
+                return Err(VmError {
+                    message: "Fiber method called on non-object".into(),
+                    line,
+                });
+            }
+        };
+
+        match method {
+            b"start" => self.fiber_start(obj_rc, extra_args, line),
+            b"resume" => self.fiber_resume(obj_rc, extra_args, line),
+            b"throw" => self.fiber_throw(obj_rc, extra_args, line),
+            b"isstarted" => {
+                let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+                Ok(if state > FiberState::Created as i64 { Value::True } else { Value::False })
+            }
+            b"isrunning" => {
+                let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+                Ok(if state == FiberState::Running as i64 { Value::True } else { Value::False })
+            }
+            b"issuspended" => {
+                let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+                Ok(if state == FiberState::Suspended as i64 { Value::True } else { Value::False })
+            }
+            b"isterminated" => {
+                let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+                Ok(if state == FiberState::Terminated as i64 { Value::True } else { Value::False })
+            }
+            b"getreturn" => {
+                let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+                if state != FiberState::Terminated as i64 {
+                    let msg = if state == FiberState::Created as i64 {
+                        "Cannot get fiber return value: The fiber has not been started"
+                    } else {
+                        "Cannot get fiber return value: The fiber has not returned"
+                    };
+                    let exc = self.create_exception(b"FiberError", msg, line);
+                    self.current_exception = Some(exc);
+                    return Err(VmError { message: format!("Uncaught FiberError: {}", msg), line });
+                }
+                let threw = obj_rc.borrow().get_property(b"__fiber_threw");
+                if matches!(threw, Value::True) {
+                    let msg = "Cannot get fiber return value: The fiber threw an exception";
+                    let exc = self.create_exception(b"FiberError", msg, line);
+                    self.current_exception = Some(exc);
+                    return Err(VmError { message: format!("Uncaught FiberError: {}", msg), line });
+                }
+                Ok(obj_rc.borrow().get_property(b"__fiber_return_value"))
+            }
+            _ => Err(VmError {
+                message: format!("Call to undefined method Fiber::{}()", String::from_utf8_lossy(method)),
+                line,
+            }),
+        }
+    }
+
+    /// Execute Fiber::start(...$args) - begin executing the fiber callback
+    fn fiber_start(
+        &mut self,
+        obj_rc: Rc<RefCell<PhpObject>>,
+        args: &[Value],
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+        if state != FiberState::Created as i64 {
+            let msg = "Cannot start a fiber that has already been started";
+            let exc = self.create_exception(b"FiberError", msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught FiberError: {}", msg),
+                line,
+            });
+        }
+
+        let callback = obj_rc.borrow().get_property(b"__fiber_callback");
+
+        // Resolve the callback - may be a string (simple closure) or array (closure with use vars)
+        let (callback_lower, captured_vars) = match &callback {
+            Value::Array(arr) => {
+                let arr_borrow = arr.borrow();
+                let mut values: Vec<Value> = arr_borrow.values().cloned().collect();
+                if values.is_empty() {
+                    return Err(VmError {
+                        message: "Invalid fiber callback".into(),
+                        line,
+                    });
+                }
+                let name = values.remove(0);
+                let name_str = name.to_php_string();
+                let name_lower: Vec<u8> = name_str.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                (name_lower, values)
+            }
+            _ => {
+                let callback_name = callback.to_php_string();
+                let callback_lower: Vec<u8> = callback_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                (callback_lower, Vec::new())
+            }
+        };
+
+        let user_fn = if let Some(f) = self.user_functions.get(&callback_lower).cloned() {
+            f
+        } else {
+            return Err(VmError {
+                message: format!("Call to undefined function {}()", String::from_utf8_lossy(&callback_lower)),
+                line,
+            });
+        };
+
+        // Set up CVs with args
+        // First, populate captured use vars from the closure
+        let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+
+        // Captured vars go into the first CVs (after any implicit $this)
+        let mut cv_offset = 0;
+        for captured in &captured_vars {
+            if cv_offset < func_cvs.len() {
+                func_cvs[cv_offset] = captured.clone();
+                cv_offset += 1;
+            }
+        }
+
+        // Then fill in the start() args
+        if let Some(variadic_idx) = user_fn.variadic_param {
+            let vi = variadic_idx as usize;
+            for (i, arg) in args.iter().enumerate() {
+                let target = cv_offset + i;
+                if target < vi && target < func_cvs.len() {
+                    func_cvs[target] = arg.clone();
+                }
+            }
+            let mut variadic_arr = crate::array::PhpArray::new();
+            for (i, arg) in args.iter().enumerate() {
+                if cv_offset + i >= vi {
+                    variadic_arr.push(arg.clone());
+                }
+            }
+            if vi < func_cvs.len() {
+                func_cvs[vi] = Value::Array(Rc::new(RefCell::new(variadic_arr)));
+            }
+        } else {
+            for (i, arg) in args.iter().enumerate() {
+                let target = cv_offset + i;
+                if target < func_cvs.len() {
+                    func_cvs[target] = arg.clone();
+                }
+            }
+        }
+
+        // Create a generator from the callback
+        let mut generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
+
+        // Set state to Running
+        obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Running as i64));
+
+        // Push the current fiber onto the stack and set the new one
+        self.fiber_stack.push(self.current_fiber.take());
+        self.current_fiber = Some(Value::Object(obj_rc.clone()));
+        self.fiber_depth += 1;
+
+        // Run the generator until it yields (Fiber::suspend) or completes
+        let result = generator.resume(self);
+
+        // Restore fiber context
+        self.fiber_depth -= 1;
+        self.current_fiber = self.fiber_stack.pop().flatten();
+
+        match result {
+            Ok(true) => {
+                // Generator yielded = Fiber suspended
+                let suspend_val = generator.current_value.clone();
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
+                // Store the generator for later resumption
+                let fiber_id = obj_rc.borrow().object_id;
+                self.fiber_generators.insert(fiber_id, generator);
+                Ok(suspend_val)
+            }
+            Ok(false) => {
+                // Generator completed = Fiber terminated
+                let return_val = generator.return_value.clone();
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                obj_rc.borrow_mut().set_property(b"__fiber_return_value".to_vec(), return_val);
+                Ok(Value::Null)
+            }
+            Err(e) => {
+                if self.fiber_suspended {
+                    // Fiber::suspend() was called from within a nested function call
+                    self.fiber_suspended = false;
+                    let suspend_val = std::mem::replace(&mut self.fiber_suspend_value, Value::Null);
+                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
+                    // The generator's state was saved at the DoFCall that triggered the suspend
+                    let fiber_id = obj_rc.borrow().object_id;
+                    // Mark the generator as suspended at a nested call
+                    generator.state = crate::generator::GeneratorState::Suspended;
+                    self.fiber_generators.insert(fiber_id, generator);
+                    Ok(suspend_val)
+                } else {
+                    // Fiber threw an exception or error
+                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                    obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Execute Fiber::resume($value) - resume a suspended fiber
+    fn fiber_resume(
+        &mut self,
+        obj_rc: Rc<RefCell<PhpObject>>,
+        args: &[Value],
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+        if state == FiberState::Created as i64 {
+            let msg = "Cannot resume a fiber that is not suspended";
+            let exc = self.create_exception(b"FiberError", msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught FiberError: {}", msg),
+                line,
+            });
+        }
+        if state != FiberState::Suspended as i64 {
+            let msg = if state == FiberState::Running as i64 {
+                "Cannot resume a fiber that is currently running"
+            } else {
+                "Cannot resume a terminated fiber"
+            };
+            let exc = self.create_exception(b"FiberError", msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught FiberError: {}", msg),
+                line,
+            });
+        }
+
+        let resume_val = args.first().cloned().unwrap_or(Value::Null);
+
+        // Get the generator
+        let fiber_id = obj_rc.borrow().object_id;
+        let mut generator = match self.fiber_generators.remove(&fiber_id) {
+            Some(g) => g,
+            None => {
+                return Err(VmError {
+                    message: "Internal error: fiber generator not found".into(),
+                    line,
+                });
+            }
+        };
+
+        // Set the send value (this becomes the return value of Fiber::suspend())
+        generator.send_value = resume_val;
+
+        // Set state to Running
+        obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Running as i64));
+
+        // Push current fiber and set this one
+        self.fiber_stack.push(self.current_fiber.take());
+        self.current_fiber = Some(Value::Object(obj_rc.clone()));
+        self.fiber_depth += 1;
+
+        // Write the send value to the result operand of the last Yield
+        generator.write_send_value();
+
+        // Resume the generator
+        let result = generator.resume(self);
+
+        // Restore fiber context
+        self.fiber_depth -= 1;
+        self.current_fiber = self.fiber_stack.pop().flatten();
+
+        match result {
+            Ok(true) => {
+                // Generator yielded again = Fiber suspended
+                let suspend_val = generator.current_value.clone();
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
+                let fiber_id = obj_rc.borrow().object_id;
+                self.fiber_generators.insert(fiber_id, generator);
+                Ok(suspend_val)
+            }
+            Ok(false) => {
+                // Generator completed = Fiber terminated
+                let return_val = generator.return_value.clone();
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                obj_rc.borrow_mut().set_property(b"__fiber_return_value".to_vec(), return_val);
+                Ok(Value::Null)
+            }
+            Err(e) => {
+                if self.fiber_suspended {
+                    self.fiber_suspended = false;
+                    let suspend_val = std::mem::replace(&mut self.fiber_suspend_value, Value::Null);
+                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
+                    generator.state = crate::generator::GeneratorState::Suspended;
+                    let fiber_id = obj_rc.borrow().object_id;
+                    self.fiber_generators.insert(fiber_id, generator);
+                    Ok(suspend_val)
+                } else {
+                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                    obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Execute Fiber::throw($exception) - throw an exception into a suspended fiber
+    fn fiber_throw(
+        &mut self,
+        obj_rc: Rc<RefCell<PhpObject>>,
+        args: &[Value],
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+        if state != FiberState::Suspended as i64 {
+            let msg = if state == FiberState::Created as i64 {
+                "Cannot resume a fiber that is not suspended"
+            } else if state == FiberState::Running as i64 {
+                "Cannot resume a fiber that is currently running"
+            } else {
+                "Cannot resume a terminated fiber"
+            };
+            let exc = self.create_exception(b"FiberError", msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught FiberError: {}", msg),
+                line,
+            });
+        }
+
+        let exception = args.first().cloned().unwrap_or(Value::Null);
+
+        // Get the generator
+        let fiber_id = obj_rc.borrow().object_id;
+        let mut generator = match self.fiber_generators.remove(&fiber_id) {
+            Some(g) => g,
+            None => {
+                return Err(VmError {
+                    message: "Internal error: fiber generator not found".into(),
+                    line,
+                });
+            }
+        };
+
+        // Set state to Running
+        obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Running as i64));
+
+        // Push current fiber and set this one
+        self.fiber_stack.push(self.current_fiber.take());
+        self.current_fiber = Some(Value::Object(obj_rc.clone()));
+        self.fiber_depth += 1;
+
+        // Set the exception as current before resuming the generator
+        self.current_exception = Some(exception);
+
+        // Resume the generator - it will encounter the exception
+        // We need to set up the generator to throw the exception when it resumes
+        generator.write_send_value();
+        let result = generator.resume_with_exception(self);
+
+        // Restore fiber context
+        self.fiber_depth -= 1;
+        self.current_fiber = self.fiber_stack.pop().flatten();
+
+        match result {
+            Ok(true) => {
+                let suspend_val = generator.current_value.clone();
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
+                let fiber_id = obj_rc.borrow().object_id;
+                self.fiber_generators.insert(fiber_id, generator);
+                Ok(suspend_val)
+            }
+            Ok(false) => {
+                let return_val = generator.return_value.clone();
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                obj_rc.borrow_mut().set_property(b"__fiber_return_value".to_vec(), return_val);
+                Ok(Value::Null)
+            }
+            Err(e) => {
+                if self.fiber_suspended {
+                    self.fiber_suspended = false;
+                    let suspend_val = std::mem::replace(&mut self.fiber_suspend_value, Value::Null);
+                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
+                    generator.state = crate::generator::GeneratorState::Suspended;
+                    let fiber_id = obj_rc.borrow().object_id;
+                    self.fiber_generators.insert(fiber_id, generator);
+                    Ok(suspend_val)
+                } else {
+                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                    obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
+                    Err(e)
+                }
+            }
+        }
     }
 }
 
@@ -16729,7 +17414,7 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
         | b"overflowexception" | b"underflowexception" | b"outofboundsexception"
         | b"domainexception" | b"unexpectedvalueexception" | b"lengthexception"
         | b"outofrangeexception" | b"closedgeneratorexception" | b"errorexception"
-        | b"jsonexception" => &[b"Throwable"],
+        | b"jsonexception" | b"fibererror" => &[b"Throwable"],
         _ => &[],
     };
     interfaces.iter().map(|i| i.to_vec()).collect()
@@ -16739,7 +17424,7 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
 pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
     match class {
         b"typeerror" | b"valueerror" | b"argumentcounterror" | b"rangeerror"
-        | b"unhandledmatcherror" | b"assertionerror" => Some(b"Error"),
+        | b"unhandledmatcherror" | b"assertionerror" | b"fibererror" => Some(b"Error"),
         b"arithmeticerror" => Some(b"Error"),
         b"divisionbyzeroerror" => Some(b"ArithmeticError"),
         b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"errorexception" | b"jsonexception" => Some(b"Exception"),

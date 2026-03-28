@@ -122,7 +122,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let class_name_owned = class_name.to_string();
                 // Count visible properties (non-internal)
                 let extra_props: Vec<_> = obj_borrow.properties.iter()
-                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !matches!(val, Value::Undef))
+                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !name.starts_with(b"__fiber_") && !name.starts_with(b"__ctor_") && !matches!(val, Value::Undef))
                     .map(|(n, v)| (n.clone(), v.clone()))
                     .collect();
                 let prop_count = 1 + extra_props.len(); // storage + any extra properties
@@ -194,7 +194,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
 
             // Don't count uninitialized (Undef) properties or internal __spl_/__reflection_ properties
             let prop_count = obj_borrow.properties.iter()
-                .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !matches!(val, Value::Undef))
+                .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !name.starts_with(b"__fiber_") && !name.starts_with(b"__ctor_") && !matches!(val, Value::Undef))
                 .count();
             vm.write_output(
                 format!(
@@ -221,7 +221,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             drop(obj_borrow);
             for (name, value) in &props {
                 // Skip internal SPL/Reflection properties and uninitialized (Undef) properties
-                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") || matches!(value, Value::Undef) {
+                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_") || matches!(value, Value::Undef) {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);
@@ -470,7 +470,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                 let spl_arr = obj_borrow.get_property(b"__spl_array");
                 // Show extra props first
                 let extra_props: Vec<_> = obj_borrow.properties.iter()
-                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !matches!(val, Value::Undef))
+                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !name.starts_with(b"__fiber_") && !name.starts_with(b"__ctor_") && !matches!(val, Value::Undef))
                     .map(|(n, v)| (n.clone(), v.clone()))
                     .collect();
                 drop(obj_borrow);
@@ -519,7 +519,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (name, value) in &obj_borrow.properties {
                 // Skip internal SPL/Reflection properties
-                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") {
+                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_") {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);
