@@ -3457,11 +3457,29 @@ fn base64_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if first_pad + pad_len != filtered.len() {
             return Ok(Value::False);
         }
-        // Check valid padding length
+        // Check valid content length and padding combination
+        // PHP strict mode accepts: no padding (if content length mod 4 is 0, 2, or 3)
+        // or correctly padded input
+        let total = content_len + pad_len;
         match content_len % 4 {
-            0 => if pad_len != 0 { return Ok(Value::False); },
-            2 => if pad_len != 2 { return Ok(Value::False); },
-            3 => if pad_len != 1 { return Ok(Value::False); },
+            0 => {
+                // Full groups: padding must be 0
+                if pad_len != 0 { return Ok(Value::False); }
+            }
+            2 => {
+                // 2 extra chars: accepts 0 or 2 padding chars
+                if pad_len != 0 && pad_len != 2 { return Ok(Value::False); }
+                if pad_len != 0 && total % 4 != 0 { return Ok(Value::False); }
+            }
+            3 => {
+                // 3 extra chars: accepts 0 or 1 padding char
+                if pad_len != 0 && pad_len != 1 { return Ok(Value::False); }
+                if pad_len != 0 && total % 4 != 0 { return Ok(Value::False); }
+            }
+            1 => {
+                // 1 extra char can't decode to anything valid
+                return Ok(Value::False);
+            }
             _ => return Ok(Value::False),
         }
     }

@@ -1859,6 +1859,7 @@ impl Compiler {
                             type_hint,
                             default,
                             visibility,
+                            set_visibility,
                             is_static,
                             is_readonly,
                             get_hook,
@@ -2055,6 +2056,39 @@ impl Compiler {
                                     .static_properties
                                     .insert(prop_name.clone(), default_val.clone());
                             }
+                            // Asymmetric visibility validation
+                            let obj_set_vis = set_visibility.map(|sv| {
+                                match sv {
+                                    Visibility::Public => ObjVisibility::Public,
+                                    Visibility::Protected => ObjVisibility::Protected,
+                                    Visibility::Private => ObjVisibility::Private,
+                                }
+                            });
+                            if obj_set_vis.is_some() {
+                                // Asymmetric visibility requires a type
+                                if type_hint.is_none() {
+                                    return Err(CompileError {
+                                        message: format!("Property with asymmetric visibility {}::${} must have type",
+                                            String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                                // Set visibility must not be wider than read visibility
+                                let vis_level = |v: &ObjVisibility| match v {
+                                    ObjVisibility::Public => 0,
+                                    ObjVisibility::Protected => 1,
+                                    ObjVisibility::Private => 2,
+                                };
+                                if let Some(ref sv) = obj_set_vis {
+                                    if vis_level(sv) < vis_level(&vis) {
+                                        return Err(CompileError {
+                                            message: format!("Visibility of property {}::${} must not be weaker than set visibility",
+                                                String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                            line: stmt.span.line,
+                                        });
+                                    }
+                                }
+                            }
                             let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             let prop_type = type_hint.as_ref().map(|hint| {
                                 type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
@@ -2085,6 +2119,7 @@ impl Compiler {
                                 default: default_val,
                                 is_static: *is_static,
                                 visibility: vis,
+                                set_visibility: obj_set_vis,
                                 declaring_class: declaring_class_lower.clone(),
                                 is_readonly: prop_is_readonly,
                                 property_type: prop_type,
@@ -2456,8 +2491,8 @@ impl Compiler {
                                 }
                                 if mn_lower == b"__construct" {
                                     for param in params {
-                                        if let Some(vis) = &param.visibility {
-                                            let prop_vis = match vis {
+                                        if param.visibility.is_some() || param.set_visibility.is_some() {
+                                            let prop_vis = match param.visibility.as_ref().unwrap_or(&Visibility::Public) {
                                                 Visibility::Public => {
                                                     crate::object::Visibility::Public
                                                 }
@@ -2468,6 +2503,45 @@ impl Compiler {
                                                     crate::object::Visibility::Private
                                                 }
                                             };
+                                            let obj_set_vis_cpp = param.set_visibility.as_ref().map(|sv| {
+                                                match sv {
+                                                    Visibility::Public => ObjVisibility::Public,
+                                                    Visibility::Protected => ObjVisibility::Protected,
+                                                    Visibility::Private => ObjVisibility::Private,
+                                                }
+                                            });
+                                            // Validate asymmetric visibility in CPP
+                                            if obj_set_vis_cpp.is_some() {
+                                                if param.type_hint.is_none() {
+                                                    return Err(CompileError {
+                                                        message: format!("Property with asymmetric visibility {}::${} must have type",
+                                                            String::from_utf8_lossy(name), String::from_utf8_lossy(&param.name)),
+                                                        line: *method_line,
+                                                    });
+                                                }
+                                                let vis_level = |v: &ObjVisibility| match v {
+                                                    ObjVisibility::Public => 0,
+                                                    ObjVisibility::Protected => 1,
+                                                    ObjVisibility::Private => 2,
+                                                };
+                                                if let Some(ref sv) = obj_set_vis_cpp {
+                                                    if vis_level(sv) < vis_level(&prop_vis) {
+                                                        return Err(CompileError {
+                                                            message: format!("Visibility of property {}::${} must not be weaker than set visibility",
+                                                                String::from_utf8_lossy(name), String::from_utf8_lossy(&param.name)),
+                                                            line: *method_line,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            // Readonly promoted properties must have a type
+                                            if (param.readonly || modifiers.is_readonly) && param.type_hint.is_none() {
+                                                return Err(CompileError {
+                                                    message: format!("Readonly property {}::${} must have type",
+                                                        String::from_utf8_lossy(name), String::from_utf8_lossy(&param.name)),
+                                                    line: *method_line,
+                                                });
+                                            }
                                             let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                             let promoted_prop_type = param.type_hint.as_ref().map(|hint| {
                                                 type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
@@ -2485,6 +2559,7 @@ impl Compiler {
                                                 default: Value::Null,
                                                 is_static: false,
                                                 visibility: prop_vis,
+                                                set_visibility: obj_set_vis_cpp,
                                                 declaring_class: declaring_class_lower,
                                                 is_readonly: param.readonly || modifiers.is_readonly,
                                                 property_type: promoted_prop_type,
@@ -3817,16 +3892,35 @@ impl Compiler {
                             line: expr.span.line,
                         });
                         for arg in args {
-                            if let ExprKind::String(s) = &arg.value.kind {
-                                let cv = self.op_array.get_or_create_cv(s);
-                                let key_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(s.clone())));
-                                self.op_array.emit(Op {
-                                    opcode: OpCode::ArraySet,
-                                    op1: OperandType::Tmp(arr_tmp),
-                                    op2: OperandType::Cv(cv),
-                                    result: OperandType::Const(key_idx),
-                                    line: expr.span.line,
-                                });
+                            match &arg.value.kind {
+                                ExprKind::String(s) => {
+                                    let cv = self.op_array.get_or_create_cv(s);
+                                    let key_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(s.clone())));
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::ArraySet,
+                                        op1: OperandType::Tmp(arr_tmp),
+                                        op2: OperandType::Cv(cv),
+                                        result: OperandType::Const(key_idx),
+                                        line: expr.span.line,
+                                    });
+                                }
+                                ExprKind::Array(elements) => {
+                                    // compact(["a", "b"]) - flatten array of string literals
+                                    for elem in elements {
+                                        if let ExprKind::String(s) = &elem.value.kind {
+                                            let cv = self.op_array.get_or_create_cv(s);
+                                            let key_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(s.clone())));
+                                            self.op_array.emit(Op {
+                                                opcode: OpCode::ArraySet,
+                                                op1: OperandType::Tmp(arr_tmp),
+                                                op2: OperandType::Cv(cv),
+                                                result: OperandType::Const(key_idx),
+                                                line: expr.span.line,
+                                            });
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         return Ok(OperandType::Tmp(arr_tmp));

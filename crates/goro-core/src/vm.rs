@@ -1062,15 +1062,15 @@ impl Vm {
 
     /// Find the PropertyDef for a given property name in a class (by lowercase class name).
     /// Walks up the parent chain to find the property definition.
-    /// Returns (visibility, declaring_class, is_readonly, property_type).
-    fn find_property_def(&self, class_name_lower: &[u8], prop_name: &[u8]) -> Option<(Visibility, Vec<u8>, bool, Option<crate::opcode::ParamType>)> {
+    /// Returns (visibility, declaring_class, is_readonly, property_type, set_visibility).
+    fn find_property_def(&self, class_name_lower: &[u8], prop_name: &[u8]) -> Option<(Visibility, Vec<u8>, bool, Option<crate::opcode::ParamType>, Option<Visibility>)> {
         self.find_property_def_for_scope(class_name_lower, prop_name, None)
     }
 
     /// Find a property definition, optionally considering the caller scope for private property resolution.
     /// When caller_scope is provided, private properties from other classes are skipped
     /// so that a parent can access its own private property on a child object.
-    fn find_property_def_for_scope(&self, class_name_lower: &[u8], prop_name: &[u8], caller_scope: Option<&[u8]>) -> Option<(Visibility, Vec<u8>, bool, Option<crate::opcode::ParamType>)> {
+    fn find_property_def_for_scope(&self, class_name_lower: &[u8], prop_name: &[u8], caller_scope: Option<&[u8]>) -> Option<(Visibility, Vec<u8>, bool, Option<crate::opcode::ParamType>, Option<Visibility>)> {
         let mut current = class_name_lower.to_vec();
         let mut first_match = None;
         for _ in 0..50 {
@@ -1082,17 +1082,17 @@ impl Vm {
                                 let declaring_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if declaring_lower == scope {
                                     // Exact match for private property in caller's scope
-                                    return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
+                                    return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
                                 }
                                 // Save first match but keep looking for a scope match
                                 if first_match.is_none() {
-                                    first_match = Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
+                                    first_match = Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
                                 }
                             } else {
-                                return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
+                                return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
                             }
                         } else {
-                            return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone()));
+                            return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
                         }
                     }
                 }
@@ -13986,11 +13986,60 @@ impl Vm {
                             }
                         }
                         let has_prop = obj.borrow().has_property(prop_name.as_bytes());
+                        // Check asymmetric visibility for unset (same as set) - check against class def, not instance
+                        let class_name_orig_u = obj.borrow().class_name.clone();
+                        let class_lower_u: Vec<u8> = class_name_orig_u.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let caller_scope_u = self.current_class_scope()
+                            .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let mut avis_error: Option<String> = None;
+                        if let Some((_vis, declaring_class, _ro, _pt, set_vis)) = self.find_property_def_for_scope(&class_lower_u, prop_name.as_bytes(), caller_scope_u.as_deref()) {
+                            if let Some(sv) = set_vis {
+                                if sv != Visibility::Public {
+                                    let caller_scope = self.current_class_scope();
+                                    let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                    let raw_error = self.check_visibility(
+                                        sv,
+                                        &declaring_class,
+                                        &class_name_orig_u,
+                                        &prop_name_str,
+                                        true,
+                                        caller_scope.as_deref(),
+                                    );
+                                    if raw_error.is_some() {
+                                        let vis_str = match sv {
+                                            Visibility::Private => "private(set)",
+                                            Visibility::Protected => "protected(set)",
+                                            Visibility::Public => "public(set)",
+                                        };
+                                        let declaring_lower_u: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let class_display = self.classes.get(&declaring_lower_u)
+                                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                            .unwrap_or_else(|| String::from_utf8_lossy(&declaring_class).to_string());
+                                        let scope_str = if let Some(cs) = caller_scope.as_deref() {
+                                            format!("scope {}", String::from_utf8_lossy(cs))
+                                        } else {
+                                            "global scope".to_string()
+                                        };
+                                        avis_error = Some(format!("Cannot unset {} property {}::${} from {}",
+                                            vis_str, class_display, prop_name_str, scope_str));
+                                    }
+                                }
+                            }
+                        }
                         if has_prop {
+                            if let Some(msg) = avis_error {
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: msg, line: op.line });
+                            }
                             obj.borrow_mut().properties
                                 .retain(|(name, _)| name != prop_name.as_bytes());
                         } else {
-                            // Try __unset magic method
+                            // Try __unset magic method (or throw avis error if no __unset)
                             let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             let class_name_orig = obj.borrow().class_name.clone();
                             let has_unset = self.classes.get(&class_lower)
@@ -14010,6 +14059,15 @@ impl Vm {
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
                                 self.magic_depth -= 1;
+                            } else if let Some(msg) = avis_error {
+                                // Property was unset but still has asymmetric visibility restriction
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: msg, line: op.line });
                             }
                         }
                     }
@@ -15456,7 +15514,7 @@ impl Vm {
                         let mut visibility_error: Option<String> = None;
                         let caller_scope_for_get = self.current_class_scope()
                             .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        if let Some((vis, declaring_class, _is_readonly, _prop_type)) = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_get.as_deref()) {
+                        if let Some((vis, declaring_class, _is_readonly, _prop_type, _set_vis)) = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_get.as_deref()) {
                             if vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -15718,22 +15776,50 @@ impl Vm {
 
                         // Check visibility, readonly, and type before setting the property
                         let mut visibility_error: Option<String> = None;
+                        let mut is_avis_error = false; // true if error is from asymmetric visibility
                         let mut readonly_error: Option<String> = None;
                         let mut type_error: Option<String> = None;
                         let caller_scope_for_prop = self.current_class_scope()
                             .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        if let Some((vis, declaring_class, prop_is_readonly, prop_type)) = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_prop.as_deref()) {
-                            if vis != Visibility::Public {
+                        if let Some((vis, declaring_class, prop_is_readonly, prop_type, set_vis)) = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_prop.as_deref()) {
+                            // Use set_visibility for write access checks if present
+                            let effective_write_vis = set_vis.unwrap_or(vis);
+                            if effective_write_vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
-                                visibility_error = self.check_visibility(
-                                    vis,
+                                let raw_error = self.check_visibility(
+                                    effective_write_vis,
                                     &declaring_class,
                                     &class_name_orig,
                                     &prop_name_str,
                                     true,
                                     caller_scope.as_deref(),
                                 );
+                                // For asymmetric visibility, adjust the error message format
+                                if let Some(err) = raw_error {
+                                    if set_vis.is_some() {
+                                        let vis_str = match effective_write_vis {
+                                            Visibility::Private => "private(set)",
+                                            Visibility::Protected => "protected(set)",
+                                            Visibility::Public => "public(set)",
+                                        };
+                                        // Use declaring class original name for error display
+                                        let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let class_display = self.classes.get(&declaring_lower)
+                                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                            .unwrap_or_else(|| String::from_utf8_lossy(&declaring_class).to_string());
+                                        let scope_str = if let Some(cs) = caller_scope.as_deref() {
+                                            format!("scope {}", String::from_utf8_lossy(cs))
+                                        } else {
+                                            "global scope".to_string()
+                                        };
+                                        visibility_error = Some(format!("Cannot modify {} property {}::${} from {}",
+                                            vis_str, class_display, prop_name_str, scope_str));
+                                        is_avis_error = true;
+                                    } else {
+                                        visibility_error = Some(err);
+                                    }
+                                }
                             }
                             // Enforce readonly: if property is readonly and already initialized (not Undef), reject
                             if prop_is_readonly {
@@ -15798,13 +15884,22 @@ impl Vm {
                                 });
                             }
                         } else if let Some(err_msg) = visibility_error {
-                            // Property is inaccessible - try __set magic method first
+                            // For asymmetric visibility: only try __set if property has been unset from the object
+                            // For regular visibility errors: always try __set (PHP behavior for private/protected)
+                            let prop_exists_on_instance = obj.borrow().has_property(prop_name.as_bytes());
                             let has_set = self
                                 .classes
                                 .get(&class_lower)
                                 .map(|c| c.methods.contains_key(&b"__set".to_vec()))
                                 .unwrap_or(false);
-                            if has_set && self.magic_depth < 5 {
+                            let should_try_set = if is_avis_error {
+                                // Asymmetric visibility: only fall through to __set if property was unset
+                                has_set && self.magic_depth < 5 && !prop_exists_on_instance
+                            } else {
+                                // Regular visibility: always try __set
+                                has_set && self.magic_depth < 5
+                            };
+                            if should_try_set {
                                 self.magic_depth += 1;
                                 let magic_method_def = self
                                     .classes
@@ -17857,14 +17952,9 @@ fn emit_inc_dec_warnings(vm: &mut Vm, val: &Value, is_increment: bool, line: u32
         }
         Value::String(s) if is_increment => {
             let bytes = s.as_bytes();
-            // Only warn for non-numeric, non-purely-alphanumeric strings
-            // Purely alphanumeric strings use the magic increment (no deprecation)
+            // PHP 8.3+: ALL non-numeric string increments emit deprecation
             if crate::value::parse_numeric_string(bytes).is_none() {
-                if bytes.is_empty() {
-                    vm.emit_deprecated_at("Increment on non-numeric string is deprecated, use str_increment() instead", line);
-                } else if !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
-                    vm.emit_deprecated_at("Increment on non-numeric string is deprecated, use str_increment() instead", line);
-                }
+                vm.emit_deprecated_at("Increment on non-numeric string is deprecated, use str_increment() instead", line);
             }
         }
         Value::String(s) if !is_increment => {

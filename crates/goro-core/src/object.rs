@@ -54,6 +54,8 @@ pub struct PropertyDef {
     pub is_static: bool,
     pub is_readonly: bool,
     pub visibility: Visibility,
+    /// Asymmetric set visibility (PHP 8.4): if Some, write access uses this instead of visibility
+    pub set_visibility: Option<Visibility>,
     /// The class that originally declared this property (lowercase)
     pub declaring_class: Vec<u8>,
     /// Optional type constraint for the property

@@ -527,7 +527,19 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
                 || err_msg.contains("must take exactly")
                 || err_msg.contains("cannot be static")
                 || err_msg.contains("may not be nested")
-                || err_msg.contains("cannot accept");
+                || err_msg.contains("cannot accept")
+                || err_msg.contains("may be declared abstract")
+                || err_msg.contains("must have type")
+                || err_msg.contains("Duplicate value in enum")
+                || err_msg.contains("Visibility of property")
+                || err_msg.contains("asymmetric visibility")
+                || err_msg.contains("cannot have type")
+                || err_msg.contains("Enum ")
+                || err_msg.contains("Property ")
+                || err_msg.contains("Readonly property")
+                || err_msg.contains("Static property")
+                || err_msg.contains("constant must")
+                || err_msg.contains("class must");
             let msg = if is_fatal {
                 format!(
                     "\nFatal error: {} in {} on line {}\n",

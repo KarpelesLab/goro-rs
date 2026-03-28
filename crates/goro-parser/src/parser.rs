@@ -1091,23 +1091,31 @@ impl Parser {
 
         loop {
             let mut visibility = None;
+            let mut set_visibility = None;
             let mut readonly = false;
 
-            // Constructor promotion visibility
-            match self.peek() {
-                TokenKind::Public => {
-                    visibility = Some(Visibility::Public);
-                    self.advance();
+            // Constructor promotion visibility (possibly with asymmetric set visibility)
+            loop {
+                match self.peek() {
+                    TokenKind::Public | TokenKind::Protected | TokenKind::Private => {
+                        let vis = match self.peek() {
+                            TokenKind::Protected => Visibility::Protected,
+                            TokenKind::Private => Visibility::Private,
+                            _ => Visibility::Public,
+                        };
+                        self.advance();
+                        // Check for asymmetric visibility: private(set), protected(set), public(set)
+                        if matches!(self.peek(), TokenKind::OpenParen) && self.lookahead_is_set_modifier() {
+                            self.advance(); // consume (
+                            self.advance(); // consume 'set'
+                            self.advance(); // consume )
+                            set_visibility = Some(vis);
+                        } else {
+                            visibility = Some(vis);
+                        }
+                    }
+                    _ => break,
                 }
-                TokenKind::Protected => {
-                    visibility = Some(Visibility::Protected);
-                    self.advance();
-                }
-                TokenKind::Private => {
-                    visibility = Some(Visibility::Private);
-                    self.advance();
-                }
-                _ => {}
             }
 
             if matches!(self.peek(), TokenKind::Readonly) {
@@ -1153,6 +1161,7 @@ impl Parser {
                 by_ref,
                 variadic,
                 visibility,
+                set_visibility,
                 readonly,
             });
 
@@ -1576,11 +1585,38 @@ impl Parser {
         let mut is_final = false;
         let mut is_readonly = false;
         let mut has_visibility = false;
+        let mut set_visibility: Option<Visibility> = None;
+        let mut has_set_visibility = false;
 
         // Parse modifiers
         loop {
             match self.peek() {
                 TokenKind::Public | TokenKind::Protected | TokenKind::Private => {
+                    let vis = match self.peek() {
+                        TokenKind::Protected => Visibility::Protected,
+                        TokenKind::Private => Visibility::Private,
+                        _ => Visibility::Public,
+                    };
+                    self.advance();
+                    // Check for asymmetric visibility: private(set), protected(set), public(set)
+                    if matches!(self.peek(), TokenKind::OpenParen) {
+                        // Peek ahead to see if it's `(set)`
+                        if self.lookahead_is_set_modifier() {
+                            if has_set_visibility {
+                                return Err(ParseError {
+                                    message: "Multiple access type modifiers are not allowed".into(),
+                                    span: self.span(),
+                                });
+                            }
+                            has_set_visibility = true;
+                            self.advance(); // consume (
+                            self.advance(); // consume 'set'
+                            self.advance(); // consume )
+                            set_visibility = Some(vis);
+                            continue;
+                        }
+                    }
+                    // Normal (read) visibility
                     if has_visibility {
                         return Err(ParseError {
                             message: "Multiple access type modifiers are not allowed".into(),
@@ -1588,12 +1624,7 @@ impl Parser {
                         });
                     }
                     has_visibility = true;
-                    match self.peek() {
-                        TokenKind::Protected => visibility = Visibility::Protected,
-                        TokenKind::Private => visibility = Visibility::Private,
-                        _ => visibility = Visibility::Public,
-                    }
-                    self.advance();
+                    visibility = vis;
                 }
                 TokenKind::Static => {
                     if is_static {
@@ -1626,6 +1657,12 @@ impl Parser {
                     self.advance();
                 }
                 TokenKind::Readonly => {
+                    if is_readonly {
+                        return Err(ParseError {
+                            message: "Multiple readonly modifiers are not allowed".into(),
+                            span: self.span(),
+                        });
+                    }
                     is_readonly = true;
                     self.advance();
                 }
@@ -2068,11 +2105,19 @@ impl Parser {
                     self.expect_semicolon()?;
                     (None, None)
                 };
+                // Abstract properties must have hooks
+                if is_abstract && get_hook.is_none() && set_hook.is_none() {
+                    return Err(ParseError {
+                        message: "Only hooked properties may be declared abstract".into(),
+                        span: self.span(),
+                    });
+                }
                 Ok(ClassMember::Property {
                     name,
                     type_hint: None,
                     default,
                     visibility,
+                    set_visibility,
                     is_static,
                     is_readonly,
                     get_hook,
@@ -2119,11 +2164,19 @@ impl Parser {
                     self.expect_semicolon()?;
                     (None, None)
                 };
+                // Abstract properties must have hooks
+                if is_abstract && get_hook.is_none() && set_hook.is_none() {
+                    return Err(ParseError {
+                        message: "Only hooked properties may be declared abstract".into(),
+                        span: self.span(),
+                    });
+                }
                 Ok(ClassMember::Property {
                     name,
                     type_hint: Some(type_hint),
                     default,
                     visibility,
+                    set_visibility,
                     is_static,
                     is_readonly,
                     get_hook,
@@ -4757,6 +4810,16 @@ impl Parser {
     }
 
     /// Check if current token is a semi-reserved keyword that can be used as a method/function name
+    /// Check if the current position is at `(set)` for asymmetric visibility.
+    /// Assumes peek() is already `(`.
+    fn lookahead_is_set_modifier(&self) -> bool {
+        if let TokenKind::Identifier(name) = self.peek_at(1) {
+            name.eq_ignore_ascii_case(b"set") && matches!(self.peek_at(2), TokenKind::CloseParen)
+        } else {
+            false
+        }
+    }
+
     fn is_semi_reserved_keyword(&self) -> bool {
         matches!(
             self.peek(),

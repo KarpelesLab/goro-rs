@@ -437,6 +437,8 @@ pub struct Param {
     pub by_ref: bool,
     pub variadic: bool,
     pub visibility: Option<Visibility>,
+    /// Asymmetric set visibility for constructor property promotion
+    pub set_visibility: Option<Visibility>,
     pub readonly: bool,
 }
 
@@ -497,6 +499,8 @@ pub enum ClassMember {
         type_hint: Option<TypeHint>,
         default: Option<Expr>,
         visibility: Visibility,
+        /// Asymmetric visibility for set (PHP 8.4): e.g. `public private(set) string $prop`
+        set_visibility: Option<Visibility>,
         is_static: bool,
         is_readonly: bool,
         /// Property get hook body (PHP 8.4)
