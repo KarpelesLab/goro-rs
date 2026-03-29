@@ -1603,6 +1603,9 @@ impl Vm {
                             return String::from_utf8_lossy(called).to_string();
                         }
                     }
+                    b"iterable" => {
+                        return "Traversable|array".to_string();
+                    }
                     _ => {}
                 }
                 String::from_utf8_lossy(name).to_string()
@@ -1941,6 +1944,9 @@ impl Vm {
                 match name.as_slice() {
                     b"self" | b"parent" | b"static" => {
                         return self.param_type_name(param_type);
+                    }
+                    b"iterable" => {
+                        return "Traversable|array".to_string();
                     }
                     _ => {}
                 }

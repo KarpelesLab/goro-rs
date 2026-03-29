@@ -103,6 +103,15 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"ctype_upper", b"text");
     params!(b"ctype_xdigit", b"text");
 
+    params!(b"exec", b"command", b"output", b"result_code");
+    params!(b"system", b"command", b"result_code");
+    params!(b"shell_exec", b"command");
+    params!(b"passthru", b"command", b"result_code");
+    params!(b"escapeshellarg", b"arg");
+    params!(b"escapeshellcmd", b"command");
+    params!(b"mb_strcut", b"string", b"start", b"length", b"encoding");
+    params!(b"mb_detect_order", b"encoding");
+
     // Array functions
     params!(b"array_keys", b"array", b"filter_value", b"strict");
     params!(b"array_values", b"array");

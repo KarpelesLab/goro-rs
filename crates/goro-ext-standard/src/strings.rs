@@ -106,6 +106,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_encoding_aliases", mb_encoding_aliases_fn);
     vm.register_function(b"mb_ord", mb_ord_fn);
     vm.register_function(b"mb_chr", mb_chr_fn);
+    vm.register_function(b"mb_strcut", mb_strcut_fn);
+    vm.register_function(b"mb_detect_order", mb_detect_order_fn);
     vm.register_function(b"hex2bin", hex2bin);
     vm.register_function(b"bin2hex", bin2hex);
     vm.register_function(b"crc32", crc32_fn);
@@ -279,7 +281,7 @@ fn substr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     )))
 }
 
-fn strpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn strpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let offset_val = args.get(2).map(|v| v.to_long()).unwrap_or(0);
@@ -291,17 +293,24 @@ fn strpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let offset = if offset_val < 0 {
         let abs = (-offset_val) as usize;
         if abs > h.len() {
-            return Ok(Value::False);
+            let msg = "strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: vm.current_line });
         }
         h.len() - abs
     } else {
-        offset_val as usize
+        let o = offset_val as usize;
+        if o > h.len() {
+            let msg = "strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: vm.current_line });
+        }
+        o
     };
 
     if n.is_empty() {
-        if offset > h.len() {
-            return Ok(Value::False);
-        }
         return Ok(Value::Long(offset as i64));
     }
 
@@ -589,8 +598,27 @@ fn implode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn chr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let code = args.first().map(|v| v.to_long()).unwrap_or(0) as u8;
+fn chr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        let msg = "chr() expects exactly 1 argument, 0 given";
+        let exc = vm.create_exception(b"TypeError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
+    }
+    if args.len() > 1 {
+        let msg = format!("chr() expects exactly 1 argument, {} given", args.len());
+        let exc = vm.create_exception(b"TypeError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let n = args[0].to_long();
+    if n < 0 || n > 255 {
+        vm.emit_deprecated_at(
+            "chr(): Providing a value not in-between 0 and 255 is deprecated, this is because a byte value must be in the [0, 255] interval. The value used will be constrained using % 256",
+            vm.current_line,
+        );
+    }
+    let code = ((n % 256 + 256) % 256) as u8;
     Ok(Value::String(PhpString::from_bytes(&[code])))
 }
 
@@ -600,12 +628,12 @@ fn ord(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(code as i64))
 }
 
-fn sprintf(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn sprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
-        return Err(VmError {
-            message: "sprintf() expects at least 1 argument".into(),
-            line: 0,
-        });
+        let msg = "sprintf() expects at least 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
     }
     let result = do_sprintf(args);
     Ok(Value::String(PhpString::from_vec(result.into_bytes())))
@@ -1070,11 +1098,16 @@ fn lcfirst(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn ucwords(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let delimiters = args.get(1).map(|v| v.to_php_string());
     let mut bytes = s.as_bytes().to_vec();
     let mut capitalize_next = true;
+    let delim_bytes: Vec<u8> = if let Some(ref d) = delimiters {
+        d.as_bytes().to_vec()
+    } else {
+        b" \t\r\n\x0B\x0C".to_vec()
+    };
     for b in &mut bytes {
-        if *b == b' ' || *b == b'\t' || *b == b'\r' || *b == b'\n' || *b == b'\x0B' || *b == b'\x0C'
-        {
+        if delim_bytes.contains(b) {
             capitalize_next = true;
         } else if capitalize_next {
             *b = b.to_ascii_uppercase();
@@ -1235,10 +1268,6 @@ fn stripcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 b'b' => {
                     result.push(0x08);
-                    i += 2;
-                }
-                b'e' | b'E' => {
-                    result.push(0x1B);
                     i += 2;
                 }
                 b'f' => {
@@ -1611,24 +1640,42 @@ fn strtr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::String(PhpString::from_vec(result)))
     } else if let Some(Value::Array(replacements)) = args.get(1) {
         let replacements = replacements.borrow();
-        let mut result = subject.to_string_lossy();
         // Sort by key length descending for correct replacement order
-        let mut pairs: Vec<(String, String)> = replacements
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = replacements
             .iter()
-            .map(|(k, v)| {
+            .filter_map(|(k, v)| {
                 let key = match k {
-                    goro_core::array::ArrayKey::String(s) => s.to_string_lossy(),
-                    goro_core::array::ArrayKey::Int(n) => n.to_string(),
+                    goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                    goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
                 };
-                (key, v.to_php_string().to_string_lossy())
+                if key.is_empty() {
+                    None
+                } else {
+                    Some((key, v.to_php_string().as_bytes().to_vec()))
+                }
             })
             .collect();
         pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
-        for (from, to) in &pairs {
-            result = result.replace(from.as_str(), to.as_str());
+        let src = subject.as_bytes();
+        let mut result = Vec::with_capacity(src.len());
+        let mut i = 0;
+        while i < src.len() {
+            let mut replaced = false;
+            for (from, to) in &pairs {
+                if i + from.len() <= src.len() && &src[i..i + from.len()] == from.as_slice() {
+                    result.extend_from_slice(to);
+                    i += from.len();
+                    replaced = true;
+                    break;
+                }
+            }
+            if !replaced {
+                result.push(src[i]);
+                i += 1;
+            }
         }
-        Ok(Value::String(PhpString::from_string(result)))
+        Ok(Value::String(PhpString::from_vec(result)))
     } else {
         Ok(Value::String(subject))
     }
@@ -2140,7 +2187,12 @@ fn strstr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     if needle.is_empty() {
-        return Ok(Value::False); // PHP 8 throws ValueError but let's be permissive
+        // PHP 8.0+: empty needle matches at position 0
+        if before_needle {
+            return Ok(Value::String(PhpString::empty()));
+        } else {
+            return Ok(Value::String(haystack));
+        }
     }
     if let Some(pos) = haystack
         .as_bytes()
@@ -2161,9 +2213,15 @@ fn strstr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn strpbrk_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn strpbrk_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let char_list = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    if char_list.is_empty() {
+        let msg = "strpbrk(): Argument #2 ($characters) must be a non-empty string";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
+    }
     let h = haystack.as_bytes();
     let chars = char_list.as_bytes();
     for (i, &b) in h.iter().enumerate() {
@@ -2174,35 +2232,97 @@ fn strpbrk_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
+fn strnatcmp_impl(a: &[u8], b: &[u8], case_insensitive: bool) -> i64 {
+    let mut ai = 0;
+    let mut bi = 0;
+    while ai < a.len() && bi < b.len() {
+        // Skip leading spaces
+        while ai < a.len() && a[ai] == b' ' {
+            ai += 1;
+        }
+        while bi < b.len() && b[bi] == b' ' {
+            bi += 1;
+        }
+        if ai >= a.len() || bi >= b.len() {
+            break;
+        }
+        // Both are digits - compare numerically
+        if a[ai].is_ascii_digit() && b[bi].is_ascii_digit() {
+            // Skip leading zeros
+            let mut a_leading_zeros = 0;
+            let mut b_leading_zeros = 0;
+            while ai + a_leading_zeros < a.len() && a[ai + a_leading_zeros] == b'0' {
+                a_leading_zeros += 1;
+            }
+            while bi + b_leading_zeros < b.len() && b[bi + b_leading_zeros] == b'0' {
+                b_leading_zeros += 1;
+            }
+            // Extract digit runs (without leading zeros)
+            let a_start = ai + a_leading_zeros;
+            let b_start = bi + b_leading_zeros;
+            let mut a_end = a_start;
+            let mut b_end = b_start;
+            while a_end < a.len() && a[a_end].is_ascii_digit() {
+                a_end += 1;
+            }
+            while b_end < b.len() && b[b_end].is_ascii_digit() {
+                b_end += 1;
+            }
+            let a_num_len = a_end - a_start;
+            let b_num_len = b_end - b_start;
+            // Different lengths means different magnitude
+            if a_num_len != b_num_len {
+                if a_num_len == 0 && b_num_len == 0 {
+                    // Both are all zeros - compare by number of zeros
+                    if a_leading_zeros != b_leading_zeros {
+                        return if a_leading_zeros < b_leading_zeros { -1 } else { 1 };
+                    }
+                } else {
+                    return if a_num_len < b_num_len { -1 } else { 1 };
+                }
+            } else {
+                // Same length - compare digit by digit
+                for k in 0..a_num_len {
+                    if a[a_start + k] != b[b_start + k] {
+                        return if a[a_start + k] < b[b_start + k] { -1 } else { 1 };
+                    }
+                }
+                // Same numeric value - fewer leading zeros comes first
+                if a_leading_zeros != b_leading_zeros {
+                    return if a_leading_zeros < b_leading_zeros { -1 } else { 1 };
+                }
+            }
+            ai = a_end;
+            bi = b_end;
+        } else {
+            let ca = if case_insensitive { a[ai].to_ascii_lowercase() } else { a[ai] };
+            let cb = if case_insensitive { b[bi].to_ascii_lowercase() } else { b[bi] };
+            if ca != cb {
+                return if ca < cb { -1 } else { 1 };
+            }
+            ai += 1;
+            bi += 1;
+        }
+    }
+    if ai < a.len() {
+        1
+    } else if bi < b.len() {
+        -1
+    } else {
+        0
+    }
+}
+
 fn strnatcmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args.first().unwrap_or(&Value::Null).to_php_string();
     let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    // Natural order comparison (simplified - just do string compare for now)
-    Ok(Value::Long(match a.as_bytes().cmp(b.as_bytes()) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }))
+    Ok(Value::Long(strnatcmp_impl(a.as_bytes(), b.as_bytes(), false)))
 }
 
 fn strnatcasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args.first().unwrap_or(&Value::Null).to_php_string();
     let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let a_lower: Vec<u8> = a
-        .as_bytes()
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let b_lower: Vec<u8> = b
-        .as_bytes()
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    Ok(Value::Long(match a_lower.cmp(&b_lower) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }))
+    Ok(Value::Long(strnatcmp_impl(a.as_bytes(), b.as_bytes(), true)))
 }
 
 fn strcmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2317,15 +2437,22 @@ fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn strrchr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null);
+    let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     let needle_byte = match needle {
         Value::String(s) if !s.is_empty() => s.as_bytes()[0],
         Value::Long(n) => *n as u8,
         _ => return Ok(Value::False),
     };
     if let Some(pos) = haystack.as_bytes().iter().rposition(|&b| b == needle_byte) {
-        Ok(Value::String(PhpString::from_vec(
-            haystack.as_bytes()[pos..].to_vec(),
-        )))
+        if before_needle {
+            Ok(Value::String(PhpString::from_vec(
+                haystack.as_bytes()[..pos].to_vec(),
+            )))
+        } else {
+            Ok(Value::String(PhpString::from_vec(
+                haystack.as_bytes()[pos..].to_vec(),
+            )))
+        }
     } else {
         Ok(Value::False)
     }
@@ -2336,7 +2463,12 @@ fn stristr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     if needle.is_empty() {
-        return Ok(Value::False);
+        // PHP 8.0+: empty needle matches at position 0
+        if before_needle {
+            return Ok(Value::String(PhpString::empty()));
+        } else {
+            return Ok(Value::String(haystack));
+        }
     }
     let h_lower: Vec<u8> = haystack
         .as_bytes()
@@ -2366,21 +2498,60 @@ fn stristr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
+thread_local! {
+    static STRTOK_STATE: RefCell<(Vec<u8>, usize)> = RefCell::new((Vec::new(), 0));
+}
+
 fn strtok_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Simplified strtok - just split on first occurrence of any delimiter char
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let delim = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let s_bytes = s.as_bytes();
+    // strtok has two forms:
+    // strtok(string, delimiters) - initializes with new string
+    // strtok(delimiters) - continues tokenizing the current string
+    let (set_new, delim) = if args.len() >= 2 {
+        // strtok(string, delimiters) - set new string
+        let s = args[0].to_php_string();
+        let d = args[1].to_php_string();
+        STRTOK_STATE.with(|state| {
+            let mut st = state.borrow_mut();
+            st.0 = s.as_bytes().to_vec();
+            st.1 = 0;
+        });
+        (true, d)
+    } else {
+        // strtok(delimiters) - continue with saved string
+        let d = args.first().unwrap_or(&Value::Null).to_php_string();
+        (false, d)
+    };
+    let _ = set_new;
     let delim_bytes = delim.as_bytes();
-    if s_bytes.is_empty() {
-        return Ok(Value::False);
-    }
-    for (i, &b) in s_bytes.iter().enumerate() {
-        if delim_bytes.contains(&b) {
-            return Ok(Value::String(PhpString::from_vec(s_bytes[..i].to_vec())));
+
+    STRTOK_STATE.with(|state| {
+        let mut st = state.borrow_mut();
+        let mut pos = st.1;
+        let s_len = st.0.len();
+
+        // Skip leading delimiter characters
+        while pos < s_len && delim_bytes.contains(&st.0[pos]) {
+            pos += 1;
         }
-    }
-    Ok(Value::String(s))
+
+        if pos >= s_len {
+            st.1 = pos;
+            return Ok(Value::False);
+        }
+
+        // Find next delimiter
+        let start = pos;
+        while pos < s_len && !delim_bytes.contains(&st.0[pos]) {
+            pos += 1;
+        }
+
+        let token = st.0[start..pos].to_vec();
+
+        // Move past the delimiter for next call
+        st.1 = if pos < s_len { pos + 1 } else { pos };
+
+        Ok(Value::String(PhpString::from_vec(token)))
+    })
 }
 
 fn compute_substr_range(s_len: usize, offset: i64, length: Option<i64>) -> (usize, usize) {
@@ -2615,11 +2786,11 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .unwrap_or_else(|| PhpString::from_bytes(b"\n"));
     let cut_long = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
 
-    if width < 1 && cut_long {
-        return Err(VmError {
-            message: "wordwrap(): Argument #2 ($width) must be greater than or equal to 1 when argument #4 ($cut_long_words) is true".into(),
-            line: 0,
-        });
+    if width == 0 && cut_long {
+        let msg = "wordwrap(): Argument #4 ($cut_long_words) cannot be true when argument #2 ($width) is 0";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
     }
 
     let width = if cut_long { width.max(1) as usize } else { width.max(0) as usize };
@@ -2640,99 +2811,97 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::empty()));
     }
 
-    let mut result = Vec::new();
-    let mut last_start = 0;  // Start of current line segment
-    let mut last_space: Option<usize> = None;  // Position of last space seen
-    let mut line_len: usize = 0;
-    let mut i = 0;
+    let width = if width < 1 { 1 } else { width };
 
+    let mut result = Vec::new();
+    let mut line_start = 0;
+    let mut last_space: Option<usize> = None;
+    let mut current_len: usize = 0;
+
+    let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'\n' {
-            // Existing newline resets line
-            result.extend_from_slice(&bytes[last_start..=i]);
-            last_start = i + 1;
+            // Newline: emit everything up to and including the newline
+            result.extend_from_slice(&bytes[line_start..=i]);
+            line_start = i + 1;
             last_space = None;
-            line_len = 0;
+            current_len = 0;
             i += 1;
             continue;
         }
 
-        // Increment line length for this character
-        line_len += 1;
+        current_len += 1;
 
         if bytes[i] == b' ' {
-            if line_len > width {
-                // Line exceeds width at a space -> break here (replace space)
-                result.extend_from_slice(&bytes[last_start..i]);
-                result.extend_from_slice(brk_bytes);
-                last_start = i + 1;
-                last_space = None;
-                line_len = 0;
-                i += 1;
-                continue;
-            }
             last_space = Some(i);
-        } else if line_len > width {
-            // Line exceeds width at a non-space char
+        }
+
+        if current_len > width {
             if let Some(sp) = last_space {
-                if sp > last_start {
-                    // Wrap at last space (replace it) only if there's content before it
-                    result.extend_from_slice(&bytes[last_start..sp]);
-                    result.extend_from_slice(brk_bytes);
-                    last_start = sp + 1;
-                    line_len = i + 1 - last_start;
-                    last_space = None;
-                    // Re-scan for spaces in the portion we're keeping
-                    for j in last_start..=i {
-                        if bytes[j] == b' ' {
-                            last_space = Some(j);
-                        }
+                // Break at last space
+                result.extend_from_slice(&bytes[line_start..sp]);
+                result.extend_from_slice(brk_bytes);
+                line_start = sp + 1;
+                current_len = i + 1 - line_start;
+                last_space = None;
+                // Re-scan for spaces in the kept portion
+                for j in line_start..=i {
+                    if j < bytes.len() && bytes[j] == b' ' {
+                        last_space = Some(j);
                     }
-                } else if cut_long {
-                    // Space at start of line or no usable space with cut_long
-                    result.extend_from_slice(&bytes[last_start..i]);
-                    result.extend_from_slice(brk_bytes);
-                    last_start = i;
-                    line_len = 1;
-                    last_space = None;
                 }
             } else if cut_long {
-                // No space found - cut the word
-                result.extend_from_slice(&bytes[last_start..i]);
+                // No space found, cut the word at width
+                result.extend_from_slice(&bytes[line_start..i]);
                 result.extend_from_slice(brk_bytes);
-                last_start = i;
-                line_len = 1;
-                last_space = None;
+                line_start = i;
+                current_len = 1;
             }
-            // else: no space and no cut_long, just continue
+            // else: no space, no cut - just continue
         }
 
         i += 1;
     }
 
     // Append remaining
-    if last_start < bytes.len() {
-        result.extend_from_slice(&bytes[last_start..]);
+    if line_start < bytes.len() {
+        result.extend_from_slice(&bytes[line_start..]);
     }
 
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn strrpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let h = haystack.as_bytes();
     let n = needle.as_bytes();
-    if n.is_empty() || n.len() > h.len() {
-        return Ok(Value::False);
-    }
+    // Compute start position from offset
     let start = if offset >= 0 {
-        (offset as usize).min(h.len())
+        let o = offset as usize;
+        if o > h.len() {
+            let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: vm.current_line });
+        }
+        o
     } else {
-        h.len().saturating_sub((-offset) as usize)
+        let abs = (-offset) as usize;
+        if abs > h.len() {
+            let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: vm.current_line });
+        }
+        h.len() - abs
     };
-    if start >= h.len() {
+    if n.is_empty() {
+        // Empty needle: return the length of the haystack
+        return Ok(Value::Long(h.len() as i64));
+    }
+    if n.len() > h.len() || start >= h.len() {
         return Ok(Value::False);
     }
     if let Some(pos) = h[start..].windows(n.len()).rposition(|w| w == n) {
@@ -2742,10 +2911,10 @@ fn strrpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn stripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn stripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0).max(0) as usize;
+    let offset_val = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let h: Vec<u8> = haystack
         .as_bytes()
         .iter()
@@ -2756,7 +2925,30 @@ fn stripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    if n.is_empty() || offset >= h.len() {
+    // Handle negative offset
+    let offset = if offset_val < 0 {
+        let abs = (-offset_val) as usize;
+        if abs > h.len() {
+            let msg = "stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: vm.current_line });
+        }
+        h.len() - abs
+    } else {
+        let o = offset_val as usize;
+        if o > h.len() {
+            let msg = "stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: vm.current_line });
+        }
+        o
+    };
+    if n.is_empty() {
+        return Ok(Value::Long(offset as i64));
+    }
+    if offset >= h.len() {
         return Ok(Value::False);
     }
     if let Some(pos) = h[offset..].windows(n.len()).position(|w| w == n.as_slice()) {
@@ -2766,9 +2958,10 @@ fn stripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn strripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let h: Vec<u8> = haystack
         .as_bytes()
         .iter()
@@ -2779,11 +2972,34 @@ fn strripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
+    // Compute start position from offset
+    let start = if offset >= 0 {
+        let o = offset as usize;
+        if o > h.len() {
+            let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: vm.current_line });
+        }
+        o
+    } else {
+        let abs = (-offset) as usize;
+        if abs > h.len() {
+            let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.into(), line: vm.current_line });
+        }
+        h.len() - abs
+    };
     if n.is_empty() {
+        return Ok(Value::Long(h.len() as i64));
+    }
+    if start >= h.len() {
         return Ok(Value::False);
     }
-    if let Some(pos) = h.windows(n.len()).rposition(|w| w == n.as_slice()) {
-        Ok(Value::Long(pos as i64))
+    if let Some(pos) = h[start..].windows(n.len()).rposition(|w| w == n.as_slice()) {
+        Ok(Value::Long((start + pos) as i64))
     } else {
         Ok(Value::False)
     }
@@ -3181,6 +3397,72 @@ fn mb_chr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::String(PhpString::from_bytes(s.as_bytes())))
     } else {
         Ok(Value::False)
+    }
+}
+
+fn mb_strcut_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let start = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let length = args.get(2).map(|v| v.to_long());
+    let bytes = s.as_bytes();
+    let len = bytes.len() as i64;
+
+    // Compute start position (negative = from end)
+    let start_byte = if start < 0 {
+        (len + start).max(0) as usize
+    } else {
+        start.min(len) as usize
+    };
+
+    // Adjust start to UTF-8 character boundary (don't split a multi-byte char)
+    let start_byte = {
+        let mut sb = start_byte;
+        while sb > 0 && sb < bytes.len() && (bytes[sb] & 0xC0) == 0x80 {
+            sb -= 1;
+        }
+        sb
+    };
+
+    let end_byte = match length {
+        Some(l) if l < 0 => {
+            let e = (len + l).max(start_byte as i64) as usize;
+            // Adjust to UTF-8 boundary
+            let mut eb = e;
+            while eb > start_byte && eb < bytes.len() && (bytes[eb] & 0xC0) == 0x80 {
+                eb -= 1;
+            }
+            eb
+        }
+        Some(l) => {
+            let e = (start_byte as i64 + l).min(len) as usize;
+            // Adjust to UTF-8 boundary
+            let mut eb = e;
+            while eb > start_byte && eb < bytes.len() && (bytes[eb] & 0xC0) == 0x80 {
+                eb -= 1;
+            }
+            eb
+        }
+        None => bytes.len(),
+    };
+
+    if start_byte >= end_byte || start_byte >= bytes.len() {
+        return Ok(Value::String(PhpString::empty()));
+    }
+
+    Ok(Value::String(PhpString::from_vec(bytes[start_byte..end_byte].to_vec())))
+}
+
+fn mb_detect_order_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() || matches!(args.first(), Some(Value::Null)) {
+        // Return current detect order
+        let arr = PhpArray::new();
+        let mut result = arr;
+        result.push(Value::String(PhpString::from_bytes(b"ASCII")));
+        result.push(Value::String(PhpString::from_bytes(b"UTF-8")));
+        Ok(Value::Array(Rc::new(RefCell::new(result))))
+    } else {
+        // Set detect order - we just accept it
+        Ok(Value::True)
     }
 }
 

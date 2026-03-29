@@ -6148,9 +6148,27 @@ impl Compiler {
                 });
 
                 if let Some(jmp) = jmp_null {
-                    // Skip to here if null, result will be Undef (which reads as Null)
+                    // Jump past the assign-null
+                    let skip_null = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    // Nullsafe short-circuit: assign null to result
+                    let null_assign_pos = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp, null_assign_pos);
+                    let null_idx = self.op_array.add_literal(Value::Null);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(tmp),
+                        op2: OperandType::Const(null_idx),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
                     let end = self.op_array.current_offset();
-                    self.op_array.patch_jump(jmp, end);
+                    self.op_array.patch_jump(skip_null, end);
                 }
 
                 Ok(OperandType::Tmp(tmp))
@@ -6221,8 +6239,27 @@ impl Compiler {
                 });
 
                 if let Some(jmp) = jmp_null {
+                    // Jump past the assign-null that follows
+                    let skip_null = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    // Nullsafe short-circuit: assign null to result
+                    let null_assign_pos = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp, null_assign_pos);
+                    let null_idx = self.op_array.add_literal(Value::Null);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(tmp),
+                        op2: OperandType::Const(null_idx),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
                     let end = self.op_array.current_offset();
-                    self.op_array.patch_jump(jmp, end);
+                    self.op_array.patch_jump(skip_null, end);
                 }
 
                 Ok(OperandType::Tmp(tmp))

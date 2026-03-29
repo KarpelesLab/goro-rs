@@ -189,6 +189,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_any", array_any_fn);
     vm.register_function(b"array_multisort", array_multisort_fn);
     vm.register_function(b"highlight_string", highlight_string_fn);
+    vm.register_function(b"exec", exec_fn);
+    vm.register_function(b"system", system_fn);
+    vm.register_function(b"shell_exec", shell_exec_fn);
+    vm.register_function(b"passthru", passthru_fn);
+    vm.register_function(b"escapeshellarg", escapeshellarg_fn);
+    vm.register_function(b"escapeshellcmd", escapeshellcmd_fn);
     vm.register_function(b"fopen", fopen_fn);
     vm.register_function(b"fclose", fclose_fn);
     vm.register_function(b"fread", fread_fn);
@@ -3520,8 +3526,41 @@ fn urlencode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }
-fn urldecode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
+fn urldecode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            result.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = bytes[i + 1];
+            let lo = bytes[i + 2];
+            if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit() {
+                let val = (hex_val_misc(hi) << 4) | hex_val_misc(lo);
+                result.push(val);
+                i += 3;
+            } else {
+                result.push(bytes[i]);
+                i += 1;
+            }
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn hex_val_misc(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
 }
 fn rawurlencode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -3536,9 +3575,28 @@ fn rawurlencode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }
-fn rawurldecode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
+fn rawurldecode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = bytes[i + 1];
+            let lo = bytes[i + 2];
+            if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit() {
+                let val = (hex_val_misc(hi) << 4) | hex_val_misc(lo);
+                result.push(val);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
 }
+
 fn htmlspecialchars(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(11); // ENT_QUOTES | ENT_SUBSTITUTE (default)
@@ -6069,19 +6127,19 @@ fn fopen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let mode = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
 
-    let file = match mode.as_str() {
-        "r" | "rb" => std::fs::File::open(&filename),
-        "r+" | "r+b" | "rb+" => std::fs::OpenOptions::new().read(true).write(true).open(&filename),
-        "w" | "wb" => std::fs::File::create(&filename),
-        "w+" | "w+b" | "wb+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&filename),
-        "a" | "ab" => std::fs::OpenOptions::new().write(true).append(true).create(true).open(&filename),
-        "a+" | "a+b" | "ab+" => std::fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(&filename),
-        "x" | "xb" => std::fs::OpenOptions::new().write(true).create_new(true).open(&filename),
-        "x+" | "x+b" | "xb+" => std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&filename),
-        "c" | "cb" => std::fs::OpenOptions::new().write(true).create(true).open(&filename),
-        "c+" | "c+b" | "cb+" => std::fs::OpenOptions::new().read(true).write(true).create(true).open(&filename),
-        "wt" => std::fs::File::create(&filename),
-        "rt" => std::fs::File::open(&filename),
+    // Normalize mode: strip 'b' (binary) and 't' (text) flags - they're all the same on Linux
+    let mode_clean: String = mode.chars().filter(|&c| c != 'b' && c != 't').collect();
+    let file = match mode_clean.as_str() {
+        "r" => std::fs::File::open(&filename),
+        "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&filename),
+        "w" => std::fs::File::create(&filename),
+        "w+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&filename),
+        "a" => std::fs::OpenOptions::new().write(true).append(true).create(true).open(&filename),
+        "a+" => std::fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(&filename),
+        "x" => std::fs::OpenOptions::new().write(true).create_new(true).open(&filename),
+        "x+" => std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&filename),
+        "c" => std::fs::OpenOptions::new().write(true).create(true).open(&filename),
+        "c+" => std::fs::OpenOptions::new().read(true).write(true).create(true).open(&filename),
         _ => std::fs::File::open(&filename), // default to read
     };
 
@@ -7870,7 +7928,7 @@ fn array_u_op(
     compare_keys: bool,
     also_compare_values: bool,
 ) -> Result<Value, VmError> {
-    if args.len() < 3 {
+    if args.len() < 2 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
     let callback = args.last().unwrap().clone();
@@ -7878,6 +7936,10 @@ fn array_u_op(
         Value::Array(arr) => arr.borrow().clone(),
         _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     };
+    // If only one array + callback, return the first array
+    if args.len() <= 2 {
+        return Ok(Value::Array(Rc::new(RefCell::new(first))));
+    }
     let other_arrays: Vec<PhpArray> = args[1..args.len() - 1]
         .iter()
         .filter_map(|v| {
@@ -9247,5 +9309,109 @@ fn umask_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     {
         Ok(Value::Long(0))
     }
+}
+
+fn exec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let command = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let lines: Vec<&str> = stdout.trim_end_matches('\n').split('\n').collect();
+            // If $output array ref is provided (args[1]), fill it
+            // For now, just return the last line
+            let last_line = lines.last().map(|s| s.to_string()).unwrap_or_default();
+            // If $result_code ref is provided (args[2]), set it
+            // For now just return the last line
+            let _ = vm;
+            Ok(Value::String(PhpString::from_string(last_line)))
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn system_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let command = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = &out.stdout;
+            vm.write_output(stdout);
+            let stdout_str = String::from_utf8_lossy(stdout);
+            let lines: Vec<&str> = stdout_str.trim_end_matches('\n').split('\n').collect();
+            let last_line = lines.last().map(|s| s.to_string()).unwrap_or_default();
+            Ok(Value::String(PhpString::from_string(last_line)))
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn shell_exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let command = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            Ok(Value::String(PhpString::from_string(stdout)))
+        }
+        Err(_) => Ok(Value::Null),
+    }
+}
+
+fn passthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let command = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .output();
+    match output {
+        Ok(out) => {
+            vm.write_output(&out.stdout);
+            Ok(Value::Null)
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn escapeshellarg(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len() + 2);
+    result.push(b'\'');
+    for &b in bytes {
+        if b == b'\'' {
+            result.extend_from_slice(b"'\\''");
+        } else {
+            result.push(b);
+        }
+    }
+    result.push(b'\'');
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn escapeshellcmd(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    for &b in bytes {
+        match b {
+            b'#' | b'&' | b';' | b'`' | b'|' | b'*' | b'?' | b'~' | b'<' | b'>' | b'^'
+            | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'$' | b'\\' | b'\x0A' | b'\xFF' => {
+                result.push(b'\\');
+                result.push(b);
+            }
+            _ => result.push(b),
+        }
+    }
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 
