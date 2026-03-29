@@ -13,6 +13,9 @@ use crate::value::Value;
 /// Built-in function signature
 pub type BuiltinFn = fn(&mut Vm, &[Value]) -> Result<Value, VmError>;
 
+/// Type alias for the class map (used by external crates)
+pub type ClassMap = IndexMap<Vec<u8>, ClassEntry>;
+
 /// VM runtime error
 #[derive(Debug, Clone)]
 pub struct VmError {
@@ -1130,7 +1133,11 @@ impl Vm {
                                 cvs[i] = arg.clone();
                             }
                         }
-                        let _ = self.execute_op_array(&user_fn, cvs);
+                        let result = self.execute_op_array(&user_fn, cvs);
+                        // If the error handler threw an exception, it's already in current_exception
+                        if result.is_err() || self.current_exception.is_some() {
+                            return true;
+                        }
                         return true;
                     } else if let Some(builtin) = self.functions.get(&func_lower).copied() {
                         let _ = builtin(self, &args);
@@ -8501,6 +8508,76 @@ impl Vm {
         val.clone()
     }
 
+    /// Resolve a single deferred value reference (either a deferred const or a literal)
+    fn resolve_single_deferred_operand(&self, s: &[u8], self_class_lower: &[u8], class: &ClassEntry) -> Value {
+        if s.starts_with(b"__deferred_const__::") {
+            let rest = &s[b"__deferred_const__::".len()..];
+            if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                let ref_class_name = &rest[..sep_pos];
+                let ref_const_name = &rest[sep_pos + 2..];
+                let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let resolved = if ref_class_lower == self_class_lower {
+                    class.constants.get(ref_const_name).cloned()
+                } else if let Some(ref_class) = self.classes.get(&ref_class_lower) {
+                    ref_class.constants.get(ref_const_name).cloned()
+                } else {
+                    None
+                };
+                if let Some(val) = resolved {
+                    return val;
+                }
+            }
+            // Return the marker as a string if unresolved
+            Value::String(PhpString::from_vec(s.to_vec()))
+        } else if s.starts_with(b"__deferred_binop__::") {
+            // Recursively resolve nested deferred binops
+            if let Some(val) = self.resolve_deferred_binop(s, self_class_lower, class) {
+                val
+            } else {
+                Value::String(PhpString::from_vec(s.to_vec()))
+            }
+        } else {
+            // It's a literal string
+            Value::String(PhpString::from_vec(s.to_vec()))
+        }
+    }
+
+    /// Resolve a deferred binary operation expression
+    /// Format: __deferred_binop__::OP_CODE:left_repr\x00right_repr
+    fn resolve_deferred_binop(&self, s_bytes: &[u8], self_class_lower: &[u8], class: &ClassEntry) -> Option<Value> {
+        let rest = &s_bytes[b"__deferred_binop__::".len()..];
+        if rest.len() < 2 || rest[1] != b':' {
+            return None;
+        }
+        let op_code = rest[0];
+        let payload = &rest[2..]; // after OP_CODE:
+        // Split on null byte
+        if let Some(sep_pos) = payload.iter().position(|&b| b == 0) {
+            let left_repr = &payload[..sep_pos];
+            let right_repr = &payload[sep_pos + 1..];
+            let lv = self.resolve_single_deferred_operand(left_repr, self_class_lower, class);
+            let rv = self.resolve_single_deferred_operand(right_repr, self_class_lower, class);
+            let result = match op_code {
+                1 => { // Concat
+                    let mut r = lv.to_php_string().as_bytes().to_vec();
+                    r.extend_from_slice(rv.to_php_string().as_bytes());
+                    Value::String(PhpString::from_vec(r))
+                }
+                2 => lv.add(&rv), // Add
+                3 => lv.sub(&rv), // Sub
+                4 => lv.mul(&rv), // Mul
+                5 => Value::Long(lv.to_long() | rv.to_long()), // BitwiseOr
+                6 => Value::Long(lv.to_long() & rv.to_long()), // BitwiseAnd
+                7 => Value::Long(lv.to_long() << rv.to_long()), // ShiftLeft
+                8 => Value::Long(lv.to_long() >> rv.to_long()), // ShiftRight
+                _ => return None,
+            };
+            Some(result)
+        } else {
+            None
+        }
+    }
+
     /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
@@ -15026,6 +15103,85 @@ impl Vm {
                                         }
                                     }
                                 }
+                            }
+                        }
+                        // Resolve deferred constant references inside array values in class constants
+                        let const_keys_arr: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
+                        for const_name in const_keys_arr {
+                            if let Some(Value::Array(arr_rc)) = class.constants.get(&const_name) {
+                                let mut arr = arr_rc.borrow().clone();
+                                let mut changed = false;
+                                let keys: Vec<_> = arr.iter().map(|(k, _)| k.clone()).collect();
+                                for key in keys {
+                                    if let Some(Value::String(s)) = arr.get(&key) {
+                                        let s_bytes = s.as_bytes();
+                                        if s_bytes.starts_with(b"__deferred_const__::") {
+                                            let rest = &s_bytes[b"__deferred_const__::".len()..];
+                                            if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                                let ref_class_name = &rest[..sep_pos];
+                                                let ref_const_name = &rest[sep_pos + 2..];
+                                                let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                let resolved = if ref_class_lower == name_lower.as_slice() {
+                                                    class.constants.get(ref_const_name).cloned()
+                                                } else if let Some(ref_class) = self.classes.get(&ref_class_lower) {
+                                                    ref_class.constants.get(ref_const_name).cloned()
+                                                } else {
+                                                    None
+                                                };
+                                                if let Some(val) = resolved {
+                                                    // Handle enum case markers
+                                                    if let Value::String(s2) = &val {
+                                                        if s2.as_bytes().starts_with(b"__enum_case__::") {
+                                                            let case_name = &s2.as_bytes()[15..];
+                                                            if let Some(enum_obj) = self.get_enum_case(&ref_class_lower, case_name) {
+                                                                arr.set(key, enum_obj);
+                                                            } else {
+                                                                arr.set(key, val);
+                                                            }
+                                                        } else {
+                                                            arr.set(key, val);
+                                                        }
+                                                    } else {
+                                                        arr.set(key, val);
+                                                    }
+                                                    changed = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if changed {
+                                    class.constants.insert(const_name, Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))));
+                                }
+                            }
+                        }
+                        // Resolve deferred binary operation expressions in class constants
+                        let const_keys2: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
+                        for const_name in const_keys2 {
+                            if let Some(Value::String(s)) = class.constants.get(&const_name) {
+                                let s_bytes = s.as_bytes();
+                                if s_bytes.starts_with(b"__deferred_binop__::") {
+                                    if let Some(resolved) = self.resolve_deferred_binop(s_bytes, &name_lower, &class) {
+                                        class.constants.insert(const_name, resolved);
+                                    }
+                                }
+                            }
+                        }
+                        // Resolve deferred binary operation expressions in property defaults
+                        {
+                            let mut prop_binop_updates: Vec<(usize, Value)> = Vec::new();
+                            for (i, prop) in class.properties.iter().enumerate() {
+                                if let Value::String(s) = &prop.default {
+                                    let s_bytes = s.as_bytes();
+                                    if s_bytes.starts_with(b"__deferred_binop__::") {
+                                        if let Some(resolved) = self.resolve_deferred_binop(s_bytes, &name_lower, &class) {
+                                            prop_binop_updates.push((i, resolved));
+                                        }
+                                    }
+                                }
+                            }
+                            for (i, val) in prop_binop_updates {
+                                class.properties[i].default = val;
                             }
                         }
                         // Resolve deferred constant references in property defaults

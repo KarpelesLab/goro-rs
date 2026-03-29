@@ -101,6 +101,8 @@ impl Compiler {
                     (b"settype", 0) => true,
                     // parse_str($string, &$result)
                     (b"parse_str", 1) => true,
+                    // is_callable($value, $syntax_only, &$callable_name)
+                    (b"is_callable", 2) => true,
                     _ => false,
                 }
             }
@@ -2136,21 +2138,78 @@ impl Compiler {
                                         Value::String(PhpString::from_vec(marker))
                                     }
                                     ExprKind::BinaryOp { op, left, right, .. } => {
-                                        let l = Self::eval_const_expr(left);
-                                        let r = Self::eval_const_expr(right);
-                                        if let (Some(lv), Some(rv)) = (l, r) {
-                                            match op {
-                                                BinaryOp::Add => lv.add(&rv),
-                                                BinaryOp::Sub => lv.sub(&rv),
-                                                BinaryOp::Mul => lv.mul(&rv),
-                                                BinaryOp::Concat => {
-                                                    let mut result = lv.to_php_string().as_bytes().to_vec();
-                                                    result.extend_from_slice(rv.to_php_string().as_bytes());
-                                                    Value::String(PhpString::from_vec(result))
+                                        let l = Self::eval_const_expr(left).or_else(|| {
+                                            Self::eval_class_const_expr(left, &class, &qualified_name, extends.as_deref(), self)
+                                        });
+                                        let r = Self::eval_const_expr(right).or_else(|| {
+                                            Self::eval_class_const_expr(right, &class, &qualified_name, extends.as_deref(), self)
+                                        });
+                                        // Helper: resolve an operand, producing a deferred marker for ClassConstAccess if needed
+                                        let resolve_or_defer_prop = |operand: &Expr, resolved: Option<Value>| -> Option<Value> {
+                                            if let Some(v) = resolved {
+                                                return Some(v);
+                                            }
+                                            if let ExprKind::ClassConstAccess { class: class_expr, constant } = &operand.kind {
+                                                let class_name = match &class_expr.kind {
+                                                    ExprKind::Identifier(ident_name) => {
+                                                        let resolved_name = self.resolve_class_name(ident_name);
+                                                        if resolved_name.eq_ignore_ascii_case(b"self") {
+                                                            qualified_name.clone()
+                                                        } else if resolved_name.eq_ignore_ascii_case(b"parent") {
+                                                            extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved_name)
+                                                        } else {
+                                                            resolved_name
+                                                        }
+                                                    }
+                                                    _ => qualified_name.clone(),
+                                                };
+                                                let mut marker = b"__deferred_const__::".to_vec();
+                                                marker.extend_from_slice(&class_name);
+                                                marker.push(b':');
+                                                marker.push(b':');
+                                                marker.extend_from_slice(constant);
+                                                return Some(Value::String(PhpString::from_vec(marker)));
+                                            }
+                                            None
+                                        };
+                                        let lv = resolve_or_defer_prop(left, l);
+                                        let rv = resolve_or_defer_prop(right, r);
+                                        if let (Some(lv), Some(rv)) = (lv, rv) {
+                                            let l_deferred = matches!(&lv, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"));
+                                            let r_deferred = matches!(&rv, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"));
+                                            if l_deferred || r_deferred {
+                                                let op_code: u8 = match op {
+                                                    BinaryOp::Concat => 1,
+                                                    BinaryOp::Add => 2,
+                                                    BinaryOp::Sub => 3,
+                                                    BinaryOp::Mul => 4,
+                                                    BinaryOp::BitwiseOr => 5,
+                                                    BinaryOp::BitwiseAnd => 6,
+                                                    _ => 0,
+                                                };
+                                                let l_str = lv.to_php_string();
+                                                let r_str = rv.to_php_string();
+                                                let mut marker = b"__deferred_binop__::".to_vec();
+                                                marker.push(op_code);
+                                                marker.push(b':');
+                                                marker.extend_from_slice(l_str.as_bytes());
+                                                marker.push(0);
+                                                marker.extend_from_slice(r_str.as_bytes());
+                                                Value::String(PhpString::from_vec(marker))
+                                            } else {
+                                                match op {
+                                                    BinaryOp::Add => lv.add(&rv),
+                                                    BinaryOp::Sub => lv.sub(&rv),
+                                                    BinaryOp::Mul => lv.mul(&rv),
+                                                    BinaryOp::Concat => {
+                                                        let mut result = lv.to_php_string().as_bytes().to_vec();
+                                                        result.extend_from_slice(rv.to_php_string().as_bytes());
+                                                        Value::String(PhpString::from_vec(result))
+                                                    }
+                                                    BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
+                                                    BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
+                                                    _ => Value::Null,
                                                 }
-                                                BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
-                                                BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
-                                                _ => Value::Null,
                                             }
                                         } else {
                                             Value::Null
@@ -2951,21 +3010,79 @@ impl Compiler {
                                         let r = Self::eval_const_expr(right).or_else(|| {
                                             Self::eval_class_const_expr(right, &class, &qualified_name, extends.as_deref(), self)
                                         });
-                                        if let (Some(lv), Some(rv)) = (l, r) {
-                                            match op {
-                                                BinaryOp::Add => lv.add(&rv),
-                                                BinaryOp::Sub => lv.sub(&rv),
-                                                BinaryOp::Mul => lv.mul(&rv),
-                                                BinaryOp::Concat => {
-                                                    let mut result = lv.to_php_string().as_bytes().to_vec();
-                                                    result.extend_from_slice(rv.to_php_string().as_bytes());
-                                                    Value::String(PhpString::from_vec(result))
+                                        // Helper: resolve an operand, producing a deferred marker for ClassConstAccess if needed
+                                        let resolve_or_defer = |operand: &Expr, resolved: Option<Value>| -> Option<Value> {
+                                            if let Some(v) = resolved {
+                                                return Some(v);
+                                            }
+                                            // Try to produce a deferred const marker for ClassConstAccess
+                                            if let ExprKind::ClassConstAccess { class: class_expr, constant } = &operand.kind {
+                                                let class_name = match &class_expr.kind {
+                                                    ExprKind::Identifier(ident_name) => {
+                                                        let resolved_name = self.resolve_class_name(ident_name);
+                                                        if resolved_name.eq_ignore_ascii_case(b"self") {
+                                                            qualified_name.clone()
+                                                        } else if resolved_name.eq_ignore_ascii_case(b"parent") {
+                                                            extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved_name)
+                                                        } else {
+                                                            resolved_name
+                                                        }
+                                                    }
+                                                    _ => qualified_name.clone(),
+                                                };
+                                                let mut marker = b"__deferred_const__::".to_vec();
+                                                marker.extend_from_slice(&class_name);
+                                                marker.push(b':');
+                                                marker.push(b':');
+                                                marker.extend_from_slice(constant);
+                                                return Some(Value::String(PhpString::from_vec(marker)));
+                                            }
+                                            None
+                                        };
+                                        let lv = resolve_or_defer(left, l);
+                                        let rv = resolve_or_defer(right, r);
+                                        if let (Some(lv), Some(rv)) = (lv, rv) {
+                                            // Check if any side is a deferred marker - if so, create a deferred binary expression
+                                            let l_deferred = matches!(&lv, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"));
+                                            let r_deferred = matches!(&rv, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"));
+                                            if l_deferred || r_deferred {
+                                                // Encode as deferred binary expression: __deferred_binop__::OP_CODE::left_repr\x00right_repr
+                                                let op_code: u8 = match op {
+                                                    BinaryOp::Concat => 1,
+                                                    BinaryOp::Add => 2,
+                                                    BinaryOp::Sub => 3,
+                                                    BinaryOp::Mul => 4,
+                                                    BinaryOp::BitwiseOr => 5,
+                                                    BinaryOp::BitwiseAnd => 6,
+                                                    BinaryOp::ShiftLeft => 7,
+                                                    BinaryOp::ShiftRight => 8,
+                                                    _ => 0,
+                                                };
+                                                let l_str = lv.to_php_string();
+                                                let r_str = rv.to_php_string();
+                                                let mut marker = b"__deferred_binop__::".to_vec();
+                                                marker.push(op_code);
+                                                marker.push(b':');
+                                                marker.extend_from_slice(l_str.as_bytes());
+                                                marker.push(0); // null separator
+                                                marker.extend_from_slice(r_str.as_bytes());
+                                                Value::String(PhpString::from_vec(marker))
+                                            } else {
+                                                match op {
+                                                    BinaryOp::Add => lv.add(&rv),
+                                                    BinaryOp::Sub => lv.sub(&rv),
+                                                    BinaryOp::Mul => lv.mul(&rv),
+                                                    BinaryOp::Concat => {
+                                                        let mut result = lv.to_php_string().as_bytes().to_vec();
+                                                        result.extend_from_slice(rv.to_php_string().as_bytes());
+                                                        Value::String(PhpString::from_vec(result))
+                                                    }
+                                                    BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
+                                                    BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
+                                                    BinaryOp::ShiftLeft => Value::Long(lv.to_long() << rv.to_long()),
+                                                    BinaryOp::ShiftRight => Value::Long(lv.to_long() >> rv.to_long()),
+                                                    _ => Value::Null,
                                                 }
-                                                BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
-                                                BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
-                                                BinaryOp::ShiftLeft => Value::Long(lv.to_long() << rv.to_long()),
-                                                BinaryOp::ShiftRight => Value::Long(lv.to_long() >> rv.to_long()),
-                                                _ => Value::Null,
                                             }
                                         } else {
                                             // Create a deferred marker for the entire expression
@@ -2981,6 +3098,95 @@ impl Compiler {
                                     ExprKind::Identifier(name) => {
                                         let name_lower_lc: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
                                         self.resolve_class_const_magic(&name_lower_lc, &qualified_name, const_expr.span.line)
+                                    }
+                                    ExprKind::Array(elements) => {
+                                        // Handle arrays containing class constant references
+                                        let mut arr = crate::array::PhpArray::new();
+                                        let mut ok = true;
+                                        for elem in elements {
+                                            // Try to evaluate each element, with class context fallback
+                                            let val = Self::eval_const_expr(&elem.value)
+                                                .or_else(|| Self::eval_class_const_expr(&elem.value, &class, &qualified_name, extends.as_deref(), self))
+                                                .or_else(|| {
+                                                    // Handle magic constants like __CLASS__ in array context
+                                                    match &elem.value.kind {
+                                                        ExprKind::ConstantAccess(parts) => {
+                                                            let name_lower: Vec<u8> = parts.iter().flat_map(|p| p.iter()).copied().collect();
+                                                            let name_lower_lc: Vec<u8> = name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
+                                                            let v = self.resolve_class_const_magic(&name_lower_lc, &qualified_name, elem.value.span.line);
+                                                            if matches!(v, Value::Null) { None } else { Some(v) }
+                                                        }
+                                                        ExprKind::Identifier(n) => {
+                                                            let name_lower_lc: Vec<u8> = n.iter().map(|c| c.to_ascii_lowercase()).collect();
+                                                            let v = self.resolve_class_const_magic(&name_lower_lc, &qualified_name, elem.value.span.line);
+                                                            if matches!(v, Value::Null) { None } else { Some(v) }
+                                                        }
+                                                        _ => None,
+                                                    }
+                                                })
+                                                .or_else(|| {
+                                                    // Create deferred marker for class const references
+                                                    if let ExprKind::ClassConstAccess { class: class_expr, constant } = &elem.value.kind {
+                                                        let cname = match &class_expr.kind {
+                                                            ExprKind::Identifier(n) => {
+                                                                let resolved = self.resolve_class_name(n);
+                                                                if resolved.eq_ignore_ascii_case(b"self") {
+                                                                    qualified_name.clone()
+                                                                } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                                                    extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                                } else {
+                                                                    resolved
+                                                                }
+                                                            }
+                                                            _ => qualified_name.clone(),
+                                                        };
+                                                        let mut marker = b"__deferred_const__::".to_vec();
+                                                        marker.extend_from_slice(&cname);
+                                                        marker.push(b':');
+                                                        marker.push(b':');
+                                                        marker.extend_from_slice(constant);
+                                                        Some(Value::String(PhpString::from_vec(marker)))
+                                                    } else {
+                                                        None
+                                                    }
+                                                });
+                                            if let Some(v) = val {
+                                                if let Some(key_expr) = &elem.key {
+                                                    let k = Self::eval_const_expr(key_expr)
+                                                        .or_else(|| Self::eval_class_const_expr(key_expr, &class, &qualified_name, extends.as_deref(), self));
+                                                    if let Some(k) = k {
+                                                        let key = match k {
+                                                            Value::Long(n) => crate::array::ArrayKey::Int(n),
+                                                            Value::String(s) => crate::array::ArrayKey::String(s),
+                                                            _ => { ok = false; break; }
+                                                        };
+                                                        arr.set(key, v);
+                                                    } else {
+                                                        ok = false;
+                                                        break;
+                                                    }
+                                                } else {
+                                                    arr.push(v);
+                                                }
+                                            } else {
+                                                ok = false;
+                                                break;
+                                            }
+                                        }
+                                        if ok {
+                                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr)))
+                                        } else {
+                                            Value::Null
+                                        }
+                                    }
+                                    ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => {
+                                        let inner = Self::eval_const_expr(operand)
+                                            .or_else(|| Self::eval_class_const_expr(operand, &class, &qualified_name, extends.as_deref(), self));
+                                        match inner {
+                                            Some(Value::Long(n)) => Value::Long(-n),
+                                            Some(Value::Double(f)) => Value::Double(-f),
+                                            _ => Value::Null,
+                                        }
                                     }
                                     _ => Value::Null,
                                 }

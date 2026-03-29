@@ -1918,14 +1918,18 @@ fn metaphone(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let is_vowel = |c: char| -> bool { matches!(c, 'A' | 'E' | 'I' | 'O' | 'U') };
 
     let mut i = 0;
+    let mut last = '\0';
     // Skip initial silent letters
     match (at(0), at(1)) {
         ('A', 'E') | ('G', 'N') | ('K', 'N') | ('P', 'N') | ('W', 'R') => i = 1,
-        ('W', 'H') => i = 1,
+        ('W', 'H') => {
+            // WH at start: produce W, skip H
+            result.push('W');
+            last = 'W';
+            i = 2;
+        },
         _ => {}
     }
-
-    let mut last = '\0';
     while i < len && result.len() < max {
         let c = at(i);
         if c == last && c != 'C' {
@@ -1947,7 +1951,11 @@ fn metaphone(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             'C' => {
-                if at(i + 1) == 'I' || at(i + 1) == 'E' || at(i + 1) == 'Y' {
+                if at(i + 1) == 'H' {
+                    result.push('X');
+                    last = 'X';
+                    i += 1; // skip H
+                } else if at(i + 1) == 'I' || at(i + 1) == 'E' || at(i + 1) == 'Y' {
                     if at(i + 1) == 'I' && at(i + 2) == 'A' {
                         result.push('X');
                         last = 'X';

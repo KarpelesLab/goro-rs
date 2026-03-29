@@ -407,9 +407,35 @@ impl Value {
         }
         match (self, other) {
             (Value::Long(base), Value::Long(exp)) if *exp >= 0 => {
-                match (*base as u64).checked_pow(*exp as u32) {
-                    Some(result) if result <= i64::MAX as u64 => Value::Long(result as i64),
-                    _ => Value::Double((*base as f64).powf(*exp as f64)),
+                // Handle negative bases: result sign depends on exp parity
+                if *base < 0 {
+                    let abs_base = base.unsigned_abs();
+                    if let Ok(exp_u32) = u32::try_from(*exp) {
+                        match abs_base.checked_pow(exp_u32) {
+                            Some(result) => {
+                                let negative = exp_u32 % 2 == 1;
+                                if negative {
+                                    if result <= i64::MAX as u64 + 1 {
+                                        Value::Long(-(result as i64))
+                                    } else {
+                                        Value::Double((*base as f64).powf(*exp as f64))
+                                    }
+                                } else if result <= i64::MAX as u64 {
+                                    Value::Long(result as i64)
+                                } else {
+                                    Value::Double((*base as f64).powf(*exp as f64))
+                                }
+                            }
+                            _ => Value::Double((*base as f64).powf(*exp as f64)),
+                        }
+                    } else {
+                        Value::Double((*base as f64).powf(*exp as f64))
+                    }
+                } else {
+                    match (*base as u64).checked_pow(*exp as u32) {
+                        Some(result) if result <= i64::MAX as u64 => Value::Long(result as i64),
+                        _ => Value::Double((*base as f64).powf(*exp as f64)),
+                    }
                 }
             }
             _ => Value::Double(self.to_double().powf(other.to_double())),

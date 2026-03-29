@@ -57,9 +57,11 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !throw_on_error {
         vm.json_last_error = 0;
     }
+    // Pre-process value: call jsonSerialize() on JsonSerializable objects
+    let val = resolve_json_serializable(vm, val);
     let mut seen = std::collections::HashSet::new();
     let mut recursion_detected = false;
-    let s = json_encode_value_flags_tracked(val, 0, flags, &mut seen, &mut recursion_detected);
+    let s = json_encode_value_flags_tracked(&val, 0, flags, &mut seen, &mut recursion_detected);
     if s.contains("\x00ENUM_ERROR") {
         // Non-backed enum cannot be serialized
         let err_msg = "Non-backed enums have no default serialization";
@@ -91,6 +93,74 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     Ok(Value::String(PhpString::from_string(s)))
+}
+
+/// Recursively resolve JsonSerializable objects by calling their jsonSerialize() method
+fn resolve_json_serializable(vm: &mut Vm, val: &Value) -> Value {
+    resolve_json_serializable_depth(vm, val, 0)
+}
+
+fn resolve_json_serializable_depth(vm: &mut Vm, val: &Value, depth: usize) -> Value {
+    if depth > 64 {
+        return val.clone(); // Prevent infinite recursion
+    }
+    match val {
+        Value::Object(obj) => {
+            let obj_ref = obj.borrow();
+            // Skip enum cases
+            if obj_ref.has_property(b"__enum_case") {
+                return val.clone();
+            }
+            let class_lower: Vec<u8> = obj_ref.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            drop(obj_ref);
+            // Check if the class implements JsonSerializable
+            let has_json_serialize = {
+                if let Some(class) = vm.classes.get(&class_lower) {
+                    class.interfaces.iter().any(|i| i.eq_ignore_ascii_case(b"JsonSerializable"))
+                        || class.get_method(b"jsonserialize").is_some()
+                } else {
+                    false
+                }
+            };
+            if has_json_serialize {
+                // Call jsonSerialize() method
+                let method = {
+                    let class = vm.classes.get(&class_lower);
+                    class.and_then(|c| c.get_method(b"jsonserialize").cloned())
+                };
+                if let Some(method) = method {
+                    let op = method.op_array.clone();
+                    let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
+                    if !fn_cvs.is_empty() {
+                        fn_cvs[0] = val.clone(); // $this
+                    }
+                    if let Ok(result) = vm.execute_fn(&op, fn_cvs) {
+                        // Recursively resolve the result (it could contain more JsonSerializable objects)
+                        return resolve_json_serializable_depth(vm, &result, depth + 1);
+                    }
+                }
+            }
+            val.clone()
+        }
+        Value::Array(arr) => {
+            // Check if any values in the array are JsonSerializable objects
+            let arr_ref = arr.borrow();
+            let has_objects = arr_ref.iter().any(|(_, v)| matches!(v, Value::Object(_)));
+            if !has_objects {
+                return val.clone();
+            }
+            let items: Vec<_> = arr_ref.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            drop(arr_ref);
+            let mut new_arr = PhpArray::new();
+            for (key, value) in items {
+                let resolved = resolve_json_serializable_depth(vm, &value, depth + 1);
+                new_arr.set(key, resolved);
+            }
+            Value::Array(Rc::new(RefCell::new(new_arr)))
+        }
+        Value::Reference(r) => resolve_json_serializable_depth(vm, &r.borrow(), depth),
+        _ => val.clone(),
+    }
 }
 
 fn json_encode_value_flags(val: &Value, depth: usize, flags: i64) -> String {
@@ -243,11 +313,20 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: 
                     return "\x00ENUM_ERROR".to_string();
                 }
             }
-            if obj_ref.properties.is_empty() {
+            // Filter out internal properties
+            let visible_props: Vec<_> = obj_ref.properties.iter()
+                .filter(|(name, val)| {
+                    !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_")
+                    && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_")
+                    && !name.starts_with(b"__fiber_") && !name.starts_with(b"__ctor_")
+                    && !matches!(val, Value::Undef)
+                })
+                .collect();
+            if visible_props.is_empty() {
                 seen.remove(&obj_ptr);
                 return "{}".to_string();
             }
-            let parts: Vec<String> = obj_ref.properties.iter().map(|(name, val)| {
+            let parts: Vec<String> = visible_props.iter().map(|(name, val)| {
                 let key = json_encode_string(name, flags);
                 format!("{}{}{}", key, sep, json_encode_value_flags_tracked(val, depth + 1, flags, seen, recursion_detected))
             }).collect();

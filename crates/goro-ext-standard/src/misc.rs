@@ -692,15 +692,43 @@ fn flush_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 // === Function handling ===
 
-fn func_num_args(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Stub
-    Ok(Value::Long(0))
+fn func_num_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Return the number of arguments passed to the calling user function
+    if let Some((_name, _file, _line, args, _is_method)) = vm.call_stack.last() {
+        Ok(Value::Long(args.len() as i64))
+    } else {
+        // Called from global scope
+        vm.emit_warning("func_num_args(): Called from the global scope - no function context");
+        Ok(Value::Long(-1))
+    }
 }
-fn func_get_args(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn func_get_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Return an array of all arguments passed to the calling user function
+    if let Some((_name, _file, _line, args, _is_method)) = vm.call_stack.last() {
+        let mut arr = PhpArray::new();
+        for arg in args.iter() {
+            arr.push(arg.clone());
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+    } else {
+        // Called from global scope
+        vm.emit_warning("func_get_args(): Called from the global scope - no function context");
+        Ok(Value::False)
+    }
 }
-fn func_get_arg(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let index = args.first().unwrap_or(&Value::Null).to_long();
+    if let Some((_name, _file, _line, caller_args, _is_method)) = vm.call_stack.last() {
+        if index < 0 || index as usize >= caller_args.len() {
+            vm.emit_warning(&format!("func_get_arg(): Argument #{} not passed to function", index));
+            Ok(Value::False)
+        } else {
+            Ok(caller_args[index as usize].clone())
+        }
+    } else {
+        vm.emit_warning("func_get_arg(): Called from the global scope - no function context");
+        Ok(Value::False)
+    }
 }
 fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -723,7 +751,8 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null).deref();
-    match &val {
+    let mut callable_name: Option<Vec<u8>> = None;
+    let result = match &val {
         Value::String(s) => {
             let raw_bytes = s.as_bytes();
             // Strip leading backslash for namespace resolution
@@ -736,44 +765,54 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
+            callable_name = Some(stripped.to_vec());
             // Check for "Class::method" syntax
             if let Some(pos) = name_lower.iter().position(|&b| b == b':') {
                 if pos + 1 < name_lower.len() && name_lower[pos + 1] == b':' {
                     let class_name = &name_lower[..pos];
                     let method_name = &name_lower[pos + 2..];
                     if let Some(class) = vm.classes.get(class_name) {
-                        Ok(if class.get_method(method_name).is_some() {
+                        if class.get_method(method_name).is_some() {
                             Value::True
                         } else {
                             Value::False
-                        })
+                        }
                     } else {
-                        Ok(Value::False)
+                        Value::False
                     }
                 } else {
-                    Ok(Value::False)
+                    Value::False
                 }
             } else if vm.functions.contains_key(&name_lower)
                 || vm.user_functions.contains_key(&name_lower)
             {
-                Ok(Value::True)
+                Value::True
             } else {
-                Ok(Value::False)
+                Value::False
             }
         }
         Value::Object(obj) => {
             // Check if the object has __invoke method
             let class_name_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             if class_name_lower == b"closure" {
-                Ok(Value::True)
-            } else if let Some(class) = vm.classes.get(&class_name_lower) {
-                Ok(if class.methods.contains_key(&b"__invoke".to_vec()) {
-                    Value::True
-                } else {
-                    Value::False
-                })
+                callable_name = Some(b"Closure::__invoke".to_vec());
+                Value::True
             } else {
-                Ok(Value::True) // default to true for built-in objects
+                let class_orig: Vec<u8> = obj.borrow().class_name.clone();
+                if let Some(class) = vm.classes.get(&class_name_lower) {
+                    if class.methods.contains_key(&b"__invoke".to_vec()) {
+                        let mut name = class_orig;
+                        name.extend_from_slice(b"::__invoke");
+                        callable_name = Some(name);
+                        Value::True
+                    } else {
+                        callable_name = Some(b"".to_vec());
+                        Value::False
+                    }
+                } else {
+                    callable_name = Some(b"".to_vec());
+                    Value::True // default to true for built-in objects
+                }
             }
         }
         Value::Array(arr) => {
@@ -783,18 +822,21 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if let Value::String(s) = first {
                     let b = s.as_bytes();
                     if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
-                        return Ok(Value::True);
+                        callable_name = Some(b"Closure::__invoke".to_vec());
+                        return set_callable_name_and_return(vm, args, callable_name, Value::True);
                     }
                 }
             }
-            Ok(if arr.len() == 2 {
+            if arr.len() == 2 {
                 // Validate that the callback is actually callable
                 let vals: Vec<Value> = arr.values().cloned().collect();
                 let method_name = vals[1].to_php_string();
-                let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                let method_name_bytes = method_name.as_bytes().to_vec();
+                let method_lower: Vec<u8> = method_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
                 match &vals[0] {
                     Value::Object(obj) => {
-                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_orig: Vec<u8> = obj.borrow().class_name.clone();
+                        let class_lower: Vec<u8> = class_orig.iter().map(|b| b.to_ascii_lowercase()).collect();
                         let mut current = class_lower;
                         let mut found = false;
                         for _ in 0..50 {
@@ -812,24 +854,53 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 break;
                             }
                         }
+                        let mut name = class_orig;
+                        name.extend_from_slice(b"::");
+                        name.extend_from_slice(&method_name_bytes);
+                        callable_name = Some(name);
                         if found { Value::True } else { Value::False }
                     }
                     Value::String(class_name) => {
-                        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_name_bytes = class_name.as_bytes().to_vec();
+                        let class_lower: Vec<u8> = class_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let mut name = class_name_bytes;
+                        name.extend_from_slice(b"::");
+                        name.extend_from_slice(&method_name_bytes);
+                        callable_name = Some(name);
                         if let Some(class) = vm.classes.get(&class_lower) {
                             if class.methods.contains_key(&method_lower) { Value::True } else { Value::False }
                         } else {
                             Value::False
                         }
                     }
-                    _ => Value::False,
+                    _ => {
+                        callable_name = Some(b"".to_vec());
+                        Value::False
+                    }
                 }
             } else {
+                callable_name = Some(b"".to_vec());
                 Value::False
-            })
+            }
         }
-        _ => Ok(Value::False),
+        _ => {
+            callable_name = Some(b"".to_vec());
+            Value::False
+        }
+    };
+    set_callable_name_and_return(vm, args, callable_name, result)
+}
+
+fn set_callable_name_and_return(_vm: &mut Vm, args: &[Value], callable_name: Option<Vec<u8>>, result: Value) -> Result<Value, VmError> {
+    // Set the callable name in the third argument if provided (pass by reference)
+    if let Some(name_bytes) = callable_name {
+        if let Some(name_ref) = args.get(2) {
+            if let Value::Reference(r) = name_ref {
+                *r.borrow_mut() = Value::String(PhpString::from_vec(name_bytes));
+            }
+        }
     }
+    Ok(result)
 }
 fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
@@ -6135,6 +6206,7 @@ use std::io::{Read as IoRead, Write as IoWrite, Seek, SeekFrom, BufRead, BufRead
 thread_local! {
     static FILE_HANDLES: RefCell<StdHashMap<i64, FileHandle>> = RefCell::new(StdHashMap::new());
     static NEXT_FILE_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(100) }; // Start at 100 to avoid clashing with STDIN/STDOUT/STDERR
+    static DIR_HANDLES: RefCell<StdHashMap<String, Vec<String>>> = RefCell::new(StdHashMap::new());
 }
 
 struct FileHandle {
@@ -6409,11 +6481,82 @@ fn rmdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(_) => Ok(Value::False),
     }
 }
-fn glob_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let pattern = args.first().unwrap_or(&Value::Null).to_php_string();
+    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let pattern_str = pattern.to_string_lossy();
+
+    // Use libc glob
+    let mut glob_buf: libc::glob_t = unsafe { std::mem::zeroed() };
+    let c_pattern = std::ffi::CString::new(pattern_str.as_bytes()).unwrap_or_default();
+
+    let mut libc_flags = 0i32;
+    // GLOB_MARK = 1 in PHP, adds trailing slash to directories
+    if flags & 1 != 0 {
+        libc_flags |= libc::GLOB_MARK;
+    }
+    // GLOB_NOSORT = 2 in PHP
+    if flags & 2 != 0 {
+        libc_flags |= libc::GLOB_NOSORT;
+    }
+    // GLOB_BRACE = 128 in PHP
+    #[cfg(target_os = "linux")]
+    if flags & 128 != 0 {
+        libc_flags |= libc::GLOB_BRACE;
+    }
+    // GLOB_ONLYDIR = 8192 in PHP
+    #[cfg(target_os = "linux")]
+    if flags & 8192 != 0 {
+        libc_flags |= libc::GLOB_ONLYDIR;
+    }
+
+    let ret = unsafe { libc::glob(c_pattern.as_ptr(), libc_flags, None, &mut glob_buf) };
+
+    let mut arr = PhpArray::new();
+    if ret == 0 {
+        for i in 0..glob_buf.gl_pathc {
+            let path = unsafe {
+                let p = *glob_buf.gl_pathv.add(i);
+                std::ffi::CStr::from_ptr(p).to_string_lossy().to_string()
+            };
+            arr.push(Value::String(PhpString::from_string(path)));
+        }
+    }
+    unsafe { libc::globfree(&mut glob_buf); }
+
+    // GLOB_NOCHECK = 16: if no matches, return the pattern itself
+    if ret != 0 && flags & 16 != 0 {
+        arr.push(Value::String(PhpString::from_string(pattern_str.to_string())));
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
-fn scandir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn scandir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let dir = args.first().unwrap_or(&Value::Null).to_php_string();
+    let dir_str = dir.to_string_lossy();
+    let sort_order = args.get(1).map(|v| v.to_long()).unwrap_or(0); // 0 = ascending, 1 = descending
+
+    match std::fs::read_dir(&*dir_str) {
+        Ok(entries) => {
+            let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
+            for entry in entries {
+                if let Ok(e) = entry {
+                    names.push(e.file_name().to_string_lossy().to_string());
+                }
+            }
+            if sort_order == 1 {
+                names.sort_by(|a, b| b.cmp(a));
+            } else {
+                names.sort();
+            }
+            let mut arr = PhpArray::new();
+            for name in names {
+                arr.push(Value::String(PhpString::from_string(name)));
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(arr))))
+        }
+        Err(_) => Ok(Value::False),
+    }
 }
 fn header_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
@@ -7257,27 +7400,69 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn opendir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if std::path::Path::new(&*path.to_string_lossy()).is_dir() {
-        Ok(Value::String(PhpString::from_string(format!(
-            "dir:{}",
-            path.to_string_lossy()
-        ))))
+    let path_str = path.to_string_lossy();
+    let dir_path = std::path::Path::new(&*path_str);
+    if dir_path.is_dir() {
+        // Read all entries
+        match std::fs::read_dir(dir_path) {
+            Ok(entries) => {
+                let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
+                for entry in entries {
+                    if let Ok(e) = entry {
+                        names.push(e.file_name().to_string_lossy().to_string());
+                    }
+                }
+                names.sort(); // Sort for consistent order
+                // Reverse so we can pop from end efficiently
+                names.reverse();
+                let key = format!("dir:{}", path_str);
+                DIR_HANDLES.with(|dh| {
+                    dh.borrow_mut().insert(key.clone(), names);
+                });
+                Ok(Value::String(PhpString::from_string(key)))
+            }
+            Err(_) => {
+                vm.emit_warning(&format!("opendir({}): Failed to open directory", path_str));
+                Ok(Value::False)
+            }
+        }
     } else {
+        vm.emit_warning(&format!("opendir({}): No such file or directory", path_str));
         Ok(Value::False)
     }
 }
 
-fn closedir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn closedir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(handle) = args.first() {
+        let key = handle.to_php_string().to_string_lossy();
+        DIR_HANDLES.with(|dh| {
+            dh.borrow_mut().remove(&*key);
+        });
+    }
     Ok(Value::Null)
 }
 
-fn readdir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn readdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let handle = args.first().unwrap_or(&Value::Null);
+    let key = handle.to_php_string().to_string_lossy();
+    DIR_HANDLES.with(|dh| {
+        let mut handles = dh.borrow_mut();
+        if let Some(entries) = handles.get_mut(&*key) {
+            if let Some(name) = entries.pop() {
+                Ok(Value::String(PhpString::from_string(name)))
+            } else {
+                Ok(Value::False)
+            }
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
 
 fn chmod_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Stub: pretend chmod always succeeds to avoid tests breaking test directory permissions
     Ok(Value::True)
 }
 
@@ -8389,10 +8574,23 @@ fn ftruncate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn tmpfile_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Return a file handle to a temp file - simplified stub
-    // In PHP this returns a resource; we'll return false for now
-    Ok(Value::False)
+fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Create a temporary file
+    // Use libc mkstemp for a proper temp file
+    let template = b"/tmp/goro_tmp_XXXXXX\0";
+    let mut buf = template.to_vec();
+    let fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut libc::c_char) };
+    if fd < 0 {
+        return Ok(Value::False);
+    }
+    // Remove the file immediately so it's automatically cleaned up
+    let path = std::ffi::CStr::from_bytes_with_nul(&buf).unwrap();
+    unsafe { libc::unlink(path.as_ptr()); }
+    // Convert fd to std::fs::File
+    use std::os::unix::io::FromRawFd;
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let fid = alloc_file_handle(file, "w+b");
+    Ok(Value::Long(fid))
 }
 
 fn filemtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
