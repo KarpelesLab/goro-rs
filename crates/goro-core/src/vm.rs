@@ -1541,6 +1541,8 @@ impl Vm {
 
     /// Check if a return value matches the declared return type
     fn value_matches_return_type(&self, value: &Value, ret_type: &ParamType) -> bool {
+        // Return type checking always uses strict matching in PHP
+        // (the function's declared return type is always enforced strictly)
         match ret_type {
             ParamType::Simple(name) => {
                 match name.as_slice() {
@@ -1638,23 +1640,45 @@ impl Vm {
     /// Check if a value matches a single ParamType constraint.
     /// Returns true if the value is acceptable for the given type.
     fn value_matches_type(&self, value: &Value, param_type: &ParamType) -> bool {
+        self.value_matches_type_mode(value, param_type, false)
+    }
+
+    fn value_matches_type_strict(&self, value: &Value, param_type: &ParamType) -> bool {
+        self.value_matches_type_mode(value, param_type, true)
+    }
+
+    fn value_matches_type_mode(&self, value: &Value, param_type: &ParamType, strict: bool) -> bool {
         match param_type {
             ParamType::Simple(type_name) => {
                 match type_name.as_slice() {
                     b"int" | b"integer" => {
+                        if strict {
+                            // Strict: only accept int
+                            matches!(value, Value::Long(_))
+                        } else {
                         // Non-strict: accept int, float (truncatable), bool, numeric strings
                         matches!(
                             value,
                             Value::Long(_) | Value::Double(_) | Value::True | Value::False
                         ) || matches!(value, Value::String(s) if crate::value::parse_numeric_string(s.as_bytes()).is_some())
+                        }
                     }
                     b"float" | b"double" => {
+                        if strict {
+                            // Strict: accept float and int (int->float is always safe)
+                            matches!(value, Value::Double(_) | Value::Long(_))
+                        } else {
                         matches!(
                             value,
                             Value::Double(_) | Value::Long(_) | Value::True | Value::False
                         ) || matches!(value, Value::String(s) if crate::value::parse_numeric_string(s.as_bytes()).is_some())
+                        }
                     }
                     b"string" => {
+                        if strict {
+                            // Strict: only accept string
+                            matches!(value, Value::String(_))
+                        } else {
                         // Non-strict: accept string, int, float, bool (all coercible)
                         matches!(
                             value,
@@ -1664,8 +1688,13 @@ impl Vm {
                                 | Value::True
                                 | Value::False
                         )
+                        }
                     }
                     b"bool" | b"boolean" => {
+                        if strict {
+                            // Strict: only accept bool
+                            matches!(value, Value::True | Value::False)
+                        } else {
                         // Non-strict: accept any scalar
                         matches!(
                             value,
@@ -1676,6 +1705,7 @@ impl Vm {
                                 | Value::String(_)
                                 | Value::Null
                         )
+                        }
                     }
                     b"array" => matches!(value, Value::Array(_)),
                     b"object" => matches!(value, Value::Object(_)),
@@ -1865,11 +1895,11 @@ impl Vm {
                 }
             }
             ParamType::Nullable(inner) => {
-                matches!(value, Value::Null) || self.value_matches_type(value, inner)
+                matches!(value, Value::Null) || self.value_matches_type_mode(value, inner, strict)
             }
-            ParamType::Union(types) => types.iter().any(|t| self.value_matches_type(value, t)),
+            ParamType::Union(types) => types.iter().any(|t| self.value_matches_type_mode(value, t, strict)),
             ParamType::Intersection(types) => {
-                types.iter().all(|t| self.value_matches_type(value, t))
+                types.iter().all(|t| self.value_matches_type_mode(value, t, strict))
             }
         }
     }
@@ -1959,6 +1989,18 @@ impl Vm {
         implicit_args: usize,
         line: u32,
     ) -> Option<String> {
+        self.check_param_types_with_strict(user_fn, args, func_display_name, implicit_args, line, false)
+    }
+
+    fn check_param_types_with_strict(
+        &self,
+        user_fn: &OpArray,
+        args: &[Value],
+        func_display_name: &str,
+        implicit_args: usize,
+        line: u32,
+        caller_strict: bool,
+    ) -> Option<String> {
         for (i, arg) in args.iter().enumerate() {
             if i >= user_fn.param_types.len() {
                 continue;
@@ -1970,7 +2012,7 @@ impl Vm {
             }
             if let Some(type_info) = &user_fn.param_types[i] {
                 let val = arg.deref();
-                if !self.value_matches_type(&val, &type_info.param_type) {
+                if !self.value_matches_type_mode(&val, &type_info.param_type, caller_strict) {
                     let expected = self.param_type_display(&type_info.param_type);
                     let given = Self::value_type_name(&val);
                     let param_name = String::from_utf8_lossy(&type_info.param_name);
@@ -2062,6 +2104,13 @@ impl Vm {
                     func_cvs[i] = arg.clone();
                 }
             }
+        }
+
+        // If this is a generator function, create a Generator instead of executing
+        if op_array.is_generator {
+            let generator = crate::generator::PhpGenerator::new(op_array.clone(), func_cvs);
+            let gen_rc = Rc::new(RefCell::new(generator));
+            return Ok(Value::Generator(gen_rc));
         }
 
         self.execute_op_array(op_array, func_cvs)
@@ -11105,12 +11154,13 @@ impl Vm {
                             let display_name = call.name.to_string_lossy();
                             // For method calls like ClassName::method, format as ClassName::method
                             // For regular functions, just the function name
-                            let param_err = self.check_param_types(
+                            let param_err = self.check_param_types_with_strict(
                                 &user_fn,
                                 &call.args,
                                 &display_name,
                                 implicit_args,
                                 op.line,
+                                op_array.strict_types,
                             );
                             // Pop temp scope
                             if temp_scope_pushed {
@@ -12052,6 +12102,10 @@ impl Vm {
                 OpCode::Return => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.last_return_line = op.line;
+                    // A return statement inside a finally block discards any pending exception
+                    self.current_exception = None;
+                    // Also clear any pending deferred return (this explicit return supersedes it)
+                    self.pending_return = None;
                     // Save global-bound CVs back to globals
                     for (cv_idx, name) in &global_cv_keys {
                         if let Some(cv_val) = cvs.get(*cv_idx as usize) {
@@ -14118,6 +14172,8 @@ impl Vm {
                     // Save return value for deferred return (finally blocks)
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.pending_return = Some(val);
+                    // A return inside try-with-finally discards any pending exception
+                    self.current_exception = None;
                 }
 
                 OpCode::ReturnDeferred => {

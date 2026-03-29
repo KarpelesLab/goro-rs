@@ -468,6 +468,34 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
     use goro_core::string::PhpString;
     use goro_parser::{Lexer, Parser};
 
+    // Write source to the expected file path so __FILE__ works with fopen/file etc.
+    let file_written = if !filename.is_empty() && filename != "Unknown.php" {
+        let path = std::path::Path::new(filename);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(path, source).is_ok()
+    } else {
+        false
+    };
+
+    let result = execute_php_inner_impl(source, ini_settings, filename);
+
+    // Clean up the temporary file
+    if file_written {
+        let _ = std::fs::remove_file(filename);
+    }
+
+    result
+}
+
+fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], filename: &str) -> Result<Vec<u8>, String> {
+    use goro_core::compiler::Compiler;
+    use goro_core::vm::Vm;
+    use goro_core::value::{Value, set_php_precision, set_php_serialize_precision, memory_reset, set_memory_limit};
+    use goro_core::string::PhpString;
+    use goro_parser::{Lexer, Parser};
+
     // Reset memory tracking and limits for this test
     memory_reset();
     set_memory_limit(128 * 1024 * 1024); // 128MB default

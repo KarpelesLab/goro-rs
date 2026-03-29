@@ -648,7 +648,7 @@ pub fn do_sprintf(args: &[Value]) -> String {
                     i += 1;
                 }
                 if has_num && i < format_bytes.len() && format_bytes[i] == b'$' {
-                    use_arg_idx = num; // 1-based index
+                    use_arg_idx = num; // 1-based maps directly to args[] since args[0] is format string
                     i += 1; // skip $
                 } else {
                     i = save_i; // not a position specifier, backtrack
@@ -713,8 +713,8 @@ pub fn do_sprintf(args: &[Value]) -> String {
                     prec = prec.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as usize);
                     i += 1;
                 }
-                if prec > 1_000_000 {
-                    prec = 1_000_000;
+                if prec > 4096 {
+                    prec = 4096;
                 }
                 precision = Some(prec);
             }
@@ -1231,6 +1231,14 @@ fn stripcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 b'a' => {
                     result.push(0x07);
+                    i += 2;
+                }
+                b'b' => {
+                    result.push(0x08);
+                    i += 2;
+                }
+                b'e' | b'E' => {
+                    result.push(0x1B);
                     i += 2;
                 }
                 b'f' => {

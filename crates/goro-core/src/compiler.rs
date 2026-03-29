@@ -1168,6 +1168,7 @@ impl Compiler {
                 func_compiler.op_array.name = qualified_name.clone();
                 func_compiler.op_array.is_generator = is_generator;
                 func_compiler.op_array.decl_line = stmt.span.line;
+                func_compiler.op_array.strict_types = self.op_array.strict_types;
                 func_compiler.source_file = self.source_file.clone();
 
                 // Set return type
@@ -1324,8 +1325,17 @@ impl Compiler {
                 // Handle const declarations (parsed as Declare directives)
                 for (name, value) in directives {
                     let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    // Skip declare(strict_types=1) and similar
-                    if name_lower == b"strict_types" || name_lower == b"encoding" || name_lower == b"ticks" {
+                    // Handle declare(strict_types=1)
+                    if name_lower == b"strict_types" {
+                        if let ExprKind::Int(n) = &value.kind {
+                            if *n == 1 {
+                                self.op_array.strict_types = true;
+                            }
+                        }
+                        continue;
+                    }
+                    // Skip declare(encoding=...) and declare(ticks=...)
+                    if name_lower == b"encoding" || name_lower == b"ticks" {
                         continue;
                     }
                     // This is a const declaration: const FOO = value;
@@ -2140,6 +2150,7 @@ impl Compiler {
                                 hook_compiler.use_const_map = self.use_const_map.clone();
                                 hook_compiler.op_array.name = hook_display_name.into_bytes();
                                 hook_compiler.op_array.decl_line = stmt.span.line;
+                                hook_compiler.op_array.strict_types = self.op_array.strict_types;
                                 hook_compiler.source_file = self.source_file.clone();
                                 hook_compiler.current_class = Some(qualified_name.clone());
                                 hook_compiler.current_parent_class = class.parent.clone();
@@ -2192,6 +2203,7 @@ impl Compiler {
                                 hook_compiler.use_const_map = self.use_const_map.clone();
                                 hook_compiler.op_array.name = hook_display_name.into_bytes();
                                 hook_compiler.op_array.decl_line = stmt.span.line;
+                                hook_compiler.op_array.strict_types = self.op_array.strict_types;
                                 hook_compiler.source_file = self.source_file.clone();
                                 hook_compiler.current_class = Some(qualified_name.clone());
                                 hook_compiler.current_parent_class = class.parent.clone();
@@ -2584,6 +2596,7 @@ impl Compiler {
                                 method_compiler.op_array.name = method_name.clone();
                                 method_compiler.op_array.is_generator = method_is_generator;
                                 method_compiler.op_array.decl_line = *method_line;
+                                method_compiler.op_array.strict_types = self.op_array.strict_types;
                                 method_compiler.source_file = self.source_file.clone();
                                 if let Some(hint) = method_return_type {
                                     method_compiler.op_array.return_type =
@@ -5394,6 +5407,7 @@ impl Compiler {
                 closure_compiler.op_array.is_generator = is_generator;
                 closure_compiler.op_array.is_static_closure = *is_static;
                 closure_compiler.op_array.decl_line = expr.span.line;
+                closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
@@ -5609,6 +5623,7 @@ impl Compiler {
                 let mut closure_compiler = Compiler::new();
                 closure_compiler.op_array.name = closure_name.clone();
                 closure_compiler.op_array.decl_line = expr.span.line;
+                closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
@@ -6346,6 +6361,7 @@ impl Compiler {
 
         let mut cc = Compiler::new();
         cc.op_array.name = closure_name.clone();
+        cc.op_array.strict_types = self.op_array.strict_types;
         cc.current_class = self.current_class.clone();
         cc.current_parent_class = self.current_parent_class.clone();
         cc.op_array.scope_class = self.op_array.scope_class.clone()

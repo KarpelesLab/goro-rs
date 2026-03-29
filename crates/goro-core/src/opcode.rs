@@ -319,6 +319,8 @@ pub struct OpArray {
     pub decl_line: u32,
     /// Literal indices that contain __CLASS__ magic constant values (for trait patching)
     pub class_const_literals: Vec<u32>,
+    /// Whether this file/function was declared with declare(strict_types=1)
+    pub strict_types: bool,
 }
 
 impl OpArray {
@@ -340,6 +342,7 @@ impl OpArray {
             is_static_closure: false,
             decl_line: 0,
             class_const_literals: Vec::new(),
+            strict_types: false,
         }
     }
 

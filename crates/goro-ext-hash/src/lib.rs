@@ -376,9 +376,44 @@ fn hash_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn hash_equals_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let known = args.first().unwrap_or(&Value::Null).to_php_string();
-    let user = args.get(1).unwrap_or(&Value::Null).to_php_string();
+fn hash_equals_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let known_val = args.first().unwrap_or(&Value::Null);
+    let user_val = args.get(1).unwrap_or(&Value::Null);
+    // hash_equals requires both arguments to be strings
+    if !matches!(known_val, Value::String(_)) {
+        let type_name = match known_val {
+            Value::Long(_) => "int",
+            Value::Double(_) => "float",
+            Value::True | Value::False => "bool",
+            Value::Null => "null",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+            _ => "unknown",
+        };
+        vm.throw_type_error(format!(
+            "hash_equals(): Argument #1 ($known_string) must be of type string, {} given",
+            type_name
+        ));
+        return Ok(Value::Null);
+    }
+    if !matches!(user_val, Value::String(_)) {
+        let type_name = match user_val {
+            Value::Long(_) => "int",
+            Value::Double(_) => "float",
+            Value::True | Value::False => "bool",
+            Value::Null => "null",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+            _ => "unknown",
+        };
+        vm.throw_type_error(format!(
+            "hash_equals(): Argument #2 ($user_string) must be of type string, {} given",
+            type_name
+        ));
+        return Ok(Value::Null);
+    }
+    let known = known_val.to_php_string();
+    let user = user_val.to_php_string();
     Ok(if known.as_bytes() == user.as_bytes() {
         Value::True
     } else {

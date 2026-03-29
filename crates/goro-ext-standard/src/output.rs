@@ -192,6 +192,65 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 }
             }
 
+            // Check if class has __debugInfo method
+            let has_debug_info = {
+                let class_entry = vm.classes.get(&class_lower).cloned();
+                class_entry.as_ref().and_then(|c| c.get_method(b"__debuginfo")).is_some()
+            };
+
+            if has_debug_info {
+                // Call __debugInfo() and use the returned array for display
+                let debug_result = {
+                    let class_entry = vm.classes.get(&class_lower).cloned();
+                    if let Some(class) = class_entry {
+                        if let Some(method) = class.get_method(b"__debuginfo") {
+                            let op = method.op_array.clone();
+                            let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
+                            if !fn_cvs.is_empty() {
+                                fn_cvs[0] = val.clone(); // $this
+                            }
+                            vm.execute_fn(&op, fn_cvs).ok()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(Value::Array(debug_arr)) = debug_result {
+                    let arr_borrow = debug_arr.borrow();
+                    let count = arr_borrow.len();
+                    let class_name_owned = class_name.to_string();
+                    drop(obj_borrow);
+                    vm.write_output(
+                        format!("{}object({})#{} ({}) {{\n", prefix, class_name_owned, oid, count).as_bytes(),
+                    );
+                    if !seen.insert(oid) {
+                        vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                        vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                        return;
+                    }
+                    let items: Vec<_> = arr_borrow.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    drop(arr_borrow);
+                    for (key, value) in &items {
+                        match key {
+                            goro_core::array::ArrayKey::Int(n) => {
+                                vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
+                            }
+                            goro_core::array::ArrayKey::String(s) => {
+                                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                            }
+                        }
+                        var_dump_value(vm, value, indent + 2, seen);
+                    }
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    seen.remove(&oid);
+                    return;
+                }
+                // If __debugInfo didn't return an array, fall through to normal display
+            }
+
             // Don't count uninitialized (Undef) properties or internal __spl_/__reflection_ properties
             let prop_count = obj_borrow.properties.iter()
                 .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !name.starts_with(b"__fiber_") && !name.starts_with(b"__ctor_") && !matches!(val, Value::Undef))
@@ -518,8 +577,8 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (name, value) in &obj_borrow.properties {
-                // Skip internal SPL/Reflection properties
-                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_") {
+                // Skip internal SPL/Reflection properties and uninitialized properties
+                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_") || matches!(value, Value::Undef) {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);
