@@ -228,6 +228,8 @@ pub struct Vm {
     pub error_reporting_stack: Vec<i64>,
     /// Pending return value (for deferred return in finally blocks)
     pending_return: Option<Value>,
+    /// Pending jump target (for deferred break/continue in finally blocks)
+    pending_finally_jump: Option<u32>,
     /// User error handler callback (from set_error_handler)
     pub error_handler: Option<Value>,
     /// User exception handler callback (from set_exception_handler)
@@ -289,6 +291,7 @@ impl Vm {
             call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
             pending_return: None,
+            pending_finally_jump: None,
             error_handler: None,
             exception_handler: None,
             next_bound_closure_id: 0,
@@ -12110,8 +12113,9 @@ impl Vm {
                     self.last_return_line = op.line;
                     // A return statement inside a finally block discards any pending exception
                     self.current_exception = None;
-                    // Also clear any pending deferred return (this explicit return supersedes it)
+                    // Also clear any pending deferred return/jump (this explicit return supersedes it)
                     self.pending_return = None;
+                    self.pending_finally_jump = None;
                     // Save global-bound CVs back to globals
                     for (cv_idx, name) in &global_cv_keys {
                         if let Some(cv_val) = cvs.get(*cv_idx as usize) {
@@ -14178,7 +14182,18 @@ impl Vm {
                     // Save return value for deferred return (finally blocks)
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.pending_return = Some(val);
+                    // A return inside try-with-finally discards any pending jump
+                    self.pending_finally_jump = None;
                     // A return inside try-with-finally discards any pending exception
+                    self.current_exception = None;
+                }
+
+                OpCode::SaveJump => {
+                    // Save jump target for deferred break/continue (finally blocks)
+                    if let OperandType::JmpTarget(target) = op.op1 {
+                        self.pending_finally_jump = Some(target);
+                    }
+                    // A break/continue inside try-with-finally discards any pending exception
                     self.current_exception = None;
                 }
 
@@ -14186,6 +14201,11 @@ impl Vm {
                     // If there's a pending return, execute it now
                     if let Some(val) = self.pending_return.take() {
                         return Ok(val);
+                    }
+                    // If there's a pending jump (deferred break/continue), execute it now
+                    if let Some(target) = self.pending_finally_jump.take() {
+                        ip = target as usize;
+                        continue;
                     }
                     // If there's a pending exception, re-throw it
                     if self.current_exception.is_some() {
@@ -16728,7 +16748,8 @@ impl Vm {
             }
             Value::Double(f) => ArrayKey::Int(f as i64),
             Value::True => ArrayKey::Int(1),
-            Value::False | Value::Null | Value::Undef => ArrayKey::Int(0),
+            Value::False => ArrayKey::Int(0),
+            Value::Null | Value::Undef => ArrayKey::String(PhpString::empty()),
             Value::Object(_) | Value::Array(_) | Value::Generator(_) => ArrayKey::Int(0),
             Value::Reference(r) => Self::value_to_array_key(r.borrow().clone()),
         }

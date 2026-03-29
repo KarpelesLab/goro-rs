@@ -722,8 +722,8 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    match val {
+    let val = args.first().unwrap_or(&Value::Null).deref();
+    match &val {
         Value::String(s) => {
             let raw_bytes = s.as_bytes();
             // Strip leading backslash for namespace resolution
@@ -778,6 +778,15 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Value::Array(arr) => {
             let arr = arr.borrow();
+            // Check if this is a closure array [__closure_N, use_val1, ...]
+            if let Some(first) = arr.values().next() {
+                if let Value::String(s) = first {
+                    let b = s.as_bytes();
+                    if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                        return Ok(Value::True);
+                    }
+                }
+            }
             Ok(if arr.len() == 2 {
                 // Validate that the callback is actually callable
                 let vals: Vec<Value> = arr.values().cloned().collect();
@@ -1154,14 +1163,27 @@ fn array_unshift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        let search_value = args.get(1);
+        let strict = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
         let arr = arr.borrow();
         let mut result = PhpArray::new();
-        for (key, _) in arr.iter() {
-            let key_val = match key {
-                goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
-                goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),
+        for (key, val) in arr.iter() {
+            let include = if let Some(search) = search_value {
+                if strict {
+                    val.identical(search)
+                } else {
+                    val.equals(search)
+                }
+            } else {
+                true
             };
-            result.push(key_val);
+            if include {
+                let key_val = match key {
+                    goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
+                    goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),
+                };
+                result.push(key_val);
+            }
         }
         Ok(Value::Array(Rc::new(RefCell::new(result))))
     } else {
@@ -1422,10 +1444,16 @@ fn array_splice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_search(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let needle = args.first().unwrap_or(&Value::Null);
+    let strict = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     if let Some(Value::Array(arr)) = args.get(1) {
         let arr = arr.borrow();
         for (key, val) in arr.iter() {
-            if val.equals(needle) {
+            let matches = if strict {
+                val.identical(needle)
+            } else {
+                val.equals(needle)
+            };
+            if matches {
                 return Ok(match key {
                     goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
                     goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),
@@ -2107,27 +2135,36 @@ fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_intersect(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.len() < 2 {
+    if args.len() < 1 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
-    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
-        let a = a.borrow();
-        let b = b.borrow();
-        let b_vals: Vec<_> = b
-            .values()
-            .map(|v| v.to_php_string().as_bytes().to_vec())
-            .collect();
-        let mut result = PhpArray::new();
-        for (key, val) in a.iter() {
-            let s = val.to_php_string().as_bytes().to_vec();
-            if b_vals.contains(&s) {
-                result.set(key.clone(), val.clone());
-            }
-        }
-        Ok(Value::Array(Rc::new(RefCell::new(result))))
-    } else {
-        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    // Single array: return it as-is
+    if args.len() == 1 {
+        return match &args[0] {
+            Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
+            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        };
     }
+    let first = match &args[0] {
+        Value::Array(a) => a.borrow().clone(),
+        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    };
+    // Collect string representations of values from all other arrays
+    let other_val_sets: Vec<Vec<Vec<u8>>> = args[1..].iter().map(|arg| {
+        match arg {
+            Value::Array(arr) => arr.borrow().values().map(|v| v.to_php_string().as_bytes().to_vec()).collect(),
+            _ => Vec::new(),
+        }
+    }).collect();
+    let mut result = PhpArray::new();
+    for (key, val) in first.iter() {
+        let s = val.to_php_string().as_bytes().to_vec();
+        // Value must exist in ALL other arrays
+        if other_val_sets.iter().all(|vals| vals.contains(&s)) {
+            result.set(key.clone(), val.clone());
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 /// Get a type priority for sorting that establishes total ordering
@@ -3152,7 +3189,8 @@ fn value_to_array_key(val: &Value) -> goro_core::array::ArrayKey {
             }
         }
         Value::True => goro_core::array::ArrayKey::Int(1),
-        Value::False | Value::Null => goro_core::array::ArrayKey::Int(0),
+        Value::False => goro_core::array::ArrayKey::Int(0),
+        Value::Null => goro_core::array::ArrayKey::String(PhpString::empty()),
         Value::Double(f) => goro_core::array::ArrayKey::Int(*f as i64),
         _ => goro_core::array::ArrayKey::String(val.to_php_string()),
     }
@@ -3321,13 +3359,11 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         let num = val.to_double();
         if num.is_nan() {
-            let s = if decimals > 0 { format!("NAN{}{}", dec_point, "0".repeat(decimals)) } else { "NAN".to_string() };
-            return Ok(Value::String(PhpString::from_string(s)));
+            return Ok(Value::String(PhpString::from_bytes(b"NAN")));
         }
         if num.is_infinite() {
             let prefix = if num < 0.0 { "-" } else { "" };
-            let s = if decimals > 0 { format!("{}INF{}{}", prefix, dec_point, "0".repeat(decimals)) } else { format!("{}INF", prefix) };
-            return Ok(Value::String(PhpString::from_string(s)));
+            return Ok(Value::String(PhpString::from_string(format!("{}INF", prefix))));
         }
         let neg = num < 0.0;
         let abs_num = num.abs();
@@ -6490,22 +6526,29 @@ fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         }
     }
     if args.len() < 2 {
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        return match args.first() {
+            Some(Value::Array(arr)) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
+            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        };
     }
-    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
-        let a = a.borrow();
-        let b = b.borrow();
-        let b_keys: Vec<_> = b.keys().cloned().collect();
-        let mut result = PhpArray::new();
-        for (key, val) in a.iter() {
-            if b_keys.contains(key) {
-                result.set(key.clone(), val.clone());
-            }
+    let first = match &args[0] {
+        Value::Array(a) => a.borrow().clone(),
+        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    };
+    // Collect keys from all other arrays
+    let other_key_sets: Vec<Vec<ArrayKey>> = args[1..].iter().map(|arg| {
+        match arg {
+            Value::Array(arr) => arr.borrow().keys().cloned().collect(),
+            _ => Vec::new(),
         }
-        Ok(Value::Array(Rc::new(RefCell::new(result))))
-    } else {
-        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+    }).collect();
+    let mut result = PhpArray::new();
+    for (key, val) in first.iter() {
+        if other_key_sets.iter().all(|keys| keys.contains(key)) {
+            result.set(key.clone(), val.clone());
+        }
     }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -6520,23 +6563,38 @@ fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         }
     }
     if args.len() < 2 {
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        return match args.first() {
+            Some(Value::Array(arr)) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
+            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        };
     }
-    if let (Some(Value::Array(a)), Some(Value::Array(b))) = (args.first(), args.get(1)) {
-        let a = a.borrow();
-        let b = b.borrow();
-        let mut result = PhpArray::new();
-        for (key, val) in a.iter() {
-            if let Some(b_val) = b.get(key)
-                && b_val.equals(val)
-            {
-                result.set(key.clone(), val.clone());
+    let first = match &args[0] {
+        Value::Array(a) => a.borrow().clone(),
+        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    };
+    let other_arrays: Vec<_> = args[1..].iter().filter_map(|arg| {
+        if let Value::Array(arr) = arg { Some(arr.borrow().clone()) } else { None }
+    }).collect();
+    let mut result = PhpArray::new();
+    for (key, val) in first.iter() {
+        let val_str = val.to_php_string().as_bytes().to_vec();
+        let mut found_in_all = true;
+        for other in &other_arrays {
+            if let Some(other_val) = other.get(key) {
+                if other_val.to_php_string().as_bytes().to_vec() != val_str {
+                    found_in_all = false;
+                    break;
+                }
+            } else {
+                found_in_all = false;
+                break;
             }
         }
-        Ok(Value::Array(Rc::new(RefCell::new(result))))
-    } else {
-        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+        if found_in_all {
+            result.set(key.clone(), val.clone());
+        }
     }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn array_all_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -7258,7 +7316,7 @@ fn debug_print_backtrace_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
     Ok(Value::Null)
 }
 
-fn array_key_exists_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let key = args.first().unwrap_or(&Value::Null);
     let arr = args.get(1).unwrap_or(&Value::Null);
     if let Value::Array(a) = arr {
@@ -7269,7 +7327,11 @@ fn array_key_exists_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
             Value::False
         })
     } else {
-        Ok(Value::False)
+        let type_name = Vm::value_type_name(arr);
+        let msg = format!("array_key_exists(): Argument #2 ($array) must be of type array, {} given", type_name);
+        let exc = vm.create_exception(b"TypeError", &msg, 0);
+        vm.current_exception = Some(exc);
+        Err(VmError { message: msg, line: vm.current_line })
     }
 }
 
@@ -8004,8 +8066,15 @@ fn array_udiff_with_key_check(
     args: &[Value],
     is_intersect: bool,
 ) -> Result<Value, VmError> {
-    if args.len() < 3 {
+    if args.len() < 2 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    // Single array + callback: return the first array
+    if args.len() == 2 {
+        return match &args[0] {
+            Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
+            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        };
     }
     let callback = args.last().unwrap().clone();
     let first = match &args[0] {
@@ -8047,8 +8116,15 @@ fn array_udiff_with_key_check(
 }
 
 fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.len() < 4 {
+    if args.len() < 3 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    // Single array + two callbacks: return the first array
+    if args.len() == 3 {
+        return match &args[0] {
+            Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
+            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        };
     }
     let key_callback = args[args.len() - 1].clone();
     let val_callback = args[args.len() - 2].clone();
@@ -8103,8 +8179,15 @@ fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 }
 
 fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.len() < 4 {
+    if args.len() < 3 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    // Single array + two callbacks: return the first array
+    if args.len() == 3 {
+        return match &args[0] {
+            Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
+            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        };
     }
     let key_callback = args[args.len() - 1].clone();
     let val_callback = args[args.len() - 2].clone();

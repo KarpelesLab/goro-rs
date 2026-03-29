@@ -89,7 +89,7 @@ fn hash_block_size(algo: &str) -> usize {
     }
 }
 
-fn hash_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let algo = args
         .first()
         .unwrap_or(&Value::Null)
@@ -108,11 +108,16 @@ fn hash_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Ok(Value::String(PhpString::from_string(hex)))
             }
         }
-        None => Ok(Value::False),
+        None => {
+            let msg = format!("hash(): Unknown hashing algorithm: {}", algo_lower);
+            let exc = vm.create_exception(b"ValueError", &msg, 0);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: vm.current_line })
+        }
     }
 }
 
-fn hash_hmac_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let algo = args
         .first()
         .unwrap_or(&Value::Null)
@@ -130,7 +135,12 @@ fn hash_hmac_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if key_bytes.len() > block_size {
         key_bytes = match compute_hash(&algo, &key_bytes) {
             Some(h) => h,
-            None => return Ok(Value::False),
+            None => {
+                let msg = format!("hash_hmac(): Unknown hashing algorithm: {}", algo);
+                let exc = vm.create_exception(b"ValueError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
         };
     }
     while key_bytes.len() < block_size {
@@ -149,7 +159,12 @@ fn hash_hmac_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     inner_data.extend_from_slice(data.as_bytes());
     let inner_hash = match compute_hash(&algo, &inner_data) {
         Some(h) => h,
-        None => return Ok(Value::False),
+        None => {
+            let msg = format!("hash_hmac(): Unknown hashing algorithm: {}", algo);
+            let exc = vm.create_exception(b"ValueError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
     };
 
     // outer hash
@@ -157,7 +172,12 @@ fn hash_hmac_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     outer_data.extend_from_slice(&inner_hash);
     let digest = match compute_hash(&algo, &outer_data) {
         Some(h) => h,
-        None => return Ok(Value::False),
+        None => {
+            let msg = format!("hash_hmac(): Unknown hashing algorithm: {}", algo);
+            let exc = vm.create_exception(b"ValueError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
     };
 
     if raw {
@@ -385,32 +405,36 @@ fn hash_equals_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::Long(_) => "int",
             Value::Double(_) => "float",
             Value::True | Value::False => "bool",
-            Value::Null => "null",
+            Value::Null | Value::Undef => "null",
             Value::Array(_) => "array",
             Value::Object(_) => "object",
             _ => "unknown",
         };
-        vm.throw_type_error(format!(
+        let msg = format!(
             "hash_equals(): Argument #1 ($known_string) must be of type string, {} given",
             type_name
-        ));
-        return Ok(Value::Null);
+        );
+        let exc = vm.create_exception(b"TypeError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     if !matches!(user_val, Value::String(_)) {
         let type_name = match user_val {
             Value::Long(_) => "int",
             Value::Double(_) => "float",
             Value::True | Value::False => "bool",
-            Value::Null => "null",
+            Value::Null | Value::Undef => "null",
             Value::Array(_) => "array",
             Value::Object(_) => "object",
             _ => "unknown",
         };
-        vm.throw_type_error(format!(
+        let msg = format!(
             "hash_equals(): Argument #2 ($user_string) must be of type string, {} given",
             type_name
-        ));
-        return Ok(Value::Null);
+        );
+        let exc = vm.create_exception(b"TypeError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let known = known_val.to_php_string();
     let user = user_val.to_php_string();

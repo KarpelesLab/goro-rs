@@ -63,6 +63,8 @@ pub struct Compiler {
     pending_gotos: HashMap<Vec<u8>, Vec<u32>>,
     /// Source file path (for __FILE__, __DIR__)
     pub source_file: Vec<u8>,
+    /// Whether the current function has a "never" return type
+    has_never_return: bool,
 }
 
 impl Default for Compiler {
@@ -121,6 +123,7 @@ impl Compiler {
             label_offsets: HashMap::new(),
             pending_gotos: HashMap::new(),
             source_file: Vec::new(),
+            has_never_return: false,
         }
     }
 
@@ -523,6 +526,13 @@ impl Compiler {
             }
 
             StmtKind::Return(value) => {
+                // Check for return in never-returning function
+                if self.has_never_return {
+                    return Err(CompileError {
+                        message: "A never-returning function must not return".into(),
+                        line: stmt.span.line,
+                    });
+                }
                 let operand = if let Some(expr) = value {
                     self.compile_expr(expr)?
                 } else {
@@ -1089,15 +1099,58 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
-                let jmp = self.op_array.emit(Op {
-                    opcode: OpCode::Jmp,
-                    op1: OperandType::JmpTarget(0),
-                    op2: OperandType::Unused,
-                    result: OperandType::Unused,
-                    line: stmt.span.line,
-                });
                 let target_index = stack_len - level;
-                self.loop_stack[target_index].break_jumps.push(jmp);
+                // Check if we're inside a try-with-finally block
+                if let Some(&finally_target) = self.finally_targets.last() {
+                    if finally_target > 0 {
+                        // Inside try-with-finally: save jump target and jump to finally
+                        let save_jmp = self.op_array.emit(Op {
+                            opcode: OpCode::SaveJump,
+                            op1: OperandType::JmpTarget(0), // patched to break target later
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                        self.loop_stack[target_index].break_jumps.push(save_jmp);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(finally_target),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    } else {
+                        // finally_target is 0 (not yet patched), use deferred jump
+                        let save_jmp = self.op_array.emit(Op {
+                            opcode: OpCode::SaveJump,
+                            op1: OperandType::JmpTarget(0), // patched to break target later
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                        self.loop_stack[target_index].break_jumps.push(save_jmp);
+                        // Emit Jmp with placeholder 0 - will be patched by finally compilation
+                        let jmp = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0), // patched to finally target later
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                        // Mark this Jmp as needing SaveJump patching (it follows a SaveJump)
+                        // The finally compilation will patch Jmp(0) that follow SaveJump
+                        let _ = jmp;
+                    }
+                } else {
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    self.loop_stack[target_index].break_jumps.push(jmp);
+                }
                 Ok(())
             }
 
@@ -1128,15 +1181,55 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
-                let jmp = self.op_array.emit(Op {
-                    opcode: OpCode::Jmp,
-                    op1: OperandType::JmpTarget(0),
-                    op2: OperandType::Unused,
-                    result: OperandType::Unused,
-                    line: stmt.span.line,
-                });
                 let target_index = stack_len - level;
-                self.loop_stack[target_index].continue_jumps.push(jmp);
+                // Check if we're inside a try-with-finally block
+                if let Some(&finally_target) = self.finally_targets.last() {
+                    if finally_target > 0 {
+                        // Inside try-with-finally: save jump target and jump to finally
+                        let save_jmp = self.op_array.emit(Op {
+                            opcode: OpCode::SaveJump,
+                            op1: OperandType::JmpTarget(0), // patched to continue target later
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                        self.loop_stack[target_index].continue_jumps.push(save_jmp);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(finally_target),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    } else {
+                        // finally_target is 0 (not yet patched), use deferred jump
+                        let save_jmp = self.op_array.emit(Op {
+                            opcode: OpCode::SaveJump,
+                            op1: OperandType::JmpTarget(0), // patched to continue target later
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                        self.loop_stack[target_index].continue_jumps.push(save_jmp);
+                        // Emit Jmp with placeholder 0 - will be patched by finally compilation
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0), // patched to finally target later
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    }
+                } else {
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    self.loop_stack[target_index].continue_jumps.push(jmp);
+                }
                 Ok(())
             }
 
@@ -1192,6 +1285,13 @@ impl Compiler {
                         }
                     }
                     func_compiler.op_array.return_type = Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                    // Check for 'never' return type
+                    if let TypeHint::Simple(name) = hint {
+                        let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if name_lower == b"never" {
+                            func_compiler.has_never_return = true;
+                        }
+                    }
                 }
 
                 // Validate parameter types
@@ -1504,6 +1604,14 @@ impl Compiler {
                 catches,
                 finally_body,
             } => {
+                // Check for try without catch or finally
+                if catches.is_empty() && finally_body.is_none() {
+                    return Err(CompileError {
+                        message: "Cannot use try without catch or finally".into(),
+                        line: stmt.span.line,
+                    });
+                }
+
                 // Emit TryBegin with jump target for catch handler
                 let try_begin = self.op_array.emit(Op {
                     opcode: OpCode::TryBegin,
@@ -1689,15 +1797,16 @@ impl Compiler {
                     if let Some(target) = self.finally_targets.last_mut() {
                         *target = finally_start;
                     }
-                    // Now go back and patch any SaveReturn+Jmp that used the placeholder
-                    // Actually, we pushed 0 and return statements jumped to 0.
+                    // Now go back and patch any SaveReturn+Jmp or SaveJump+Jmp that used the placeholder
+                    // Actually, we pushed 0 and return/break/continue statements jumped to 0.
                     // We need to patch those jumps. Let's find them:
                     let ops_len = self.op_array.ops.len();
                     for i in (try_begin as usize)..ops_len {
                         if self.op_array.ops[i].opcode == OpCode::Jmp {
                             if let OperandType::JmpTarget(0) = self.op_array.ops[i].op1 {
-                                // Check if preceded by SaveReturn
-                                if i > 0 && self.op_array.ops[i - 1].opcode == OpCode::SaveReturn {
+                                // Check if preceded by SaveReturn or SaveJump
+                                if i > 0 && (self.op_array.ops[i - 1].opcode == OpCode::SaveReturn
+                                    || self.op_array.ops[i - 1].opcode == OpCode::SaveJump) {
                                     self.op_array.ops[i].op1 =
                                         OperandType::JmpTarget(finally_start);
                                 }
@@ -2601,6 +2710,13 @@ impl Compiler {
                                 if let Some(hint) = method_return_type {
                                     method_compiler.op_array.return_type =
                                         Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                                    // Check for 'never' return type
+                                    if let TypeHint::Simple(name) = hint {
+                                        let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if name_lower == b"never" {
+                                            method_compiler.has_never_return = true;
+                                        }
+                                    }
                                 }
                                 method_compiler.current_class = Some(qualified_name.clone());
                                 method_compiler.current_parent_class = class.parent.clone();

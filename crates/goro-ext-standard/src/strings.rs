@@ -576,25 +576,47 @@ fn implode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         (PhpString::empty(), args.first().unwrap_or(&Value::Null))
     };
 
-    if let Value::Array(arr) = pieces {
-        let values: Vec<Value> = {
-            let arr = arr.borrow();
-            arr.values().cloned().collect()
-        };
-        let parts: Vec<Vec<u8>> = values
-            .iter()
-            .map(|v| vm.value_to_string(v).as_bytes().to_vec())
-            .collect();
-        let mut result = Vec::new();
-        for (i, part) in parts.iter().enumerate() {
-            if i > 0 {
-                result.extend_from_slice(glue.as_bytes());
+    match pieces {
+        Value::Array(arr) => {
+            let values: Vec<Value> = {
+                let arr = arr.borrow();
+                arr.values().cloned().collect()
+            };
+            let parts: Vec<Vec<u8>> = values
+                .iter()
+                .map(|v| vm.value_to_string(v).as_bytes().to_vec())
+                .collect();
+            let mut result = Vec::new();
+            for (i, part) in parts.iter().enumerate() {
+                if i > 0 {
+                    result.extend_from_slice(glue.as_bytes());
+                }
+                result.extend_from_slice(part);
             }
-            result.extend_from_slice(part);
+            Ok(Value::String(PhpString::from_vec(result)))
         }
-        Ok(Value::String(PhpString::from_vec(result)))
-    } else {
-        Ok(Value::String(PhpString::empty()))
+        Value::Null | Value::Undef => {
+            // implode with null pieces - deprecated in PHP 8.x but returns ""
+            vm.emit_deprecated_at(
+                "implode(): Passing null to parameter #2 ($array) of type array is deprecated",
+                vm.current_line,
+            );
+            Ok(Value::String(PhpString::empty()))
+        }
+        _ => {
+            let type_name = match pieces {
+                Value::True | Value::False => "bool",
+                Value::Long(_) => "int",
+                Value::Double(_) => "float",
+                Value::String(_) => "string",
+                Value::Object(_) => "object",
+                _ => "unknown",
+            };
+            let msg = format!("implode(): Argument #2 ($array) must be of type ?array, {} given", type_name);
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: vm.current_line })
+        }
     }
 }
 

@@ -270,7 +270,9 @@ pub enum OpCode {
     VarVarSet,
     /// Save return value for deferred return (finally blocks): op1 = value
     SaveReturn,
-    /// Check and execute deferred return after finally block
+    /// Save jump target for deferred break/continue (finally blocks): op1 = JmpTarget
+    SaveJump,
+    /// Check and execute deferred return or jump after finally block
     ReturnDeferred,
     /// Save and suppress error reporting (for @ operator)
     ErrorSuppress,
@@ -386,7 +388,7 @@ impl OpArray {
     pub fn patch_jump(&mut self, op_index: u32, target: u32) {
         let op = &mut self.ops[op_index as usize];
         match op.opcode {
-            OpCode::Jmp => op.op1 = OperandType::JmpTarget(target),
+            OpCode::Jmp | OpCode::SaveJump => op.op1 = OperandType::JmpTarget(target),
             OpCode::JmpZ | OpCode::JmpNz | OpCode::ForeachNext | OpCode::ForeachNextRef => {
                 op.op2 = OperandType::JmpTarget(target);
             }
