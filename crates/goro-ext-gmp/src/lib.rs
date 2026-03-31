@@ -30,6 +30,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gmp_div_r", gmp_div_r);
     vm.register_function(b"gmp_div_qr", gmp_div_qr);
     vm.register_function(b"gmp_div", gmp_div_q); // alias
+    vm.register_function(b"gmp_divexact", gmp_divexact);
     vm.register_function(b"gmp_mod", gmp_mod);
     vm.register_function(b"gmp_neg", gmp_neg);
     vm.register_function(b"gmp_abs", gmp_abs);
@@ -38,7 +39,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gmp_pow", gmp_pow);
     vm.register_function(b"gmp_powm", gmp_powm);
     vm.register_function(b"gmp_sqrt", gmp_sqrt);
+    vm.register_function(b"gmp_sqrtrem", gmp_sqrtrem);
+    vm.register_function(b"gmp_root", gmp_root);
+    vm.register_function(b"gmp_rootrem", gmp_rootrem);
+    vm.register_function(b"gmp_perfect_power", gmp_perfect_power);
     vm.register_function(b"gmp_gcd", gmp_gcd);
+    vm.register_function(b"gmp_gcdext", gmp_gcdext);
     vm.register_function(b"gmp_lcm", gmp_lcm);
     vm.register_function(b"gmp_and", gmp_and);
     vm.register_function(b"gmp_or", gmp_or);
@@ -49,9 +55,22 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gmp_nextprime", gmp_nextprime);
     vm.register_function(b"gmp_testbit", gmp_testbit);
     vm.register_function(b"gmp_setbit", gmp_setbit);
+    vm.register_function(b"gmp_clrbit", gmp_clrbit);
     vm.register_function(b"gmp_popcount", gmp_popcount);
+    vm.register_function(b"gmp_hamdist", gmp_hamdist);
+    vm.register_function(b"gmp_scan0", gmp_scan0);
+    vm.register_function(b"gmp_scan1", gmp_scan1);
     vm.register_function(b"gmp_perfect_square", gmp_perfect_square);
     vm.register_function(b"gmp_invert", gmp_invert);
+    vm.register_function(b"gmp_jacobi", gmp_jacobi);
+    vm.register_function(b"gmp_legendre", gmp_legendre);
+    vm.register_function(b"gmp_kronecker", gmp_kronecker);
+    vm.register_function(b"gmp_binomial", gmp_binomial);
+    vm.register_function(b"gmp_export", gmp_export_fn);
+    vm.register_function(b"gmp_import", gmp_import_fn);
+    vm.register_function(b"gmp_random_bits", gmp_random_bits);
+    vm.register_function(b"gmp_random_range", gmp_random_range);
+    vm.register_function(b"gmp_random_seed", gmp_random_seed);
 
     // Constants
     vm.constants
@@ -76,15 +95,239 @@ pub fn register(vm: &mut Vm) {
     );
 }
 
-// === Helper functions ===
+// ============================================================
+// Public API for VM integration (operator overloading, casting)
+// ============================================================
+
+/// Check if a Value is a GMP object
+pub fn is_gmp_object(val: &Value) -> bool {
+    match val {
+        Value::Object(obj) => {
+            let b = obj.borrow();
+            b.class_name.eq_ignore_ascii_case(b"GMP")
+        }
+        Value::Reference(r) => is_gmp_object(&r.borrow()),
+        _ => false,
+    }
+}
+
+/// Get the BigInt value from a GMP object
+pub fn get_gmp_value(val: &Value) -> Option<BigInt> {
+    match val {
+        Value::Object(obj) => {
+            let id = obj.borrow().object_id;
+            GMP_VALUES.with(|m| m.borrow().get(&id).cloned())
+        }
+        Value::Reference(r) => get_gmp_value(&r.borrow()),
+        _ => None,
+    }
+}
+
+/// Perform a GMP arithmetic operation and return the result as a GMP Value.
+/// `op` is one of: "+", "-", "*", "/", "%", "**", "|", "&", "^", "<<", ">>"
+/// Returns None if the operation can't be performed (e.g., invalid types).
+pub fn gmp_do_operation(vm: &mut Vm, op: &str, a: &Value, b: &Value) -> Option<Result<Value, String>> {
+    let a_is_gmp = is_gmp_object(a);
+    let b_is_gmp = is_gmp_object(b);
+
+    if !a_is_gmp && !b_is_gmp {
+        return None; // Not a GMP operation
+    }
+
+    // Convert both operands to BigInt
+    let a_val = if a_is_gmp {
+        get_gmp_value(a)
+    } else {
+        operand_to_bigint(a)
+    };
+
+    let b_val = if b_is_gmp {
+        get_gmp_value(b)
+    } else {
+        operand_to_bigint(b)
+    };
+
+    let a_bi = match a_val {
+        Some(v) => v,
+        None => {
+            let type_name = value_type_name_for_gmp(if !a_is_gmp { a } else { b });
+            return Some(Err(format!(
+                "Number must be of type GMP|string|int, {} given",
+                type_name
+            )));
+        }
+    };
+
+    let b_bi = match b_val {
+        Some(v) => v,
+        None => {
+            let type_name = value_type_name_for_gmp(if !b_is_gmp { b } else { a });
+            return Some(Err(format!(
+                "Number must be of type GMP|string|int, {} given",
+                type_name
+            )));
+        }
+    };
+
+    let result = match op {
+        "+" => Ok(&a_bi + &b_bi),
+        "-" => Ok(&a_bi - &b_bi),
+        "*" => Ok(&a_bi * &b_bi),
+        "/" => {
+            if b_bi.is_zero() {
+                return Some(Err("Division by zero".to_string()));
+            }
+            // GMP division truncates toward zero
+            Ok(a_bi.div_floor(&b_bi))
+        }
+        "%" => {
+            if b_bi.is_zero() {
+                return Some(Err("Modulo by zero".to_string()));
+            }
+            Ok(&a_bi % &b_bi)
+        }
+        "**" => {
+            let exp = b_bi.to_u32().unwrap_or(0);
+            Ok(a_bi.pow(exp))
+        }
+        "|" => Ok(&a_bi | &b_bi),
+        "&" => Ok(&a_bi & &b_bi),
+        "^" => Ok(&a_bi ^ &b_bi),
+        "<<" => {
+            let shift = b_bi.to_i64().unwrap_or(0);
+            if shift < 0 {
+                return Some(Err("Shift must be greater than or equal to 0".to_string()));
+            }
+            Ok(&a_bi << shift as u64)
+        }
+        ">>" => {
+            let shift = b_bi.to_i64().unwrap_or(0);
+            if shift < 0 {
+                return Some(Err("Shift must be greater than or equal to 0".to_string()));
+            }
+            Ok(&a_bi >> shift as u64)
+        }
+        _ => return None,
+    };
+
+    match result {
+        Ok(n) => Some(Ok(bigint_to_gmp_value(vm, n))),
+        Err(e) => Some(Err(e)),
+    }
+}
+
+/// Perform GMP unary operation: "~" (complement), "-" (negation), "+" (identity)
+pub fn gmp_do_unary(vm: &mut Vm, op: &str, a: &Value) -> Option<Value> {
+    if !is_gmp_object(a) {
+        return None;
+    }
+    let n = get_gmp_value(a)?;
+    match op {
+        "~" => Some(bigint_to_gmp_value(vm, -(n + BigInt::one()))),
+        "-" => Some(bigint_to_gmp_value(vm, -n)),
+        "+" => Some(bigint_to_gmp_value(vm, n)),
+        _ => None,
+    }
+}
+
+/// Compare two values where at least one is GMP.
+/// Returns Some(ordering) if comparison is possible, None otherwise.
+pub fn gmp_compare(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    let a_gmp = is_gmp_object(a);
+    let b_gmp = is_gmp_object(b);
+    if !a_gmp && !b_gmp {
+        return None;
+    }
+    let a_bi = if a_gmp { get_gmp_value(a) } else { operand_to_bigint(a) };
+    let b_bi = if b_gmp { get_gmp_value(b) } else { operand_to_bigint(b) };
+    match (a_bi, b_bi) {
+        (Some(a), Some(b)) => Some(a.cmp(&b)),
+        _ => None,
+    }
+}
+
+/// Convert a GMP object to its string representation (for __toString / concatenation)
+pub fn gmp_to_string(val: &Value) -> Option<String> {
+    if !is_gmp_object(val) {
+        return None;
+    }
+    get_gmp_value(val).map(|n| n.to_str_radix(10))
+}
+
+/// Convert a GMP object to i64 (for (int) cast)
+pub fn gmp_to_long(val: &Value) -> Option<i64> {
+    if !is_gmp_object(val) {
+        return None;
+    }
+    get_gmp_value(val).map(|n| {
+        n.to_i64().unwrap_or_else(|| {
+            let (sign, bytes) = n.to_bytes_le();
+            let mut buf = [0u8; 8];
+            let len = bytes.len().min(8);
+            buf[..len].copy_from_slice(&bytes[..len]);
+            let v = i64::from_le_bytes(buf);
+            if sign == Sign::Minus { -v } else { v }
+        })
+    })
+}
+
+/// Convert a GMP object to f64 (for (float) cast)
+pub fn gmp_to_double(val: &Value) -> Option<f64> {
+    if !is_gmp_object(val) {
+        return None;
+    }
+    get_gmp_value(val).map(|n| n.to_f64().unwrap_or(0.0))
+}
+
+/// Convert a non-GMP operand to BigInt for operator overloading.
+/// Only accepts int and int-strings. Rejects float, array, object, etc.
+fn operand_to_bigint(val: &Value) -> Option<BigInt> {
+    match val {
+        Value::Long(n) => Some(BigInt::from(*n)),
+        Value::String(s) => {
+            let s_str = s.to_string_lossy();
+            let trimmed = s_str.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            // Must be a valid integer string
+            parse_bigint_str(trimmed, 10).ok()
+        }
+        Value::Reference(r) => operand_to_bigint(&r.borrow()),
+        _ => None,
+    }
+}
+
+fn value_type_name_for_gmp(val: &Value) -> &'static str {
+    match val {
+        Value::Long(_) => "int",
+        Value::Double(_) => "float",
+        Value::String(_) => "string",
+        Value::True | Value::False => "bool",
+        Value::Null | Value::Undef => "null",
+        Value::Array(_) => "array",
+        Value::Object(obj) => {
+            let name = obj.borrow().class_name.clone();
+            if name.eq_ignore_ascii_case(b"stdClass") {
+                "stdClass"
+            } else {
+                // leak a static string - not great but matches PHP behavior
+                "object"
+            }
+        }
+        _ => "unknown",
+    }
+}
+
+// ============================================================
+// Helper functions
+// ============================================================
 
 /// Parse a string to BigInt, supporting optional sign and base prefixes (0x, 0b, 0o).
-/// For bases <= 36, digits are case-insensitive (handled by num-bigint).
-/// For bases 37..=62, lowercase a-z = 10-35, uppercase A-Z = 36-61.
 fn parse_bigint_str(s: &str, base: u32) -> Result<BigInt, String> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(BigInt::zero());
+        return Err("empty string".to_string());
     }
 
     let bytes = s.as_bytes();
@@ -95,7 +338,7 @@ fn parse_bigint_str(s: &str, base: u32) -> Result<BigInt, String> {
     };
 
     if start >= bytes.len() {
-        return Ok(BigInt::zero());
+        return Err("empty string after sign".to_string());
     }
 
     // Handle "0x", "0b", "0o" prefixes
@@ -119,7 +362,26 @@ fn parse_bigint_str(s: &str, base: u32) -> Result<BigInt, String> {
 
     let digit_str = &s[digit_start..];
     if digit_str.is_empty() {
-        return Ok(BigInt::zero());
+        return Err("no digits after prefix".to_string());
+    }
+
+    // Validate all characters are valid for the base
+    for &ch in digit_str.as_bytes() {
+        let valid = if actual_base <= 10 {
+            ch >= b'0' && ch < b'0' + actual_base as u8
+        } else if actual_base <= 36 {
+            (ch >= b'0' && ch <= b'9')
+                || (ch >= b'a' && ch < b'a' + (actual_base - 10) as u8)
+                || (ch >= b'A' && ch < b'A' + (actual_base - 10) as u8)
+        } else {
+            // bases 37..=62: 0-9, a-z (10-35), A-Z (36-61)
+            (ch >= b'0' && ch <= b'9')
+                || (ch >= b'a' && ch <= b'z')
+                || (ch >= b'A' && ch < b'A' + (actual_base - 36) as u8)
+        };
+        if !valid {
+            return Err(format!("Invalid digit for base {}", actual_base));
+        }
     }
 
     let n = if actual_base <= 36 {
@@ -134,19 +396,8 @@ fn parse_bigint_str(s: &str, base: u32) -> Result<BigInt, String> {
                 b'0'..=b'9' => (ch - b'0') as u32,
                 b'a'..=b'z' => (ch - b'a' + 10) as u32,
                 b'A'..=b'Z' => (ch - b'A' + 36) as u32,
-                _ => {
-                    return Err(format!(
-                        "Invalid digit for base {}: {}",
-                        actual_base, ch as char
-                    ))
-                }
+                _ => return Err(format!("Invalid digit for base {}", actual_base)),
             };
-            if digit >= actual_base {
-                return Err(format!(
-                    "Digit {} out of range for base {}",
-                    digit, actual_base
-                ));
-            }
             result = result * &base_bi + BigInt::from(digit);
         }
         result
@@ -160,8 +411,6 @@ fn parse_bigint_str(s: &str, base: u32) -> Result<BigInt, String> {
 }
 
 /// Convert a BigInt to a string in the given radix (2..=62).
-/// For bases <= 36, uses num-bigint's built-in to_str_radix.
-/// For bases 37..=62, uses manual conversion with lowercase a-z = 10-35, uppercase A-Z = 36-61.
 fn bigint_to_str_radix(n: &BigInt, base: u32) -> String {
     if base <= 36 {
         n.to_str_radix(base)
@@ -195,41 +444,116 @@ fn bigint_to_str_radix(n: &BigInt, base: u32) -> String {
     }
 }
 
-/// Extract a BigInt from a Value. Accepts GMP objects, integers, and strings.
-fn value_to_bigint(val: &Value) -> Option<BigInt> {
+/// Extract a BigInt from a Value for GMP function arguments.
+/// Returns Ok(BigInt) on success, Err(error_kind) on failure.
+/// error_kind: "type" for TypeError, "value" for ValueError
+fn value_to_bigint_checked(val: &Value, func_name: &str, arg_num: u32, arg_name: &str) -> Result<BigInt, GmpArgError> {
     match val {
         Value::Object(obj) => {
-            let id = obj.borrow().object_id;
-            GMP_VALUES.with(|m| m.borrow().get(&id).cloned())
-        }
-        Value::Long(n) => Some(BigInt::from(*n)),
-        Value::String(s) => {
-            let s = s.to_string_lossy();
-            let s = s.trim();
-            if s.is_empty() {
-                return Some(BigInt::zero());
+            let b = obj.borrow();
+            if b.class_name.eq_ignore_ascii_case(b"GMP") {
+                let id = b.object_id;
+                GMP_VALUES.with(|m| m.borrow().get(&id).cloned())
+                    .ok_or(GmpArgError::Type(format!(
+                        "{}(): Argument #{} (${}) must be of type GMP|string|int, {} given",
+                        func_name, arg_num, arg_name, String::from_utf8_lossy(&b.class_name)
+                    )))
+            } else {
+                Err(GmpArgError::Type(format!(
+                    "{}(): Argument #{} (${}) must be of type GMP|string|int, {} given",
+                    func_name, arg_num, arg_name, String::from_utf8_lossy(&b.class_name)
+                )))
             }
-            parse_bigint_str(s, 10).ok()
         }
-        Value::Double(f) => Some(BigInt::from(*f as i64)),
-        Value::True => Some(BigInt::one()),
-        Value::False | Value::Null | Value::Undef => Some(BigInt::zero()),
-        Value::Reference(r) => value_to_bigint(&r.borrow()),
-        _ => None,
+        Value::Long(n) => Ok(BigInt::from(*n)),
+        Value::String(s) => {
+            let s_str = s.to_string_lossy();
+            let trimmed = s_str.trim();
+            if trimmed.is_empty() {
+                return Err(GmpArgError::Value(format!(
+                    "{}(): Argument #{} (${}) is not an integer string",
+                    func_name, arg_num, arg_name
+                )));
+            }
+            parse_bigint_str(trimmed, 10).map_err(|_| {
+                GmpArgError::Value(format!(
+                    "{}(): Argument #{} (${}) is not an integer string",
+                    func_name, arg_num, arg_name
+                ))
+            })
+        }
+        Value::Double(_) => Err(GmpArgError::Type(format!(
+            "{}(): Argument #{} (${}) must be of type GMP|string|int, float given",
+            func_name, arg_num, arg_name
+        ))),
+        Value::True => Err(GmpArgError::Type(format!(
+            "{}(): Argument #{} (${}) must be of type GMP|string|int, true given",
+            func_name, arg_num, arg_name
+        ))),
+        Value::False => Err(GmpArgError::Type(format!(
+            "{}(): Argument #{} (${}) must be of type GMP|string|int, false given",
+            func_name, arg_num, arg_name
+        ))),
+        Value::Null | Value::Undef => Err(GmpArgError::Type(format!(
+            "{}(): Argument #{} (${}) must be of type GMP|string|int, null given",
+            func_name, arg_num, arg_name
+        ))),
+        Value::Array(_) => Err(GmpArgError::Type(format!(
+            "{}(): Argument #{} (${}) must be of type GMP|string|int, array given",
+            func_name, arg_num, arg_name
+        ))),
+        Value::Reference(r) => value_to_bigint_checked(&r.borrow(), func_name, arg_num, arg_name),
+        _ => Err(GmpArgError::Type(format!(
+            "{}(): Argument #{} (${}) must be of type GMP|string|int, unknown given",
+            func_name, arg_num, arg_name
+        ))),
     }
+}
+
+#[derive(Debug)]
+enum GmpArgError {
+    Type(String),
+    Value(String),
+}
+
+/// Throw the appropriate exception for a GMP argument error
+fn throw_gmp_error(vm: &mut Vm, err: GmpArgError) -> VmError {
+    match err {
+        GmpArgError::Type(msg) => {
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            VmError { message: msg, line: vm.current_line }
+        }
+        GmpArgError::Value(msg) => {
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            VmError { message: msg, line: vm.current_line }
+        }
+    }
+}
+
+/// Helper to get a BigInt arg or throw proper exception
+fn get_gmp_arg(vm: &mut Vm, args: &[Value], idx: usize, func_name: &str, arg_name: &str) -> Result<BigInt, VmError> {
+    let val = args.get(idx).unwrap_or(&Value::Null);
+    value_to_bigint_checked(val, func_name, (idx + 1) as u32, arg_name)
+        .map_err(|e| throw_gmp_error(vm, e))
 }
 
 /// Create a GMP object from a BigInt and return it as a Value
 fn bigint_to_gmp_value(vm: &mut Vm, n: BigInt) -> Value {
     let obj_id = vm.next_object_id();
-    let obj = PhpObject::new(b"GMP".to_vec(), obj_id);
+    let mut obj = PhpObject::new(b"GMP".to_vec(), obj_id);
+    // Set the "num" property for var_dump display
+    let num_str = n.to_str_radix(10);
+    obj.set_property(b"num".to_vec(), Value::String(PhpString::from_string(num_str)));
     GMP_VALUES.with(|m| m.borrow_mut().insert(obj_id, n));
     Value::Object(Rc::new(RefCell::new(obj)))
 }
 
-// === Primality testing (Miller-Rabin) ===
+// ============================================================
+// Primality testing (Miller-Rabin)
+// ============================================================
 
-/// Deterministic witnesses for small numbers
 fn deterministic_witnesses(n: &BigInt) -> Vec<u64> {
     if *n < BigInt::from(2047u64) {
         vec![2]
@@ -256,8 +580,6 @@ fn deterministic_witnesses(n: &BigInt) -> Vec<u64> {
     }
 }
 
-/// Miller-Rabin primality test.
-/// Returns 0 = not prime, 1 = probably prime, 2 = definitely prime (for small values).
 fn is_probably_prime(n: &BigInt, reps: u32) -> u32 {
     let n = n.abs();
     if n.is_zero() {
@@ -275,12 +597,10 @@ fn is_probably_prime(n: &BigInt, reps: u32) -> u32 {
         return 2;
     }
 
-    // Check if even
     if (&n & &one).is_zero() {
         return 0;
     }
 
-    // Check small primes for divisibility
     let small_primes: &[u32] = &[
         3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83,
         89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179,
@@ -297,12 +617,10 @@ fn is_probably_prime(n: &BigInt, reps: u32) -> u32 {
         }
     }
 
-    // If n < 63001 (= 251^2) and we tested all primes up to 251, it's definitely prime.
     if n < BigInt::from(63001u32) {
         return 2;
     }
 
-    // Write n-1 = 2^r * d
     let n_minus_1 = &n - &one;
     let mut d = n_minus_1.clone();
     let mut r = 0u32;
@@ -311,7 +629,6 @@ fn is_probably_prime(n: &BigInt, reps: u32) -> u32 {
         r += 1;
     }
 
-    // Deterministic witnesses for small numbers
     let witnesses = deterministic_witnesses(&n);
 
     let actual_reps = if witnesses.is_empty() {
@@ -320,7 +637,6 @@ fn is_probably_prime(n: &BigInt, reps: u32) -> u32 {
         witnesses.len() as u32
     };
 
-    // Use a simple PRNG seeded from the number for non-deterministic witnesses
     let (_, n_bytes) = n.to_bytes_le();
     let mut prng_state: u64 = 0;
     for (i, &b) in n_bytes.iter().enumerate() {
@@ -332,7 +648,6 @@ fn is_probably_prime(n: &BigInt, reps: u32) -> u32 {
         let a = if !witnesses.is_empty() {
             BigInt::from(witnesses[i as usize])
         } else {
-            // Generate pseudo-random witness in range [2, n-2]
             prng_state ^= prng_state << 13;
             prng_state ^= prng_state >> 7;
             prng_state ^= prng_state << 17;
@@ -342,7 +657,6 @@ fn is_probably_prime(n: &BigInt, reps: u32) -> u32 {
             BigInt::from(val)
         };
 
-        // Make sure a is in range [2, n-2]
         if a >= n_minus_1 || a < two {
             continue;
         }
@@ -374,7 +688,6 @@ fn is_probably_prime(n: &BigInt, reps: u32) -> u32 {
     }
 }
 
-/// Find the next prime after n
 fn next_prime(n: &BigInt) -> BigInt {
     let mut candidate = n.abs();
     let one = BigInt::one();
@@ -384,7 +697,6 @@ fn next_prime(n: &BigInt) -> BigInt {
         return two;
     }
 
-    // Make candidate odd and greater than n
     if (&candidate & &one).is_zero() {
         candidate += &one;
     } else {
@@ -420,9 +732,7 @@ fn mod_inverse(a: &BigInt, modulus: &BigInt) -> Result<BigInt, String> {
     if !g.is_one() {
         return Err("Inverse doesn't exist".to_string());
     }
-    // Adjust sign
     let result = if a.sign() == Sign::Minus { -x } else { x };
-    // Make positive
     let m = modulus.abs();
     let r = result.mod_floor(&m);
     Ok(r)
@@ -434,7 +744,6 @@ fn isqrt(n: &BigInt) -> BigInt {
         return BigInt::zero();
     }
     let two = BigInt::from(2);
-    // Initial guess: 2^(bit_length/2 + 1)
     let bits = n.bits();
     let mut x = BigInt::one() << (bits / 2 + 1);
     loop {
@@ -446,12 +755,47 @@ fn isqrt(n: &BigInt) -> BigInt {
     }
 }
 
-/// Test if a specific bit is set (handles negative numbers in two's complement)
+/// Integer nth root (floor)
+fn iroot(n: &BigInt, k: u32) -> BigInt {
+    if n.is_zero() || k == 0 {
+        return BigInt::zero();
+    }
+    if k == 1 {
+        return n.clone();
+    }
+    if k == 2 {
+        return isqrt(n);
+    }
+    let k_bi = BigInt::from(k);
+    let k_minus_1 = BigInt::from(k - 1);
+
+    // Initial guess
+    let bits = n.bits();
+    let mut x = BigInt::one() << ((bits / k as u64) + 1);
+
+    loop {
+        // Newton: x_new = ((k-1)*x + n/x^(k-1)) / k
+        let xk1 = x.pow(k - 1);
+        if xk1.is_zero() {
+            break;
+        }
+        let next = (&k_minus_1 * &x + n / &xk1) / &k_bi;
+        if next >= x {
+            break;
+        }
+        x = next;
+    }
+    // Adjust down if needed
+    while x.pow(k) > *n {
+        x -= BigInt::one();
+    }
+    x
+}
+
 fn test_bit(n: &BigInt, index: u64) -> bool {
     n.bit(index)
 }
 
-/// Set or clear a specific bit (handles negative numbers in two's complement)
 fn set_bit(n: &BigInt, index: u64, value: bool) -> BigInt {
     let mask = BigInt::one() << index;
     if value {
@@ -461,8 +805,6 @@ fn set_bit(n: &BigInt, index: u64, value: bool) -> BigInt {
     }
 }
 
-/// Population count for non-negative BigInts.
-/// Returns -1 for negative numbers (PHP convention).
 fn popcount(n: &BigInt) -> i64 {
     if n.sign() == Sign::Minus {
         return -1;
@@ -478,7 +820,6 @@ fn popcount(n: &BigInt) -> i64 {
     count
 }
 
-/// Check if n is a perfect square
 fn is_perfect_square(n: &BigInt) -> bool {
     if n.sign() == Sign::Minus {
         return false;
@@ -490,162 +831,365 @@ fn is_perfect_square(n: &BigInt) -> bool {
     &root * &root == *n
 }
 
-// === PHP function implementations ===
+/// Jacobi symbol (a/n) for odd n > 0
+fn jacobi_symbol(a: &BigInt, n: &BigInt) -> i32 {
+    if n.is_one() {
+        return 1;
+    }
+    if a.is_zero() {
+        return 0;
+    }
 
-/// gmp_init(value, base=10) -> GMP
+    let mut a = a.mod_floor(n);
+    let mut n = n.clone();
+    let mut result = 1i32;
+
+    while !a.is_zero() {
+        // Factor out 2s from a
+        while (&a & BigInt::one()).is_zero() {
+            a >>= 1;
+            let n_mod_8 = (&n % BigInt::from(8)).to_i64().unwrap_or(0);
+            if n_mod_8 == 3 || n_mod_8 == 5 {
+                result = -result;
+            }
+        }
+
+        // Apply quadratic reciprocity
+        std::mem::swap(&mut a, &mut n);
+        let a_mod_4 = (&a % BigInt::from(4)).to_i64().unwrap_or(0);
+        let n_mod_4 = (&n % BigInt::from(4)).to_i64().unwrap_or(0);
+        if a_mod_4 == 3 && n_mod_4 == 3 {
+            result = -result;
+        }
+        a = a.mod_floor(&n);
+    }
+
+    if n.is_one() {
+        result
+    } else {
+        0
+    }
+}
+
+/// Kronecker symbol (a/n), extension of Jacobi symbol
+fn kronecker_symbol(a: &BigInt, n: &BigInt) -> i32 {
+    if n.is_zero() {
+        if a.abs().is_one() { return 1; } else { return 0; }
+    }
+    if n.is_one() {
+        return 1;
+    }
+    if *n == BigInt::from(-1) {
+        if a.sign() == Sign::Minus { return -1; } else { return 1; }
+    }
+
+    // Handle negative n
+    let (mut result, n) = if n.sign() == Sign::Minus {
+        let r = if a.sign() == Sign::Minus { -1 } else { 1 };
+        (r, n.abs())
+    } else {
+        (1, n.clone())
+    };
+
+    // Factor out powers of 2 from n
+    let mut n = n;
+    let mut v = 0u32;
+    while (&n & BigInt::one()).is_zero() {
+        n >>= 1;
+        v += 1;
+    }
+
+    if v > 0 {
+        // Handle (a/2) for each factor of 2
+        let a_mod_8 = a.mod_floor(&BigInt::from(8)).to_i64().unwrap_or(0);
+        if v % 2 != 0 {
+            if a_mod_8 == 3 || a_mod_8 == 5 {
+                result = -result;
+            }
+        }
+    }
+
+    if n.is_one() {
+        return result;
+    }
+
+    // Now n is odd > 1, use Jacobi symbol
+    result * jacobi_symbol(a, &n)
+}
+
+/// Scan for bit 0 starting from position start
+fn scan0(n: &BigInt, start: u64) -> i64 {
+    // Find the first 0 bit at or after position start
+    for i in start..start + 4096 {
+        if !n.bit(i) {
+            return i as i64;
+        }
+    }
+    -1
+}
+
+/// Scan for bit 1 starting from position start
+fn scan1(n: &BigInt, start: u64) -> i64 {
+    if n.sign() == Sign::Minus {
+        // For negative numbers in two's complement, there are always 1 bits
+        for i in start..start + 4096 {
+            if n.bit(i) {
+                return i as i64;
+            }
+        }
+        return -1;
+    }
+    if n.is_zero() {
+        return -1;
+    }
+    for i in start..start + 4096 {
+        if n.bit(i) {
+            return i as i64;
+        }
+    }
+    -1
+}
+
+/// Hamming distance (number of different bits)
+fn hamdist(a: &BigInt, b: &BigInt) -> i64 {
+    let diff = a ^ b;
+    popcount(&diff)
+}
+
+/// Binomial coefficient C(n, k)
+fn binomial(n: &BigInt, k: i64) -> BigInt {
+    if k < 0 {
+        return BigInt::zero();
+    }
+    if k == 0 {
+        return BigInt::one();
+    }
+
+    let n_neg = n.sign() == Sign::Minus;
+    if n_neg {
+        // C(n, k) = (-1)^k * C(k - n - 1, k) for negative n
+        let adjusted = BigInt::from(k) - n - BigInt::one();
+        let result = binomial_positive(&adjusted, k as u64);
+        if k % 2 != 0 {
+            -result
+        } else {
+            result
+        }
+    } else {
+        binomial_positive(n, k as u64)
+    }
+}
+
+fn binomial_positive(n: &BigInt, k: u64) -> BigInt {
+    if n.to_u64().map_or(false, |nv| k > nv) {
+        return BigInt::zero();
+    }
+    let mut result = BigInt::one();
+    for i in 0..k {
+        result = result * (n - BigInt::from(i));
+        result = result / BigInt::from(i + 1);
+    }
+    result
+}
+
+// ============================================================
+// Rounding helper
+// ============================================================
+
+fn apply_rounding(q: BigInt, r: &BigInt, b: &BigInt, round: i64) -> BigInt {
+    if r.is_zero() {
+        return q;
+    }
+    match round {
+        0 => q,
+        1 => {
+            if (r.sign() == Sign::Plus && b.sign() == Sign::Plus)
+                || (r.sign() == Sign::Minus && b.sign() == Sign::Minus)
+            {
+                q + BigInt::one()
+            } else {
+                q
+            }
+        }
+        2 => {
+            if (r.sign() == Sign::Plus && b.sign() == Sign::Minus)
+                || (r.sign() == Sign::Minus && b.sign() == Sign::Plus)
+            {
+                q - BigInt::one()
+            } else {
+                q
+            }
+        }
+        _ => q,
+    }
+}
+
+// ============================================================
+// PHP function implementations
+// ============================================================
+
 fn gmp_init(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
-    let base = args.get(1).map(|v| v.to_long()).unwrap_or(10) as u32;
+    let base_val = args.get(1).map(|v| v.to_long()).unwrap_or(10);
+    let base = base_val as u32;
+
+    // Validate base
+    if base_val != 0 && (base_val < 2 || base_val > 62) {
+        let msg = "gmp_init(): Argument #2 ($base) must be 0 or between 2 and 62".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
 
     let n = match val {
-        Value::Long(n) => BigInt::from(*n),
+        Value::Long(n) => {
+            if base != 10 && base != 0 {
+                // If base is specified and val is int, convert int's string repr in that base
+                BigInt::from(*n)
+            } else {
+                BigInt::from(*n)
+            }
+        }
         Value::String(s) => {
-            let s = s.to_string_lossy();
-            let s = s.trim();
-            match parse_bigint_str(s, base) {
+            let s_str = s.to_string_lossy();
+            let trimmed = s_str.trim();
+            if trimmed.is_empty() {
+                let msg = "gmp_init(): Argument #1 ($num) is not an integer string".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            match parse_bigint_str(trimmed, base) {
                 Ok(n) => n,
                 Err(_) => {
-                    return Err(VmError {
-                        message: "gmp_init(): Unable to convert variable to GMP - string is not an integer".to_string(),
-                        line: vm.current_line,
-                    });
+                    let msg = "gmp_init(): Argument #1 ($num) is not an integer string".to_string();
+                    let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
                 }
             }
         }
-        Value::Double(f) => BigInt::from(*f as i64),
-        Value::True => BigInt::one(),
-        Value::False | Value::Null | Value::Undef => BigInt::zero(),
         Value::Object(obj) => {
-            let id = obj.borrow().object_id;
-            match GMP_VALUES.with(|m| m.borrow().get(&id).cloned()) {
-                Some(n) => n,
-                None => {
-                    return Err(VmError {
-                        message: "gmp_init(): Unable to convert variable to GMP".to_string(),
-                        line: vm.current_line,
-                    });
+            let b = obj.borrow();
+            if b.class_name.eq_ignore_ascii_case(b"GMP") {
+                let id = b.object_id;
+                match GMP_VALUES.with(|m| m.borrow().get(&id).cloned()) {
+                    Some(n) => n,
+                    None => {
+                        let msg = format!("gmp_init(): Argument #1 ($num) must be of type GMP|string|int, {} given", String::from_utf8_lossy(&b.class_name));
+                        let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: msg, line: vm.current_line });
+                    }
                 }
+            } else {
+                let msg = format!("gmp_init(): Argument #1 ($num) must be of type GMP|string|int, {} given", String::from_utf8_lossy(&b.class_name));
+                let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
             }
+        }
+        Value::Double(_) => {
+            let msg = "gmp_init(): Argument #1 ($num) must be of type GMP|string|int, float given".to_string();
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        Value::True | Value::False => {
+            let t = if matches!(val, Value::True) { "true" } else { "false" };
+            let msg = format!("gmp_init(): Argument #1 ($num) must be of type GMP|string|int, {} given", t);
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        Value::Null | Value::Undef => {
+            let msg = "gmp_init(): Argument #1 ($num) must be of type GMP|string|int, null given".to_string();
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        Value::Array(_) => {
+            let msg = "gmp_init(): Argument #1 ($num) must be of type GMP|string|int, array given".to_string();
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
         }
         Value::Reference(r) => {
             let inner = r.borrow().clone();
-            return gmp_init(vm, &[inner]);
+            return gmp_init(vm, &[inner, args.get(1).cloned().unwrap_or(Value::Long(10))]);
         }
         _ => {
-            return Err(VmError {
-                message: "gmp_init(): Unable to convert variable to GMP".to_string(),
-                line: vm.current_line,
-            });
+            let msg = "gmp_init(): Argument #1 ($num) must be of type GMP|string|int, unknown given".to_string();
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     };
 
     Ok(bigint_to_gmp_value(vm, n))
 }
 
-/// gmp_strval(gmp, base=10) -> string
 fn gmp_strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    let base = args.get(1).map(|v| v.to_long()).unwrap_or(10) as u32;
+    let a = get_gmp_arg(vm, args, 0, "gmp_strval", "num")?;
+    let base = args.get(1).map(|v| v.to_long()).unwrap_or(10);
 
-    let n = match value_to_bigint(val) {
-        Some(n) => n,
-        None => {
-            return Err(VmError {
-                message: "gmp_strval(): Unable to convert variable to GMP - string is not an integer".to_string(),
-                line: vm.current_line,
-            });
-        }
+    if base < -36 || (base > -2 && base < 2) || base > 62 {
+        let msg = "gmp_strval(): Argument #2 ($base) must be between 2 and 62, or -2 and -36".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
+    let s = if base < 0 {
+        // Negative base: uppercase output
+        bigint_to_str_radix(&a, (-base) as u32).to_uppercase()
+    } else {
+        bigint_to_str_radix(&a, base as u32)
     };
-
-    let base = if base < 2 || base > 62 { 10 } else { base };
-    let s = bigint_to_str_radix(&n, base);
     Ok(Value::String(PhpString::from_string(s)))
 }
 
-/// gmp_intval(gmp) -> int
 fn gmp_intval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    let n = match value_to_bigint(val) {
-        Some(n) => n,
-        None => {
-            return Err(VmError {
-                message: "gmp_intval(): Unable to convert variable to GMP".to_string(),
-                line: vm.current_line,
-            });
-        }
-    };
-    // Truncate to i64 (wrapping behavior for large values)
-    let result = n.to_i64().unwrap_or_else(|| {
-        let (sign, bytes) = n.to_bytes_le();
+    let a = get_gmp_arg(vm, args, 0, "gmp_intval", "num")?;
+    let result = a.to_i64().unwrap_or_else(|| {
+        let (sign, bytes) = a.to_bytes_le();
         let mut buf = [0u8; 8];
         let len = bytes.len().min(8);
         buf[..len].copy_from_slice(&bytes[..len]);
         let v = i64::from_le_bytes(buf);
-        if sign == Sign::Minus {
-            -v
-        } else {
-            v
-        }
+        if sign == Sign::Minus { -v } else { v }
     });
     Ok(Value::Long(result))
 }
 
-/// gmp_add(a, b) -> GMP
 fn gmp_add(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_add")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_add")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_add", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_add", "num2")?;
     Ok(bigint_to_gmp_value(vm, &a + &b))
 }
 
-/// gmp_sub(a, b) -> GMP
 fn gmp_sub(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_sub")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_sub")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_sub", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_sub", "num2")?;
     Ok(bigint_to_gmp_value(vm, &a - &b))
 }
 
-/// gmp_mul(a, b) -> GMP
 fn gmp_mul(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_mul")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_mul")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_mul", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_mul", "num2")?;
     Ok(bigint_to_gmp_value(vm, &a * &b))
 }
 
-/// gmp_div_q(a, b, round=GMP_ROUND_ZERO) -> GMP
 fn gmp_div_q(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_div_q")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_div_q")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_div_q", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_div_q", "num2")?;
     let round = args.get(2).map(|v| v.to_long()).unwrap_or(0);
 
     if b.is_zero() {
-        return Err(VmError {
-            message: "gmp_div_q(): Zero operand not allowed".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "Division by zero".to_string();
+        let exc = vm.create_exception(b"DivisionByZeroError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
     let (q, r) = a.div_rem(&b);
@@ -653,49 +1197,34 @@ fn gmp_div_q(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(bigint_to_gmp_value(vm, result))
 }
 
-/// gmp_div_r(a, b, round=GMP_ROUND_ZERO) -> GMP
 fn gmp_div_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_div_r")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_div_r")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_div_r", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_div_r", "num2")?;
     let round = args.get(2).map(|v| v.to_long()).unwrap_or(0);
 
     if b.is_zero() {
-        return Err(VmError {
-            message: "gmp_div_r(): Zero operand not allowed".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "Division by zero".to_string();
+        let exc = vm.create_exception(b"DivisionByZeroError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
     let (q, r) = a.div_rem(&b);
     let adjusted_q = apply_rounding(q, &r, &b, round);
-    // remainder = a - q*b
     let result = &a - &(&adjusted_q * &b);
     Ok(bigint_to_gmp_value(vm, result))
 }
 
-/// gmp_div_qr(a, b, round=GMP_ROUND_ZERO) -> [GMP, GMP]
 fn gmp_div_qr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_div_qr")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_div_qr")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_div_qr", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_div_qr", "num2")?;
     let round = args.get(2).map(|v| v.to_long()).unwrap_or(0);
 
     if b.is_zero() {
-        return Err(VmError {
-            message: "gmp_div_qr(): Zero operand not allowed".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "Division by zero".to_string();
+        let exc = vm.create_exception(b"DivisionByZeroError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
     let (q, r) = a.div_rem(&b);
@@ -711,56 +1240,48 @@ fn gmp_div_qr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
-/// gmp_mod(a, b) -> GMP (always non-negative remainder)
-fn gmp_mod(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_mod")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_mod")),
-    };
+fn gmp_divexact(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_divexact", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_divexact", "num2")?;
 
     if b.is_zero() {
-        return Err(VmError {
-            message: "gmp_mod(): Zero operand not allowed".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "Division by zero".to_string();
+        let exc = vm.create_exception(b"DivisionByZeroError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
+    Ok(bigint_to_gmp_value(vm, &a / &b))
+}
+
+fn gmp_mod(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_mod", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_mod", "num2")?;
+
+    if b.is_zero() {
+        let msg = "Division by zero".to_string();
+        let exc = vm.create_exception(b"DivisionByZeroError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
     let r = a.mod_floor(&b.abs());
     Ok(bigint_to_gmp_value(vm, r))
 }
 
-/// gmp_neg(a) -> GMP
 fn gmp_neg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_neg")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_neg", "num")?;
     Ok(bigint_to_gmp_value(vm, -a))
 }
 
-/// gmp_abs(a) -> GMP
 fn gmp_abs(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_abs")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_abs", "num")?;
     Ok(bigint_to_gmp_value(vm, a.abs()))
 }
 
-/// gmp_cmp(a, b) -> int (-1, 0, 1)
 fn gmp_cmp(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_cmp")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_cmp")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_cmp", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_cmp", "num2")?;
     let result = match a.cmp(&b) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -769,59 +1290,42 @@ fn gmp_cmp(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(result))
 }
 
-/// gmp_sign(a) -> int (-1, 0, 1)
 fn gmp_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_sign")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_sign", "num")?;
     let result = match a.sign() {
-        Sign::Plus => 1,
+        Sign::Plus => {
+            if a.is_zero() { 0 } else { 1 }
+        }
         Sign::NoSign => 0,
         Sign::Minus => -1,
     };
     Ok(Value::Long(result))
 }
 
-/// gmp_pow(base, exp) -> GMP
 fn gmp_pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let base = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_pow")),
-    };
+    let base = get_gmp_arg(vm, args, 0, "gmp_pow", "num")?;
     let exp = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     if exp < 0 {
-        return Err(VmError {
-            message: "gmp_pow(): Negative exponent not supported".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "gmp_pow(): Argument #2 ($exponent) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     Ok(bigint_to_gmp_value(vm, base.pow(exp as u32)))
 }
 
-/// gmp_powm(base, exp, mod) -> GMP
 fn gmp_powm(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let base = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_powm")),
-    };
-    let exp = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_powm")),
-    };
-    let modulus = match value_to_bigint(args.get(2).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_powm")),
-    };
+    let base = get_gmp_arg(vm, args, 0, "gmp_powm", "num")?;
+    let exp = get_gmp_arg(vm, args, 1, "gmp_powm", "exponent")?;
+    let modulus = get_gmp_arg(vm, args, 2, "gmp_powm", "modulus")?;
 
     if modulus.is_zero() {
-        return Err(VmError {
-            message: "gmp_powm(): Zero modulus not allowed".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "Division by zero".to_string();
+        let exc = vm.create_exception(b"DivisionByZeroError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
-    // For negative exponents, compute modular inverse first
     if exp.sign() == Sign::Minus {
         match mod_inverse(&base, &modulus) {
             Ok(inv) => {
@@ -829,10 +1333,12 @@ fn gmp_powm(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let result = inv.modpow(&pos_exp, &modulus.abs());
                 Ok(bigint_to_gmp_value(vm, result))
             }
-            Err(e) => Err(VmError {
-                message: format!("gmp_powm(): {}", e),
-                line: vm.current_line,
-            }),
+            Err(_) => {
+                let msg = "gmp_powm(): Argument #2 ($exponent) must be greater than or equal to 0 when modular inverse doesn't exist".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                Err(VmError { message: msg, line: vm.current_line })
+            }
         }
     } else {
         let result = base.modpow(&exp, &modulus.abs());
@@ -840,44 +1346,119 @@ fn gmp_powm(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-/// gmp_sqrt(a) -> GMP
 fn gmp_sqrt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_sqrt")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_sqrt", "num")?;
     if a.sign() == Sign::Minus {
-        return Err(VmError {
-            message: "gmp_sqrt(): Number has to be greater than or equal to 0".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "gmp_sqrt(): Number has to be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     Ok(bigint_to_gmp_value(vm, isqrt(&a)))
 }
 
-/// gmp_gcd(a, b) -> GMP
+fn gmp_sqrtrem(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_sqrtrem", "num")?;
+    if a.sign() == Sign::Minus {
+        let msg = "gmp_sqrtrem(): Number has to be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let root = isqrt(&a);
+    let rem = &a - &root * &root;
+    let root_val = bigint_to_gmp_value(vm, root);
+    let rem_val = bigint_to_gmp_value(vm, rem);
+    let mut arr = PhpArray::new();
+    arr.push(root_val);
+    arr.push(rem_val);
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn gmp_root(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_root", "num")?;
+    let nth = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if nth <= 0 {
+        let msg = "gmp_root(): Argument #2 ($nth) must be positive".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    if a.sign() == Sign::Minus && nth % 2 == 0 {
+        let msg = "gmp_root(): Can't take even root of negative number".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let neg = a.sign() == Sign::Minus;
+    let root = iroot(&a.abs(), nth as u32);
+    let result = if neg { -root } else { root };
+    Ok(bigint_to_gmp_value(vm, result))
+}
+
+fn gmp_rootrem(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_rootrem", "num")?;
+    let nth = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if nth <= 0 {
+        let msg = "gmp_rootrem(): Argument #2 ($nth) must be positive".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let neg = a.sign() == Sign::Minus;
+    let root = iroot(&a.abs(), nth as u32);
+    let root_signed = if neg { -root.clone() } else { root.clone() };
+    let rem = &a - root.pow(nth as u32) * (if neg { BigInt::from(-1) } else { BigInt::one() });
+    let root_val = bigint_to_gmp_value(vm, root_signed);
+    let rem_val = bigint_to_gmp_value(vm, rem);
+    let mut arr = PhpArray::new();
+    arr.push(root_val);
+    arr.push(rem_val);
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn gmp_perfect_power(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_perfect_power", "num")?;
+    let a_abs = a.abs();
+    if a_abs <= BigInt::one() {
+        return Ok(Value::True);
+    }
+    // Check if n is a perfect power (n = m^k for some k >= 2)
+    for k in 2..=64u32 {
+        let root = iroot(&a_abs, k);
+        if root <= BigInt::one() {
+            break;
+        }
+        if root.pow(k) == a_abs {
+            return Ok(Value::True);
+        }
+    }
+    Ok(Value::False)
+}
+
 fn gmp_gcd(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_gcd")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_gcd")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_gcd", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_gcd", "num2")?;
     Ok(bigint_to_gmp_value(vm, a.gcd(&b)))
 }
 
-/// gmp_lcm(a, b) -> GMP
+fn gmp_gcdext(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_gcdext", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_gcdext", "num2")?;
+    let (g, s, t) = extended_gcd(&a, &b);
+    let g_val = bigint_to_gmp_value(vm, g);
+    let s_val = bigint_to_gmp_value(vm, s);
+    let t_val = bigint_to_gmp_value(vm, t);
+    let mut arr = PhpArray::new();
+    arr.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"g")), g_val);
+    arr.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"s")), s_val);
+    arr.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"t")), t_val);
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
 fn gmp_lcm(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_lcm")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_lcm")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_lcm", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_lcm", "num2")?;
 
     if a.is_zero() || b.is_zero() {
         return Ok(bigint_to_gmp_value(vm, BigInt::zero()));
@@ -886,103 +1467,61 @@ fn gmp_lcm(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(bigint_to_gmp_value(vm, a.lcm(&b)))
 }
 
-/// gmp_and(a, b) -> GMP
 fn gmp_and(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_and")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_and")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_and", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_and", "num2")?;
     Ok(bigint_to_gmp_value(vm, &a & &b))
 }
 
-/// gmp_or(a, b) -> GMP
 fn gmp_or(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_or")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_or")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_or", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_or", "num2")?;
     Ok(bigint_to_gmp_value(vm, &a | &b))
 }
 
-/// gmp_xor(a, b) -> GMP
 fn gmp_xor(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_xor")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_xor")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_xor", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_xor", "num2")?;
     Ok(bigint_to_gmp_value(vm, &a ^ &b))
 }
 
-/// gmp_com(a) -> GMP (one's complement, i.e., ~n = -(n+1))
 fn gmp_com(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_com")),
-    };
-    // ~n = -(n+1)
+    let a = get_gmp_arg(vm, args, 0, "gmp_com", "num")?;
     Ok(bigint_to_gmp_value(vm, -(a + BigInt::one())))
 }
 
-/// gmp_fact(n) -> GMP
 fn gmp_fact(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    let n = match value_to_bigint(val) {
-        Some(n) => n.to_i64().unwrap_or(-1),
-        None => return Err(gmp_error(vm, "gmp_fact")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_fact", "num")?;
+    let n = a.to_i64().unwrap_or(-1);
     if n < 0 {
-        return Err(VmError {
-            message: "gmp_fact(): Number has to be greater than or equal to 0".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "gmp_fact(): Argument #1 ($num) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let result = (1..=n as u32).fold(BigInt::one(), |acc, i| acc * BigInt::from(i));
     Ok(bigint_to_gmp_value(vm, result))
 }
 
-/// gmp_prob_prime(n, reps=10) -> int (0, 1, or 2)
 fn gmp_prob_prime(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let n = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_prob_prime")),
-    };
+    let n = get_gmp_arg(vm, args, 0, "gmp_prob_prime", "num")?;
     let reps = args.get(1).map(|v| v.to_long()).unwrap_or(10) as u32;
     Ok(Value::Long(is_probably_prime(&n, reps) as i64))
 }
 
-/// gmp_nextprime(n) -> GMP
 fn gmp_nextprime(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let n = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_nextprime")),
-    };
+    let n = get_gmp_arg(vm, args, 0, "gmp_nextprime", "num")?;
     Ok(bigint_to_gmp_value(vm, next_prime(&n)))
 }
 
-/// gmp_testbit(a, index) -> bool
 fn gmp_testbit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_testbit")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_testbit", "num")?;
     let index = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     if index < 0 {
-        return Err(VmError {
-            message: "gmp_testbit(): Bit index must be greater than or equal to 0".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "gmp_testbit(): Argument #2 ($index) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     Ok(if test_bit(&a, index as u64) {
         Value::True
@@ -991,22 +1530,18 @@ fn gmp_testbit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-/// gmp_setbit(&a, index, value=true) -> void
-/// Note: In PHP, gmp_setbit modifies the GMP object in place.
-/// We handle this by updating the stored BigInt.
 fn gmp_setbit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     let index = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let bit_val = args.get(2).map(|v| v.is_truthy()).unwrap_or(true);
 
     if index < 0 {
-        return Err(VmError {
-            message: "gmp_setbit(): Bit index must be greater than or equal to 0".to_string(),
-            line: vm.current_line,
-        });
+        let msg = "gmp_setbit(): Argument #2 ($index) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
-    // Get the object ID from the value
     let obj_id = match val {
         Value::Object(obj) => obj.borrow().object_id,
         Value::Reference(r) => {
@@ -1014,12 +1549,18 @@ fn gmp_setbit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             match &*inner {
                 Value::Object(obj) => obj.borrow().object_id,
                 _ => {
-                    return Err(gmp_error(vm, "gmp_setbit"));
+                    let msg = "gmp_setbit(): Argument #1 ($num) must be of type GMP".to_string();
+                    let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
                 }
             }
         }
         _ => {
-            return Err(gmp_error(vm, "gmp_setbit"));
+            let msg = "gmp_setbit(): Argument #1 ($num) must be of type GMP".to_string();
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     };
 
@@ -1027,28 +1568,104 @@ fn gmp_setbit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut map = m.borrow_mut();
         if let Some(n) = map.get(&obj_id) {
             let new_val = set_bit(n, index as u64, bit_val);
+            // Update the num property on the object
+            let num_str = new_val.to_str_radix(10);
             map.insert(obj_id, new_val);
+            // Try to update num property
+            if let Value::Object(obj) = val {
+                obj.borrow_mut().set_property(b"num".to_vec(), Value::String(PhpString::from_string(num_str)));
+            }
         }
     });
 
     Ok(Value::Null)
 }
 
-/// gmp_popcount(a) -> int
-fn gmp_popcount(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_popcount")),
+fn gmp_clrbit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    let index = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+
+    if index < 0 {
+        let msg = "gmp_clrbit(): Argument #2 ($index) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
+    let obj_id = match val {
+        Value::Object(obj) => obj.borrow().object_id,
+        Value::Reference(r) => {
+            let inner = r.borrow();
+            match &*inner {
+                Value::Object(obj) => obj.borrow().object_id,
+                _ => {
+                    let msg = "gmp_clrbit(): Argument #1 ($num) must be of type GMP".to_string();
+                    let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
+                }
+            }
+        }
+        _ => {
+            let msg = "gmp_clrbit(): Argument #1 ($num) must be of type GMP".to_string();
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
     };
+
+    GMP_VALUES.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some(n) = map.get(&obj_id) {
+            let new_val = set_bit(n, index as u64, false);
+            let num_str = new_val.to_str_radix(10);
+            map.insert(obj_id, new_val);
+            if let Value::Object(obj) = val {
+                obj.borrow_mut().set_property(b"num".to_vec(), Value::String(PhpString::from_string(num_str)));
+            }
+        }
+    });
+
+    Ok(Value::Null)
+}
+
+fn gmp_popcount(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_popcount", "num")?;
     Ok(Value::Long(popcount(&a)))
 }
 
-/// gmp_perfect_square(a) -> bool
+fn gmp_hamdist(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_hamdist", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_hamdist", "num2")?;
+    Ok(Value::Long(hamdist(&a, &b)))
+}
+
+fn gmp_scan0(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_scan0", "num")?;
+    let start = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if start < 0 {
+        let msg = "gmp_scan0(): Argument #2 ($start) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    Ok(Value::Long(scan0(&a, start as u64)))
+}
+
+fn gmp_scan1(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_scan1", "num")?;
+    let start = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if start < 0 {
+        let msg = "gmp_scan1(): Argument #2 ($start) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    Ok(Value::Long(scan1(&a, start as u64)))
+}
+
 fn gmp_perfect_square(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_perfect_square")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_perfect_square", "num")?;
     Ok(if is_perfect_square(&a) {
         Value::True
     } else {
@@ -1056,16 +1673,9 @@ fn gmp_perfect_square(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-/// gmp_invert(a, b) -> GMP|false
 fn gmp_invert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = match value_to_bigint(args.first().unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_invert")),
-    };
-    let b = match value_to_bigint(args.get(1).unwrap_or(&Value::Null)) {
-        Some(n) => n,
-        None => return Err(gmp_error(vm, "gmp_invert")),
-    };
+    let a = get_gmp_arg(vm, args, 0, "gmp_invert", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_invert", "num2")?;
 
     match mod_inverse(&a, &b) {
         Ok(result) => Ok(bigint_to_gmp_value(vm, result)),
@@ -1073,51 +1683,217 @@ fn gmp_invert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-// === Helper for rounding modes ===
-
-/// Apply rounding mode to quotient.
-/// round=0 (GMP_ROUND_ZERO): truncate toward zero (default)
-/// round=1 (GMP_ROUND_PLUSINF): round toward +infinity
-/// round=2 (GMP_ROUND_MINUSINF): round toward -infinity
-fn apply_rounding(q: BigInt, r: &BigInt, b: &BigInt, round: i64) -> BigInt {
-    if r.is_zero() {
-        return q;
-    }
-    match round {
-        0 => q, // Truncate toward zero (C-style division, which is what div_rem gives us)
-        1 => {
-            // Round toward +infinity (ceiling)
-            // If remainder has same sign as divisor, we need to round up
-            if (r.sign() == Sign::Plus && b.sign() == Sign::Plus)
-                || (r.sign() == Sign::Minus && b.sign() == Sign::Minus)
-            {
-                q + BigInt::one()
-            } else {
-                q
-            }
-        }
-        2 => {
-            // Round toward -infinity (floor)
-            // If remainder has different sign from divisor, we need to round down
-            if (r.sign() == Sign::Plus && b.sign() == Sign::Minus)
-                || (r.sign() == Sign::Minus && b.sign() == Sign::Plus)
-            {
-                q - BigInt::one()
-            } else {
-                q
-            }
-        }
-        _ => q,
-    }
+fn gmp_jacobi(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_jacobi", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_jacobi", "num2")?;
+    Ok(Value::Long(jacobi_symbol(&a, &b) as i64))
 }
 
-/// Create a generic GMP error
-fn gmp_error(vm: &Vm, func_name: &str) -> VmError {
-    VmError {
-        message: format!(
-            "{}(): Unable to convert variable to GMP - string is not an integer",
-            func_name
-        ),
-        line: vm.current_line,
+fn gmp_legendre(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_legendre", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_legendre", "num2")?;
+    Ok(Value::Long(jacobi_symbol(&a, &b) as i64))
+}
+
+fn gmp_kronecker(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_kronecker", "num1")?;
+    let b = get_gmp_arg(vm, args, 1, "gmp_kronecker", "num2")?;
+    Ok(Value::Long(kronecker_symbol(&a, &b) as i64))
+}
+
+fn gmp_binomial(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let n = get_gmp_arg(vm, args, 0, "gmp_binomial", "n")?;
+    let k = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if k < 0 {
+        let msg = "gmp_binomial(): Argument #2 ($k) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
+    Ok(bigint_to_gmp_value(vm, binomial(&n, k)))
+}
+
+fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, "gmp_export", "num")?;
+    let word_size = args.get(1).map(|v| v.to_long()).unwrap_or(1) as usize;
+    let options = args.get(2).map(|v| v.to_long()).unwrap_or(1 | 8); // GMP_MSW_FIRST | GMP_BIG_ENDIAN
+
+    if word_size == 0 {
+        let msg = "gmp_export(): Argument #2 ($word_size) must be greater than or equal to 1".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
+    if a.is_zero() {
+        return Ok(Value::String(PhpString::from_vec(vec![0u8; word_size])));
+    }
+
+    let (_, bytes) = a.abs().to_bytes_be();
+
+    let msw_first = (options & 1) != 0; // GMP_MSW_FIRST
+    let big_endian = (options & 8) != 0; // GMP_BIG_ENDIAN
+    let little_endian = (options & 4) != 0; // GMP_LITTLE_ENDIAN
+
+    // Pad bytes to multiple of word_size
+    let padded_len = ((bytes.len() + word_size - 1) / word_size) * word_size;
+    let mut padded = vec![0u8; padded_len];
+    let offset = padded_len - bytes.len();
+    padded[offset..].copy_from_slice(&bytes);
+
+    // Process words
+    let num_words = padded_len / word_size;
+    let mut words: Vec<Vec<u8>> = Vec::with_capacity(num_words);
+    for i in 0..num_words {
+        let start = i * word_size;
+        let end = start + word_size;
+        let mut word = padded[start..end].to_vec();
+        // Handle endianness within each word
+        if little_endian {
+            word.reverse();
+        } else if !big_endian {
+            // native endian - assume little endian on x86
+            word.reverse();
+        }
+        words.push(word);
+    }
+
+    // Handle word order
+    if !msw_first {
+        words.reverse();
+    }
+
+    let result: Vec<u8> = words.into_iter().flatten().collect();
+    Ok(Value::String(PhpString::from_vec(result)))
+}
+
+fn gmp_import_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let data = args.first().unwrap_or(&Value::Null).to_php_string();
+    let word_size = args.get(1).map(|v| v.to_long()).unwrap_or(1) as usize;
+    let options = args.get(2).map(|v| v.to_long()).unwrap_or(1 | 8);
+
+    if word_size == 0 {
+        let msg = "gmp_import(): Argument #2 ($word_size) must be greater than or equal to 1".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
+    let bytes = data.as_bytes();
+    if bytes.is_empty() {
+        return Ok(bigint_to_gmp_value(vm, BigInt::zero()));
+    }
+
+    if bytes.len() % word_size != 0 {
+        let msg = "gmp_import(): Argument #1 ($data) must be a multiple of word_size".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
+    let msw_first = (options & 1) != 0;
+    let big_endian = (options & 8) != 0;
+    let little_endian = (options & 4) != 0;
+
+    let num_words = bytes.len() / word_size;
+    let mut words: Vec<Vec<u8>> = Vec::with_capacity(num_words);
+    for i in 0..num_words {
+        let start = i * word_size;
+        let end = start + word_size;
+        let mut word = bytes[start..end].to_vec();
+        if little_endian {
+            word.reverse();
+        } else if !big_endian {
+            word.reverse();
+        }
+        words.push(word);
+    }
+
+    if !msw_first {
+        words.reverse();
+    }
+
+    let combined: Vec<u8> = words.into_iter().flatten().collect();
+    let n = BigInt::from_bytes_be(Sign::Plus, &combined);
+    Ok(bigint_to_gmp_value(vm, n))
+}
+
+// Simple PRNG for random functions
+thread_local! {
+    static RNG_STATE: RefCell<u64> = RefCell::new(0);
+}
+
+fn gmp_random_seed(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let seed = args.first().map(|v| v.to_long()).unwrap_or(0) as u64;
+    RNG_STATE.with(|s| *s.borrow_mut() = seed);
+    Ok(Value::Null)
+}
+
+fn next_random() -> u64 {
+    RNG_STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        // xorshift64
+        *state ^= (*state) << 13;
+        *state ^= (*state) >> 7;
+        *state ^= (*state) << 17;
+        if *state == 0 {
+            *state = 1; // avoid stuck at 0
+        }
+        *state
+    })
+}
+
+fn gmp_random_bits(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let bits = args.first().map(|v| v.to_long()).unwrap_or(0);
+    if bits < 1 {
+        let msg = "gmp_random_bits(): Argument #1 ($bits) must be greater than or equal to 1".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
+    // Generate random bytes
+    let num_bytes = ((bits as usize) + 7) / 8;
+    let mut bytes = Vec::with_capacity(num_bytes);
+    for _ in 0..num_bytes {
+        bytes.push((next_random() & 0xFF) as u8);
+    }
+
+    let mut n = BigInt::from_bytes_be(Sign::Plus, &bytes);
+    // Mask off excess bits
+    let excess = num_bytes * 8 - bits as usize;
+    if excess > 0 {
+        let mask = (BigInt::one() << bits as u64) - BigInt::one();
+        n = n & mask;
+    }
+
+    Ok(bigint_to_gmp_value(vm, n))
+}
+
+fn gmp_random_range(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let min = get_gmp_arg(vm, args, 0, "gmp_random_range", "min")?;
+    let max = get_gmp_arg(vm, args, 1, "gmp_random_range", "max")?;
+
+    if min > max {
+        let msg = "gmp_random_range(): Argument #1 ($min) must be less than or equal to argument #2 ($max)".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
+    let range = &max - &min + BigInt::one();
+    if range.is_one() {
+        return Ok(bigint_to_gmp_value(vm, min));
+    }
+
+    let bits = range.bits();
+    let num_bytes = ((bits as usize) + 7) / 8;
+    let mut bytes = Vec::with_capacity(num_bytes);
+    for _ in 0..num_bytes {
+        bytes.push((next_random() & 0xFF) as u8);
+    }
+    let r = BigInt::from_bytes_be(Sign::Plus, &bytes);
+    let r = r.mod_floor(&range);
+    let result = &min + &r;
+    Ok(bigint_to_gmp_value(vm, result))
 }

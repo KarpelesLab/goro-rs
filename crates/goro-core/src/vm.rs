@@ -277,6 +277,21 @@ pub struct Vm {
     pub autoload_functions: Vec<Value>,
     /// Shutdown functions registered via register_shutdown_function
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
+    /// Object operator overloading handler (e.g., GMP)
+    /// Arguments: (vm, op_str, lhs, rhs) -> Some(Ok(result)) or Some(Err(msg)) or None
+    pub object_do_operation: Option<fn(&mut Vm, &str, &Value, &Value) -> Option<Result<Value, String>>>,
+    /// Object unary operator handler (e.g., GMP ~, -, +)
+    pub object_do_unary: Option<fn(&mut Vm, &str, &Value) -> Option<Value>>,
+    /// Object comparison handler (e.g., GMP ==, <, >)
+    pub object_compare: Option<fn(&Value, &Value) -> Option<std::cmp::Ordering>>,
+    /// Object to string handler (e.g., GMP __toString)
+    pub object_to_string: Option<fn(&Value) -> Option<String>>,
+    /// Object to long handler (e.g., GMP (int) cast)
+    pub object_to_long: Option<fn(&Value) -> Option<i64>>,
+    /// Object to double handler (e.g., GMP (float) cast)
+    pub object_to_double: Option<fn(&Value) -> Option<f64>>,
+    /// Object type checker (e.g., is GMP?)
+    pub object_is_operator_type: Option<fn(&Value) -> bool>,
 }
 
 impl Vm {
@@ -925,6 +940,13 @@ impl Vm {
 
 
             },
+            object_do_operation: None,
+            object_do_unary: None,
+            object_compare: None,
+            object_to_string: None,
+            object_to_long: None,
+            object_to_double: None,
+            object_is_operator_type: None,
         }
     }
 
@@ -2671,6 +2693,20 @@ impl Vm {
         &self.static_vars
     }
 
+    /// Check if two Values are identical (===) for trait property compatibility checking.
+    fn values_identical(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Null, Value::Null) => true,
+            (Value::Undef, Value::Undef) => true,
+            (Value::True, Value::True) => true,
+            (Value::False, Value::False) => true,
+            (Value::Long(a), Value::Long(b)) => a == b,
+            (Value::Double(a), Value::Double(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a.as_bytes() == b.as_bytes(),
+            _ => false,
+        }
+    }
+
     /// Get the output buffer contents
     /// Format the current call stack as a PHP-style stack trace string
     /// Check method signature compatibility between child and parent methods.
@@ -2708,7 +2744,8 @@ impl Vm {
 
                 let mut part = String::new();
                 // Add type hint if available
-                if let Some(Some(pt)) = op.param_types.get(i) {
+                // param_types are indexed by CV index, so use cv_idx
+                if let Some(Some(pt)) = op.param_types.get(cv_idx) {
                     let type_str = Self::format_param_type_for_sig(&pt.param_type, class_name);
                     if !type_str.is_empty() {
                         part.push_str(&type_str);
@@ -2747,6 +2784,52 @@ impl Vm {
             child_required > parent_required
         };
 
+        // Check parameter type compatibility (contravariant - child can accept wider types)
+        let child_offset_usize = child_offset as usize;
+        let parent_offset_usize = parent_offset as usize;
+        let mut param_type_incompatible = false;
+        if !incompatible {
+            let check_count = std::cmp::min(
+                child_op.param_count.saturating_sub(child_offset) as usize,
+                parent_op.param_count.saturating_sub(parent_offset) as usize,
+            );
+            for i in 0..check_count {
+                // param_types are indexed by CV index, so add the offset for $this
+                let parent_cv_idx = i + parent_offset_usize;
+                let child_cv_idx = i + child_offset_usize;
+                let parent_type = parent_op.param_types.get(parent_cv_idx).and_then(|t| t.as_ref());
+                let child_type = child_op.param_types.get(child_cv_idx).and_then(|t| t.as_ref());
+                match (parent_type, child_type) {
+                    (Some(pt), Some(ct)) => {
+                        // Both have types - check that the child's type is compatible
+                        // Parameter types are contravariant: child can accept wider types
+                        let p_str = Self::format_param_type_for_sig(&pt.param_type, parent_class);
+                        let c_str = Self::format_param_type_for_sig(&ct.param_type, child_class);
+                        if !p_str.is_empty() && !c_str.is_empty() && p_str != c_str {
+                            // Types differ - check if child type is a supertype of parent type
+                            if !Self::is_param_type_compatible(&ct.param_type, &pt.param_type) {
+                                param_type_incompatible = true;
+                                break;
+                            }
+                        }
+                    }
+                    (Some(pt), None) => {
+                        // Parent has type but child doesn't - child is wider, which is OK for contravariance
+                        // Actually in PHP this is incompatible (you can't drop a type hint)
+                        let p_str = Self::format_param_type_for_sig(&pt.param_type, parent_class);
+                        if !p_str.is_empty() && !p_str.eq_ignore_ascii_case("mixed") {
+                            // param_type_incompatible = true; // PHP allows dropping type hints for BC
+                        }
+                    }
+                    (None, Some(_ct)) => {
+                        // Parent has no type but child adds one - this is narrowing (incompatible for contravariance)
+                        // In PHP this is allowed but generates a deprecation warning in some versions
+                    }
+                    (None, None) => {}
+                }
+            }
+        }
+
         // Check return type compatibility (covariant return types)
         let return_type_incompatible = if let Some(parent_rt) = &parent_op.return_type {
             if let Some(child_rt) = &child_op.return_type {
@@ -2772,7 +2855,7 @@ impl Vm {
             false
         };
 
-        if incompatible || return_type_incompatible {
+        if incompatible || return_type_incompatible || param_type_incompatible {
             let child_class_str = String::from_utf8_lossy(child_class);
             let parent_class_str = String::from_utf8_lossy(parent_class);
             let method_name = String::from_utf8_lossy(&child_method.name);
@@ -2850,6 +2933,42 @@ impl Vm {
                 } else {
                     // At least one is a class type - could be subclass, be permissive
                     true
+                }
+            }
+            _ => true,
+        }
+    }
+
+    /// Check if a child parameter type is compatible (contravariant) with a parent parameter type.
+    /// For parameters, the child type must be a supertype of the parent type (or equal).
+    /// Returns true if compatible.
+    fn is_param_type_compatible(child_pt: &crate::opcode::ParamType, parent_pt: &crate::opcode::ParamType) -> bool {
+        use crate::opcode::ParamType;
+        match (child_pt, parent_pt) {
+            // Same type is always compatible
+            (ParamType::Simple(a), ParamType::Simple(b)) if a.eq_ignore_ascii_case(b) => true,
+            // mixed accepts anything (top type)
+            (ParamType::Simple(a), _) if a.eq_ignore_ascii_case(b"mixed") => true,
+            // Child is nullable, parent is same inner type - compatible (child is wider)
+            (ParamType::Nullable(inner), ParamType::Simple(_)) => Self::is_param_type_compatible(inner, parent_pt),
+            // Both nullable - check inner types
+            (ParamType::Nullable(a), ParamType::Nullable(b)) => Self::is_param_type_compatible(a, b),
+            // Child is not nullable but parent is - incompatible (child is narrower)
+            (ParamType::Simple(_), ParamType::Nullable(_)) => false,
+            // Union/intersection - be permissive
+            (ParamType::Union(_), _) | (_, ParamType::Union(_)) => true,
+            (ParamType::Intersection(_), _) | (_, ParamType::Intersection(_)) => true,
+            // Different simple types
+            (ParamType::Simple(a), ParamType::Simple(b)) => {
+                let primitives = [b"int".as_slice(), b"float", b"string", b"bool", b"array", b"null", b"object", b"callable", b"iterable"];
+                let a_lower: Vec<u8> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let b_lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let a_is_prim = primitives.iter().any(|p| *p == a_lower.as_slice());
+                let b_is_prim = primitives.iter().any(|p| *p == b_lower.as_slice());
+                if a_is_prim && b_is_prim {
+                    false // Different primitives are incompatible
+                } else {
+                    true // Class types - be permissive
                 }
             }
             _ => true,
@@ -8519,6 +8638,31 @@ impl Vm {
                 OpCode::Add => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    // Check for object operator overloading (e.g., GMP)
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "+", &a, &b) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                        ip += 1;
+                                        continue;
+                                    }
+                                    Some(Err(msg)) => {
+                                        let exc_val = self.throw_type_error(msg.clone());
+                                        self.current_exception = Some(exc_val);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                            ip = catch_target as usize;
+                                            continue;
+                                        } else {
+                                            return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     self.check_leading_numeric_warning(&a, op.line);
                     self.check_leading_numeric_warning(&b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "+") {
@@ -8539,6 +8683,26 @@ impl Vm {
                 OpCode::Sub => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "-", &a, &b) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                        ip += 1;
+                                        continue;
+                                    }
+                                    Some(Err(msg)) => {
+                                        let exc_val = self.throw_type_error(msg.clone());
+                                        self.current_exception = Some(exc_val);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        else { return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line }); }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     self.check_leading_numeric_warning(&a, op.line);
                     self.check_leading_numeric_warning(&b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "-") {
@@ -8559,6 +8723,26 @@ impl Vm {
                 OpCode::Mul => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "*", &a, &b) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                        ip += 1;
+                                        continue;
+                                    }
+                                    Some(Err(msg)) => {
+                                        let exc_val = self.throw_type_error(msg.clone());
+                                        self.current_exception = Some(exc_val);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        else { return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line }); }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     self.check_leading_numeric_warning(&a, op.line);
                     self.check_leading_numeric_warning(&b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "*") {
@@ -8579,6 +8763,26 @@ impl Vm {
                 OpCode::Div => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "/", &a, &b) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                        ip += 1;
+                                        continue;
+                                    }
+                                    Some(Err(msg)) => {
+                                        let exc = self.create_exception(b"DivisionByZeroError", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        else { return Err(VmError { message: format!("Uncaught DivisionByZeroError: {}", msg), line: op.line }); }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "/") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8628,6 +8832,26 @@ impl Vm {
                 OpCode::Mod => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "%", &a, &b) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                        ip += 1;
+                                        continue;
+                                    }
+                                    Some(Err(msg)) => {
+                                        let exc = self.create_exception(b"DivisionByZeroError", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        else { return Err(VmError { message: format!("Uncaught DivisionByZeroError: {}", msg), line: op.line }); }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "%") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8686,6 +8910,26 @@ impl Vm {
                 OpCode::Pow => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "**", &a, &b) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                        ip += 1;
+                                        continue;
+                                    }
+                                    Some(Err(msg)) => {
+                                        let exc_val = self.throw_type_error(msg.clone());
+                                        self.current_exception = Some(exc_val);
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        else { return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line }); }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "**") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8798,6 +9042,17 @@ impl Vm {
                 OpCode::BitwiseAnd => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "&", &a, &b) {
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "&") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8833,6 +9088,17 @@ impl Vm {
                 OpCode::BitwiseOr => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "|", &a, &b) {
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "|") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8872,6 +9138,17 @@ impl Vm {
                 OpCode::BitwiseXor => {
                     let a = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let b = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "^", &a, &b) {
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "^") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -8922,6 +9199,18 @@ impl Vm {
                 }
                 OpCode::BitwiseNot => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // Check for GMP unary
+                    if let Some(handler) = self.object_do_unary {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) {
+                                if let Some(result) = handler(self, "~", &a) {
+                                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                    ip += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     let result = if matches!(a.deref(), Value::String(_)) {
                         let sa = a.to_php_string();
                         let bytes = sa.as_bytes();
@@ -8941,6 +9230,22 @@ impl Vm {
                 OpCode::ShiftLeft => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, "<<", &a, &b) {
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Err(msg)) => {
+                                        let exc = self.create_exception(b"ValueError", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; }
+                                        else { return Err(VmError { message: msg, line: op.line }); }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     // Check for unsupported operand types
                     if matches!(&a, Value::Array(_)) || matches!(&b, Value::Array(_)) {
                         let err = format!("Unsupported operand types: {} << {}", Vm::value_type_name(&a), Vm::value_type_name(&b));
@@ -8963,6 +9268,22 @@ impl Vm {
                 OpCode::ShiftRight => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                match handler(self, ">>", &a, &b) {
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Err(msg)) => {
+                                        let exc = self.create_exception(b"ValueError", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; }
+                                        else { return Err(VmError { message: msg, line: op.line }); }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     // Check for unsupported operand types
                     if matches!(&a, Value::Array(_)) || matches!(&b, Value::Array(_)) {
                         let err = format!("Unsupported operand types: {} >> {}", Vm::value_type_name(&a), Vm::value_type_name(&b));
@@ -9002,6 +9323,26 @@ impl Vm {
                 OpCode::Equal => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(cmp_fn) = self.object_compare {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                // GMP == non-GMP-object: throw TypeError
+                                if (is_type(&a) && matches!(b.deref(), Value::Object(_)) && !is_type(&b))
+                                    || (is_type(&b) && matches!(a.deref(), Value::Object(_)) && !is_type(&a)) {
+                                    let msg = "Number must be of type GMP|string|int, stdClass given".to_string();
+                                    let exc_val = self.throw_type_error(msg.clone());
+                                    self.current_exception = Some(exc_val);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                    else { return Err(VmError { message: msg, line: op.line }); }
+                                }
+                                if let Some(ord) = cmp_fn(&a, &b) {
+                                    self.write_operand(&op.result, if ord == std::cmp::Ordering::Equal { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                                    ip += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     self.emit_object_comparison_notice(&a, &b, op.line);
                     self.write_operand(
                         &op.result,
@@ -9018,6 +9359,25 @@ impl Vm {
                 OpCode::NotEqual => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(cmp_fn) = self.object_compare {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                if (is_type(&a) && matches!(b.deref(), Value::Object(_)) && !is_type(&b))
+                                    || (is_type(&b) && matches!(a.deref(), Value::Object(_)) && !is_type(&a)) {
+                                    let msg = "Number must be of type GMP|string|int, stdClass given".to_string();
+                                    let exc_val = self.throw_type_error(msg.clone());
+                                    self.current_exception = Some(exc_val);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                    else { return Err(VmError { message: msg, line: op.line }); }
+                                }
+                                if let Some(ord) = cmp_fn(&a, &b) {
+                                    self.write_operand(&op.result, if ord != std::cmp::Ordering::Equal { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                                    ip += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     self.emit_object_comparison_notice(&a, &b, op.line);
                     self.write_operand(
                         &op.result,
@@ -15549,6 +15909,12 @@ impl Vm {
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_long() as usize;
                     if let Some(mut class) = self.pending_classes.get(class_idx).cloned() {
+                        // Record methods directly defined in this class BEFORE parent inheritance
+                        // so we know which methods trait methods should NOT override later
+                        let own_method_names_pre_inherit: std::collections::HashSet<Vec<u8>> = class.methods.keys().cloned().collect();
+                        // Record own property names before parent inheritance
+                        let own_prop_names_pre_inherit: std::collections::HashSet<Vec<u8>> = class.properties.iter().map(|p| p.name.clone()).collect();
+
                         // Resolve inheritance: copy parent methods/properties
                         if let Some(parent_name) = &class.parent.clone() {
                             let parent_lower: Vec<u8> =
@@ -15877,16 +16243,239 @@ impl Vm {
                             }
                         }
 
+                        // Check enum/class interface restrictions
+                        // Skip auto-added interfaces (UnitEnum/BackedEnum for enums)
+                        {
+                            let auto_iface_count = if class.is_enum {
+                                if class.enum_backing_type.is_some() { 2usize } else { 1usize }
+                            } else { 0usize };
+                            // Only check user-specified interfaces (skip auto-added at the beginning)
+                            for (idx, iface_name) in iface_names.iter().enumerate() {
+                                if idx < auto_iface_count {
+                                    continue; // Skip auto-added UnitEnum/BackedEnum
+                                }
+                                let iface_lower: Vec<u8> = iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                match iface_lower.as_slice() {
+                                    b"unitenum" => {
+                                        if !class.is_enum {
+                                            return Err(VmError {
+                                                message: format!("Non-enum class {} cannot implement interface UnitEnum", class_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                        return Err(VmError {
+                                            message: format!("Enum {} cannot implement previously implemented interface UnitEnum", class_display),
+                                            line: op.line,
+                                        });
+                                    }
+                                    b"backedenum" => {
+                                        if !class.is_enum {
+                                            return Err(VmError {
+                                                message: format!("Non-enum class {} cannot implement interface BackedEnum", class_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                        if class.enum_backing_type.is_none() {
+                                            return Err(VmError {
+                                                message: format!("Non-backed enum {} cannot implement interface BackedEnum", class_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                        return Err(VmError {
+                                            message: format!("Enum {} cannot implement previously implemented interface BackedEnum", class_display),
+                                            line: op.line,
+                                        });
+                                    }
+                                    b"serializable" => {
+                                        if class.is_enum {
+                                            return Err(VmError {
+                                                message: format!("Enum {} cannot implement the Serializable interface", class_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
                         // Resolve traits: copy trait methods/properties/constants into the class
                         let trait_names = class.traits.clone();
                         let trait_adaptations = class.trait_adaptations.clone();
                         let class_name_lower: Vec<u8> = class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
+                        // Use the pre-inheritance method/property names to determine which were directly defined
+                        let own_method_names = &own_method_names_pre_inherit;
+                        let own_prop_names = &own_prop_names_pre_inherit;
+
+                        // Check that trait names actually refer to traits
+                        for trait_name in &trait_names {
+                            let trait_lower: Vec<u8> =
+                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            // Check if it's "static" which is reserved
+                            if trait_lower == b"static" {
+                                return Err(VmError {
+                                    message: "Cannot use static as a trait".to_string(),
+                                    line: op.line,
+                                });
+                            }
+                            // Try autoloading if trait not found
+                            if !self.classes.contains_key(&trait_lower) {
+                                self.try_autoload_class(trait_name);
+                            }
+                            if let Some(trait_def) = self.classes.get(&trait_lower) {
+                                if !trait_def.is_trait {
+                                    let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
+                                    let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                    return Err(VmError {
+                                        message: format!("{} cannot use {} - it is not a trait", class_display, trait_display),
+                                        line: op.line,
+                                    });
+                                }
+                            } else {
+                                let trait_display = String::from_utf8_lossy(trait_name).to_string();
+                                return Err(VmError {
+                                    message: format!("Could not find trait {}", trait_display),
+                                    line: op.line,
+                                });
+                            }
+                        }
+
+                        // Validate trait adaptations: check for aliasing/precedence of nonexistent methods
+                        for adapt in &trait_adaptations {
+                            match adapt {
+                                crate::object::TraitAdaptation::Alias {
+                                    trait_name: alias_trait,
+                                    method: alias_method,
+                                    new_name,
+                                    ..
+                                } => {
+                                    let method_lower: Vec<u8> = alias_method.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if let Some(tn) = alias_trait {
+                                        let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        // Check if this is actually a trait we're using
+                                        let is_trait = self.classes.get(&tn_lower).map(|c| c.is_trait).unwrap_or(false);
+                                        if !is_trait {
+                                            let tn_display = String::from_utf8_lossy(tn).to_string();
+                                            return Err(VmError {
+                                                message: format!("Class {} is not a trait, Only traits may be used in 'as' and 'insteadof' statements", tn_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                        // Check method exists in that trait
+                                        let method_exists = self.classes.get(&tn_lower)
+                                            .map(|t| t.methods.contains_key(&method_lower))
+                                            .unwrap_or(false);
+                                        if !method_exists {
+                                            let tn_display = String::from_utf8_lossy(tn).to_string();
+                                            let method_display = String::from_utf8_lossy(alias_method).to_string();
+                                            return Err(VmError {
+                                                message: format!("An alias was defined for {}::{} but this method does not exist", tn_display, method_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                    } else {
+                                        // No trait specified - method must exist in at least one trait
+                                        let method_display = String::from_utf8_lossy(alias_method).to_string();
+                                        // Check how many traits have this method
+                                        let mut found_count = 0;
+                                        let mut found_traits: Vec<String> = Vec::new();
+                                        for tn in &trait_names {
+                                            let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            if let Some(t) = self.classes.get(&tn_lower) {
+                                                if t.methods.contains_key(&method_lower) {
+                                                    found_count += 1;
+                                                    found_traits.push(String::from_utf8_lossy(&t.name).to_string());
+                                                }
+                                            }
+                                        }
+                                        if found_count == 0 {
+                                            let alias_display = if let Some(nn) = new_name {
+                                                String::from_utf8_lossy(nn).to_string()
+                                            } else {
+                                                method_display.clone()
+                                            };
+                                            return Err(VmError {
+                                                message: format!("An alias ({}) was defined for method {}(), but this method does not exist", alias_display, method_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                        if found_count > 1 {
+                                            return Err(VmError {
+                                                message: format!("An alias was defined for method {}(), which exists in both {}. Use {}::{} or {}::{} to resolve the ambiguity",
+                                                    method_display, found_traits.join(" and "),
+                                                    found_traits[0], method_display,
+                                                    found_traits[1], method_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                }
+                                crate::object::TraitAdaptation::Precedence {
+                                    trait_name: prec_trait,
+                                    method: prec_method,
+                                    instead_of,
+                                } => {
+                                    let prec_trait_lower: Vec<u8> = prec_trait.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let method_lower: Vec<u8> = prec_method.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    // Check that the trait is actually a trait
+                                    let is_trait = self.classes.get(&prec_trait_lower).map(|c| c.is_trait).unwrap_or(false);
+                                    if !is_trait {
+                                        let tn_display = String::from_utf8_lossy(prec_trait).to_string();
+                                        if self.classes.contains_key(&prec_trait_lower) {
+                                            return Err(VmError {
+                                                message: format!("Class {} is not a trait, Only traits may be used in 'as' and 'insteadof' statements", tn_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    // Check method exists
+                                    let method_exists = self.classes.get(&prec_trait_lower)
+                                        .map(|t| t.methods.contains_key(&method_lower))
+                                        .unwrap_or(false);
+                                    if !method_exists {
+                                        let tn_display = String::from_utf8_lossy(prec_trait).to_string();
+                                        let method_display = String::from_utf8_lossy(prec_method).to_string();
+                                        return Err(VmError {
+                                            message: format!("A precedence rule was defined for {}::{} but this method does not exist", tn_display, method_display),
+                                            line: op.line,
+                                        });
+                                    }
+                                    // Check that the trait itself is not in the insteadof list
+                                    for io in instead_of {
+                                        let io_lower: Vec<u8> = io.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if io_lower == prec_trait_lower {
+                                            let tn_display = String::from_utf8_lossy(prec_trait).to_string();
+                                            let method_display = String::from_utf8_lossy(prec_method).to_string();
+                                            return Err(VmError {
+                                                message: format!("Inconsistent insteadof definition. The method {} is to be used from {}, but {} is also on the exclude list",
+                                                    method_display, tn_display, tn_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Helper closure to patch __CLASS__ references in a method's literals
+                        fn patch_class_literals(m: &mut crate::object::MethodDef, trait_name_original: &[u8], class_name: &[u8]) {
+                            for &lit_idx in &m.op_array.class_const_literals.clone() {
+                                if let Some(Value::String(s)) = m.op_array.literals.get(lit_idx as usize) {
+                                    if s.as_bytes() == trait_name_original {
+                                        m.op_array.literals[lit_idx as usize] = Value::String(PhpString::from_vec(class_name.to_vec()));
+                                    }
+                                }
+                            }
+                        }
+
                         for trait_name in &trait_names {
                             let trait_lower: Vec<u8> =
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
-                                // Copy trait methods (class's own methods take precedence)
+                                // Copy trait methods
+                                // Trait methods override inherited parent methods, but NOT the class's own methods
                                 for (method_name, method) in &trait_def.methods {
                                     // Check if this method is excluded by an insteadof rule
                                     let mut excluded = false;
@@ -15912,29 +16501,70 @@ impl Vm {
                                     if excluded {
                                         continue;
                                     }
-                                    if !class.methods.contains_key(method_name) {
-                                        let mut m = method.clone();
-                                        // Trait methods should have scope of the using class
-                                        m.declaring_class = class_name_lower.clone();
-                                        m.op_array.scope_class = Some(class_name_lower.clone());
-                                        // Patch __CLASS__ references in literals (only marked ones)
-                                        let trait_name_original = trait_def.name.clone();
-                                        for &lit_idx in &m.op_array.class_const_literals.clone() {
-                                            if let Some(Value::String(s)) = m.op_array.literals.get(lit_idx as usize) {
-                                                if s.as_bytes() == trait_name_original.as_slice() {
-                                                    m.op_array.literals[lit_idx as usize] = Value::String(PhpString::from_vec(class.name.clone()));
-                                                }
-                                            }
-                                        }
-                                        class.methods.insert(method_name.clone(), m);
+                                    // Only skip if the method was directly defined in this class (not inherited from parent)
+                                    if own_method_names.contains(method_name) {
+                                        continue;
                                     }
+                                    let mut m = method.clone();
+                                    // Trait methods should have scope of the using class
+                                    m.declaring_class = class_name_lower.clone();
+                                    m.op_array.scope_class = Some(class_name_lower.clone());
+                                    // Patch __CLASS__ references in literals (only marked ones)
+                                    let trait_name_original = trait_def.name.clone();
+                                    patch_class_literals(&mut m, &trait_name_original, &class.name);
+                                    class.methods.insert(method_name.clone(), m);
                                 }
-                                // Copy trait properties (class's own properties take precedence)
+                                // Copy trait properties
                                 let child_prop_names: Vec<Vec<u8>> =
                                     class.properties.iter().map(|p| p.name.clone()).collect();
                                 let trait_name_original = trait_def.name.clone();
                                 for prop in &trait_def.properties {
-                                    if !child_prop_names.contains(&prop.name) {
+                                    if own_prop_names.contains(&prop.name) {
+                                        // Class directly defines this property - check compatibility
+                                        if let Some(class_prop) = class.properties.iter().find(|p| p.name == prop.name) {
+                                            // Check: static vs non-static mismatch
+                                            if prop.is_static != class_prop.is_static {
+                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
+                                                let prop_display = String::from_utf8_lossy(&prop.name).to_string();
+                                                return Err(VmError {
+                                                    message: format!("{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
+                                                        class_display, trait_display, prop_display, class_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                            // Check: visibility mismatch
+                                            if prop.visibility != class_prop.visibility {
+                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
+                                                let prop_display = String::from_utf8_lossy(&prop.name).to_string();
+                                                return Err(VmError {
+                                                    message: format!("{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
+                                                        class_display, trait_display, prop_display, class_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                            // Check: default value mismatch (strict equality)
+                                            if !Self::values_identical(&prop.default, &class_prop.default) {
+                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
+                                                let prop_display = String::from_utf8_lossy(&prop.name).to_string();
+                                                return Err(VmError {
+                                                    message: format!("{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
+                                                        class_display, trait_display, prop_display, class_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                    } else if !child_prop_names.contains(&prop.name) {
+                                        // Check if enum - enums cannot include properties from traits
+                                        if class.is_enum {
+                                            let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                            return Err(VmError {
+                                                message: format!("Enum {} cannot include properties", class_display),
+                                                line: op.line,
+                                            });
+                                        }
                                         let mut p = prop.clone();
                                         p.declaring_class = class_name_lower.clone();
                                         // Patch __CLASS__ in property defaults
@@ -15972,6 +16602,26 @@ impl Vm {
                                             .insert(prop_name.clone(), patched_val);
                                     }
                                 }
+
+                                // Check enum restrictions on trait methods
+                                if class.is_enum {
+                                    let forbidden_magic = [
+                                        b"__construct" as &[u8], b"__destruct", b"__clone",
+                                        b"__get", b"__set", b"__unset", b"__isset",
+                                        b"__tostring", b"__debuginfo", b"__serialize", b"__unserialize",
+                                        b"__sleep", b"__wakeup", b"__set_state",
+                                    ];
+                                    for (method_name, _) in &trait_def.methods {
+                                        if forbidden_magic.contains(&method_name.as_slice()) {
+                                            let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                            let method_display = String::from_utf8_lossy(method_name).to_string();
+                                            return Err(VmError {
+                                                message: format!("Enum {} cannot include magic method {}", class_display, method_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -15986,18 +16636,42 @@ impl Vm {
                             {
                                 let method_lower: Vec<u8> = alias_method.iter().map(|b| b.to_ascii_lowercase()).collect();
 
-                                // Find the source method (from specified trait or any trait)
+                                // Find the source method from the original trait definition (not the class's imported methods)
                                 let source_method = if let Some(tn) = alias_trait {
                                     let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    self.classes.get(&tn_lower).and_then(|t| t.methods.get(&method_lower).cloned())
+                                    if let Some(t) = self.classes.get(&tn_lower) {
+                                        t.methods.get(&method_lower).cloned()
+                                    } else {
+                                        None
+                                    }
                                 } else {
-                                    // Look in the class's already-imported methods
-                                    class.methods.get(&method_lower).cloned()
+                                    // No trait specified - look in all used traits, then fall back to class methods
+                                    let mut found = None;
+                                    for tn in &trait_names {
+                                        let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if let Some(t) = self.classes.get(&tn_lower) {
+                                            if let Some(m) = t.methods.get(&method_lower) {
+                                                found = Some(m.clone());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if found.is_none() {
+                                        found = class.methods.get(&method_lower).cloned();
+                                    }
+                                    found
                                 };
 
                                 if let Some(mut m) = source_method {
                                     m.declaring_class = class_name_lower.clone();
                                     m.op_array.scope_class = Some(class_name_lower.clone());
+                                    // Patch __CLASS__ in the aliased method
+                                    for tn in &trait_names {
+                                        let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if let Some(t) = self.classes.get(&tn_lower) {
+                                            patch_class_literals(&mut m, &t.name, &class.name);
+                                        }
+                                    }
                                     if let Some(vis) = new_visibility {
                                         m.visibility = *vis;
                                     }
@@ -16017,33 +16691,63 @@ impl Vm {
                             }
                         }
 
+                        // Check abstract trait method compatibility with class implementations
+                        // Trait abstract methods must be checked against the class's concrete implementations
+                        {
+                            let mut all_trait_abstract_methods: Vec<(Vec<u8>, crate::object::MethodDef, Vec<u8>)> = Vec::new();
+                            for trait_name in &trait_names {
+                                let trait_lower: Vec<u8> = trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(trait_def) = self.classes.get(&trait_lower) {
+                                    for (method_name, method) in &trait_def.methods {
+                                        if method.is_abstract {
+                                            all_trait_abstract_methods.push((method_name.clone(), method.clone(), trait_def.name.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                            for (method_name, trait_method, trait_orig_name) in &all_trait_abstract_methods {
+                                if let Some(class_method) = class.methods.get(method_name) {
+                                    if !class_method.is_abstract {
+                                        // Check staticness compatibility
+                                        if trait_method.is_static && !class_method.is_static {
+                                            let trait_display = String::from_utf8_lossy(trait_orig_name).to_string();
+                                            let method_display = String::from_utf8_lossy(&trait_method.name).to_string();
+                                            let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                            return Err(VmError {
+                                                message: format!("Cannot make static method {}::{}() non static in class {}", trait_display, method_display, class_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                        if !trait_method.is_static && class_method.is_static {
+                                            let trait_display = String::from_utf8_lossy(trait_orig_name).to_string();
+                                            let method_display = String::from_utf8_lossy(&trait_method.name).to_string();
+                                            let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                            return Err(VmError {
+                                                message: format!("Cannot make non static method {}::{}() static in class {}", trait_display, method_display, class_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                        // Check method signature compatibility
+                                        if let Some(err_msg) = Self::check_method_compatibility(
+                                            &class.name, class_method,
+                                            trait_orig_name, trait_method,
+                                        ) {
+                                            return Err(VmError {
+                                                message: err_msg,
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Check for unimplemented abstract methods (interface enforcement)
                         if !class.is_abstract && !class.is_interface && !class.is_trait {
                             let mut abstract_methods: Vec<String> = Vec::new();
                             let _class_name_lower_for_check: Vec<u8> = class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             for (_, method) in &class.methods {
                                 if method.is_abstract {
-                                    // Skip abstract methods inherited from traits
-                                    // (non-abstract classes are allowed to use traits with abstract methods)
-                                    let declaring_is_trait = self.classes.get(&method.declaring_class)
-                                        .map(|c| c.is_trait)
-                                        .unwrap_or(false);
-                                    if declaring_is_trait {
-                                        continue;
-                                    }
-                                    // Also check if the method came from a trait by looking at used trait names
-                                    let method_from_trait = trait_names.iter().any(|tn| {
-                                        let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        if let Some(tc) = self.classes.get(&tn_lower) {
-                                            let method_lower: Vec<u8> = method.name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                            tc.methods.contains_key(&method_lower)
-                                        } else {
-                                            false
-                                        }
-                                    });
-                                    if method_from_trait {
-                                        continue;
-                                    }
                                     // Find which interface this method belongs to
                                     let mut iface_origin = String::new();
                                     for iface_name in &iface_names {

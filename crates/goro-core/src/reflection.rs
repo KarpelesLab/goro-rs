@@ -2194,9 +2194,9 @@ pub fn reflection_constant_method(
         b"getvalue" => {
             // Look up the constant value
             let const_lower: Vec<u8> = name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-            if let Some(val) = vm.get_constant(name.as_bytes()) {
+            if let Some(val) = vm.constants.get(name.as_bytes()) {
                 Some(val.clone())
-            } else if let Some(val) = vm.get_constant(&const_lower) {
+            } else if let Some(val) = vm.constants.get(&const_lower[..]) {
                 Some(val.clone())
             } else {
                 Some(Value::Null)

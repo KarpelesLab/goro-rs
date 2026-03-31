@@ -3357,6 +3357,47 @@ impl Compiler {
                                 let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 let mut abstract_op_array = OpArray::new();
                                 abstract_op_array.decl_line = *method_line;
+                                abstract_op_array.name = method_name.clone();
+                                abstract_op_array.scope_class = Some(declaring_class_lower.clone());
+                                // Populate parameter information for abstract methods
+                                // This is needed for method signature compatibility checks
+                                if !is_static {
+                                    abstract_op_array.get_or_create_cv(b"this");
+                                }
+                                abstract_op_array.param_count = params.len() as u32
+                                    + if *is_static { 0 } else { 1 };
+                                abstract_op_array.required_param_count = params
+                                    .iter()
+                                    .filter(|p| p.default.is_none() && !p.variadic)
+                                    .count() as u32;
+                                for param in params {
+                                    let cv = abstract_op_array.get_or_create_cv(&param.name);
+                                    if param.variadic {
+                                        abstract_op_array.variadic_param = Some(cv);
+                                    }
+                                    let type_info = param.type_hint.as_ref().map(|hint| {
+                                        let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                        if let Some(default_expr) = &param.default {
+                                            if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                                                pt = ParamType::Nullable(Box::new(pt));
+                                            }
+                                        }
+                                        crate::opcode::ParamTypeInfo {
+                                            param_type: pt,
+                                            param_name: param.name.clone(),
+                                        }
+                                    });
+                                    // Store at CV index (cv already accounts for $this offset)
+                                    while abstract_op_array.param_types.len() <= cv as usize {
+                                        abstract_op_array.param_types.push(None);
+                                    }
+                                    abstract_op_array.param_types[cv as usize] = type_info;
+                                }
+                                // Set return type
+                                if let Some(hint) = method_return_type {
+                                    abstract_op_array.return_type =
+                                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                                }
                                 class.methods.insert(
                                     lower_name,
                                     MethodDef {
@@ -6742,7 +6783,8 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    let resolved = if class_name.eq_ignore_ascii_case(b"self") {
+                    let is_self = class_name.eq_ignore_ascii_case(b"self");
+                    let resolved = if is_self {
                         self.current_class.clone().unwrap_or_default()
                     } else {
                         class_name.clone()
@@ -6750,11 +6792,16 @@ impl Compiler {
                     let idx = self
                         .op_array
                         .add_literal(Value::String(PhpString::from_vec(resolved)));
+                    // Track self::class for trait patching
+                    if is_self {
+                        self.op_array.class_const_literals.push(idx);
+                    }
                     return Ok(OperandType::Const(idx));
                 }
 
                 // Try to find the constant at compile time in already-compiled classes
-                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
+                let is_self_const = class_name.eq_ignore_ascii_case(b"self");
+                let resolved_class = if is_self_const {
                     self.current_class.clone().unwrap_or(class_name.clone())
                 } else if class_name.eq_ignore_ascii_case(b"static") {
                     // Late static binding: resolve at runtime
@@ -6771,6 +6818,10 @@ impl Compiler {
                 let class_idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(resolved_class)));
+                // Track self:: references for trait patching
+                if is_self_const {
+                    self.op_array.class_const_literals.push(class_idx);
+                }
                 let const_name_idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(constant.clone())));
@@ -6946,7 +6997,8 @@ impl Compiler {
                     ExprKind::Identifier(name) => {
                         let resolved = self.resolve_class_name(name);
                         // Resolve self/parent, keep static as literal for LSB
-                        let class_name = if resolved.eq_ignore_ascii_case(b"self") {
+                        let is_self = resolved.eq_ignore_ascii_case(b"self");
+                        let class_name = if is_self {
                             self.current_class.clone().unwrap_or(resolved)
                         } else if resolved.eq_ignore_ascii_case(b"static") {
                             // Late static binding: resolve at runtime
@@ -6957,6 +7009,10 @@ impl Compiler {
                             resolved
                         };
                         let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                        // Track self:: references for trait patching (like __CLASS__)
+                        if is_self {
+                            self.op_array.class_const_literals.push(idx);
+                        }
                         (OperandType::Const(idx), property.clone())
                     }
                     _ => {

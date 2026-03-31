@@ -5487,6 +5487,14 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
             let class_lower: Vec<u8> = class_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
             let class_name = String::from_utf8_lossy(&class_name_bytes).to_string();
 
+            // Check if this is an enum case - use E: format
+            if Vm::is_enum_case(val) {
+                let case_name = obj.borrow().get_property(b"name");
+                let case_str = case_name.to_php_string();
+                let full = format!("{}:{}", class_name, case_str.to_string_lossy());
+                return format!("E:{}:\"{}\";", full.len(), full);
+            }
+
             // Check for __serialize first (PHP 7.4+)
             let has_serialize = vm.classes.get(&class_lower)
                 .map(|c| c.get_method(b"__serialize").is_some())
@@ -5903,6 +5911,104 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
                 *pos += 1;
             }
             Some(Value::Null)
+        }
+        b'E' => {
+            // E:n:"ClassName:CaseName";
+            *pos += 1;
+            if *pos < data.len() && data[*pos] == b':' {
+                *pos += 1;
+            }
+            // Read total length
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b':' {
+                *pos += 1;
+            }
+            let len_str = String::from_utf8_lossy(&data[start..*pos]).to_string();
+            let len = len_str.parse::<usize>().unwrap_or(0);
+            if *pos < data.len() {
+                *pos += 1; // skip ':'
+            }
+            if *pos < data.len() && data[*pos] == b'"' {
+                *pos += 1;
+            }
+            let str_start = *pos;
+            let str_end = (*pos + len).min(data.len());
+            let content = &data[str_start..str_end];
+            *pos = str_end;
+            if *pos < data.len() && data[*pos] == b'"' {
+                *pos += 1;
+            }
+            if *pos < data.len() && data[*pos] == b';' {
+                *pos += 1;
+            }
+
+            // Parse "ClassName:CaseName"
+            if let Some(colon_pos) = content.iter().position(|&b| b == b':') {
+                let class_bytes = &content[..colon_pos];
+                let case_bytes = &content[colon_pos + 1..];
+                let class_lower: Vec<u8> = class_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                // Check if class exists and is an enum
+                if let Some(ce) = vm.classes.get(&class_lower) {
+                    if !ce.is_enum {
+                        let class_str = String::from_utf8_lossy(class_bytes);
+                        vm.emit_warning_at(
+                            &format!("unserialize(): Class '{}' is not an enum", class_str),
+                            vm.current_line,
+                        );
+                        let msg = format!("unserialize(): Error at offset 0 of {} bytes", data.len());
+                        vm.emit_warning_at(&msg, vm.current_line);
+                        return None;
+                    }
+                    // Check if the case exists (it must be in enum_cases, not just constants)
+                    let case_exists = ce.enum_cases.iter().any(|(name, _)| name == case_bytes);
+                    if !case_exists {
+                        // Check if it's a regular constant (not a case)
+                        let is_const = ce.constants.contains_key(case_bytes);
+                        let class_str = String::from_utf8_lossy(class_bytes);
+                        let case_str = String::from_utf8_lossy(case_bytes);
+                        if is_const {
+                            vm.emit_warning_at(
+                                &format!("unserialize(): {}::{} is not an enum case", class_str, case_str),
+                                vm.current_line,
+                            );
+                        } else {
+                            vm.emit_warning_at(
+                                &format!("unserialize(): Undefined constant {}::{}", class_str, case_str),
+                                vm.current_line,
+                            );
+                        }
+                        let offset = str_end.min(data.len());
+                        let msg = format!("unserialize(): Error at offset {} of {} bytes", offset, data.len());
+                        vm.emit_warning_at(&msg, vm.current_line);
+                        return None;
+                    }
+                    // Get/create the enum case singleton
+                    if let Some(enum_obj) = vm.get_enum_case(&class_lower, case_bytes) {
+                        return Some(enum_obj);
+                    }
+                } else {
+                    let class_str = String::from_utf8_lossy(class_bytes);
+                    vm.emit_warning_at(
+                        &format!("unserialize(): Class '{}' is not an enum", class_str),
+                        vm.current_line,
+                    );
+                    let msg = format!("unserialize(): Error at offset 0 of {} bytes", data.len());
+                    vm.emit_warning_at(&msg, vm.current_line);
+                    return None;
+                }
+            } else {
+                // Missing colon
+                let content_str = String::from_utf8_lossy(content);
+                vm.emit_warning_at(
+                    &format!("unserialize(): Invalid enum name '{}' (missing colon)", content_str),
+                    vm.current_line,
+                );
+                let msg = format!("unserialize(): Error at offset 0 of {} bytes", data.len());
+                vm.emit_warning_at(&msg, vm.current_line);
+                return None;
+            }
+            None
         }
         b'C' => {
             // C:n:"ClassName":n:{...} (custom serializable)
