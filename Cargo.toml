@@ -9,7 +9,9 @@ members = [
     "crates/goro-ext-json",
     "crates/goro-ext-ctype",
     "crates/goro-ext-hash",
+    "crates/goro-ext-openssl",
     "crates/goro-phpt",
+    "crates/goro-ext-xml",
 ]
 resolver = "2"
 
@@ -31,7 +33,9 @@ goro-ext-date = { path = "crates/goro-ext-date" }
 goro-ext-json = { path = "crates/goro-ext-json" }
 goro-ext-ctype = { path = "crates/goro-ext-ctype" }
 goro-ext-hash = { path = "crates/goro-ext-hash" }
+goro-ext-openssl = { path = "crates/goro-ext-openssl" }
 goro-phpt = { path = "crates/goro-phpt" }
+goro-ext-xml = { path = "crates/goro-ext-xml" }
 
 [features]
 default = ["ext-standard"]

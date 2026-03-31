@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-xml"
+version = "0.1.0"
+edition = "2024"
+description = "PHP xml extension for goro-rs"
+
+[dependencies]
+goro-core = { path = "../goro-core" }
