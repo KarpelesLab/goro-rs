@@ -2764,7 +2764,8 @@ impl Vm {
                 }
             } else {
                 // Parent has return type but child doesn't - incompatible
-                false
+                // (except for void return type, which is compatible with no return type)
+                !matches!(parent_rt, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"))
             }
         } else {
             // Parent has no return type - child can add one (covariant)
@@ -2852,6 +2853,102 @@ impl Vm {
                 }
             }
             _ => true,
+        }
+    }
+
+    /// Check if two optional ParamTypes are structurally equal (for property type invariance)
+    fn param_types_are_equal(a: &Option<ParamType>, b: &Option<ParamType>) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+            (Some(a), Some(b)) => {
+                // Normalize both types before comparing (expand iterable, flatten unions)
+                let a_norm = Self::normalize_param_type(a);
+                let b_norm = Self::normalize_param_type(b);
+                Self::param_type_equal(&a_norm, &b_norm)
+            }
+        }
+    }
+
+    /// Normalize a ParamType by expanding iterable to Traversable|array union members
+    fn normalize_param_type(pt: &ParamType) -> ParamType {
+        match pt {
+            ParamType::Simple(name) => {
+                let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if lower == b"iterable" {
+                    // Expand iterable to Union(Traversable, array)
+                    ParamType::Union(vec![
+                        ParamType::Simple(b"Traversable".to_vec()),
+                        ParamType::Simple(b"array".to_vec()),
+                    ])
+                } else {
+                    pt.clone()
+                }
+            }
+            ParamType::Nullable(inner) => {
+                ParamType::Nullable(Box::new(Self::normalize_param_type(inner)))
+            }
+            ParamType::Union(types) => {
+                // Expand iterable members and flatten
+                let mut expanded: Vec<ParamType> = Vec::new();
+                for t in types {
+                    let normalized = Self::normalize_param_type(t);
+                    if let ParamType::Union(inner_types) = normalized {
+                        expanded.extend(inner_types);
+                    } else {
+                        expanded.push(normalized);
+                    }
+                }
+                ParamType::Union(expanded)
+            }
+            ParamType::Intersection(types) => {
+                ParamType::Intersection(types.iter().map(|t| Self::normalize_param_type(t)).collect())
+            }
+        }
+    }
+
+    fn param_type_equal(a: &ParamType, b: &ParamType) -> bool {
+        match (a, b) {
+            (ParamType::Simple(a_name), ParamType::Simple(b_name)) => {
+                let a_lower: Vec<u8> = a_name.iter().map(|bb| bb.to_ascii_lowercase()).collect();
+                let b_lower: Vec<u8> = b_name.iter().map(|bb| bb.to_ascii_lowercase()).collect();
+                // Normalize aliases
+                let normalize = |n: &[u8]| -> Vec<u8> {
+                    match n {
+                        b"integer" => b"int".to_vec(),
+                        b"double" => b"float".to_vec(),
+                        b"boolean" => b"bool".to_vec(),
+                        other => other.to_vec(),
+                    }
+                };
+                normalize(&a_lower) == normalize(&b_lower)
+            }
+            (ParamType::Nullable(a_inner), ParamType::Nullable(b_inner)) => {
+                Self::param_type_equal(a_inner, b_inner)
+            }
+            (ParamType::Union(a_types), ParamType::Union(b_types)) => {
+                if a_types.len() != b_types.len() {
+                    return false;
+                }
+                // Check all types in a exist in b (order-independent)
+                a_types.iter().all(|at| b_types.iter().any(|bt| Self::param_type_equal(at, bt)))
+                    && b_types.iter().all(|bt| a_types.iter().any(|at| Self::param_type_equal(at, bt)))
+            }
+            (ParamType::Intersection(a_types), ParamType::Intersection(b_types)) => {
+                if a_types.len() != b_types.len() {
+                    return false;
+                }
+                a_types.iter().all(|at| b_types.iter().any(|bt| Self::param_type_equal(at, bt)))
+                    && b_types.iter().all(|bt| a_types.iter().any(|at| Self::param_type_equal(at, bt)))
+            }
+            // An intersection type A&B can be equivalent to just B when B extends A.
+            // We can't check class hierarchy here, so we check if the simple type
+            // is one of the intersection members (which is a common case).
+            (ParamType::Intersection(types), ParamType::Simple(name)) | (ParamType::Simple(name), ParamType::Intersection(types)) => {
+                // If the simple type is one of the intersection members, it's plausibly equivalent
+                types.iter().any(|t| Self::param_type_equal(t, &ParamType::Simple(name.clone())))
+            }
+            _ => false,
         }
     }
 
@@ -6671,7 +6768,10 @@ impl Vm {
                     // Weak mode: coerce return value
                     Self::coerce_value_to_type(val, ret_type, false);
                 }
-                if !self.value_matches_return_type(val, ret_type) {
+                // For mixed return type, implicit return (no explicit return statement) is an error
+                // because mixed means "must return a value" even though it accepts any type
+                let mixed_implicit_mismatch = implicit_return && matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"mixed"));
+                if mixed_implicit_mismatch || !self.value_matches_return_type(val, ret_type) {
                     let raw_name = String::from_utf8_lossy(&op_array.name);
                     // Include class name in the function display name for methods
                     let func_name = if let Some(ref scope) = op_array.scope_class {
@@ -8874,6 +8974,87 @@ impl Vm {
                                 &static_cv_keys,
                             );
                         }
+                    } else if func_name_lower == b"__generator_throw" {
+                        // Generator throw() method: args[0] = generator, args[1] = exception
+                        if let Some(Value::Generator(gen_rc)) = call.args.first() {
+                            let exception = call.args.get(1).cloned().unwrap_or(Value::Null);
+                            let mut gen_borrow = gen_rc.borrow_mut();
+
+                            if gen_borrow.state == crate::generator::GeneratorState::Completed {
+                                // Generator is already closed - re-throw the exception
+                                drop(gen_borrow);
+                                self.current_exception = Some(exception);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                    let ob = obj.borrow();
+                                    let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                    format!("Uncaught {}: {}", class, msg)
+                                } else { "Uncaught exception".to_string() };
+                                return Err(VmError { message: exc_msg, line: op.line });
+                            }
+
+                            if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                // Fresh generator - advance to first yield first, then throw
+                                let _ = gen_borrow.resume(self);
+                                if gen_borrow.state == crate::generator::GeneratorState::Completed {
+                                    // Generator completed without yielding - throw the exception
+                                    drop(gen_borrow);
+                                    self.current_exception = Some(exception);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                        let ob = obj.borrow();
+                                        let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                        let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                        format!("Uncaught {}: {}", class, msg)
+                                    } else { "Uncaught exception".to_string() };
+                                    return Err(VmError { message: exc_msg, line: op.line });
+                                }
+                            }
+
+                            // Set the exception and resume the generator with it
+                            self.current_exception = Some(exception);
+
+                            // Resume with exception
+                            let result = gen_borrow.resume_with_exception(self);
+                            let current_value = gen_borrow.current_value.clone();
+                            drop(gen_borrow);
+
+                            match result {
+                                Ok(_) => {
+                                    self.write_operand(
+                                        &op.result,
+                                        current_value,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                }
+                                Err(e) => {
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                    }
+                                    return Err(e);
+                                }
+                            }
+                        } else {
+                            self.write_operand(
+                                &op.result,
+                                Value::Null,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                        }
                     } else if func_name_lower.contains(&b':') && {
                         // Check if this is an enum static method call (from/tryFrom/cases)
                         let sep_pos = func_name_lower.iter().position(|&b| b == b':').unwrap_or(0);
@@ -9652,6 +9833,30 @@ impl Vm {
                             false
                         };
 
+                        // For closures with $this, push the called_class for static:: resolution
+                        let pushed_called_for_closure = if !pushed_called_class
+                            && user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                        {
+                            // Get the $this object's class name from the first arg
+                            if let Some(Value::Object(obj)) = call.args.first() {
+                                let class_name = obj.borrow().class_name.clone();
+                                self.called_class_stack.push(class_name);
+                                true
+                            } else if pushed_scope_from_fn {
+                                // Use scope_class as fallback for called_class
+                                if let Some(ref scope) = user_fn.scope_class {
+                                    self.called_class_stack.push(scope.clone());
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
                         // Save caller's globals before the call
                         if was_global {
                             for (i, cv) in cvs.iter().enumerate() {
@@ -9759,6 +9964,9 @@ impl Vm {
                         }
                         if pushed_scope_from_fn {
                             self.class_scope_stack.pop();
+                        }
+                        if pushed_called_for_closure {
+                            self.called_class_stack.pop();
                         }
 
                         self.is_global_scope = was_global;
@@ -11375,6 +11583,40 @@ impl Vm {
 
                 OpCode::ForeachInitRef => {
                     let arr_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, &op_array, op.line);
+
+                    // Handle Generator values - delegate to ForeachInit behavior
+                    if let Value::Generator(gen_rc) = &arr_val {
+                        {
+                            let mut gen_borrow = gen_rc.borrow_mut();
+                            if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                let resume_result = gen_borrow.resume(self);
+                                drop(gen_borrow);
+                                if resume_result.is_err() || self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                        exception_handlers.pop();
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    if let Err(e) = resume_result {
+                                        return Err(e);
+                                    }
+                                    return Err(VmError { message: "Uncaught exception in generator".to_string(), line: op.line });
+                                }
+                            }
+                        }
+                        self.write_operand(
+                            &op.result,
+                            arr_val,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                        if let OperandType::Tmp(iter_idx) = op.result {
+                            foreach_positions.insert(iter_idx, 0usize);
+                        }
+                        continue;
+                    }
+
                     let iter_idx = match op.result {
                         OperandType::Tmp(idx) => idx,
                         _ => 0,
@@ -11457,6 +11699,51 @@ impl Vm {
                         OperandType::Tmp(idx) => idx,
                         _ => 0,
                     };
+
+                    // Check if this is a generator iteration (by-ref foreach on a generator)
+                    let iter_val = match op.op1 {
+                        OperandType::Tmp(idx) => tmps.get(idx as usize).cloned(),
+                        _ => None,
+                    };
+                    if let Some(Value::Generator(gen_rc)) = &iter_val {
+                        let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
+                        // For generators in by-ref foreach, use ForeachNext behavior
+                        let gen_borrow = gen_rc.borrow();
+                        if gen_borrow.state == crate::generator::GeneratorState::Completed {
+                            drop(gen_borrow);
+                            if let OperandType::JmpTarget(target) = op.op2 {
+                                ip = target as usize;
+                            }
+                            continue;
+                        }
+                        // On first call (pos==0), the generator was already primed by ForeachInitRef
+                        if pos == 0 {
+                            let val = gen_borrow.current_value.clone();
+                            drop(gen_borrow);
+                            self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                            foreach_positions.insert(iter_idx, pos + 1);
+                        } else {
+                            drop(gen_borrow);
+                            let mut gen_borrow = gen_rc.borrow_mut();
+                            gen_borrow.write_send_value();
+                            match gen_borrow.resume(self) {
+                                Ok(true) => {
+                                    let val = gen_borrow.current_value.clone();
+                                    drop(gen_borrow);
+                                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                                    foreach_positions.insert(iter_idx, pos + 1);
+                                }
+                                _ => {
+                                    drop(gen_borrow);
+                                    if let OperandType::JmpTarget(target) = op.op2 {
+                                        ip = target as usize;
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
 
                     // Re-snapshot keys each iteration for by-ref (elements may be added)
@@ -12687,7 +12974,15 @@ impl Vm {
                     // Directly replace the CV slot with Undef (breaks reference links)
                     if let OperandType::Cv(idx) = op.op1 {
                         if let Some(slot) = cvs.get_mut(idx as usize) {
-                            *slot = Value::Undef;
+                            // If the CV holds a generator, close it (run finally blocks)
+                            if let Value::Generator(gen_rc) = slot {
+                                let gen_clone = gen_rc.clone();
+                                *slot = Value::Undef;
+                                let mut gen_borrow = gen_clone.borrow_mut();
+                                gen_borrow.close(self);
+                            } else {
+                                *slot = Value::Undef;
+                            }
                         }
                     }
                 }
@@ -13598,6 +13893,38 @@ impl Vm {
                                                 };
                                                 return Err(VmError {
                                                     message: format!("Access level to {}::${} must be {} (as in class {}) or weaker", child_display, prop_display, vis_str, parent_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                // Check property type invariance
+                                for parent_prop in &parent.properties {
+                                    if parent_prop.visibility == Visibility::Private {
+                                        continue; // Private properties are not subject to invariance
+                                    }
+                                    if let Some(child_prop) = class.properties.iter().find(|p| p.name == parent_prop.name) {
+                                        // Property types must be exactly the same (invariant)
+                                        if !Self::param_types_are_equal(&parent_prop.property_type, &child_prop.property_type) {
+                                            let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                            let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                            let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                            let expected_type = if let Some(ref pt) = parent_prop.property_type {
+                                                self.param_type_display(pt)
+                                            } else {
+                                                "omitted to match the parent definition".to_string()
+                                            };
+                                            if parent_prop.property_type.is_none() {
+                                                return Err(VmError {
+                                                    message: format!("Type of {}::${} must be omitted to match the parent definition in class {}",
+                                                        child_display, prop_display, parent_display),
+                                                    line: op.line,
+                                                });
+                                            } else {
+                                                return Err(VmError {
+                                                    message: format!("Type of {}::${} must be {} (as in class {})",
+                                                        child_display, prop_display, expected_type, parent_display),
                                                     line: op.line,
                                                 });
                                             }
@@ -15163,6 +15490,19 @@ impl Vm {
                             continue;
                         }
 
+                        // Closures cannot have dynamic properties
+                        if class_lower == b"closure" {
+                            let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                            let msg = format!("Cannot create dynamic property Closure::${}", prop_str);
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                        }
+
                         // Enums cannot have properties set
                         if obj.borrow().has_property(b"__enum_case") {
                             let class_name = String::from_utf8_lossy(&class_name_orig).to_string();
@@ -15403,6 +15743,17 @@ impl Vm {
                         // Cannot create dynamic properties on Generator objects
                         let prop_str = prop_name.to_string_lossy();
                         let msg = format!("Cannot create dynamic property Generator::${}", prop_str);
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                    } else if Self::is_closure_value(&obj_val) {
+                        // Cannot create dynamic properties on Closure objects
+                        let prop_str = prop_name.to_string_lossy();
+                        let msg = format!("Cannot create dynamic property Closure::${}", prop_str);
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _)) = exception_handlers.pop() {
@@ -15997,10 +16348,10 @@ impl Vm {
                                         return Err(VmError { message: "Uncaught exception in generator".to_string(), line: op.line });
                                     }
                                 } else if gen_borrow.state == crate::generator::GeneratorState::Suspended {
-                                    // In PHP 8.x, rewinding an already-started generator throws an Error
+                                    // Rewinding an already-started generator throws an Exception
                                     drop(gen_borrow);
                                     let msg = "Cannot rewind a generator that was already run";
-                                    let exc = self.create_exception(b"Error", msg, op.line);
+                                    let exc = self.create_exception(b"Exception", msg, op.line);
                                     self.current_exception = Some(exc);
                                     if let Some((catch_target, _, _)) = exception_handlers.pop() {
                                         ip = catch_target as usize;
@@ -16017,23 +16368,75 @@ impl Vm {
                                 Value::Null // Will be handled in DoFCall with args
                             }
                             b"getreturn" => {
-                                let gen_borrow = gen_rc.borrow();
-                                if gen_borrow.state == crate::generator::GeneratorState::Created {
-                                    drop(gen_borrow);
+                                let gen_state = gen_rc.borrow().state.clone();
+                                if gen_state == crate::generator::GeneratorState::Created {
+                                    // Auto-prime: advance to first yield
                                     let mut gen_borrow = gen_rc.borrow_mut();
                                     let _ = gen_borrow.resume(self);
-                                    gen_borrow.return_value.clone()
+                                    let state_after = gen_borrow.state.clone();
+                                    if state_after == crate::generator::GeneratorState::Completed {
+                                        gen_borrow.return_value.clone()
+                                    } else {
+                                        drop(gen_borrow);
+                                        // Generator suspended - hasn't returned yet
+                                        let msg = "Cannot get return value of a generator that hasn't returned";
+                                        let exc = self.create_exception(b"Exception", msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                            exception_handlers.pop();
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught Exception: {}", msg), line: op.line });
+                                    }
+                                } else if gen_state == crate::generator::GeneratorState::Completed {
+                                    let gen_borrow = gen_rc.borrow();
+                                    if gen_borrow.has_returned {
+                                        gen_borrow.return_value.clone()
+                                    } else {
+                                        // Generator was aborted (e.g. by exception) - no return value
+                                        drop(gen_borrow);
+                                        let msg = "Cannot get return value of a generator that hasn't returned";
+                                        let exc = self.create_exception(b"Exception", msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                            exception_handlers.pop();
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught Exception: {}", msg), line: op.line });
+                                    }
                                 } else {
-                                    gen_borrow.return_value.clone()
+                                    // Generator is suspended - throw exception
+                                    let msg = "Cannot get return value of a generator that hasn't returned";
+                                    let exc = self.create_exception(b"Exception", msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                        exception_handlers.pop();
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught Exception: {}", msg), line: op.line });
                                 }
+                            }
+                            b"throw" => {
+                                // throw($exception): throw into the generator
+                                // Will be handled in DoFCall with args
+                                Value::Null
                             }
                             _ => Value::Null,
                         };
 
-                        // For send(), we need to pass through to DoFCall so args can be collected
+                        // For send() and throw(), we need to pass through to DoFCall so args can be collected
                         if method_lower == b"send" {
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::from_bytes(b"__generator_send"),
+                                args: vec![obj_val.clone()],
+                                named_args: Vec::new(),
+                            });
+                        } else if method_lower == b"throw" {
+                            self.pending_calls.push(PendingCall {
+                                name: PhpString::from_bytes(b"__generator_throw"),
                                 args: vec![obj_val.clone()],
                                 named_args: Vec::new(),
                             });
@@ -16067,6 +16470,32 @@ impl Vm {
                                     args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
                                 });
+                            }
+                            b"__invoke" => {
+                                // Closure::__invoke(...$args) - call the closure directly
+                                // Extract the function name from the closure value
+                                let closure_name = match &obj_val {
+                                    Value::String(s) => Some(s.clone()),
+                                    Value::Array(arr) => {
+                                        let arr_borrow = arr.borrow();
+                                        arr_borrow.get(&crate::array::ArrayKey::Int(0))
+                                            .map(|v| v.to_php_string())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(name) = closure_name {
+                                    self.pending_calls.push(PendingCall {
+                                        name,
+                                        args: Vec::new(),
+                                        named_args: Vec::new(),
+                                    });
+                                } else {
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        args: vec![Value::Null],
+                                        named_args: Vec::new(),
+                                    });
+                                }
                             }
                             _ => {
                                 // Not an object - throw "Call to a member function on <type>"
@@ -17172,8 +17601,9 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
 /// Get the built-in parent class name for a class (lowercase)
 pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
     match class {
-        b"typeerror" | b"valueerror" | b"argumentcounterror" | b"rangeerror"
+        b"typeerror" | b"valueerror" | b"rangeerror"
         | b"unhandledmatcherror" | b"assertionerror" | b"fibererror" => Some(b"Error"),
+        b"argumentcounterror" => Some(b"TypeError"),
         b"arithmeticerror" => Some(b"Error"),
         b"divisionbyzeroerror" => Some(b"ArithmeticError"),
         b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"errorexception" | b"jsonexception" => Some(b"Exception"),
@@ -17351,10 +17781,10 @@ pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             // Error hierarchy
             b"typeerror"
             | b"valueerror"
-            | b"argumentcounterror"
             | b"rangeerror"
             | b"unhandledmatcherror"
             | b"assertionerror" => Some(b"error".to_vec()),
+            b"argumentcounterror" => Some(b"typeerror".to_vec()),
             b"arithmeticerror" => Some(b"error".to_vec()),
             b"divisionbyzeroerror" => Some(b"arithmeticerror".to_vec()),
             b"error" => Some(b"throwable".to_vec()),

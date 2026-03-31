@@ -643,6 +643,113 @@ fn ord(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(code as i64))
 }
 
+/// Validate that the format argument to sprintf/printf is a string (not array/resource)
+fn validate_sprintf_format_arg(vm: &mut Vm, func_name: &str, format_arg: Option<&Value>) -> Result<(), VmError> {
+    if let Some(arg) = format_arg {
+        match arg {
+            Value::Array(_) => {
+                let msg = format!("{}(): Argument #1 ($format) must be of type string, array given", func_name);
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Count the number of format specifiers in a sprintf format string and validate arg count
+fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> Result<(), VmError> {
+    if args.is_empty() {
+        return Ok(());
+    }
+    let format = args[0].to_php_string();
+    let format_bytes = format.as_bytes();
+    let mut max_arg = 0usize;
+    let mut seq_arg = 0usize;
+    let mut i = 0;
+
+    while i < format_bytes.len() {
+        if format_bytes[i] == b'%' {
+            i += 1;
+            if i >= format_bytes.len() {
+                // % at end of string with no specifier
+                let msg = "Missing format specifier at end of string";
+                let exc = vm.create_exception(b"ValueError", msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.into(), line: vm.current_line });
+            }
+            if format_bytes[i] == b'%' {
+                i += 1;
+                continue;
+            }
+            // Check for position specifier N$
+            let save_i = i;
+            let mut num = 0usize;
+            let mut has_num = false;
+            while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
+                num = num * 10 + (format_bytes[i] - b'0') as usize;
+                has_num = true;
+                i += 1;
+            }
+            if has_num && i < format_bytes.len() && format_bytes[i] == b'$' {
+                if num > max_arg {
+                    max_arg = num;
+                }
+                i += 1;
+            } else {
+                i = save_i;
+                seq_arg += 1;
+                if seq_arg > max_arg {
+                    max_arg = seq_arg;
+                }
+            }
+            // Skip flags, width, precision, length modifiers, and type
+            while i < format_bytes.len() && matches!(format_bytes[i], b'-' | b'+' | b' ' | b'0' | b'\'') {
+                if format_bytes[i] == b'\'' {
+                    i += 1; // skip pad char
+                }
+                i += 1;
+            }
+            // Width
+            while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            // Precision
+            if i < format_bytes.len() && format_bytes[i] == b'.' {
+                i += 1;
+                while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            // Length modifiers
+            while i < format_bytes.len() && matches!(format_bytes[i], b'l' | b'h' | b'L' | b'q' | b'j' | b'z' | b't') {
+                i += 1;
+            }
+            // Type specifier - if missing, it's an error
+            if i >= format_bytes.len() {
+                let msg = "Missing format specifier at end of string";
+                let exc = vm.create_exception(b"ValueError", msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.into(), line: vm.current_line });
+            }
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    let available = args.len() - 1; // subtract the format arg
+    if max_arg > available {
+        let msg = format!("{} arguments are required, {} given", max_arg + 1, available + 1);
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    Ok(())
+}
+
 fn sprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         let msg = "sprintf() expects at least 1 argument, 0 given";
@@ -650,6 +757,10 @@ fn sprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg.into(), line: vm.current_line });
     }
+    // TypeError for non-string format argument (array, resource)
+    validate_sprintf_format_arg(vm, "sprintf", args.first())?;
+    // Check argument count
+    validate_sprintf_arg_count(vm, "sprintf", args)?;
     let result = do_sprintf(args);
     Ok(Value::String(PhpString::from_vec(result.into_bytes())))
 }
@@ -2435,6 +2546,14 @@ fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        let msg = "vprintf() expects at least 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
+    }
+    // Check format arg type
+    validate_sprintf_format_arg(vm, "vprintf", args.first())?;
     let format = args.first().unwrap_or(&Value::Null).to_php_string();
     let arr = args.get(1).unwrap_or(&Value::Null);
     let fmt_args: Vec<Value> = if let Value::Array(a) = arr {
@@ -2444,17 +2563,26 @@ fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let mut all_args = vec![Value::String(format)];
     all_args.extend(fmt_args);
-    let result = sprintf(vm, &all_args)?;
-    let s = result.to_php_string();
-    vm.write_output(s.as_bytes());
-    Ok(Value::Long(s.len() as i64))
+    validate_sprintf_arg_count(vm, "vprintf", &all_args)?;
+    let result = do_sprintf(&all_args);
+    let s_bytes = result.as_bytes();
+    vm.write_output(s_bytes);
+    Ok(Value::Long(s_bytes.len() as i64))
 }
 
 fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let result = sprintf(vm, args)?;
-    let s = result.to_php_string();
-    vm.write_output(s.as_bytes());
-    Ok(Value::Long(s.len() as i64))
+    if args.is_empty() {
+        let msg = "printf() expects at least 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
+    }
+    validate_sprintf_format_arg(vm, "printf", args.first())?;
+    validate_sprintf_arg_count(vm, "printf", args)?;
+    let result = do_sprintf(args);
+    let s_bytes = result.as_bytes();
+    vm.write_output(s_bytes);
+    Ok(Value::Long(s_bytes.len() as i64))
 }
 
 fn strrchr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2634,6 +2762,13 @@ fn strcspn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn vsprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        let msg = "vsprintf() expects at least 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
+    }
+    validate_sprintf_format_arg(vm, "vsprintf", args.first())?;
     let format = args.first().unwrap_or(&Value::Null).to_php_string();
     let arr = args.get(1).unwrap_or(&Value::Null);
     let fmt_args: Vec<Value> = if let Value::Array(a) = arr {
@@ -2643,7 +2778,9 @@ fn vsprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let mut all_args = vec![Value::String(format)];
     all_args.extend(fmt_args);
-    sprintf(vm, &all_args)
+    validate_sprintf_arg_count(vm, "vsprintf", &all_args)?;
+    let result = do_sprintf(&all_args);
+    Ok(Value::String(PhpString::from_vec(result.into_bytes())))
 }
 
 fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

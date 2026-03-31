@@ -9,6 +9,22 @@ use std::rc::Rc;
 /// Validate that an argument is an array and throw TypeError if not.
 /// Returns Ok(()) if valid array (or reference to array), Err with VmError if not.
 fn require_array_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<(), VmError> {
+    require_array_arg_inner(vm, val, func_name, Some(param_name), param_num)
+}
+
+/// Like require_array_arg but without parameter name in error message (for variadic args)
+fn require_array_arg_variadic(vm: &mut Vm, val: &Value, func_name: &str, param_num: u32) -> Result<(), VmError> {
+    require_array_arg_inner(vm, val, func_name, None, param_num)
+}
+
+fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name: Option<&str>, param_num: u32) -> Result<(), VmError> {
+    let make_msg = |type_name: &str| -> String {
+        if let Some(name) = param_name {
+            format!("{}(): Argument #{} (${}) must be of type array, {} given", func_name, param_num, name, type_name)
+        } else {
+            format!("{}(): Argument #{} must be of type array, {} given", func_name, param_num, type_name)
+        }
+    };
     match val {
         Value::Array(_) => Ok(()),
         Value::Reference(r) => {
@@ -17,7 +33,7 @@ fn require_array_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str
                 Ok(())
             } else {
                 let type_name = Vm::value_type_name(&*inner);
-                let msg = format!("{}(): Argument #{} (${}) must be of type array, {} given", func_name, param_num, param_name, type_name);
+                let msg = make_msg(&type_name);
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
                 Err(VmError { message: msg, line: vm.current_line })
@@ -25,7 +41,7 @@ fn require_array_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str
         }
         _ => {
             let type_name = Vm::value_type_name(val);
-            let msg = format!("{}(): Argument #{} (${}) must be of type array, {} given", func_name, param_num, param_name, type_name);
+            let msg = make_msg(&type_name);
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
             Err(VmError { message: msg, line: vm.current_line })
@@ -1305,7 +1321,7 @@ fn array_values(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn array_merge(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for (i, arg) in args.iter().enumerate() {
-        require_array_arg(vm, arg, "array_merge", "arrays", (i + 1) as u32)?;
+        require_array_arg_variadic(vm, arg, "array_merge", (i + 1) as u32)?;
         if let Value::Array(arr) = arg {
             let arr = arr.borrow();
             for (key, val) in arr.iter() {
@@ -1902,8 +1918,48 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
-    require_array_arg(vm, first, "array_walk", "array", 1)?;
-    if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
+
+    // Accept arrays and objects (objects are iterated by their properties)
+    let is_array = matches!(first, Value::Array(_))
+        || matches!(first, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_)));
+    let is_object = matches!(first, Value::Object(_))
+        || matches!(first, Value::Reference(r) if matches!(&*r.borrow(), Value::Object(_)));
+
+    if !is_array && !is_object {
+        require_array_arg(vm, first, "array_walk", "array", 1)?;
+        return Ok(Value::True);
+    }
+
+    let callback = match args.get(1) {
+        Some(cb) => cb,
+        None => return Ok(Value::True),
+    };
+
+    // For objects, convert properties to entries
+    if is_object {
+        let obj = match first {
+            Value::Object(o) => o.clone(),
+            Value::Reference(r) => {
+                if let Value::Object(o) = &*r.borrow() {
+                    o.clone()
+                } else {
+                    return Ok(Value::True);
+                }
+            }
+            _ => return Ok(Value::True),
+        };
+        let entries: Vec<(ArrayKey, Value)> = {
+            let obj_borrow = obj.borrow();
+            obj_borrow.properties.iter().map(|(k, v)| {
+                (ArrayKey::String(PhpString::from_vec(k.clone())), v.clone())
+            }).collect()
+        };
+        let extra_data = args.get(2);
+        return array_walk_entries(vm, callback, &entries, extra_data, None);
+    }
+
+    // Array case
+    if let Some(Value::Array(arr)) = args.first() {
         let entries: Vec<_> = {
             let arr_borrow = arr.borrow();
             arr_borrow
@@ -1912,64 +1968,77 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .collect()
         };
         let extra_data = args.get(2);
+        return array_walk_entries(vm, callback, &entries, extra_data, Some(arr));
+    }
 
-        let (func_name, captured) = match callback {
-            Value::String(s) => (s.as_bytes().to_vec(), vec![]),
-            Value::Array(cb) => {
-                let cb = cb.borrow();
-                let vals: Vec<Value> = cb.values().cloned().collect();
-                if vals.is_empty() {
-                    return Ok(Value::True);
-                }
-                (
-                    vals[0].to_php_string().as_bytes().to_vec(),
-                    vals[1..].to_vec(),
-                )
+    Ok(Value::True)
+}
+
+fn array_walk_entries(
+    vm: &mut Vm,
+    callback: &Value,
+    entries: &[(ArrayKey, Value)],
+    extra_data: Option<&Value>,
+    arr: Option<&Rc<RefCell<PhpArray>>>,
+) -> Result<Value, VmError> {
+    let (func_name, captured) = match callback {
+        Value::String(s) => (s.as_bytes().to_vec(), vec![]),
+        Value::Array(cb) => {
+            let cb = cb.borrow();
+            let vals: Vec<Value> = cb.values().cloned().collect();
+            if vals.is_empty() {
+                return Ok(Value::True);
             }
-            _ => return Ok(Value::True),
-        };
-        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            (
+                vals[0].to_php_string().as_bytes().to_vec(),
+                vals[1..].to_vec(),
+            )
+        }
+        _ => return Ok(Value::True),
+    };
+    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
-        if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-            for (key, val) in &entries {
-                // Wrap value in a Reference so by-ref params (&$v) work
-                let val_ref = Rc::new(RefCell::new(val.clone()));
-                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                let mut idx = 0;
-                for cv in &captured {
-                    if idx < fn_cvs.len() {
-                        fn_cvs[idx] = cv.clone();
-                        idx += 1;
-                    }
-                }
+    if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+        for (key, val) in entries {
+            // Wrap value in a Reference so by-ref params (&$v) work
+            let val_ref = Rc::new(RefCell::new(val.clone()));
+            let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+            let mut idx = 0;
+            for cv in &captured {
                 if idx < fn_cvs.len() {
-                    fn_cvs[idx] = Value::Reference(val_ref.clone());
+                    fn_cvs[idx] = cv.clone();
                     idx += 1;
                 }
-                // Pass key as second argument
+            }
+            if idx < fn_cvs.len() {
+                fn_cvs[idx] = Value::Reference(val_ref.clone());
+                idx += 1;
+            }
+            // Pass key as second argument
+            if idx < fn_cvs.len() {
+                let key_val = match key {
+                    ArrayKey::Int(n) => Value::Long(*n),
+                    ArrayKey::String(s) => Value::String(s.clone()),
+                };
+                fn_cvs[idx] = key_val;
+                idx += 1;
+            }
+            // Pass extra_data as third argument
+            if let Some(extra) = extra_data {
                 if idx < fn_cvs.len() {
-                    let key_val = match key {
-                        ArrayKey::Int(n) => Value::Long(*n),
-                        ArrayKey::String(s) => Value::String(s.clone()),
-                    };
-                    fn_cvs[idx] = key_val;
-                    idx += 1;
+                    fn_cvs[idx] = extra.clone();
                 }
-                // Pass extra_data as third argument
-                if let Some(extra) = extra_data {
-                    if idx < fn_cvs.len() {
-                        fn_cvs[idx] = extra.clone();
-                    }
-                }
-                vm.execute_fn(&user_fn, fn_cvs)?;
-                // Write modified value back to the array
+            }
+            vm.execute_fn(&user_fn, fn_cvs)?;
+            // Write modified value back to the array (if it's an array)
+            if let Some(arr) = arr {
                 let new_val = val_ref.borrow().clone();
                 arr.borrow_mut().set(key.clone(), new_val);
             }
-        } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-            for (_key, val) in &entries {
-                builtin(vm, &[val.clone()])?;
-            }
+        }
+    } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+        for (_key, val) in entries {
+            builtin(vm, &[val.clone()])?;
         }
     }
     Ok(Value::True)
@@ -2153,7 +2222,7 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for (i, arg) in args.iter().enumerate() {
-        require_array_arg(vm, arg, "array_merge_recursive", "arrays", (i + 1) as u32)?;
+        require_array_arg_variadic(vm, arg, "array_merge_recursive", (i + 1) as u32)?;
         if let Value::Array(arr) = arg {
             let arr = arr.borrow();
             for (key, val) in arr.iter() {
@@ -4165,7 +4234,10 @@ fn printf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // fprintf($handle, $format, ...$args) - write formatted to file handle
     if args.len() < 2 {
-        return Ok(Value::Long(0));
+        let msg = format!("fprintf() expects at least 2 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let fid = args[0].to_long();
     let format_args = &args[1..]; // skip the handle, pass format + args
@@ -4192,8 +4264,11 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // vfprintf($handle, $format, $args_array)
-    if args.len() < 3 {
-        return Ok(Value::Long(0));
+    if args.len() < 2 {
+        let msg = format!("vfprintf() expects at least 2 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let fid = args[0].to_long();
     let format = args[1].to_php_string();

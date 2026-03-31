@@ -71,6 +71,14 @@ pub struct PhpGenerator {
     pub class_scope: Option<Vec<u8>>,
     /// The arguments passed to the generator function (for func_get_args())
     pub args: Vec<Value>,
+    /// Pending return value for deferred return (finally blocks)
+    pub pending_return: Option<Value>,
+    /// Pending jump target for deferred break/continue (finally blocks)
+    pub pending_finally_jump: Option<u32>,
+    /// Whether this generator has been force-closed (destruction while suspended)
+    pub force_closed: bool,
+    /// Whether this generator completed with an explicit return (vs exception/abort)
+    pub has_returned: bool,
 }
 
 impl PhpGenerator {
@@ -99,7 +107,126 @@ impl PhpGenerator {
             called_class: None,
             class_scope: None,
             args: Vec::new(),
+            pending_return: None,
+            pending_finally_jump: None,
+            force_closed: false,
+            has_returned: false,
         }
+    }
+
+    /// Force-close the generator, running any finally blocks.
+    /// Called when a suspended generator is destroyed (e.g. unset or goes out of scope).
+    pub fn close(&mut self, vm: &mut Vm) {
+        if self.state != GeneratorState::Suspended {
+            return;
+        }
+        if self.is_running {
+            return;
+        }
+
+        self.force_closed = true;
+
+        // Find finally blocks that need to be executed.
+        // Scan TryBegin/TryEnd in the op_array to find finally targets
+        // that encompass the current IP position.
+        let current_ip = self.ip;
+        let op_array = &self.op_array;
+
+        // Collect all try-finally ranges: (try_begin_ip, finally_target)
+        // A try block runs from try_begin_ip until we find TryEnd or
+        // reach the catch/finally target.
+        let mut finally_targets = Vec::new();
+        let mut try_stack: Vec<(usize, u32)> = Vec::new();
+
+        for (i, op) in op_array.ops.iter().enumerate() {
+            match op.opcode {
+                OpCode::TryBegin => {
+                    if let OperandType::JmpTarget(finally_target) = op.op2 {
+                        if finally_target > 0 {
+                            try_stack.push((i, finally_target));
+                        }
+                    }
+                }
+                OpCode::TryEnd => {
+                    // Pop the matching TryBegin
+                    if let Some((begin, finally_target)) = try_stack.pop() {
+                        // Check if current_ip is within the try block range
+                        if current_ip > begin && current_ip <= i {
+                            finally_targets.push(finally_target);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Also check try blocks that are still open (not TryEnd'd because
+        // the generator suspended before reaching TryEnd)
+        for (begin, finally_target) in &try_stack {
+            if current_ip > *begin {
+                finally_targets.push(*finally_target);
+            }
+        }
+
+        if finally_targets.is_empty() {
+            self.state = GeneratorState::Completed;
+            self.current_value = Value::Null;
+            return;
+        }
+
+        // Sort finally targets so innermost (smallest) runs first
+        finally_targets.sort();
+        finally_targets.dedup();
+
+        // Jump to the innermost finally block
+        if let Some(&first_finally) = finally_targets.first() {
+            self.ip = first_finally as usize;
+            // Clear exception handlers and set up for finally execution
+            self.exception_handlers.clear();
+
+            // Set up finally targets as exception handlers in reverse order
+            // (outermost at bottom of stack, innermost on top)
+            // so ReturnDeferred can pop the current and chain to the next
+            for ft in finally_targets.iter().rev() {
+                self.exception_handlers.push((0, *ft, 0));
+            }
+
+            // Mark that we're doing a deferred return (force close)
+            self.pending_return = Some(Value::Null);
+            self.state = GeneratorState::Suspended; // Keep suspended so resume works
+
+            // Resume to execute the finally block(s)
+            match self.resume(vm) {
+                Err(e) => {
+                    // Output the error (e.g., "Cannot yield from finally in a force-closed generator")
+                    if let Some(exc) = vm.current_exception.take() {
+                        if let Value::Object(obj) = &exc {
+                            let obj_b = obj.borrow();
+                            let class = String::from_utf8_lossy(&obj_b.class_name).to_string();
+                            let message = obj_b.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                            let line = obj_b.get_property(b"line").to_long();
+                            let file = vm.current_file.clone();
+                            drop(obj_b);
+                            let output = format!(
+                                "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n#0 {{main}}\n  thrown in {} on line {}\n",
+                                class, message, file, line, file, line
+                            );
+                            vm.write_output(output.as_bytes());
+                        } else {
+                            let output = format!("\nFatal error: {}\n", e.message);
+                            vm.write_output(output.as_bytes());
+                        }
+                    } else {
+                        let output = format!("\nFatal error: {}\n", e.message);
+                        vm.write_output(output.as_bytes());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.state = GeneratorState::Completed;
+        self.current_value = Value::Null;
     }
 
     /// Resume execution of the generator until the next yield or return.
@@ -161,6 +288,7 @@ impl PhpGenerator {
         loop {
             if ip >= op_array.ops.len() {
                 self.state = GeneratorState::Completed;
+                self.has_returned = true;
                 self.ip = ip;
                 return Ok(false);
             }
@@ -170,6 +298,16 @@ impl PhpGenerator {
 
             match op.opcode {
                 OpCode::Yield => {
+                    // If generator is force-closed, yield in finally is an error
+                    if self.force_closed {
+                        let err_msg = "Cannot yield from finally in a force-closed generator";
+                        let exc = vm.create_exception(b"Error", err_msg, op.line);
+                        vm.current_exception = Some(exc);
+                        self.state = GeneratorState::Completed;
+                        self.current_value = Value::Null;
+                        self.ip = ip;
+                        return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                    }
                     // op1 = value to yield (or Unused for bare yield)
                     // op2 = key to yield (or Unused for auto-key)
                     // result = where to store the sent value (or Unused)
@@ -298,6 +436,7 @@ impl PhpGenerator {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     self.return_value = val;
                     self.state = GeneratorState::Completed;
+                    self.has_returned = true;
                     self.current_value = Value::Null;
                     self.ip = ip;
                     return Ok(false);
@@ -308,6 +447,7 @@ impl PhpGenerator {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     self.return_value = val;
                     self.state = GeneratorState::Completed;
+                    self.has_returned = true;
                     self.current_value = Value::Null;
                     self.ip = ip;
                     return Ok(false);
@@ -1014,10 +1154,10 @@ impl PhpGenerator {
                 }
 
                 OpCode::TryBegin => {
-                    if let (OperandType::JmpTarget(catch), OperandType::JmpTarget(_finally)) =
+                    if let (OperandType::JmpTarget(catch), OperandType::JmpTarget(finally_target)) =
                         (op.op1, op.op2)
                     {
-                        self.exception_handlers.push((catch, 0, 0));
+                        self.exception_handlers.push((catch, finally_target, 0));
                     }
                 }
 
@@ -1029,6 +1169,96 @@ impl PhpGenerator {
                     if let Some(exc) = vm.current_exception.take() {
                         self.write_operand(&op.op1, exc);
                     }
+                }
+
+                OpCode::SaveReturn => {
+                    // Save return value for deferred return (finally blocks)
+                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    self.pending_return = Some(val);
+                    self.pending_finally_jump = None;
+                    vm.current_exception = None;
+                }
+
+                OpCode::SaveJump => {
+                    // Save jump target for deferred break/continue (finally blocks)
+                    if let OperandType::JmpTarget(target) = op.op1 {
+                        self.pending_finally_jump = Some(target);
+                    }
+                    vm.current_exception = None;
+                }
+
+                OpCode::ReturnDeferred => {
+                    let this_finally_start = if let OperandType::JmpTarget(fs) = op.op1 {
+                        fs
+                    } else {
+                        0
+                    };
+                    if let Some(val) = self.pending_return.take() {
+                        // Pop exception handlers for this finally block
+                        if this_finally_start > 0 {
+                            while let Some(&(_catch_target, finally_target, _)) = self.exception_handlers.last() {
+                                self.exception_handlers.pop();
+                                if finally_target == this_finally_start {
+                                    break;
+                                }
+                            }
+                        }
+                        // Look for an outer finally block to chain through
+                        let mut outer_finally: Option<u32> = None;
+                        while let Some(&(_catch_target, finally_target, _)) = self.exception_handlers.last() {
+                            if finally_target > 0 {
+                                outer_finally = Some(finally_target);
+                                self.exception_handlers.pop();
+                                break;
+                            } else {
+                                self.exception_handlers.pop();
+                            }
+                        }
+                        if let Some(finally_ip) = outer_finally {
+                            self.pending_return = Some(val);
+                            ip = finally_ip as usize;
+                            continue;
+                        }
+                        // No outer finally - complete the generator with return value
+                        self.return_value = val;
+                        self.state = GeneratorState::Completed;
+                        self.has_returned = true;
+                        self.current_value = Value::Null;
+                        self.ip = ip;
+                        return Ok(false);
+                    }
+                    // If there's a pending jump (deferred break/continue)
+                    if let Some(target) = self.pending_finally_jump.take() {
+                        ip = target as usize;
+                        continue;
+                    }
+                    // If there's a pending exception, re-throw it through outer handlers
+                    if vm.current_exception.is_some() {
+                        if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
+                            if catch_target > 0 {
+                                ip = catch_target as usize;
+                                continue;
+                            } else if finally_target > 0 {
+                                ip = finally_target as usize;
+                                continue;
+                            }
+                        }
+                        // No outer handler - uncaught exception
+                        self.state = GeneratorState::Completed;
+                        self.current_value = Value::Null;
+                        self.ip = ip;
+                        let exc = vm.current_exception.as_ref().unwrap();
+                        let msg = if let Value::Object(obj) = exc {
+                            let obj = obj.borrow();
+                            let class = String::from_utf8_lossy(&obj.class_name).to_string();
+                            let message = obj.get_property(b"message");
+                            format!("Uncaught {}: {}", class, message.to_php_string().to_string_lossy())
+                        } else {
+                            "Uncaught exception in generator".to_string()
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
+                    // Otherwise continue (no pending return, jump, or exception)
                 }
 
                 OpCode::TypeCheck => {
@@ -1487,12 +1717,32 @@ impl PhpGenerator {
         self.fiber_suspend_result = None;
 
         // Try to find an exception handler in the generator
-        if let Some((catch_target, _, _)) = self.exception_handlers.last() {
-            let ct = *catch_target as usize;
+        if let Some((catch_target, finally_target, _)) = self.exception_handlers.last().copied() {
             self.exception_handlers.pop();
-            self.ip = ct;
+            if catch_target > 0 {
+                self.ip = catch_target as usize;
+            } else if finally_target > 0 {
+                self.ip = finally_target as usize;
+            } else {
+                // No valid handler - propagate exception
+                self.state = GeneratorState::Completed;
+                self.current_value = Value::Null;
+                vm.leave_generator_resume();
+                return Err(VmError {
+                    message: "Uncaught exception in generator".to_string(),
+                    line: 0,
+                });
+            }
+        } else {
+            // No exception handler at all - propagate exception out
+            self.state = GeneratorState::Completed;
+            self.current_value = Value::Null;
+            vm.leave_generator_resume();
+            return Err(VmError {
+                message: "Uncaught exception in generator".to_string(),
+                line: 0,
+            });
         }
-        // If no handler, the exception will propagate out
 
         let result = self.resume_inner(vm);
 

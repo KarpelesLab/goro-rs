@@ -626,6 +626,33 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
+                // Check for `return;` (without value) in function with non-void return type
+                if value.is_none() {
+                    if let Some(ref ret_type) = self.op_array.return_type {
+                        // void allows `return;`
+                        let is_void = matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"));
+                        if !is_void {
+                            // Check if the type includes null (nullable types allow `return;` with a deprecation in PHP 8.4)
+                            let includes_null = match ret_type {
+                                ParamType::Nullable(_) => true,
+                                ParamType::Simple(n) => n.eq_ignore_ascii_case(b"null"),
+                                ParamType::Union(types) => types.iter().any(|t| matches!(t, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"null"))),
+                                _ => false,
+                            };
+                            if includes_null {
+                                return Err(CompileError {
+                                    message: "A function with return type must return a value (did you mean \"return null;\" instead of \"return;\"?)".to_string(),
+                                    line: stmt.span.line,
+                                });
+                            } else {
+                                return Err(CompileError {
+                                    message: "A function with return type must return a value".to_string(),
+                                    line: stmt.span.line,
+                                });
+                            }
+                        }
+                    }
+                }
                 let operand = if let Some(expr) = value {
                     self.compile_expr(expr)?
                 } else {
@@ -1360,23 +1387,21 @@ impl Compiler {
 
                 // Set return type
                 if let Some(hint) = return_type {
-                    // Check for self/parent outside of class scope
+                    // Check for self/parent/static outside of class scope
                     if self.current_class.is_none() {
-                        if let TypeHint::Simple(name) = hint {
-                            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if name_lower == b"self" {
-                                return Err(CompileError {
-                                    message: "Cannot use \"self\" when no class scope is active".into(),
-                                    line: stmt.span.line,
-                                });
-                            }
-                            if name_lower == b"parent" {
-                                return Err(CompileError {
-                                    message: "Cannot use \"parent\" when no class scope is active".into(),
-                                    line: stmt.span.line,
-                                });
-                            }
+                        if let Some(err) = check_relative_type_outside_class(hint) {
+                            return Err(CompileError {
+                                message: err,
+                                line: stmt.span.line,
+                            });
                         }
+                    }
+                    // Validate type hint for redundancy and standalone constraints
+                    if let Some(err) = validate_type_hint(hint, self.current_class.as_deref()) {
+                        return Err(CompileError {
+                            message: err,
+                            line: stmt.span.line,
+                        });
                     }
                     func_compiler.op_array.return_type = Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
                     // Check for 'never' return type
@@ -1391,6 +1416,22 @@ impl Compiler {
                 // Validate parameter types
                 for param in params.iter() {
                     if let Some(hint) = &param.type_hint {
+                        // Check for self/parent/static outside class scope
+                        if self.current_class.is_none() {
+                            if let Some(err) = check_relative_type_outside_class(hint) {
+                                return Err(CompileError {
+                                    message: err,
+                                    line: stmt.span.line,
+                                });
+                            }
+                        }
+                        // Validate type hint for redundancy and standalone constraints
+                        if let Some(err) = validate_type_hint(hint, self.current_class.as_deref()) {
+                            return Err(CompileError {
+                                message: err,
+                                line: stmt.span.line,
+                            });
+                        }
                         let simple_hint = match hint {
                             TypeHint::Simple(n) => Some(n),
                             TypeHint::Nullable(inner) => {
@@ -2065,11 +2106,13 @@ impl Compiler {
                 };
                 // Check for reserved class names
                 let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if name_lower == b"self" || name_lower == b"parent" || name_lower == b"static" {
+                if !is_anonymous && is_reserved_class_name(&name_lower) {
                     let (article, kind) = if modifiers.is_interface {
                         ("an", "interface")
                     } else if modifiers.is_trait {
                         ("a", "trait")
+                    } else if modifiers.is_enum {
+                        ("an", "enum")
                     } else {
                         ("a", "class")
                     };
@@ -2171,6 +2214,15 @@ impl Compiler {
                                     line: stmt.span.line,
                                 });
                             }
+                            // Validate type hint for redundancy and standalone constraints
+                            if let Some(hint) = type_hint {
+                                if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                    return Err(CompileError {
+                                        message: err,
+                                        line: stmt.span.line,
+                                    });
+                                }
+                            }
                             // Properties cannot have type callable
                             if let Some(hint) = type_hint {
                                 let check_callable = |h: &TypeHint| -> bool {
@@ -2240,6 +2292,38 @@ impl Compiler {
                                         message: format!("Readonly property {}::${} cannot have default value", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
                                         line: stmt.span.line,
                                     });
+                                }
+                            }
+                            // Check: null default on typed non-nullable property
+                            if let (Some(hint), Some(expr)) = (type_hint, default) {
+                                if matches!(expr.kind, ExprKind::Null) {
+                                    // Check if the type includes null
+                                    let type_allows_null = match hint {
+                                        TypeHint::Nullable(_) => true,
+                                        TypeHint::Simple(n) => {
+                                            let l: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            l == b"null" || l == b"mixed"
+                                        }
+                                        TypeHint::Union(types) => {
+                                            types.iter().any(|t| matches!(t, TypeHint::Simple(n) if {
+                                                let l: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                l == b"null"
+                                            }))
+                                        }
+                                        _ => false,
+                                    };
+                                    if !type_allows_null {
+                                        // Format the type name for the error message
+                                        let type_name = match hint {
+                                            TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
+                                            _ => "?".to_string(), // shouldn't happen since nullable/union are handled above
+                                        };
+                                        return Err(CompileError {
+                                            message: format!("Default value for property of type {} may not be null. Use the nullable type ?{} to allow null default value",
+                                                type_name, type_name),
+                                            line: stmt.span.line,
+                                        });
+                                    }
                                 }
                             }
                             let default_val = if let Some(expr) = default {
@@ -2994,6 +3078,47 @@ impl Compiler {
                                 }
                             }
 
+                            // Check for parent/static type in abstract methods without a body
+                            if method_body.is_none() || *is_abstract {
+                                // Check return type for parent in class with no parent
+                                if let Some(hint) = method_return_type {
+                                    if class.parent.is_none() && !modifiers.is_trait {
+                                        if let Some(err) = check_parent_type_without_parent(hint) {
+                                            return Err(CompileError {
+                                                message: err,
+                                                line: *method_line,
+                                            });
+                                        }
+                                    }
+                                    // Validate type hint
+                                    if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                        return Err(CompileError {
+                                            message: err,
+                                            line: *method_line,
+                                        });
+                                    }
+                                }
+                                // Check parameter types
+                                for param in params.iter() {
+                                    if let Some(hint) = &param.type_hint {
+                                        if class.parent.is_none() && !modifiers.is_trait {
+                                            if let Some(err) = check_parent_type_without_parent(hint) {
+                                                return Err(CompileError {
+                                                    message: err,
+                                                    line: *method_line,
+                                                });
+                                            }
+                                        }
+                                        if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                            return Err(CompileError {
+                                                message: err,
+                                                line: *method_line,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+
                             if let Some(body_stmts) = method_body {
                                 // Check if method body contains yield
                                 let method_is_generator = stmts_contain_yield(body_stmts);
@@ -3009,6 +3134,22 @@ impl Compiler {
                                 method_compiler.op_array.strict_types = self.op_array.strict_types;
                                 method_compiler.source_file = self.source_file.clone();
                                 if let Some(hint) = method_return_type {
+                                    // Check for parent type in a class/interface with no parent (not traits - they allow parent)
+                                    if class.parent.is_none() && !modifiers.is_trait {
+                                        if let Some(err) = check_parent_type_without_parent(hint) {
+                                            return Err(CompileError {
+                                                message: err,
+                                                line: *method_line,
+                                            });
+                                        }
+                                    }
+                                    // Validate return type hint
+                                    if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                        return Err(CompileError {
+                                            message: err,
+                                            line: *method_line,
+                                        });
+                                    }
                                     method_compiler.op_array.return_type =
                                         Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
                                     // Check for 'never' return type
@@ -3039,6 +3180,25 @@ impl Compiler {
                                     .count() as u32;
 
                                 for param in params {
+                                    // Validate parameter type hint
+                                    if let Some(hint) = &param.type_hint {
+                                        // Check for parent type in a class/interface with no parent (not traits)
+                                        if class.parent.is_none() && !modifiers.is_trait {
+                                            if let Some(err) = check_parent_type_without_parent(hint) {
+                                                return Err(CompileError {
+                                                    message: err,
+                                                    line: *method_line,
+                                                });
+                                            }
+                                        }
+                                        if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                            return Err(CompileError {
+                                                message: err,
+                                                line: *method_line,
+                                            });
+                                        }
+                                    }
+
                                     let cv = method_compiler.op_array.get_or_create_cv(&param.name);
 
                                     // Handle variadic parameter
@@ -3737,6 +3897,16 @@ impl Compiler {
                         item.name.last().cloned().unwrap_or_default()
                     };
                     let alias_lower: Vec<u8> = alias.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    // Check for reserved names in use declarations (only for class imports)
+                    if matches!(item.kind, UseKind::Normal) && is_reserved_class_name(&alias_lower) {
+                        return Err(CompileError {
+                            message: format!("Cannot use {} as {} because '{}' is a special class name",
+                                String::from_utf8_lossy(&fqn),
+                                String::from_utf8_lossy(&alias),
+                                String::from_utf8_lossy(&alias)),
+                            line: stmt.span.line,
+                        });
+                    }
                     match item.kind {
                         UseKind::Normal => {
                             self.use_map.insert(alias_lower, fqn);
@@ -7708,6 +7878,330 @@ fn is_type_nullable_or_mixed(pt: &ParamType) -> bool {
             }))
         }
         ParamType::Intersection(_) => false,
+    }
+}
+
+/// Check if a name is a reserved type name that cannot be used as a class/interface/trait name
+fn is_reserved_class_name(name: &[u8]) -> bool {
+    let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    matches!(
+        lower.as_slice(),
+        b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
+        | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
+        | b"void" | b"self" | b"parent" | b"static" | b"false" | b"true" | b"never"
+    )
+}
+
+/// Validate a type hint for redundancy, standalone constraints, and other compile-time rules.
+/// Returns an error message string if invalid, or None if valid.
+/// `class_name` is the current class name for self resolution, or None if not in a class.
+/// `parent_class_name` is the parent class name for parent resolution, or None if no parent.
+fn validate_type_hint(hint: &TypeHint, class_name: Option<&[u8]>) -> Option<String> {
+    validate_type_hint_full(hint, class_name, None)
+}
+
+fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_class_name: Option<&[u8]>) -> Option<String> {
+    match hint {
+        TypeHint::Nullable(inner) => {
+            // ?null is invalid
+            if let TypeHint::Simple(n) = inner.as_ref() {
+                let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if lower == b"null" {
+                    return Some("null cannot be marked as nullable".to_string());
+                }
+                // ?mixed is invalid - "mixed already includes null"
+                if lower == b"mixed" {
+                    return Some("Type mixed cannot be marked as nullable since mixed already includes null".to_string());
+                }
+                // ?void is invalid
+                if lower == b"void" {
+                    return Some("Void can only be used as a standalone type".to_string());
+                }
+                // ?never is invalid
+                if lower == b"never" {
+                    return Some("never can only be used as a standalone type".to_string());
+                }
+            }
+            None
+        }
+        TypeHint::Union(types) => {
+            // Collect all types (expanding iterable to Traversable|array) for duplicate checking
+            let mut seen_types: Vec<Vec<u8>> = Vec::new();
+            let mut has_object = false;
+            let mut has_class_type = false;
+            let mut has_bool = false;
+            let mut has_false = false;
+            let mut has_true = false;
+            let mut has_void = false;
+            let mut has_mixed = false;
+            let mut has_never = false;
+            let mut class_type_names: Vec<Vec<u8>> = Vec::new();
+
+            for t in types {
+                match t {
+                    TypeHint::Simple(n) => {
+                        let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                        // Resolve self/parent to actual class name for duplicate checking
+                        let resolved = match lower.as_slice() {
+                            b"self" => {
+                                if let Some(cn) = class_name {
+                                    Some(cn.to_vec())
+                                } else {
+                                    None
+                                }
+                            }
+                            b"parent" => {
+                                if let Some(pn) = parent_class_name {
+                                    Some(pn.to_vec())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+
+                        // Normalize type name for duplicate checking
+                        let canonical = match lower.as_slice() {
+                            b"integer" => b"int".to_vec(),
+                            b"double" => b"float".to_vec(),
+                            b"boolean" => b"bool".to_vec(),
+                            _ => {
+                                if let Some(ref r) = resolved {
+                                    r.iter().map(|b| b.to_ascii_lowercase()).collect()
+                                } else {
+                                    lower.clone()
+                                }
+                            }
+                        };
+
+                        // The display name for error messages: resolved class name or canonical built-in
+                        let display_name: String = if let Some(ref r) = resolved {
+                            String::from_utf8_lossy(r).to_string()
+                        } else if matches!(lower.as_slice(),
+                            b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
+                            | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
+                            | b"void" | b"false" | b"true" | b"never"
+                        ) {
+                            // For built-in types, display the canonical (lowercase) form
+                            String::from_utf8_lossy(&canonical).to_string()
+                        } else {
+                            // For class types, preserve original case
+                            String::from_utf8_lossy(n).to_string()
+                        };
+
+                        // Check for standalone types in union
+                        match lower.as_slice() {
+                            b"void" => has_void = true,
+                            b"mixed" => has_mixed = true,
+                            b"never" => has_never = true,
+                            b"object" => has_object = true,
+                            b"bool" | b"boolean" => has_bool = true,
+                            b"false" => has_false = true,
+                            b"true" => has_true = true,
+                            b"iterable" => {
+                                // iterable expands to Traversable|array for redundancy checking
+                                if seen_types.iter().any(|s| s == b"array") {
+                                    return Some("Duplicate type array is redundant".to_string());
+                                }
+                                if seen_types.iter().any(|s| s == b"traversable") {
+                                    return Some("Duplicate type Traversable is redundant".to_string());
+                                }
+                                // Add both expanded types
+                                seen_types.push(b"traversable".to_vec());
+                                seen_types.push(b"array".to_vec());
+                            }
+                            b"array" => {
+                                // Check if iterable (which includes array) was already seen
+                                if seen_types.iter().any(|s| s == b"array") {
+                                    return Some("Duplicate type array is redundant".to_string());
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        // Check for class type (non-builtin) for object redundancy
+                        if !matches!(lower.as_slice(),
+                            b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
+                            | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
+                            | b"void" | b"false" | b"true" | b"never"
+                        ) {
+                            has_class_type = true;
+                            class_type_names.push(display_name.clone().into_bytes());
+                        }
+
+                        // Check for duplicate types (skip iterable which was handled above)
+                        if lower != b"iterable" {
+                            if seen_types.iter().any(|s| s == &canonical) {
+                                return Some(format!("Duplicate type {} is redundant", display_name));
+                            }
+                            seen_types.push(canonical);
+                        }
+                    }
+                    TypeHint::Intersection(_) => {
+                        // DNF type: intersection within union - no duplicate checks needed here
+                        // but may contain class types for object redundancy
+                        has_class_type = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            // mixed can only be standalone (check first, before void/never)
+            if has_mixed {
+                return Some("Type mixed can only be used as a standalone type".to_string());
+            }
+            // void can only be standalone
+            if has_void {
+                return Some("Void can only be used as a standalone type".to_string());
+            }
+            // never can only be standalone
+            if has_never {
+                return Some("never can only be used as a standalone type".to_string());
+            }
+            // bool + false is redundant
+            if has_bool && has_false {
+                return Some("Duplicate type false is redundant".to_string());
+            }
+            // bool + true is redundant
+            if has_bool && has_true {
+                return Some("Duplicate type true is redundant".to_string());
+            }
+            // true + false should be bool
+            if has_true && has_false {
+                return Some("Type contains both true and false, bool must be used instead".to_string());
+            }
+            // object + class type is redundant
+            if has_object && has_class_type {
+                // Build the full type string for the error message
+                // PHP orders: class types first, then builtin types
+                let mut class_parts: Vec<String> = Vec::new();
+                let mut builtin_parts: Vec<String> = Vec::new();
+                for t in types {
+                    match t {
+                        TypeHint::Simple(n) => {
+                            let l: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let display = if l == b"self" {
+                                if let Some(cn) = class_name {
+                                    String::from_utf8_lossy(cn).to_string()
+                                } else {
+                                    String::from_utf8_lossy(n).to_string()
+                                }
+                            } else if l == b"parent" {
+                                if let Some(pn) = parent_class_name {
+                                    String::from_utf8_lossy(pn).to_string()
+                                } else {
+                                    String::from_utf8_lossy(n).to_string()
+                                }
+                            } else {
+                                String::from_utf8_lossy(n).to_string()
+                            };
+                            // Expand iterable to Traversable|array
+                            if l == b"iterable" {
+                                builtin_parts.push("Traversable".to_string());
+                                builtin_parts.push("array".to_string());
+                            } else if matches!(l.as_slice(),
+                                b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
+                                | b"array" | b"object" | b"callable" | b"mixed" | b"null"
+                                | b"void" | b"false" | b"true" | b"never"
+                            ) {
+                                builtin_parts.push(display);
+                            } else {
+                                class_parts.push(display);
+                            }
+                        }
+                        TypeHint::Intersection(parts) => {
+                            let inner: Vec<String> = parts.iter().map(|p| match p {
+                                TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
+                                _ => "?".to_string(),
+                            }).collect();
+                            class_parts.push(format!("({})", inner.join("&")));
+                        }
+                        _ => {}
+                    }
+                }
+                // Class types first, then builtins
+                class_parts.extend(builtin_parts);
+                let full_type = class_parts.join("|");
+                return Some(format!("Type {} contains both object and a class type, which is redundant", full_type));
+            }
+
+            None
+        }
+        TypeHint::Simple(n) => {
+            // Nothing to validate for a simple standalone type
+            let _ = n;
+            None
+        }
+        TypeHint::Intersection(_) => {
+            // Intersection type validation is already handled in parser
+            None
+        }
+    }
+}
+
+/// Check if a type hint uses self/parent/static outside of a class scope.
+/// Returns an error message if invalid.
+fn check_relative_type_outside_class(hint: &TypeHint) -> Option<String> {
+    match hint {
+        TypeHint::Simple(name) => {
+            let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            match lower.as_slice() {
+                b"self" => Some("Cannot use \"self\" when no class scope is active".to_string()),
+                b"parent" => Some("Cannot use \"parent\" when no class scope is active".to_string()),
+                b"static" => Some("Cannot use \"static\" when no class scope is active".to_string()),
+                _ => None,
+            }
+        }
+        TypeHint::Nullable(inner) => check_relative_type_outside_class(inner),
+        TypeHint::Union(types) => {
+            for t in types {
+                if let Some(err) = check_relative_type_outside_class(t) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        TypeHint::Intersection(types) => {
+            for t in types {
+                if let Some(err) = check_relative_type_outside_class(t) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Check if a type hint uses "parent" in a class with no parent.
+/// Returns an error message if invalid.
+fn check_parent_type_without_parent(hint: &TypeHint) -> Option<String> {
+    match hint {
+        TypeHint::Simple(name) => {
+            let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if lower == b"parent" {
+                Some("Cannot use \"parent\" when current class scope has no parent".to_string())
+            } else {
+                None
+            }
+        }
+        TypeHint::Nullable(inner) => check_parent_type_without_parent(inner),
+        TypeHint::Union(types) => {
+            for t in types {
+                if let Some(err) = check_parent_type_without_parent(t) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        TypeHint::Intersection(types) => {
+            for t in types {
+                if let Some(err) = check_parent_type_without_parent(t) {
+                    return Some(err);
+                }
+            }
+            None
+        }
     }
 }
 
