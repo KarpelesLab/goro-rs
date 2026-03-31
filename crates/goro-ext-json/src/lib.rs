@@ -168,8 +168,18 @@ fn resolve_json_serializable_depth(vm: &mut Vm, val: &Value, depth: usize) -> Va
                     false
                 }
             };
+            // Also check built-in SPL classes that implement JsonSerializable
+            let is_builtin_json = matches!(class_lower.as_slice(),
+                b"splfixedarray" | b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+            );
+            if has_json_serialize || is_builtin_json {
+                // Try call_object_method which handles both user and built-in SPL dispatch
+                if let Some(result) = vm.call_object_method(val, b"jsonSerialize", &[]) {
+                    return resolve_json_serializable_depth(vm, &result, depth + 1);
+                }
+            }
             if has_json_serialize {
-                // Call jsonSerialize() method
+                // Fallback: try user-defined method directly
                 let method = {
                     let class = vm.classes.get(&class_lower);
                     class.and_then(|c| c.get_method(b"jsonserialize").cloned())
@@ -181,7 +191,6 @@ fn resolve_json_serializable_depth(vm: &mut Vm, val: &Value, depth: usize) -> Va
                         fn_cvs[0] = val.clone(); // $this
                     }
                     if let Ok(result) = vm.execute_fn(&op, fn_cvs) {
-                        // Recursively resolve the result (it could contain more JsonSerializable objects)
                         return resolve_json_serializable_depth(vm, &result, depth + 1);
                     }
                 }

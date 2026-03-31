@@ -400,7 +400,19 @@ fn count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Check for Countable interface - try to call count() method
             let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
-            // First check if this is an SPL class with __spl_array
+            // First check if user class has overridden count() method
+            let has_user_count = vm.classes.get(&class_lower)
+                .map(|c| c.get_method(b"count").is_some())
+                .unwrap_or(false);
+
+            if has_user_count {
+                // Call user-defined count() method
+                if let Some(result) = vm.call_object_method(val, b"count", &[]) {
+                    return Ok(result);
+                }
+            }
+
+            // Check if this is an SPL class with __spl_array
             let ob = obj.borrow();
             let spl_arr = ob.get_property(b"__spl_array");
             if let Value::Array(a) = spl_arr {
@@ -408,7 +420,7 @@ fn count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             drop(ob);
 
-            // Try to call $obj->count() if it implements Countable
+            // Try to call $obj->count() if it implements Countable (built-in SPL)
             if let Some(result) = vm.call_object_method(val, b"count", &[]) {
                 return Ok(result);
             }

@@ -106,7 +106,12 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             // Check if this is an SPL class with __spl_array - display array contents instead
             let is_spl_array_class = matches!(
                 class_lower.as_slice(),
-                b"splfixedarray" | b"spldoublylinkedlist" | b"splstack" | b"splqueue"
+                b"splfixedarray"
+            );
+            // SplDoublyLinkedList/SplStack/SplQueue have special var_dump format
+            let is_spl_dll_class = matches!(
+                class_lower.as_slice(),
+                b"spldoublylinkedlist" | b"splstack" | b"splqueue"
             );
             // ArrayObject/ArrayIterator use a private "storage" property format
             let is_array_object_class = matches!(
@@ -147,6 +152,40 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 }
                 // Show private storage property
                 vm.write_output(format!("{}  [\"storage\":\"{}\":private]=>\n", prefix, class_name_owned).as_bytes());
+                var_dump_value(vm, &spl_arr, indent + 2, seen);
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
+
+            if is_spl_dll_class {
+                // SplDoublyLinkedList/SplStack/SplQueue: show flags and dllist private properties
+                let spl_arr = obj_borrow.get_property(b"__spl_array");
+                let iter_mode = obj_borrow.get_property(b"__spl_iter_mode");
+                let flags_val = if let Value::Long(f) = iter_mode { f } else {
+                    match class_lower.as_slice() {
+                        b"splstack" => 6,
+                        b"splqueue" => 4,
+                        _ => 0,
+                    }
+                };
+                let class_name_owned = class_name.to_string();
+                drop(obj_borrow);
+                vm.write_output(
+                    format!(
+                        "{}object({})#{} (2) {{\n",
+                        prefix, class_name_owned, oid
+                    )
+                    .as_bytes(),
+                );
+                if !seen.insert(oid) {
+                    vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    return;
+                }
+                vm.write_output(format!("{}  [\"flags\":\"SplDoublyLinkedList\":private]=>\n", prefix).as_bytes());
+                var_dump_value(vm, &Value::Long(flags_val), indent + 2, seen);
+                vm.write_output(format!("{}  [\"dllist\":\"SplDoublyLinkedList\":private]=>\n", prefix).as_bytes());
                 var_dump_value(vm, &spl_arr, indent + 2, seen);
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 seen.remove(&oid);

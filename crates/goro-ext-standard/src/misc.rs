@@ -5496,9 +5496,43 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
             }
 
             // Check for __serialize first (PHP 7.4+)
+            let is_builtin_serializable = |cl: &[u8]| -> bool {
+                matches!(cl,
+                    b"spldoublylinkedlist" | b"splstack" | b"splqueue"
+                    | b"splfixedarray" | b"splobjectstorage"
+                    | b"splheap" | b"splminheap" | b"splmaxheap"
+                    | b"splpriorityqueue"
+                )
+            };
             let has_serialize = vm.classes.get(&class_lower)
                 .map(|c| c.get_method(b"__serialize").is_some())
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || is_builtin_serializable(class_lower.as_slice())
+                || {
+                    // Check parent chain for built-in SPL classes
+                    let mut found = false;
+                    let mut check = class_lower.clone();
+                    for _ in 0..10 {
+                        if let Some(parent) = goro_core::vm::get_builtin_parent(&check) {
+                            let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if is_builtin_serializable(&parent_lower) {
+                                found = true;
+                                break;
+                            }
+                            check = parent_lower;
+                        } else if let Some(ce) = vm.classes.get(&check) {
+                            if let Some(ref p) = ce.parent {
+                                let parent_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if is_builtin_serializable(&parent_lower) {
+                                    found = true;
+                                    break;
+                                }
+                                check = parent_lower;
+                            } else { break; }
+                        } else { break; }
+                    }
+                    found
+                };
             if has_serialize {
                 let result = vm.call_object_method(val, b"__serialize", &[]);
                 if let Some(Value::Array(arr)) = result {
@@ -5841,9 +5875,30 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
             }
 
             // Check for __unserialize first (PHP 7.4+)
+            let spl_has_builtin_unserialize = |cl: &[u8]| -> bool {
+                matches!(cl,
+                    b"spldoublylinkedlist" | b"splstack" | b"splqueue"
+                    | b"splfixedarray" | b"splobjectstorage"
+                    | b"splheap" | b"splminheap" | b"splmaxheap"
+                    | b"splpriorityqueue"
+                )
+            };
             let has_unserialize = vm.classes.get(&class_lower)
                 .map(|c| c.get_method(b"__unserialize").is_some())
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || spl_has_builtin_unserialize(class_lower.as_slice())
+                || {
+                    let mut found = false;
+                    let mut check = class_lower.clone();
+                    for _ in 0..10 {
+                        if let Some(parent) = goro_core::vm::get_builtin_parent(&check) {
+                            let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if spl_has_builtin_unserialize(&parent_lower) { found = true; break; }
+                            check = parent_lower;
+                        } else { break; }
+                    }
+                    found
+                };
 
             // Parse properties - keep as raw array for __unserialize
             let mut raw_data = PhpArray::new();
