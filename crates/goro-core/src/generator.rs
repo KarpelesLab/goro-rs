@@ -1028,6 +1028,12 @@ impl PhpGenerator {
                     let val = self.read_operand(&op.result, &op_array.literals);
                     if let Value::Object(obj) = &obj_val {
                         obj.borrow_mut().set_property(prop_name.as_bytes().to_vec(), val);
+                    } else if let Value::Generator(_) = &obj_val {
+                        let prop_str = prop_name.to_string_lossy();
+                        let msg = format!("Cannot create dynamic property Generator::${}", prop_str);
+                        let exc = vm.create_exception(b"Error", &msg, op.line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
                     }
                 }
 

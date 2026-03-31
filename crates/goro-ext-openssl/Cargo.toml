@@ -6,3 +6,13 @@ description = "PHP openssl extension for goro-rs"
 
 [dependencies]
 goro-core = { path = "../goro-core" }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+ecb = { version = "0.1", features = ["alloc"] }
+ctr = "0.9"
+cipher = { version = "0.4", features = ["alloc"] }
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+digest = "0.10"
+rand = "0.8"

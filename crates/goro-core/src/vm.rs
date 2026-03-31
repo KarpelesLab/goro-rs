@@ -17675,6 +17675,17 @@ impl Vm {
                                     .set_property(prop_name.as_bytes().to_vec(), value);
                             }
                         }
+                    } else if let Value::Generator(_) = &obj_val {
+                        // Cannot create dynamic properties on Generator objects
+                        let prop_str = prop_name.to_string_lossy();
+                        let msg = format!("Cannot create dynamic property Generator::${}", prop_str);
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
                     } else if matches!(&obj_val, Value::Null | Value::Undef | Value::False) {
                         // Attempt to assign property on null/false
                         let type_name = Self::value_type_name(&obj_val);
