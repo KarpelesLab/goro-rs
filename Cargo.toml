@@ -10,6 +10,10 @@ members = [
     "crates/goro-ext-ctype",
     "crates/goro-ext-hash",
     "crates/goro-ext-openssl",
+    "crates/goro-ext-zlib",
+    "crates/goro-ext-gmp",
+    "crates/goro-ext-bz2",
+    "crates/goro-ext-curl",
     "crates/goro-phpt",
     "crates/goro-ext-xml",
 ]
@@ -34,6 +38,10 @@ goro-ext-json = { path = "crates/goro-ext-json" }
 goro-ext-ctype = { path = "crates/goro-ext-ctype" }
 goro-ext-hash = { path = "crates/goro-ext-hash" }
 goro-ext-openssl = { path = "crates/goro-ext-openssl" }
+goro-ext-zlib = { path = "crates/goro-ext-zlib" }
+goro-ext-gmp = { path = "crates/goro-ext-gmp" }
+goro-ext-bz2 = { path = "crates/goro-ext-bz2" }
+goro-ext-curl = { path = "crates/goro-ext-curl" }
 goro-phpt = { path = "crates/goro-phpt" }
 goro-ext-xml = { path = "crates/goro-ext-xml" }
 

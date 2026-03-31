@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-bz2"
+version = "0.1.0"
+edition = "2024"
+description = "PHP bz2 extension for goro-rs"
+
+[dependencies]
+goro-core = { path = "../goro-core" }

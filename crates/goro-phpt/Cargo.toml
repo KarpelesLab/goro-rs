@@ -15,6 +15,10 @@ goro-ext-json = { path = "../goro-ext-json" }
 goro-ext-ctype = { path = "../goro-ext-ctype" }
 goro-ext-hash = { path = "../goro-ext-hash" }
 goro-ext-openssl = { path = "../goro-ext-openssl" }
+goro-ext-zlib = { path = "../goro-ext-zlib" }
+goro-ext-gmp = { path = "../goro-ext-gmp" }
+goro-ext-bz2 = { path = "../goro-ext-bz2" }
+goro-ext-curl = { path = "../goro-ext-curl" }
 goro-ext-xml = { path = "../goro-ext-xml" }
 libc = "0.2"
 regex = "1"

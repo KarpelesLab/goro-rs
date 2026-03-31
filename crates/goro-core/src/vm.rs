@@ -11145,11 +11145,51 @@ impl Vm {
                         if let Some(Value::Generator(gen_rc)) = call.args.first() {
                             let sent_value = call.args.get(1).cloned().unwrap_or(Value::Null);
                             let mut gen_borrow = gen_rc.borrow_mut();
-                            gen_borrow.send_value = sent_value;
-                            gen_borrow.write_send_value();
-                            let _ = gen_borrow.resume(self);
+                            let was_created = gen_borrow.state == crate::generator::GeneratorState::Created;
+                            if was_created {
+                                // Generator is fresh: first resume to reach the first yield,
+                                // then write the sent value as that yield's result, then resume again.
+                                // PHP semantics: send() on a fresh generator advances to the first
+                                // yield, making the sent value the result of that yield expression.
+                                let _ = gen_borrow.resume(self);
+                                if self.current_exception.is_some() {
+                                    drop(gen_borrow);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                        let ob = obj.borrow();
+                                        let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                        let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                        format!("Uncaught {}: {}", class, msg)
+                                    } else { "Uncaught exception".to_string() };
+                                    return Err(VmError { message: exc_msg, line: op.line });
+                                }
+                                // Now at first yield: write sent value and resume past it
+                                gen_borrow.send_value = sent_value;
+                                gen_borrow.write_send_value();
+                                let _ = gen_borrow.resume(self);
+                            } else {
+                                gen_borrow.send_value = sent_value;
+                                gen_borrow.write_send_value();
+                                let _ = gen_borrow.resume(self);
+                            }
                             let result = gen_borrow.current_value.clone();
                             drop(gen_borrow);
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                    let ob = obj.borrow();
+                                    let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                    format!("Uncaught {}: {}", class, msg)
+                                } else { "Uncaught exception".to_string() };
+                                return Err(VmError { message: exc_msg, line: op.line });
+                            }
                             self.write_operand(
                                 &op.result,
                                 result,
@@ -13247,10 +13287,15 @@ impl Vm {
                     let arr_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, &op_array, op.line);
 
                     if let Value::Generator(gen_rc) = &arr_val {
-                        // For generators, advance to the first yield on init
-                        let mut gen_borrow = gen_rc.borrow_mut();
-                        let _ = gen_borrow.resume(self);
-                        drop(gen_borrow);
+                        // For generators, advance to the first yield on init only if not already started.
+                        // If valid()/current()/key() was called before foreach, the generator is
+                        // already Suspended and we should not advance past the current yield.
+                        {
+                            let mut gen_borrow = gen_rc.borrow_mut();
+                            if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                let _ = gen_borrow.resume(self);
+                            }
+                        }
                         // Store the generator in the iterator tmp slot
                         self.write_operand(
                             &op.result,

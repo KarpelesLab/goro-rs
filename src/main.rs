@@ -117,6 +117,10 @@ fn run_code(source: &[u8], filename: &str) {
     goro_ext_ctype::register(&mut vm);
     goro_ext_hash::register(&mut vm);
     goro_ext_openssl::register(&mut vm);
+    goro_ext_zlib::register(&mut vm);
+    goro_ext_gmp::register(&mut vm);
+    goro_ext_bz2::register(&mut vm);
+    goro_ext_curl::register(&mut vm);
     goro_ext_xml::register(&mut vm);
     // Register compiled classes
     for class in compiled_classes {

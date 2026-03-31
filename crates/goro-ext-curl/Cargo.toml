@@ -1,0 +1,9 @@
+[package]
+name = "goro-ext-curl"
+version = "0.1.0"
+edition = "2024"
+description = "PHP curl extension for goro-rs"
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+ureq = { version = "3", features = ["rustls"] }
