@@ -300,7 +300,5 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"basename", b"path", b"suffix");
     params!(b"pathinfo", b"path", b"flags");
 
-    // Iterator functions
-    params!(b"iterator_to_array", b"iterator", b"preserve_keys");
-    params!(b"iterator_count", b"iterator");
+    // Iterator/SPL functions moved to goro-ext-spl
 }

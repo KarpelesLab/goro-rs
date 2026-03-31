@@ -126,6 +126,8 @@ fn run_code(source: &[u8], filename: &str) {
     goro_ext_mysqli::register(&mut vm);
     goro_ext_sockets::register(&mut vm);
     goro_ext_mbstring::register(&mut vm);
+    goro_ext_spl::register(&mut vm);
+    goro_ext_reflection::register(&mut vm);
     // Register compiled classes
     for class in compiled_classes {
         vm.register_class(class);

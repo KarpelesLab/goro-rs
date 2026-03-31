@@ -20,6 +20,8 @@ members = [
     "crates/goro-ext-mbstring",
     "crates/goro-phpt",
     "crates/goro-ext-xml",
+    "crates/goro-ext-spl",
+    "crates/goro-ext-reflection",
 ]
 resolver = "2"
 
@@ -52,6 +54,8 @@ goro-ext-xml = { path = "crates/goro-ext-xml" }
 goro-ext-session = { path = "crates/goro-ext-session" }
 goro-ext-sockets = { path = "crates/goro-ext-sockets" }
 goro-ext-mbstring = { path = "crates/goro-ext-mbstring" }
+goro-ext-spl = { path = "crates/goro-ext-spl" }
+goro-ext-reflection = { path = "crates/goro-ext-reflection" }
 
 [features]
 default = ["ext-standard"]

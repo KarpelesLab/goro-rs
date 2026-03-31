@@ -627,6 +627,8 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     goro_ext_curl::register(&mut vm);
     goro_ext_xml::register(&mut vm);
     goro_ext_mysqli::register(&mut vm);
+    goro_ext_spl::register(&mut vm);
+    goro_ext_reflection::register(&mut vm);
 
     // Apply all INI settings to the VM constants
     for (key, value) in ini_settings {

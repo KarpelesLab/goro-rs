@@ -5,6 +5,7 @@ pub mod function;
 pub mod generator;
 pub mod object;
 pub mod opcode;
+pub mod reflection;
 pub mod string;
 pub mod value;
 pub mod vm;

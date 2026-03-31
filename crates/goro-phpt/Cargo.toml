@@ -24,5 +24,7 @@ goro-ext-session = { path = "../goro-ext-session" }
 goro-ext-mysqli = { path = "../goro-ext-mysqli" }
 goro-ext-sockets = { path = "../goro-ext-sockets" }
 goro-ext-mbstring = { path = "../goro-ext-mbstring" }
+goro-ext-spl = { path = "../goro-ext-spl" }
+goro-ext-reflection = { path = "../goro-ext-reflection" }
 libc = "0.2"
 regex = "1"

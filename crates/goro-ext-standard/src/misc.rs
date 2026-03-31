@@ -187,9 +187,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"tempnam", tempnam_fn);
     vm.register_function(b"getenv", getenv_fn);
     vm.register_function(b"putenv", putenv_fn);
-    vm.register_function(b"spl_autoload_register", spl_autoload_register_fn);
-    vm.register_function(b"spl_autoload_functions", spl_autoload_functions_fn);
-    vm.register_function(b"spl_autoload_unregister", spl_autoload_unregister_fn);
+    // SPL autoload functions moved to goro-ext-spl
     vm.register_function(b"class_alias", class_alias_fn);
     vm.register_function(b"is_a", is_a_fn);
     vm.register_function(b"is_subclass_of", is_subclass_of_fn);
@@ -274,8 +272,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"header", header_fn);
     vm.register_function(b"headers_sent", headers_sent_fn);
     vm.register_function(b"http_response_code", http_response_code_fn);
-    vm.register_function(b"spl_object_hash", spl_object_hash_fn);
-    vm.register_function(b"spl_object_id", spl_object_id_fn);
+    // SPL object functions moved to goro-ext-spl
     vm.register_function(b"forward_static_call", call_user_func);
     vm.register_function(b"forward_static_call_array", call_user_func_array);
     vm.register_function(b"phpversion", phpversion_fn);
@@ -286,8 +283,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"extension_loaded", extension_loaded_fn);
     vm.register_function(b"get_loaded_extensions", get_loaded_extensions_fn);
     vm.register_function(b"get_extension_funcs", get_extension_funcs_fn);
-    vm.register_function(b"iterator_to_array", iterator_to_array_fn);
-    vm.register_function(b"iterator_count", iterator_count_fn);
+    // iterator_to_array and iterator_count moved to goro-ext-spl
     vm.register_function(b"array_map", array_map);
     vm.register_function(b"key_exists", array_key_exists_fn2);
     vm.register_function(b"array_replace", array_replace_fn);
@@ -390,16 +386,14 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"dirname", dirname_fn);
     vm.register_function(b"basename", basename_fn);
     vm.register_function(b"pathinfo", pathinfo_fn);
-    vm.register_function(b"class_implements", class_implements_fn);
-    vm.register_function(b"class_parents", class_parents_fn);
-    vm.register_function(b"class_uses", class_uses_fn);
+    // class_implements, class_parents, class_uses moved to goro-ext-spl
     vm.register_function(b"str_increment", str_increment_fn);
     vm.register_function(b"str_decrement", str_decrement_fn);
     vm.register_function(b"get_error_handler", get_error_handler_fn);
     vm.register_function(b"get_exception_handler", get_exception_handler_fn);
     vm.register_function(b"get_included_files", get_included_files_fn);
     vm.register_function(b"get_required_files", get_included_files_fn);
-    vm.register_function(b"iterator_apply", iterator_apply_fn);
+    // iterator_apply moved to goro-ext-spl
     vm.register_function(b"property_exists", property_exists_fn);
     vm.register_function(b"get_mangled_object_vars", get_mangled_object_vars_fn);
     vm.register_function(b"get_resource_id", get_resource_id_fn);
@@ -5947,43 +5941,7 @@ fn putenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::True)
     }
 }
-fn spl_autoload_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let callback = args.first().cloned().unwrap_or(Value::Null);
-    if matches!(callback, Value::Null) {
-        // Default autoloader (spl_autoload) - not implemented, just return
-        return Ok(Value::True);
-    }
-    // Optional second arg: throw (default true) - ignored for now
-    // Optional third arg: prepend (default false)
-    let prepend = args.get(2).map_or(false, |v| v.to_bool());
-    if prepend {
-        vm.autoload_functions.insert(0, callback);
-    } else {
-        vm.autoload_functions.push(callback);
-    }
-    Ok(Value::True)
-}
-
-fn spl_autoload_functions_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let mut arr = PhpArray::new();
-    for (i, func) in vm.autoload_functions.iter().enumerate() {
-        arr.set(ArrayKey::Int(i as i64), func.clone());
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(arr))))
-}
-
-fn spl_autoload_unregister_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let callback = args.first().cloned().unwrap_or(Value::Null);
-    // Try to remove by matching the callback
-    // Simple approach: remove first matching entry
-    if let Some(pos) = vm.autoload_functions.iter().position(|f| {
-        // Compare by string representation for simplicity
-        format!("{:?}", f) == format!("{:?}", callback)
-    }) {
-        vm.autoload_functions.remove(pos);
-    }
-    Ok(Value::True)
-}
+// spl_autoload_register, spl_autoload_functions, spl_autoload_unregister moved to goro-ext-spl
 
 fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let original = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -6968,30 +6926,7 @@ fn array_any_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn spl_object_hash_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Object(obj)) = args.first() {
-        let id = obj.borrow().object_id;
-        Ok(Value::String(PhpString::from_string(format!(
-            "{:032x}",
-            id
-        ))))
-    } else {
-        Err(VmError {
-            message: "spl_object_hash() expects an object".into(),
-            line: 0,
-        })
-    }
-}
-fn spl_object_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Object(obj)) = args.first() {
-        Ok(Value::Long(obj.borrow().object_id as i64))
-    } else {
-        Err(VmError {
-            message: "spl_object_id() expects an object".into(),
-            line: 0,
-        })
-    }
-}
+// spl_object_hash and spl_object_id moved to goro-ext-spl
 #[allow(dead_code)]
 fn str_contains_builtin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let h = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -7425,102 +7360,7 @@ fn get_parent_class_real(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::False)
 }
 
-fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
-    match args.first() {
-        Some(Value::Array(arr)) => Ok(Value::Array(arr.clone())),
-        Some(val @ Value::Object(_)) => {
-            let mut result = PhpArray::new();
-            // Call rewind, then iterate with valid/current/key/next
-            vm.call_object_method(val, b"rewind", &[]);
-            for _ in 0..100000 {
-                let valid = vm.call_object_method(val, b"valid", &[]).unwrap_or(Value::False);
-                if !valid.is_truthy() { break; }
-                let current = vm.call_object_method(val, b"current", &[]).unwrap_or(Value::Null);
-                if use_keys {
-                    let key = vm.call_object_method(val, b"key", &[]).unwrap_or(Value::Null);
-                    match key {
-                        Value::Long(n) => result.set(ArrayKey::Int(n), current),
-                        Value::String(s) => result.set(ArrayKey::String(s), current),
-                        _ => result.push(current),
-                    }
-                } else {
-                    result.push(current);
-                }
-                vm.call_object_method(val, b"next", &[]);
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(result))))
-        }
-        Some(Value::Generator(gen_rc)) => {
-            let mut result = PhpArray::new();
-            // Advance to first yield if needed
-            {
-                let mut gen_init = gen_rc.borrow_mut();
-                if gen_init.state == goro_core::generator::GeneratorState::Created {
-                    let _ = gen_init.resume(vm);
-                }
-            }
-            for _ in 0..100000 {
-                let gen_b = gen_rc.borrow();
-                if gen_b.state == goro_core::generator::GeneratorState::Completed { break; }
-                let value = gen_b.current_value.clone();
-                let key = gen_b.current_key.clone();
-                drop(gen_b);
-                if use_keys {
-                    match key {
-                        Value::Long(n) => result.set(ArrayKey::Int(n), value),
-                        Value::String(s) => result.set(ArrayKey::String(s), value),
-                        _ => result.push(value),
-                    }
-                } else {
-                    result.push(value);
-                }
-                let mut gen_bm = gen_rc.borrow_mut();
-                gen_bm.write_send_value();
-                let _ = gen_bm.resume(vm);
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(result))))
-        }
-        _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    }
-}
-
-fn iterator_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    match args.first() {
-        Some(Value::Array(arr)) => Ok(Value::Long(arr.borrow().len() as i64)),
-        Some(val @ Value::Object(_)) => {
-            let mut count: i64 = 0;
-            vm.call_object_method(val, b"rewind", &[]);
-            for _ in 0..100000 {
-                let valid = vm.call_object_method(val, b"valid", &[]).unwrap_or(Value::False);
-                if !valid.is_truthy() { break; }
-                count += 1;
-                vm.call_object_method(val, b"next", &[]);
-            }
-            Ok(Value::Long(count))
-        }
-        Some(Value::Generator(gen_rc)) => {
-            let mut count: i64 = 0;
-            {
-                let mut gen_init = gen_rc.borrow_mut();
-                if gen_init.state == goro_core::generator::GeneratorState::Created {
-                    let _ = gen_init.resume(vm);
-                }
-            }
-            loop {
-                let gen_check = gen_rc.borrow();
-                if gen_check.state == goro_core::generator::GeneratorState::Completed { break; }
-                count += 1;
-                drop(gen_check);
-                let mut gen_bm = gen_rc.borrow_mut();
-                gen_bm.write_send_value();
-                let _ = gen_bm.resume(vm);
-            }
-            Ok(Value::Long(count))
-        }
-        _ => Ok(Value::Long(0)),
-    }
-}
+// iterator_to_array and iterator_count moved to goro-ext-spl
 
 fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let categorize = args.first().map(|v| v.is_truthy()).unwrap_or(false);
@@ -9173,115 +9013,7 @@ fn get_extension_funcs_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
     Ok(Value::False) // stub
 }
 
-fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_name = match args.first().unwrap_or(&Value::Null) {
-        Value::String(s) => s.as_bytes().to_vec(),
-        Value::Object(obj) => obj.borrow().class_name.clone(),
-        _ => return Ok(Value::False),
-    };
-    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-    let mut result = PhpArray::new();
-
-    // Get interfaces from the class definition
-    if let Some(class) = vm.classes.get(&class_lower) {
-        for iface in &class.interfaces {
-            let iface_str = PhpString::from_vec(iface.clone());
-            result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
-        }
-    }
-
-    // Also check built-in interface implementations
-    let builtins = goro_core::vm::get_builtin_interfaces(&class_lower);
-    for iface in builtins {
-        let iface_str = PhpString::from_vec(iface.clone());
-        result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
-    }
-
-    // Walk parent chain for inherited interfaces
-    let mut current = class_lower.clone();
-    for _ in 0..50 {
-        let parent = if let Some(class) = vm.classes.get(&current) {
-            class.parent.clone()
-        } else {
-            None
-        };
-        if let Some(parent_name) = parent {
-            let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if let Some(parent_class) = vm.classes.get(&parent_lower) {
-                for iface in &parent_class.interfaces {
-                    let iface_str = PhpString::from_vec(iface.clone());
-                    result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
-                }
-            }
-            let parent_builtins = goro_core::vm::get_builtin_interfaces(&parent_lower);
-            for iface in parent_builtins {
-                let iface_str = PhpString::from_vec(iface.clone());
-                result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
-            }
-            current = parent_lower;
-        } else {
-            break;
-        }
-    }
-
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-fn class_parents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_name = match args.first().unwrap_or(&Value::Null) {
-        Value::String(s) => s.as_bytes().to_vec(),
-        Value::Object(obj) => obj.borrow().class_name.clone(),
-        _ => return Ok(Value::False),
-    };
-    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-    let mut result = PhpArray::new();
-
-    let mut current = class_lower;
-    for _ in 0..50 {
-        let parent = if let Some(class) = vm.classes.get(&current) {
-            class.parent.clone()
-        } else {
-            // Check built-in parent chains
-            let bp = goro_core::vm::get_builtin_parent(&current);
-            bp.map(|p| p.to_vec())
-        };
-        if let Some(parent_name) = parent {
-            let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let display_name = if let Some(class) = vm.classes.get(&parent_lower) {
-                class.name.clone()
-            } else {
-                // Canonicalize built-in class names
-                goro_core::vm::canonicalize_class_name(&parent_lower)
-            };
-            let name_str = PhpString::from_vec(display_name);
-            result.set(ArrayKey::String(name_str.clone()), Value::String(name_str));
-            current = parent_lower;
-        } else {
-            break;
-        }
-    }
-
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-fn class_uses_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_name = match args.first().unwrap_or(&Value::Null) {
-        Value::String(s) => s.as_bytes().to_vec(),
-        Value::Object(obj) => obj.borrow().class_name.clone(),
-        _ => return Ok(Value::False),
-    };
-    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-    let mut result = PhpArray::new();
-
-    if let Some(class) = vm.classes.get(&class_lower) {
-        for trait_name in &class.traits {
-            let trait_str = PhpString::from_vec(trait_name.clone());
-            result.set(ArrayKey::String(trait_str.clone()), Value::String(trait_str));
-        }
-    }
-
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
+// class_implements, class_parents, class_uses moved to goro-ext-spl
 
 fn str_increment_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -9567,49 +9299,7 @@ fn get_included_files_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
-fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let iterator = args.first().unwrap_or(&Value::Null).clone();
-    let callback = args.get(1).unwrap_or(&Value::Null).clone();
-    let cb_args = args.get(2).cloned();
-
-    // Iterate over the iterator and call the callback for each element
-    if let Value::Object(_) = &iterator {
-        // Call rewind on the iterator
-        let _ = vm.call_object_method(&iterator, b"rewind", &[iterator.clone()]);
-
-        let mut count = 0i64;
-        loop {
-            // Check valid()
-            let valid = vm.call_object_method(&iterator, b"valid", &[iterator.clone()]);
-            match valid {
-                Some(v) if !v.is_truthy() => break,
-                None => break,
-                _ => {}
-            }
-
-            // Call the callback
-            let mut call_fn_args = vec![callback.clone()];
-            if let Some(Value::Array(extra)) = &cb_args {
-                let extra_borrow = extra.borrow();
-                for (_, v) in extra_borrow.iter() {
-                    call_fn_args.push(v.clone());
-                }
-            }
-            let result = call_user_func(vm, &call_fn_args)?;
-            count += 1;
-
-            if !result.is_truthy() {
-                break;
-            }
-
-            // Call next()
-            let _ = vm.call_object_method(&iterator, b"next", &[iterator.clone()]);
-        }
-        Ok(Value::Long(count))
-    } else {
-        Ok(Value::Long(0))
-    }
-}
+// iterator_apply moved to goro-ext-spl
 
 fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let obj_or_class = args.first().unwrap_or(&Value::Null);

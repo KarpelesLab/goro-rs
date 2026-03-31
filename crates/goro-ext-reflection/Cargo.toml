@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-reflection"
+version = "0.1.0"
+edition = "2024"
+description = "PHP reflection extension for goro-rs"
+
+[dependencies]
+goro-core = { path = "../goro-core" }

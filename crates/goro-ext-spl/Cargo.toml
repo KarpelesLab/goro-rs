@@ -1,0 +1,8 @@
+[package]
+name = "goro-ext-spl"
+version = "0.1.0"
+edition = "2024"
+description = "PHP SPL (Standard PHP Library) extension for goro-rs"
+
+[dependencies]
+goro-core = { path = "../goro-core" }
