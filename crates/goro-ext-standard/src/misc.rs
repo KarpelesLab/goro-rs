@@ -1620,14 +1620,141 @@ fn in_array(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
+fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), VmError> {
+    match callback {
+        Value::Null => Ok(()), // null is valid (identity/zip)
+        Value::String(s) => {
+            let name = s.as_bytes();
+            if name.is_empty() {
+                let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, function \"\" not found or invalid function name".to_string();
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            // Check for "Class::method" syntax
+            if let Some(pos) = name.iter().position(|&b| b == b':') {
+                if pos + 1 < name.len() && name[pos + 1] == b':' {
+                    let class_name = &name[..pos];
+                    let method_name = &name[pos + 2..];
+                    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let method_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some(class) = vm.classes.get(&class_lower) {
+                        if class.get_method(&method_lower).is_some() {
+                            return Ok(());
+                        }
+                        let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, class '{}' does not have a method '{}'",
+                            String::from_utf8_lossy(class_name), String::from_utf8_lossy(method_name));
+                        let exc = vm.throw_type_error(msg.clone());
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: msg, line: vm.current_line });
+                    }
+                    let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, class \"{}\" not found",
+                        String::from_utf8_lossy(class_name));
+                    let exc = vm.throw_type_error(msg.clone());
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
+                }
+            }
+            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Check if it's a closure name
+            if name_lower.starts_with(b"__closure_") || name_lower.starts_with(b"__arrow_") {
+                return Ok(());
+            }
+            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
+                return Ok(());
+            }
+            let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, function \"{}\" not found or invalid function name",
+                String::from_utf8_lossy(name));
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: vm.current_line })
+        }
+        Value::Array(arr) => {
+            let arr_borrow = arr.borrow();
+            let len = arr_borrow.len();
+            if len != 2 {
+                let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, array callback must have exactly two members".to_string();
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            let vals: Vec<Value> = arr_borrow.values().cloned().collect();
+            drop(arr_borrow);
+            match &vals[0] {
+                Value::String(s) => {
+                    let class_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if class_lower.starts_with(b"__closure_") || class_lower.starts_with(b"__arrow_") {
+                        return Ok(());
+                    }
+                    if vm.classes.contains_key(&class_lower) {
+                        return Ok(());
+                    }
+                    let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, first array member is not a valid class name or object".to_string();
+                    let exc = vm.throw_type_error(msg.clone());
+                    vm.current_exception = Some(exc);
+                    Err(VmError { message: msg, line: vm.current_line })
+                }
+                Value::Object(_) => Ok(()),
+                _ => {
+                    let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, first array member is not a valid class name or object".to_string();
+                    let exc = vm.throw_type_error(msg.clone());
+                    vm.current_exception = Some(exc);
+                    Err(VmError { message: msg, line: vm.current_line })
+                }
+            }
+        }
+        Value::Object(obj) => {
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(class) = vm.classes.get(&class_lower) {
+                if class.get_method(b"__invoke").is_some() {
+                    return Ok(());
+                }
+            }
+            let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, no array or string given".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: vm.current_line })
+        }
+        _ => {
+            let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, no array or string given".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: vm.current_line })
+        }
+    }
+}
+
 fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let callback_raw = args.first().cloned().unwrap_or(Value::Null);
     // Treat Undef as Null for callback
     let callback = match &callback_raw {
         Value::Undef => Value::Null,
+        Value::Reference(r) => {
+            let inner = r.borrow().clone();
+            if matches!(inner, Value::Null) { Value::Null } else { inner }
+        }
         _ => callback_raw,
     };
     let array = args.get(1);
+
+    // Validate callback
+    validate_callback_for_array_map(vm, &callback)?;
+
+    // Validate array arguments - must be arrays
+    for i in 1..args.len() {
+        let val = args[i].deref();
+        if !matches!(val, Value::Array(_)) {
+            let type_name = Vm::value_type_name(&val);
+            let msg = if i == 1 {
+                format!("array_map(): Argument #2 ($array) must be of type array, {} given", type_name)
+            } else {
+                format!("array_map(): Argument #{} must be of type array, {} given", i + 1, type_name)
+            };
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
 
     // Multi-array support: array_map($callback, $arr1, $arr2, ...)
     if args.len() > 2 {
@@ -8324,12 +8451,34 @@ fn array_product_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 product_float *= f;
             }
+            Value::True => {
+                // true * x = x (no change)
+                if is_float {
+                    // 1.0 * product_float = product_float
+                } else {
+                    // 1 * product_int = product_int
+                }
+            }
+            Value::False | Value::Null => {
+                // false/null = 0, result is 0
+                if is_float {
+                    product_float = 0.0;
+                } else {
+                    product_int = 0;
+                }
+            }
             _ => {
                 let n = value.to_long();
                 if is_float {
                     product_float *= n as f64;
                 } else {
-                    product_int = product_int.wrapping_mul(n);
+                    match product_int.checked_mul(n) {
+                        Some(v) => product_int = v,
+                        None => {
+                            is_float = true;
+                            product_float = product_int as f64 * n as f64;
+                        }
+                    }
                 }
             }
         }
@@ -8344,6 +8493,44 @@ fn array_product_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn array_sum_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arr = match args.first() {
         Some(Value::Array(arr)) => arr.borrow(),
+        Some(Value::Reference(r)) => {
+            let inner = r.borrow();
+            if let Value::Array(arr) = &*inner {
+                let cloned = arr.borrow().clone();
+                drop(inner);
+                // Work with clone
+                let mut sum_int: i64 = 0;
+                let mut is_float = false;
+                let mut sum_float: f64 = 0.0;
+                for (_, value) in cloned.iter() {
+                    match value {
+                        Value::Double(f) => {
+                            if !is_float {
+                                is_float = true;
+                                sum_float = sum_int as f64;
+                            }
+                            sum_float += f;
+                        }
+                        _ => {
+                            let n = value.to_long();
+                            if is_float {
+                                sum_float += n as f64;
+                            } else {
+                                match sum_int.checked_add(n) {
+                                    Some(v) => sum_int = v,
+                                    None => {
+                                        is_float = true;
+                                        sum_float = sum_int as f64 + n as f64;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return if is_float { Ok(Value::Double(sum_float)) } else { Ok(Value::Long(sum_int)) };
+            }
+            return Ok(Value::Long(0));
+        }
         _ => return Ok(Value::Long(0)),
     };
     let mut sum_int: i64 = 0;
@@ -8363,7 +8550,13 @@ fn array_sum_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if is_float {
                     sum_float += n as f64;
                 } else {
-                    sum_int = sum_int.wrapping_add(n);
+                    match sum_int.checked_add(n) {
+                        Some(v) => sum_int = v,
+                        None => {
+                            is_float = true;
+                            sum_float = sum_int as f64 + n as f64;
+                        }
+                    }
                 }
             }
         }
@@ -8377,37 +8570,95 @@ fn array_sum_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // User-callback comparison functions
 fn array_intersect_ukey_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, true, true, false)
+    array_u_op(vm, args, true, true, false, "array_intersect_ukey", 1)
 }
 fn array_intersect_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, true, true, true)
+    array_u_op(vm, args, true, true, true, "array_intersect_uassoc", 1)
 }
 fn array_diff_ukey_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, false, true, false)
+    array_u_op(vm, args, false, true, false, "array_diff_ukey", 1)
 }
 fn array_diff_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, false, true, true)
+    array_u_op(vm, args, false, true, true, "array_diff_uassoc", 1)
 }
 fn array_udiff_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, false, false, false)
+    array_u_op(vm, args, false, false, false, "array_udiff", 1)
 }
 fn array_udiff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // udiff_assoc: compare values with callback, keys with ==
-    array_udiff_with_key_check(vm, args, false)
+    array_udiff_with_key_check(vm, args, false, "array_udiff_assoc")
 }
 fn array_udiff_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // udiff_uassoc: two callbacks - value compare and key compare
-    array_udiff_uassoc_impl(vm, args)
+    array_udiff_uassoc_impl(vm, args, "array_udiff_uassoc")
 }
 fn array_uintersect_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, true, false, false)
+    array_u_op(vm, args, true, false, false, "array_uintersect", 1)
 }
 fn array_uintersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // uintersect_assoc: compare values with callback, keys with ==
-    array_udiff_with_key_check(vm, args, true)
+    array_udiff_with_key_check(vm, args, true, "array_uintersect_assoc")
 }
 fn array_uintersect_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_uintersect_uassoc_impl(vm, args)
+    array_uintersect_uassoc_impl(vm, args, "array_uintersect_uassoc")
+}
+
+/// Validate a callback argument for array_diff_u*/array_intersect_u*/array_udiff*/array_uintersect* functions.
+/// Returns Ok(()) if valid, or Err with TypeError if not.
+fn validate_array_callback(vm: &mut Vm, callback: &Value, func_name: &str, arg_num: usize) -> Result<(), VmError> {
+    match callback {
+        Value::String(s) => {
+            let name = s.as_bytes();
+            if name.is_empty() {
+                let msg = format!("{}(): Argument #{} must be a valid callback, function \"\" not found or invalid function name", func_name, arg_num);
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if name_lower.starts_with(b"__closure_") || name_lower.starts_with(b"__arrow_") {
+                return Ok(());
+            }
+            // Check for Class::method syntax
+            if let Some(pos) = name_lower.iter().position(|&b| b == b':') {
+                if pos + 1 < name_lower.len() && name_lower[pos + 1] == b':' {
+                    let class = &name_lower[..pos];
+                    let method = &name_lower[pos + 2..];
+                    if let Some(cls) = vm.classes.get(class) {
+                        if cls.get_method(method).is_some() {
+                            return Ok(());
+                        }
+                    }
+                    let msg = format!("{}(): Argument #{} must be a valid callback, class \"{}\" not found", func_name, arg_num, String::from_utf8_lossy(&name[..pos]));
+                    let exc = vm.throw_type_error(msg.clone());
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
+                }
+            }
+            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
+                return Ok(());
+            }
+            let msg = format!("{}(): Argument #{} must be a valid callback, function \"{}\" not found or invalid function name", func_name, arg_num, String::from_utf8_lossy(name));
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: vm.current_line })
+        }
+        Value::Array(arr) => {
+            let arr_borrow = arr.borrow();
+            let len = arr_borrow.len();
+            if len != 2 {
+                let msg = format!("{}(): Argument #{} must be a valid callback, array callback must have exactly two members", func_name, arg_num);
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            Ok(())
+        }
+        Value::Object(_) => Ok(()),
+        _ => {
+            let msg = format!("{}(): Argument #{} must be a valid callback, no array or string given", func_name, arg_num);
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: vm.current_line })
+        }
+    }
 }
 
 /// Generic user-callback array operation
@@ -8420,22 +8671,46 @@ fn array_u_op(
     is_intersect: bool,
     compare_keys: bool,
     also_compare_values: bool,
+    func_name: &str,
+    num_callbacks: usize,
 ) -> Result<Value, VmError> {
-    if args.len() < 2 {
+    if args.len() < 1 + num_callbacks {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
-    let callback = args.last().unwrap().clone();
-    let first = match &args[0] {
+    // Validate callback argument(s) first (PHP validates callbacks before arrays)
+    let array_arg_count = args.len() - num_callbacks;
+    for cb_idx in 0..num_callbacks {
+        let cb_arg_pos = array_arg_count + cb_idx;
+        validate_array_callback(vm, &args[cb_arg_pos], func_name, cb_arg_pos + 1)?;
+    }
+    // Type check all array arguments (everything except the last num_callbacks args)
+    for i in 0..array_arg_count {
+        let val = args[i].deref();
+        if !matches!(val, Value::Array(_)) {
+            let type_name = Vm::value_type_name(&val);
+            let msg = if i == 0 {
+                format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
+            } else {
+                format!("{}(): Argument #{} must be of type array, {} given", func_name, i + 1, type_name)
+            };
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
+    let callback = args[args.len() - num_callbacks].clone();
+    let first = match args[0].deref() {
         Value::Array(arr) => arr.borrow().clone(),
         _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     };
-    // If only one array + callback, return the first array
-    if args.len() <= 2 {
+    // If only one array + callback(s), return the first array
+    if array_arg_count <= 1 {
         return Ok(Value::Array(Rc::new(RefCell::new(first))));
     }
-    let other_arrays: Vec<PhpArray> = args[1..args.len() - 1]
+    let other_arrays: Vec<PhpArray> = args[1..array_arg_count]
         .iter()
         .filter_map(|v| {
+            let v = v.deref();
             if let Value::Array(arr) = v {
                 Some(arr.borrow().clone())
             } else {
@@ -8496,25 +8771,45 @@ fn array_udiff_with_key_check(
     vm: &mut Vm,
     args: &[Value],
     is_intersect: bool,
+    func_name: &str,
 ) -> Result<Value, VmError> {
     if args.len() < 2 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
+    // Validate callback first
+    validate_array_callback(vm, args.last().unwrap(), func_name, args.len())?;
+    // Type check all array arguments (everything except the last callback)
+    let array_arg_count = args.len() - 1;
+    for i in 0..array_arg_count {
+        let val = args[i].deref();
+        if !matches!(val, Value::Array(_)) {
+            let type_name = Vm::value_type_name(&val);
+            let msg = if i == 0 {
+                format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
+            } else {
+                format!("{}(): Argument #{} must be of type array, {} given", func_name, i + 1, type_name)
+            };
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
     // Single array + callback: return the first array
-    if args.len() == 2 {
-        return match &args[0] {
+    if array_arg_count <= 1 {
+        return match args[0].deref() {
             Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
             _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
         };
     }
     let callback = args.last().unwrap().clone();
-    let first = match &args[0] {
+    let first = match args[0].deref() {
         Value::Array(arr) => arr.borrow().clone(),
         _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     };
-    let other_arrays: Vec<PhpArray> = args[1..args.len() - 1]
+    let other_arrays: Vec<PhpArray> = args[1..array_arg_count]
         .iter()
         .filter_map(|v| {
+            let v = v.deref();
             if let Value::Array(arr) = v {
                 Some(arr.borrow().clone())
             } else {
@@ -8546,26 +8841,48 @@ fn array_udiff_with_key_check(
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, VmError> {
     if args.len() < 3 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
+    // Validate both callbacks first
+    if args.len() >= 2 {
+        validate_array_callback(vm, &args[args.len() - 1], func_name, args.len())?;
+        validate_array_callback(vm, &args[args.len() - 2], func_name, args.len() - 1)?;
+    }
+    // Type check all array arguments (everything except the last 2 callbacks)
+    let array_arg_count = args.len().saturating_sub(2);
+    for i in 0..array_arg_count {
+        let val = args[i].deref();
+        if !matches!(val, Value::Array(_)) {
+            let type_name = Vm::value_type_name(&val);
+            let msg = if i == 0 {
+                format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
+            } else {
+                format!("{}(): Argument #{} must be of type array, {} given", func_name, i + 1, type_name)
+            };
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
     // Single array + two callbacks: return the first array
-    if args.len() == 3 {
-        return match &args[0] {
+    if array_arg_count <= 1 {
+        return match args[0].deref() {
             Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
             _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
         };
     }
     let key_callback = args[args.len() - 1].clone();
     let val_callback = args[args.len() - 2].clone();
-    let first = match &args[0] {
+    let first = match args[0].deref() {
         Value::Array(arr) => arr.borrow().clone(),
         _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     };
-    let other_arrays: Vec<PhpArray> = args[1..args.len() - 2]
+    let other_arrays: Vec<PhpArray> = args[1..array_arg_count]
         .iter()
         .filter_map(|v| {
+            let v = v.deref();
             if let Value::Array(arr) = v {
                 Some(arr.borrow().clone())
             } else {
@@ -8609,26 +8926,48 @@ fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, VmError> {
     if args.len() < 3 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
+    // Validate both callbacks first
+    if args.len() >= 2 {
+        validate_array_callback(vm, &args[args.len() - 1], func_name, args.len())?;
+        validate_array_callback(vm, &args[args.len() - 2], func_name, args.len() - 1)?;
+    }
+    // Type check all array arguments (everything except the last 2 callbacks)
+    let array_arg_count = args.len().saturating_sub(2);
+    for i in 0..array_arg_count {
+        let val = args[i].deref();
+        if !matches!(val, Value::Array(_)) {
+            let type_name = Vm::value_type_name(&val);
+            let msg = if i == 0 {
+                format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
+            } else {
+                format!("{}(): Argument #{} must be of type array, {} given", func_name, i + 1, type_name)
+            };
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
     // Single array + two callbacks: return the first array
-    if args.len() == 3 {
-        return match &args[0] {
+    if array_arg_count <= 1 {
+        return match args[0].deref() {
             Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
             _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
         };
     }
     let key_callback = args[args.len() - 1].clone();
     let val_callback = args[args.len() - 2].clone();
-    let first = match &args[0] {
+    let first = match args[0].deref() {
         Value::Array(arr) => arr.borrow().clone(),
         _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     };
-    let other_arrays: Vec<PhpArray> = args[1..args.len() - 2]
+    let other_arrays: Vec<PhpArray> = args[1..array_arg_count]
         .iter()
         .filter_map(|v| {
+            let v = v.deref();
             if let Value::Array(arr) = v {
                 Some(arr.borrow().clone())
             } else {

@@ -403,6 +403,7 @@ fn str_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let pairs: Vec<(PhpString, PhpString)> = match search_val {
         Value::Array(search_arr) => {
             let search_arr = search_arr.borrow();
+            let is_replace_array = matches!(replace_val, Value::Array(_));
             let replace_values: Vec<PhpString> = match replace_val {
                 Value::Array(replace_arr) => {
                     let replace_arr = replace_arr.borrow();
@@ -414,7 +415,12 @@ fn str_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .values()
                 .enumerate()
                 .map(|(i, sv)| {
-                    let rv = replace_values.get(i).cloned().unwrap_or_else(PhpString::empty);
+                    let rv = if is_replace_array {
+                        replace_values.get(i).cloned().unwrap_or_else(PhpString::empty)
+                    } else {
+                        // When replace is a scalar, use it for all search values
+                        replace_values[0].clone()
+                    };
                     (sv.to_php_string(), rv)
                 })
                 .collect()
@@ -1106,6 +1112,15 @@ fn nl2br(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let body = args.first().unwrap_or(&Value::Null).to_php_string();
+    // PHP 8: chunklen must be int, not float
+    if let Some(v) = args.get(1) {
+        if matches!(v.deref(), Value::Double(_)) {
+            let msg = "chunk_split(): Argument #2 ($length) must be of type int, float given".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
     let chunklen = args.get(1).map(|v| v.to_long()).unwrap_or(76);
     let end = args
         .get(2)
@@ -1506,16 +1521,50 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     while i < bytes.len() {
         if bytes[i] == b'<' {
-            // Check for PHP tags: <?php ... ?>, <? ... ?>, <?= ... ?>
-            if i + 1 < bytes.len() && bytes[i + 1] == b'?' {
-                // PHP tag - skip until ?>
-                i += 2;
-                while i < bytes.len() {
-                    if bytes[i] == b'?' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                        i += 2;
-                        break;
-                    }
+            // Check if this could be a tag: must be followed by ?, !, /, %, or alpha
+            if i + 1 < bytes.len() {
+                let next = bytes[i + 1];
+                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && !next.is_ascii_alphabetic() {
+                    // Not a tag, output as literal
+                    result.push(bytes[i]);
                     i += 1;
+                    continue;
+                }
+            } else {
+                // < at end of string - output literally
+                result.push(bytes[i]);
+                i += 1;
+                continue;
+            }
+
+            // Check for PHP/XML processing instructions and ASP-style tags
+            if i + 1 < bytes.len() && (bytes[i + 1] == b'?' || bytes[i + 1] == b'%') {
+                // Check if this is an XML processing instruction: <?xml (case-insensitive)
+                // <?xml ends at first >, all other <? tags end at ?>
+                let is_xml_pi = i + 4 < bytes.len()
+                    && bytes[i + 2..i + 5].eq_ignore_ascii_case(b"xml")
+                    && (i + 5 >= bytes.len() || !bytes[i + 5].is_ascii_alphanumeric());
+                if is_xml_pi {
+                    // XML PI - skip until first >
+                    i += 2;
+                    while i < bytes.len() {
+                        if bytes[i] == b'>' {
+                            i += 1;
+                            break;
+                        }
+                        i += 1;
+                    }
+                } else {
+                    // PHP/ASP tag - skip until ?> or %> respectively
+                    let close_char = bytes[i + 1]; // ? or %
+                    i += 2;
+                    while i < bytes.len() {
+                        if bytes[i] == close_char && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
                 }
                 continue;
             }
@@ -1590,15 +1639,71 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn quoted_printable_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = s.as_bytes();
     let mut result = Vec::new();
-    for &b in s.as_bytes() {
-        if ((33..=126).contains(&b) && b != b'=') || b == b'\t' || b == b' ' {
+    let mut line_len: usize = 0;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        // Handle CRLF and LF line breaks - output as-is and reset line counter
+        if b == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            // Trim trailing whitespace before line break
+            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
+                let ws = result.pop().unwrap();
+                // Need to encode the trailing whitespace
+                let encoded = format!("={:02X}", ws);
+                result.extend_from_slice(encoded.as_bytes());
+            }
+            result.push(b'\r');
+            result.push(b'\n');
+            line_len = 0;
+            i += 2;
+            continue;
+        }
+        if b == b'\n' {
+            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
+                let ws = result.pop().unwrap();
+                let encoded = format!("={:02X}", ws);
+                result.extend_from_slice(encoded.as_bytes());
+            }
+            result.push(b'\n');
+            line_len = 0;
+            i += 1;
+            continue;
+        }
+
+        // Determine the encoded form of this byte
+        let is_printable = ((33..=126).contains(&b) && b != b'=') || b == b'\t' || b == b' ';
+        let char_len = if is_printable { 1 } else { 3 };
+
+        // Check if we need a soft line break (max line length is 76 chars)
+        // We need room for the char plus potentially "=\r\n" soft break (3 chars)
+        if line_len + char_len > 75 {
+            result.extend_from_slice(b"=\r\n");
+            line_len = 0;
+        }
+
+        if is_printable {
             result.push(b);
+            line_len += 1;
         } else {
             result.push(b'=');
             result.extend_from_slice(format!("{:02X}", b).as_bytes());
+            line_len += 3;
         }
+
+        i += 1;
     }
+
+    // Trim trailing whitespace at end of message
+    while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
+        let ws = result.pop().unwrap();
+        let encoded = format!("={:02X}", ws);
+        result.extend_from_slice(encoded.as_bytes());
+    }
+
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
@@ -3039,7 +3144,26 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let h = haystack.as_bytes();
     let n = needle.as_bytes();
     if n.is_empty() {
-        return Ok(Value::Long(h.len() as i64));
+        // Empty needle: return position based on offset
+        if offset >= 0 {
+            let start = offset as usize;
+            if start > h.len() {
+                let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+                let exc = vm.create_exception(b"ValueError", msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.into(), line: vm.current_line });
+            }
+            return Ok(Value::Long(h.len() as i64));
+        } else {
+            let abs = (-offset) as usize;
+            if abs > h.len() {
+                let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+                let exc = vm.create_exception(b"ValueError", msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.into(), line: vm.current_line });
+            }
+            return Ok(Value::Long((h.len() - abs) as i64));
+        }
     }
     if offset >= 0 {
         let start = offset as usize;
@@ -3140,7 +3264,25 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|b| b.to_ascii_lowercase())
         .collect();
     if n.is_empty() {
-        return Ok(Value::Long(h.len() as i64));
+        if offset >= 0 {
+            let start = offset as usize;
+            if start > h.len() {
+                let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+                let exc = vm.create_exception(b"ValueError", msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.into(), line: vm.current_line });
+            }
+            return Ok(Value::Long(h.len() as i64));
+        } else {
+            let abs = (-offset) as usize;
+            if abs > h.len() {
+                let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+                let exc = vm.create_exception(b"ValueError", msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.into(), line: vm.current_line });
+            }
+            return Ok(Value::Long((h.len() - abs) as i64));
+        }
     }
     if offset >= 0 {
         let start = offset as usize;
@@ -4431,16 +4573,50 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     while i < bytes.len() {
         if bytes[i] == b'<' {
-            // Check for PHP tags: <?php ... ?>, <? ... ?>, <?= ... ?>
-            if i + 1 < bytes.len() && bytes[i + 1] == b'?' {
-                // PHP tag - skip until ?>
-                i += 2;
-                while i < bytes.len() {
-                    if bytes[i] == b'?' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                        i += 2;
-                        break;
-                    }
+            // Check if this could be a tag: must be followed by ?, !, /, %, or alpha
+            if i + 1 < bytes.len() {
+                let next = bytes[i + 1];
+                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && !next.is_ascii_alphabetic() {
+                    // Not a tag, output as literal
+                    result.push(bytes[i]);
                     i += 1;
+                    continue;
+                }
+            } else {
+                // < at end of string - output literally
+                result.push(bytes[i]);
+                i += 1;
+                continue;
+            }
+
+            // Check for PHP/XML processing instructions and ASP-style tags
+            if i + 1 < bytes.len() && (bytes[i + 1] == b'?' || bytes[i + 1] == b'%') {
+                // Check if this is an XML processing instruction: <?xml (case-insensitive)
+                // <?xml ends at first >, all other <? tags end at ?>
+                let is_xml_pi = i + 4 < bytes.len()
+                    && bytes[i + 2..i + 5].eq_ignore_ascii_case(b"xml")
+                    && (i + 5 >= bytes.len() || !bytes[i + 5].is_ascii_alphanumeric());
+                if is_xml_pi {
+                    // XML PI - skip until first >
+                    i += 2;
+                    while i < bytes.len() {
+                        if bytes[i] == b'>' {
+                            i += 1;
+                            break;
+                        }
+                        i += 1;
+                    }
+                } else {
+                    // PHP/ASP tag - skip until ?> or %> respectively
+                    let close_char = bytes[i + 1]; // ? or %
+                    i += 2;
+                    while i < bytes.len() {
+                        if bytes[i] == close_char && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
                 }
                 continue;
             }
@@ -4641,29 +4817,84 @@ fn quoted_printable_encode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
     let mut result = Vec::new();
-    let mut line_len = 0;
-    for &b in bytes {
-        if b == b'\r' || b == b'\n' {
-            result.push(b);
-            line_len = 0;
-        } else if b == b'\t' || (b >= 32 && b <= 126 && b != b'=') {
-            if line_len >= 75 {
-                result.extend_from_slice(b"=\n");
-                line_len = 0;
+    let mut line_len: usize = 0;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        // Handle CRLF line breaks - output as-is and reset line counter
+        if b == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            // Encode trailing whitespace before hard line break
+            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
+                let ws = result.pop().unwrap();
+                result.push(b'=');
+                result.push(b"0123456789ABCDEF"[(ws >> 4) as usize]);
+                result.push(b"0123456789ABCDEF"[(ws & 0x0f) as usize]);
             }
+            result.push(b'\r');
+            result.push(b'\n');
+            line_len = 0;
+            i += 2;
+            continue;
+        }
+        if b == b'\n' {
+            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
+                let ws = result.pop().unwrap();
+                result.push(b'=');
+                result.push(b"0123456789ABCDEF"[(ws >> 4) as usize]);
+                result.push(b"0123456789ABCDEF"[(ws & 0x0f) as usize]);
+            }
+            result.push(b'\r');
+            result.push(b'\n');
+            line_len = 0;
+            i += 1;
+            continue;
+        }
+        if b == b'\r' {
+            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
+                let ws = result.pop().unwrap();
+                result.push(b'=');
+                result.push(b"0123456789ABCDEF"[(ws >> 4) as usize]);
+                result.push(b"0123456789ABCDEF"[(ws & 0x0f) as usize]);
+            }
+            result.push(b'\r');
+            result.push(b'\n');
+            line_len = 0;
+            i += 1;
+            continue;
+        }
+
+        let is_printable = b == b'\t' || (b >= 32 && b <= 126 && b != b'=');
+        let char_len: usize = if is_printable { 1 } else { 3 };
+
+        // Check if we need a soft line break
+        if line_len + char_len > 75 {
+            result.extend_from_slice(b"=\r\n");
+            line_len = 0;
+        }
+
+        if is_printable {
             result.push(b);
             line_len += 1;
         } else {
-            if line_len >= 73 {
-                result.extend_from_slice(b"=\n");
-                line_len = 0;
-            }
             result.push(b'=');
             result.push(b"0123456789ABCDEF"[(b >> 4) as usize]);
             result.push(b"0123456789ABCDEF"[(b & 0x0f) as usize]);
             line_len += 3;
         }
+
+        i += 1;
     }
+
+    // Encode trailing whitespace at end of string
+    while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
+        let ws = result.pop().unwrap();
+        result.push(b'=');
+        result.push(b"0123456789ABCDEF"[(ws >> 4) as usize]);
+        result.push(b"0123456789ABCDEF"[(ws & 0x0f) as usize]);
+    }
+
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
