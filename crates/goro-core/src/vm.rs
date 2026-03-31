@@ -946,7 +946,7 @@ impl Vm {
     /// This is the class where the currently executing method was defined.
     /// Used for visibility checks. Falls back to called_class_stack if class_scope_stack is empty.
     /// Returns the canonical (original case) class name by looking up the class table.
-    fn current_class_scope(&self) -> Option<Vec<u8>> {
+    pub fn current_class_scope(&self) -> Option<Vec<u8>> {
         let scope_lower = self.class_scope_stack.last().cloned()
             .or_else(|| self.called_class_stack.last().map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect()));
         scope_lower.map(|lower| {
@@ -8670,6 +8670,17 @@ impl Vm {
                             fn_cvs[cv_idx] = arg.clone();
                         }
                     }
+                    // If this is a generator function, create a Generator object instead of executing
+                    if method_op.is_generator {
+                        let mut generator = crate::generator::PhpGenerator::new(method_op, fn_cvs);
+                        // Capture class context for get_class() / get_called_class() inside generator
+                        generator.called_class = Some(class_lower.clone());
+                        generator.class_scope = Some(method.declaring_class.clone());
+                        // Store args for func_get_args() support
+                        generator.args = args.to_vec();
+                        let gen_rc = Rc::new(RefCell::new(generator));
+                        return Some(Value::Generator(gen_rc));
+                    }
                     self.called_class_stack.push(class_lower.clone());
                     self.class_scope_stack.push(method.declaring_class.clone());
                     let result = self.execute_op_array(&method_op, fn_cvs).ok();
@@ -11887,7 +11898,31 @@ impl Vm {
                             }
 
                             // Create a generator instead of executing
-                            let generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
+                            let mut generator = crate::generator::PhpGenerator::new(user_fn.clone(), func_cvs);
+                            // Store the args for func_get_args() support
+                            generator.args = call.args.clone();
+                            // Capture class context for get_class() / get_called_class() inside generator
+                            if let Some(sep_pos) = func_name_lower.windows(2).position(|w| w == b"::") {
+                                // For late static binding, use the actual object class when $this is present.
+                                let called_class = if let Some(Value::Object(obj)) = call.args.first() {
+                                    obj.borrow().class_name.clone()
+                                } else if let Some(Value::Object(obj)) = cvs.first() {
+                                    obj.borrow().class_name.clone()
+                                } else {
+                                    // Pure static call - use the original class from the call name
+                                    let orig_bytes = call.name.as_bytes();
+                                    orig_bytes[..sep_pos].to_vec()
+                                };
+                                generator.called_class = Some(called_class);
+                                // class_scope is the declaring class from the method definition
+                                let class_part_lower = &func_name_lower[..sep_pos];
+                                let method_part_lower = &func_name_lower[sep_pos + 2..];
+                                let defining_class = self.classes.get(class_part_lower)
+                                    .and_then(|c| c.get_method(method_part_lower))
+                                    .map(|m| m.declaring_class.clone())
+                                    .unwrap_or_else(|| class_part_lower.to_vec());
+                                generator.class_scope = Some(defining_class);
+                            }
                             let gen_rc = Rc::new(RefCell::new(generator));
                             self.write_operand(
                                 &op.result,
@@ -13293,7 +13328,20 @@ impl Vm {
                         {
                             let mut gen_borrow = gen_rc.borrow_mut();
                             if gen_borrow.state == crate::generator::GeneratorState::Created {
-                                let _ = gen_borrow.resume(self);
+                                let resume_result = gen_borrow.resume(self);
+                                drop(gen_borrow);
+                                if resume_result.is_err() || self.current_exception.is_some() {
+                                    // Exception thrown during generator priming - propagate it
+                                    if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                        exception_handlers.pop();
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    if let Err(e) = resume_result {
+                                        return Err(e);
+                                    }
+                                    return Err(VmError { message: "Uncaught exception in generator".to_string(), line: op.line });
+                                }
                             }
                         }
                         // Store the generator in the iterator tmp slot
@@ -13334,26 +13382,45 @@ impl Vm {
                             // IteratorAggregate: call getIterator() and iterate the result
                             let iter_obj = self.call_object_method(&arr_val, b"getIterator", &[]);
                             if let Some(iter_val) = iter_obj {
-                                if let Value::Object(_) = &iter_val {
-                                    // Call rewind() on the returned Iterator
-                                    self.call_object_method(&iter_val, b"rewind", &[]);
-                                    // Store the iterator object for ForeachNext
-                                    self.write_operand(
-                                        &op.result,
-                                        iter_val,
-                                        &mut cvs,
-                                        &mut tmps,
-                                        &static_cv_keys,
-                                    );
-                                } else {
-                                    // getIterator() didn't return an object, store as-is
-                                    self.write_operand(
-                                        &op.result,
-                                        iter_val,
-                                        &mut cvs,
-                                        &mut tmps,
-                                        &static_cv_keys,
-                                    );
+                                match &iter_val {
+                                    Value::Object(_) => {
+                                        // Call rewind() on the returned Iterator
+                                        self.call_object_method(&iter_val, b"rewind", &[]);
+                                        // Store the iterator object for ForeachNext
+                                        self.write_operand(
+                                            &op.result,
+                                            iter_val,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                    }
+                                    Value::Generator(gen_rc) => {
+                                        // getIterator() returned a Generator - prime it if needed
+                                        {
+                                            let mut gen_borrow = gen_rc.borrow_mut();
+                                            if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                                let _ = gen_borrow.resume(self);
+                                            }
+                                        }
+                                        self.write_operand(
+                                            &op.result,
+                                            iter_val,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                    }
+                                    _ => {
+                                        // getIterator() didn't return an object, store as-is
+                                        self.write_operand(
+                                            &op.result,
+                                            iter_val,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                    }
                                 }
                             } else {
                                 self.write_operand(
@@ -18253,7 +18320,38 @@ impl Vm {
                                 }
                             }
                             b"rewind" => {
-                                // In PHP, rewind on a started generator is a no-op / warning
+                                let gen_borrow = gen_rc.borrow();
+                                if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                    drop(gen_borrow);
+                                    // Fresh generator: advance to first yield
+                                    let mut gen_borrow = gen_rc.borrow_mut();
+                                    let resume_result = gen_borrow.resume(self);
+                                    drop(gen_borrow);
+                                    if resume_result.is_err() || self.current_exception.is_some() {
+                                        // Exception during priming - propagate
+                                        if let Some((catch_target, _, _)) = exception_handlers.last().copied() {
+                                            exception_handlers.pop();
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        if let Err(e) = resume_result {
+                                            return Err(e);
+                                        }
+                                        return Err(VmError { message: "Uncaught exception in generator".to_string(), line: op.line });
+                                    }
+                                } else if gen_borrow.state == crate::generator::GeneratorState::Suspended {
+                                    // In PHP 8.x, rewinding an already-started generator throws an Error
+                                    drop(gen_borrow);
+                                    let msg = "Cannot rewind a generator that was already run";
+                                    let exc = self.create_exception(b"Error", msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                }
+                                // If completed, rewind is a no-op
                                 Value::Null
                             }
                             b"send" => {
@@ -18667,6 +18765,16 @@ impl Vm {
         self.call_depth -= 1;
     }
 
+    /// Push a class scope entry (used by generator resume to restore class context)
+    pub fn push_class_scope(&mut self, scope: Vec<u8>) {
+        self.class_scope_stack.push(scope);
+    }
+
+    /// Pop a class scope entry (used by generator resume to restore class context)
+    pub fn pop_class_scope(&mut self) {
+        self.class_scope_stack.pop();
+    }
+
     /// Initialize a function call from generator context
     pub fn generator_init_fcall(&mut self, name_val: Value) {
         if let Value::Array(arr) = &name_val {
@@ -18926,6 +19034,11 @@ impl Vm {
     /// Get a global variable value
     pub fn get_global(&self, name: &[u8]) -> Option<Value> {
         self.globals.get(name).cloned()
+    }
+
+    /// Set a global variable value
+    pub fn set_global(&mut self, name: Vec<u8>, value: Value) {
+        self.globals.insert(name, value);
     }
 
     /// Dispatch a Fiber instance method (start, resume, throw)

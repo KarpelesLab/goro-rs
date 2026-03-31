@@ -63,6 +63,14 @@ pub struct PhpGenerator {
     /// Whether this generator is currently running (executing its body).
     /// Used to detect and prevent recursive resumption.
     pub is_running: bool,
+    /// The called class (for late static binding / get_called_class())
+    /// Captured at generator creation and pushed onto the VM stack during resume.
+    pub called_class: Option<Vec<u8>>,
+    /// The class scope (defining class, for get_class() / visibility)
+    /// Captured at generator creation and pushed onto the VM stack during resume.
+    pub class_scope: Option<Vec<u8>>,
+    /// The arguments passed to the generator function (for func_get_args())
+    pub args: Vec<Value>,
 }
 
 impl PhpGenerator {
@@ -88,6 +96,9 @@ impl PhpGenerator {
             yield_from_pos: 0,
             fiber_suspend_result: None,
             is_running: false,
+            called_class: None,
+            class_scope: None,
+            args: Vec::new(),
         }
     }
 
@@ -107,9 +118,35 @@ impl PhpGenerator {
         // Track call depth to prevent stack overflow from recursive yield-from
         vm.enter_generator_resume(0)?;
 
+        // Push class context for get_class() / get_called_class() inside generators
+        let pushed_scope = if let Some(ref scope) = self.class_scope {
+            vm.push_class_scope(scope.clone());
+            true
+        } else {
+            false
+        };
+        let pushed_called = if let Some(ref called) = self.called_class {
+            vm.called_class_stack.push(called.clone());
+            true
+        } else {
+            false
+        };
+
+        // Push a call_stack entry for func_get_args() support
+        let func_name = String::from_utf8_lossy(&self.op_array.name).to_string();
+        let func_file = vm.current_file.clone();
+        vm.call_stack.push((func_name, func_file, 0, self.args.clone(), self.class_scope.is_some()));
+
         self.is_running = true;
         let result = self.resume_inner(vm);
         self.is_running = false;
+
+        // Pop the call_stack entry
+        vm.call_stack.pop();
+
+        // Pop class context
+        if pushed_called { vm.called_class_stack.pop(); }
+        if pushed_scope { vm.pop_class_scope(); }
 
         vm.leave_generator_resume();
 

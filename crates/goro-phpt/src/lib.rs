@@ -141,7 +141,7 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         let supported = [
             "ctype", "date", "json", "hash", "pcre", "spl", "standard",
             "mbstring", "reflection", "core", "tokenizer",
-            "openssl", "zlib", "xml", "gmp", "bz2", "curl", "simplexml",
+            "openssl", "zlib", "xml", "gmp", "bz2", "curl", "simplexml", "mysqli",
         ];
         for ext in extensions.lines() {
             let ext = ext.trim().to_lowercase();
@@ -626,6 +626,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     goro_ext_bz2::register(&mut vm);
     goro_ext_curl::register(&mut vm);
     goro_ext_xml::register(&mut vm);
+    goro_ext_mysqli::register(&mut vm);
 
     // Apply all INI settings to the VM constants
     for (key, value) in ini_settings {

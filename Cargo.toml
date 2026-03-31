@@ -14,6 +14,10 @@ members = [
     "crates/goro-ext-gmp",
     "crates/goro-ext-bz2",
     "crates/goro-ext-curl",
+    "crates/goro-ext-mysqli",
+    "crates/goro-ext-session",
+    "crates/goro-ext-sockets",
+    "crates/goro-ext-mbstring",
     "crates/goro-phpt",
     "crates/goro-ext-xml",
 ]
@@ -42,8 +46,12 @@ goro-ext-zlib = { path = "crates/goro-ext-zlib" }
 goro-ext-gmp = { path = "crates/goro-ext-gmp" }
 goro-ext-bz2 = { path = "crates/goro-ext-bz2" }
 goro-ext-curl = { path = "crates/goro-ext-curl" }
+goro-ext-mysqli = { path = "crates/goro-ext-mysqli" }
 goro-phpt = { path = "crates/goro-phpt" }
 goro-ext-xml = { path = "crates/goro-ext-xml" }
+goro-ext-session = { path = "crates/goro-ext-session" }
+goro-ext-sockets = { path = "crates/goro-ext-sockets" }
+goro-ext-mbstring = { path = "crates/goro-ext-mbstring" }
 
 [features]
 default = ["ext-standard"]

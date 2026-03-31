@@ -2847,7 +2847,11 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_comparison()?;
+            // Use parse_assignment for the right side so that assignment has
+            // lower precedence than comparison, allowing patterns like:
+            //   null !== $key = key($array)
+            // to parse as: null !== ($key = key($array))
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {

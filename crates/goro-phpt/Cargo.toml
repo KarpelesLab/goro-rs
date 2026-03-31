@@ -20,5 +20,9 @@ goro-ext-gmp = { path = "../goro-ext-gmp" }
 goro-ext-bz2 = { path = "../goro-ext-bz2" }
 goro-ext-curl = { path = "../goro-ext-curl" }
 goro-ext-xml = { path = "../goro-ext-xml" }
+goro-ext-session = { path = "../goro-ext-session" }
+goro-ext-mysqli = { path = "../goro-ext-mysqli" }
+goro-ext-sockets = { path = "../goro-ext-sockets" }
+goro-ext-mbstring = { path = "../goro-ext-mbstring" }
 libc = "0.2"
 regex = "1"

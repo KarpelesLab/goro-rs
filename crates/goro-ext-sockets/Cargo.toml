@@ -1,0 +1,9 @@
+[package]
+name = "goro-ext-sockets"
+version = "0.1.0"
+edition = "2024"
+description = "PHP sockets extension for goro-rs"
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+libc = "0.2"

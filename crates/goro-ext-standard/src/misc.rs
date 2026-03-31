@@ -5349,6 +5349,21 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    // get_class() with no argument (or null) uses the current class scope
+    if args.is_empty() || matches!(val, Value::Null | Value::Undef) {
+        // Deprecated: Calling get_class() without arguments is deprecated
+        _vm.emit_deprecated("Calling get_class() without arguments is deprecated");
+        // Return the current class scope (the declaring class)
+        if let Some(scope) = _vm.current_class_scope() {
+            // Find the original-case class name
+            let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_name = _vm.classes.get(&scope_lower)
+                .map(|c| c.name.clone())
+                .unwrap_or(scope);
+            return Ok(Value::String(PhpString::from_vec(class_name)));
+        }
+        return Ok(Value::False);
+    }
     if let Value::Object(obj) = val {
         let obj = obj.borrow();
         // Return the full class name including NUL byte for anonymous classes
