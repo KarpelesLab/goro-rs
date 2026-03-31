@@ -67,6 +67,17 @@ fn compute_hash(algo: &str, data: &[u8]) -> Option<Vec<u8>> {
         "sha384" | "sha-384" => Some(sha384_hash(data)),
         "sha512" | "sha-512" => Some(sha512_hash(data)),
         "sha224" | "sha-224" => Some(sha224_hash(data).to_vec()),
+        "sha512/224" => Some(sha512_224_hash(data)),
+        "sha512/256" => Some(sha512_256_hash(data)),
+        "sha3-224" => Some(sha3_hash(data, 224)),
+        "sha3-256" => Some(sha3_hash(data, 256)),
+        "sha3-384" => Some(sha3_hash(data, 384)),
+        "sha3-512" => Some(sha3_hash(data, 512)),
+        "ripemd128" => Some(ripemd128_hash(data).to_vec()),
+        "ripemd160" => Some(ripemd160_hash(data).to_vec()),
+        "ripemd256" => Some(ripemd256_hash(data).to_vec()),
+        "ripemd320" => Some(ripemd320_hash(data).to_vec()),
+        "joaat" => Some(joaat_hash(data).to_be_bytes().to_vec()),
         "crc32" => Some(crc32_compute(data).to_le_bytes().to_vec()),
         "crc32b" => Some(crc32b_compute(data).to_be_bytes().to_vec()),
         "crc32c" => Some(crc32c_compute(data).to_be_bytes().to_vec()),
@@ -84,7 +95,12 @@ fn hash_block_size(algo: &str) -> usize {
     match algo {
         "md5" | "md4" => 64,
         "sha1" | "sha-1" | "sha256" | "sha-256" | "sha224" | "sha-224" => 64,
-        "sha384" | "sha-384" | "sha512" | "sha-512" => 128,
+        "sha384" | "sha-384" | "sha512" | "sha-512" | "sha512/224" | "sha512/256" => 128,
+        "sha3-224" => 144,
+        "sha3-256" => 136,
+        "sha3-384" => 104,
+        "sha3-512" => 72,
+        "ripemd128" | "ripemd160" | "ripemd256" | "ripemd320" => 64,
         _ => 64,
     }
 }
@@ -378,6 +394,9 @@ fn hash_hmac_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for algo in &[
         "md4", "md5", "sha1", "sha224", "sha256", "sha384", "sha512",
+        "sha512/224", "sha512/256",
+        "sha3-224", "sha3-256", "sha3-384", "sha3-512",
+        "ripemd128", "ripemd160", "ripemd256", "ripemd320",
     ] {
         result.push(Value::String(PhpString::from_bytes(algo.as_bytes())));
     }
@@ -388,6 +407,10 @@ fn hash_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for algo in &[
         "md4", "md5", "sha1", "sha224", "sha256", "sha384", "sha512",
+        "sha512/224", "sha512/256",
+        "sha3-224", "sha3-256", "sha3-384", "sha3-512",
+        "ripemd128", "ripemd160", "ripemd256", "ripemd320",
+        "joaat",
         "fnv132", "fnv1a32", "fnv164", "fnv1a64",
         "adler32", "crc32", "crc32b", "crc32c",
     ] {
@@ -1133,6 +1156,485 @@ fn md5_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(_) => Ok(Value::False),
     }
+}
+
+// --- SHA-512/224 and SHA-512/256 ---
+
+fn sha512_224_hash(data: &[u8]) -> Vec<u8> {
+    sha512_core(data, &[
+        0x8C3D37C819544DA2, 0x73E1996689DCD4D6, 0x1DFAB7AE32FF9C82, 0x679DD514582F9FCF,
+        0x0F6D2B697BD44DA8, 0x77E36F7304C48942, 0x3F9D85A86A1D36C8, 0x1112E6AD91D692A1,
+    ], 28)
+}
+
+fn sha512_256_hash(data: &[u8]) -> Vec<u8> {
+    sha512_core(data, &[
+        0x22312194FC2BF72C, 0x9F555FA3C84C64C2, 0x2393B86B6F53B151, 0x963877195940EABD,
+        0x96283EE2A88EFFE3, 0xBE5E1E2553863992, 0x2B0199FC2C85B8AA, 0x0EB72DDC81C52CA2,
+    ], 32)
+}
+
+// --- SHA-3 (Keccak) ---
+
+fn sha3_hash(data: &[u8], bits: usize) -> Vec<u8> {
+    let rate = 1600 - 2 * bits;
+    let rate_bytes = rate / 8;
+    let output_bytes = bits / 8;
+    keccak_sponge(data, rate_bytes, output_bytes, 0x06)
+}
+
+fn keccak_sponge(data: &[u8], rate_bytes: usize, output_bytes: usize, suffix: u8) -> Vec<u8> {
+    let mut state = [0u64; 25];
+
+    // Absorb
+    let mut offset = 0;
+    while offset + rate_bytes <= data.len() {
+        for i in 0..rate_bytes / 8 {
+            let word = u64::from_le_bytes([
+                data[offset + i * 8], data[offset + i * 8 + 1],
+                data[offset + i * 8 + 2], data[offset + i * 8 + 3],
+                data[offset + i * 8 + 4], data[offset + i * 8 + 5],
+                data[offset + i * 8 + 6], data[offset + i * 8 + 7],
+            ]);
+            state[i] ^= word;
+        }
+        keccak_f1600(&mut state);
+        offset += rate_bytes;
+    }
+
+    // Pad and absorb last block
+    let remaining = data.len() - offset;
+    let mut last_block = vec![0u8; rate_bytes];
+    last_block[..remaining].copy_from_slice(&data[offset..]);
+    last_block[remaining] = suffix;
+    last_block[rate_bytes - 1] |= 0x80;
+
+    for i in 0..rate_bytes / 8 {
+        let word = u64::from_le_bytes([
+            last_block[i * 8], last_block[i * 8 + 1],
+            last_block[i * 8 + 2], last_block[i * 8 + 3],
+            last_block[i * 8 + 4], last_block[i * 8 + 5],
+            last_block[i * 8 + 6], last_block[i * 8 + 7],
+        ]);
+        state[i] ^= word;
+    }
+    keccak_f1600(&mut state);
+
+    // Squeeze
+    let mut output = Vec::with_capacity(output_bytes);
+    let mut squeezed = 0;
+    while squeezed < output_bytes {
+        let to_take = (output_bytes - squeezed).min(rate_bytes);
+        for i in 0..to_take / 8 {
+            let bytes = state[i].to_le_bytes();
+            let remaining_needed = output_bytes - squeezed;
+            let copy_len = 8.min(remaining_needed - i * 8);
+            output.extend_from_slice(&bytes[..copy_len]);
+        }
+        // Handle partial last word
+        let full_words = to_take / 8;
+        let partial = to_take % 8;
+        if partial > 0 {
+            let bytes = state[full_words].to_le_bytes();
+            output.extend_from_slice(&bytes[..partial]);
+        }
+        squeezed += to_take;
+        if squeezed < output_bytes {
+            keccak_f1600(&mut state);
+        }
+    }
+    output.truncate(output_bytes);
+    output
+}
+
+fn keccak_f1600(state: &mut [u64; 25]) {
+    const RC: [u64; 24] = [
+        0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000,
+        0x000000000000808B, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+        0x000000000000008A, 0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
+        0x000000008000808B, 0x800000000000008B, 0x8000000000008089, 0x8000000000008003,
+        0x8000000000008002, 0x8000000000000080, 0x000000000000800A, 0x800000008000000A,
+        0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
+    ];
+
+    // The rotation offsets for rho, indexed as [x + 5*y]
+    const ROTATIONS: [u32; 25] = [
+         0,  1, 62, 28, 27,
+        36, 44,  6, 55, 20,
+         3, 10, 43, 25, 39,
+        41, 45, 15, 21,  8,
+        18,  2, 61, 56, 14,
+    ];
+
+    for round in 0..24 {
+        // Theta
+        let mut c = [0u64; 5];
+        for x in 0..5 {
+            c[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
+        }
+        let mut d = [0u64; 5];
+        for x in 0..5 {
+            d[x] = c[(x + 4) % 5] ^ c[(x + 1) % 5].rotate_left(1);
+        }
+        for i in 0..25 {
+            state[i] ^= d[i % 5];
+        }
+
+        // Rho and Pi combined
+        let mut b = [0u64; 25];
+        for x in 0..5 {
+            for y in 0..5 {
+                let src = x + 5 * y;
+                // Pi mapping: (x, y) -> (y, 2*x + 3*y mod 5)
+                let dst = y + 5 * ((2 * x + 3 * y) % 5);
+                b[dst] = state[src].rotate_left(ROTATIONS[src]);
+            }
+        }
+
+        // Chi
+        for y in 0..5 {
+            for x in 0..5 {
+                state[x + 5 * y] = b[x + 5 * y] ^ ((!b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]);
+            }
+        }
+
+        // Iota
+        state[0] ^= RC[round];
+    }
+}
+
+// --- RIPEMD-128 ---
+fn ripemd128_hash(data: &[u8]) -> [u8; 16] {
+    let mut h0: u32 = 0x67452301;
+    let mut h1: u32 = 0xefcdab89;
+    let mut h2: u32 = 0x98badcfe;
+    let mut h3: u32 = 0x10325476;
+
+    let bit_len = (data.len() as u64) * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 { msg.push(0); }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut x = [0u32; 16];
+        for i in 0..16 {
+            x[i] = u32::from_le_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+        }
+        let (mut a, mut b, mut c, mut d) = (h0, h1, h2, h3);
+        let (mut aa, mut bb, mut cc, mut dd) = (h0, h1, h2, h3);
+
+        // Left rounds
+        let rl = [
+            0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+            7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,
+            3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,
+            1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2,
+        ];
+        let sl = [
+            11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,
+            7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,
+            11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,
+            11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12,
+        ];
+        let rr = [
+            5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,
+            6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,
+            15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,
+            8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14,
+        ];
+        let sr = [
+            8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,
+            9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,
+            9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,
+            15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8,
+        ];
+        let kl: [u32; 4] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC];
+        let kr: [u32; 4] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x00000000];
+
+        for j in 0..64 {
+            let round = j / 16;
+            let f = match round {
+                0 => b ^ c ^ d,
+                1 => (b & c) | (!b & d),
+                2 => (b | !c) ^ d,
+                3 => (b & d) | (c & !d),
+                _ => unreachable!(),
+            };
+            let t = a.wrapping_add(f).wrapping_add(x[rl[j]]).wrapping_add(kl[round]).rotate_left(sl[j]).wrapping_add(0u32);
+            a = d; d = c; c = b; b = t;
+
+            let ff = match round {
+                0 => (bb & dd) | (cc & !dd),
+                1 => (bb | !cc) ^ dd,
+                2 => (bb & cc) | (!bb & dd),
+                3 => bb ^ cc ^ dd,
+                _ => unreachable!(),
+            };
+            let tt = aa.wrapping_add(ff).wrapping_add(x[rr[j]]).wrapping_add(kr[round]).rotate_left(sr[j]).wrapping_add(0u32);
+            aa = dd; dd = cc; cc = bb; bb = tt;
+        }
+
+        let t = h1.wrapping_add(c).wrapping_add(dd);
+        h1 = h2.wrapping_add(d).wrapping_add(aa);
+        h2 = h3.wrapping_add(a).wrapping_add(bb);
+        h3 = h0.wrapping_add(b).wrapping_add(cc);
+        h0 = t;
+    }
+
+    let mut result = [0u8; 16];
+    result[0..4].copy_from_slice(&h0.to_le_bytes());
+    result[4..8].copy_from_slice(&h1.to_le_bytes());
+    result[8..12].copy_from_slice(&h2.to_le_bytes());
+    result[12..16].copy_from_slice(&h3.to_le_bytes());
+    result
+}
+
+// --- RIPEMD-160 ---
+fn ripemd160_hash(data: &[u8]) -> [u8; 20] {
+    let mut h0: u32 = 0x67452301;
+    let mut h1: u32 = 0xefcdab89;
+    let mut h2: u32 = 0x98badcfe;
+    let mut h3: u32 = 0x10325476;
+    let mut h4: u32 = 0xc3d2e1f0;
+
+    let bit_len = (data.len() as u64) * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 { msg.push(0); }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut x = [0u32; 16];
+        for i in 0..16 {
+            x[i] = u32::from_le_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
+        let (mut aa, mut bb, mut cc, mut dd, mut ee) = (h0, h1, h2, h3, h4);
+
+        let rl = [
+            0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+            7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,
+            3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,
+            1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2,
+            4,0,5,9,7,12,2,10,14,1,3,8,11,6,15,13,
+        ];
+        let sl = [
+            11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,
+            7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,
+            11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,
+            11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12,
+            9,15,5,11,6,8,13,12,5,12,13,14,11,8,5,6,
+        ];
+        let rr = [
+            5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,
+            6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,
+            15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,
+            8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14,
+            12,15,10,4,1,5,8,7,6,2,13,14,0,3,9,11,
+        ];
+        let sr = [
+            8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,
+            9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,
+            9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,
+            15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8,
+            8,5,12,9,12,5,14,6,8,13,6,5,15,13,11,11,
+        ];
+        let kl: [u32; 5] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xA953FD4E];
+        let kr: [u32; 5] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x7A6D76E9, 0x00000000];
+
+        for j in 0..80 {
+            let round = j / 16;
+            let f = match round {
+                0 => b ^ c ^ d,
+                1 => (b & c) | (!b & d),
+                2 => (b | !c) ^ d,
+                3 => (b & d) | (c & !d),
+                4 => b ^ (c | !d),
+                _ => unreachable!(),
+            };
+            let t = a.wrapping_add(f).wrapping_add(x[rl[j]]).wrapping_add(kl[round]).rotate_left(sl[j]).wrapping_add(e);
+            a = e; e = d; d = c.rotate_left(10); c = b; b = t;
+
+            let ff = match round {
+                0 => bb ^ (cc | !dd),
+                1 => (bb & dd) | (cc & !dd),
+                2 => (bb | !cc) ^ dd,
+                3 => (bb & cc) | (!bb & dd),
+                4 => bb ^ cc ^ dd,
+                _ => unreachable!(),
+            };
+            let tt = aa.wrapping_add(ff).wrapping_add(x[rr[j]]).wrapping_add(kr[round]).rotate_left(sr[j]).wrapping_add(ee);
+            aa = ee; ee = dd; dd = cc.rotate_left(10); cc = bb; bb = tt;
+        }
+
+        let t = h1.wrapping_add(c).wrapping_add(dd);
+        h1 = h2.wrapping_add(d).wrapping_add(ee);
+        h2 = h3.wrapping_add(e).wrapping_add(aa);
+        h3 = h4.wrapping_add(a).wrapping_add(bb);
+        h4 = h0.wrapping_add(b).wrapping_add(cc);
+        h0 = t;
+    }
+
+    let mut result = [0u8; 20];
+    result[0..4].copy_from_slice(&h0.to_le_bytes());
+    result[4..8].copy_from_slice(&h1.to_le_bytes());
+    result[8..12].copy_from_slice(&h2.to_le_bytes());
+    result[12..16].copy_from_slice(&h3.to_le_bytes());
+    result[16..20].copy_from_slice(&h4.to_le_bytes());
+    result
+}
+
+// --- RIPEMD-256 ---
+fn ripemd256_hash(data: &[u8]) -> [u8; 32] {
+    // RIPEMD-256 is an extension of RIPEMD-128 with 256-bit output
+    let mut h = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476,
+                 0x76543210, 0xfedcba98, 0x89abcdef, 0x01234567];
+
+    let bit_len = (data.len() as u64) * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 { msg.push(0); }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut x = [0u32; 16];
+        for i in 0..16 {
+            x[i] = u32::from_le_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+        }
+        let (mut a, mut b, mut c, mut d) = (h[0], h[1], h[2], h[3]);
+        let (mut aa, mut bb, mut cc, mut dd) = (h[4], h[5], h[6], h[7]);
+
+        let rl = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+                   7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,
+                   3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,
+                   1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2];
+        let sl = [11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,
+                   7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,
+                   11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,
+                   11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12];
+        let rr = [5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,
+                   6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,
+                   15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,
+                   8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14];
+        let sr = [8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,
+                   9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,
+                   9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,
+                   15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8];
+        let kl: [u32; 4] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC];
+        let kr: [u32; 4] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x00000000];
+
+        for j in 0..64 {
+            let round = j / 16;
+            let f = match round { 0 => b ^ c ^ d, 1 => (b & c) | (!b & d), 2 => (b | !c) ^ d, 3 => (b & d) | (c & !d), _ => unreachable!() };
+            let t = a.wrapping_add(f).wrapping_add(x[rl[j]]).wrapping_add(kl[round]).rotate_left(sl[j]);
+            a = d; d = c; c = b; b = t;
+            let ff = match round { 0 => (bb & dd) | (cc & !dd), 1 => (bb | !cc) ^ dd, 2 => (bb & cc) | (!bb & dd), 3 => bb ^ cc ^ dd, _ => unreachable!() };
+            let tt = aa.wrapping_add(ff).wrapping_add(x[rr[j]]).wrapping_add(kr[round]).rotate_left(sr[j]);
+            aa = dd; dd = cc; cc = bb; bb = tt;
+
+            // Swap after each round of 16
+            if j == 15 { std::mem::swap(&mut a, &mut aa); }
+            else if j == 31 { std::mem::swap(&mut b, &mut bb); }
+            else if j == 47 { std::mem::swap(&mut c, &mut cc); }
+            else if j == 63 { std::mem::swap(&mut d, &mut dd); }
+        }
+
+        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(aa); h[5] = h[5].wrapping_add(bb);
+        h[6] = h[6].wrapping_add(cc); h[7] = h[7].wrapping_add(dd);
+    }
+
+    let mut result = [0u8; 32];
+    for i in 0..8 { result[i*4..(i+1)*4].copy_from_slice(&h[i].to_le_bytes()); }
+    result
+}
+
+// --- RIPEMD-320 ---
+fn ripemd320_hash(data: &[u8]) -> [u8; 40] {
+    // RIPEMD-320 is an extension of RIPEMD-160 with 320-bit output
+    let mut h = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0,
+                 0x76543210, 0xfedcba98, 0x89abcdef, 0x01234567, 0x3c2d1e0f];
+
+    let bit_len = (data.len() as u64) * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 { msg.push(0); }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut x = [0u32; 16];
+        for i in 0..16 {
+            x[i] = u32::from_le_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        let (mut aa, mut bb, mut cc, mut dd, mut ee) = (h[5], h[6], h[7], h[8], h[9]);
+
+        let rl = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+                   7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,
+                   3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,
+                   1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2,
+                   4,0,5,9,7,12,2,10,14,1,3,8,11,6,15,13];
+        let sl = [11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,
+                   7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,
+                   11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,
+                   11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12,
+                   9,15,5,11,6,8,13,12,5,12,13,14,11,8,5,6];
+        let rr = [5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,
+                   6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,
+                   15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,
+                   8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14,
+                   12,15,10,4,1,5,8,7,6,2,13,14,0,3,9,11];
+        let sr = [8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,
+                   9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,
+                   9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,
+                   15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8,
+                   8,5,12,9,12,5,14,6,8,13,6,5,15,13,11,11];
+        let kl: [u32; 5] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xA953FD4E];
+        let kr: [u32; 5] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x7A6D76E9, 0x00000000];
+
+        for j in 0..80 {
+            let round = j / 16;
+            let f = match round { 0 => b ^ c ^ d, 1 => (b & c) | (!b & d), 2 => (b | !c) ^ d, 3 => (b & d) | (c & !d), 4 => b ^ (c | !d), _ => unreachable!() };
+            let t = a.wrapping_add(f).wrapping_add(x[rl[j]]).wrapping_add(kl[round]).rotate_left(sl[j]).wrapping_add(e);
+            a = e; e = d; d = c.rotate_left(10); c = b; b = t;
+            let ff = match round { 0 => bb ^ (cc | !dd), 1 => (bb & dd) | (cc & !dd), 2 => (bb | !cc) ^ dd, 3 => (bb & cc) | (!bb & dd), 4 => bb ^ cc ^ dd, _ => unreachable!() };
+            let tt = aa.wrapping_add(ff).wrapping_add(x[rr[j]]).wrapping_add(kr[round]).rotate_left(sr[j]).wrapping_add(ee);
+            aa = ee; ee = dd; dd = cc.rotate_left(10); cc = bb; bb = tt;
+
+            if j == 15 { std::mem::swap(&mut b, &mut bb); }
+            else if j == 31 { std::mem::swap(&mut d, &mut dd); }
+            else if j == 47 { std::mem::swap(&mut a, &mut aa); }
+            else if j == 63 { std::mem::swap(&mut c, &mut cc); }
+            else if j == 79 { std::mem::swap(&mut e, &mut ee); }
+        }
+
+        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(aa); h[6] = h[6].wrapping_add(bb);
+        h[7] = h[7].wrapping_add(cc); h[8] = h[8].wrapping_add(dd);
+        h[9] = h[9].wrapping_add(ee);
+    }
+
+    let mut result = [0u8; 40];
+    for i in 0..10 { result[i*4..(i+1)*4].copy_from_slice(&h[i].to_le_bytes()); }
+    result
+}
+
+// --- Jenkins' one-at-a-time (joaat) ---
+fn joaat_hash(data: &[u8]) -> u32 {
+    let mut hash: u32 = 0;
+    for &byte in data {
+        hash = hash.wrapping_add(byte as u32);
+        hash = hash.wrapping_add(hash << 10);
+        hash ^= hash >> 6;
+    }
+    hash = hash.wrapping_add(hash << 3);
+    hash ^= hash >> 11;
+    hash = hash.wrapping_add(hash << 15);
+    hash
 }
 
 fn sha1_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

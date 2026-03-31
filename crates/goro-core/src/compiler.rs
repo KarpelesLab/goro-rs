@@ -67,6 +67,8 @@ pub struct Compiler {
     has_never_return: bool,
     /// Map from parser anonymous class names (__anonymous_class_N) to PHP NUL-byte names
     anon_class_name_map: HashMap<Vec<u8>, Vec<u8>>,
+    /// Whether we're compiling inside a trait (for self:: tracking)
+    is_in_trait: bool,
 }
 
 impl Default for Compiler {
@@ -132,6 +134,7 @@ impl Compiler {
             source_file: Vec::new(),
             has_never_return: false,
             anon_class_name_map: HashMap::new(),
+            is_in_trait: false,
         }
     }
 
@@ -3133,6 +3136,7 @@ impl Compiler {
                                 method_compiler.use_const_map = self.use_const_map.clone();
                                 method_compiler.op_array.name = method_name.clone();
                                 method_compiler.op_array.is_generator = method_is_generator;
+                                method_compiler.is_in_trait = modifiers.is_trait;
                                 method_compiler.op_array.decl_line = *method_line;
                                 method_compiler.op_array.strict_types = self.op_array.strict_types;
                                 method_compiler.source_file = self.source_file.clone();
@@ -6793,7 +6797,7 @@ impl Compiler {
                         .op_array
                         .add_literal(Value::String(PhpString::from_vec(resolved)));
                     // Track self::class for trait patching
-                    if is_self {
+                    if is_self && self.is_in_trait {
                         self.op_array.class_const_literals.push(idx);
                     }
                     return Ok(OperandType::Const(idx));
@@ -6819,7 +6823,7 @@ impl Compiler {
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(resolved_class)));
                 // Track self:: references for trait patching
-                if is_self_const {
+                if is_self_const && self.is_in_trait {
                     self.op_array.class_const_literals.push(class_idx);
                 }
                 let const_name_idx = self
@@ -7010,7 +7014,7 @@ impl Compiler {
                         };
                         let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
                         // Track self:: references for trait patching (like __CLASS__)
-                        if is_self {
+                        if is_self && self.is_in_trait {
                             self.op_array.class_const_literals.push(idx);
                         }
                         (OperandType::Const(idx), property.clone())

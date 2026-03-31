@@ -72,6 +72,15 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gmp_random_range", gmp_random_range);
     vm.register_function(b"gmp_random_seed", gmp_random_seed);
 
+    // Register operator overloading handlers
+    vm.object_do_operation = Some(gmp_do_operation);
+    vm.object_do_unary = Some(gmp_do_unary);
+    vm.object_compare = Some(gmp_compare);
+    vm.object_to_string = Some(gmp_to_string);
+    vm.object_to_long = Some(gmp_to_long);
+    vm.object_to_double = Some(gmp_to_double);
+    vm.object_is_operator_type = Some(is_gmp_object);
+
     // Constants
     vm.constants
         .insert(b"GMP_ROUND_ZERO".to_vec(), Value::Long(0));

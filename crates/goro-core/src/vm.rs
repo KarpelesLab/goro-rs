@@ -8645,7 +8645,6 @@ impl Vm {
                                 match handler(self, "+", &a, &b) {
                                     Some(Ok(result)) => {
                                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                                        ip += 1;
                                         continue;
                                     }
                                     Some(Err(msg)) => {
@@ -8689,7 +8688,6 @@ impl Vm {
                                 match handler(self, "-", &a, &b) {
                                     Some(Ok(result)) => {
                                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                                        ip += 1;
                                         continue;
                                     }
                                     Some(Err(msg)) => {
@@ -8729,7 +8727,6 @@ impl Vm {
                                 match handler(self, "*", &a, &b) {
                                     Some(Ok(result)) => {
                                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                                        ip += 1;
                                         continue;
                                     }
                                     Some(Err(msg)) => {
@@ -8769,7 +8766,6 @@ impl Vm {
                                 match handler(self, "/", &a, &b) {
                                     Some(Ok(result)) => {
                                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                                        ip += 1;
                                         continue;
                                     }
                                     Some(Err(msg)) => {
@@ -8838,7 +8834,6 @@ impl Vm {
                                 match handler(self, "%", &a, &b) {
                                     Some(Ok(result)) => {
                                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                                        ip += 1;
                                         continue;
                                     }
                                     Some(Err(msg)) => {
@@ -8916,7 +8911,6 @@ impl Vm {
                                 match handler(self, "**", &a, &b) {
                                     Some(Ok(result)) => {
                                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                                        ip += 1;
                                         continue;
                                     }
                                     Some(Err(msg)) => {
@@ -9046,7 +9040,7 @@ impl Vm {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "&", &a, &b) {
-                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
                                     Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
                                     None => {}
                                 }
@@ -9092,7 +9086,7 @@ impl Vm {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "|", &a, &b) {
-                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
                                     Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
                                     None => {}
                                 }
@@ -9142,7 +9136,7 @@ impl Vm {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "^", &a, &b) {
-                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
                                     Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
                                     None => {}
                                 }
@@ -9205,7 +9199,6 @@ impl Vm {
                             if is_type(&a) {
                                 if let Some(result) = handler(self, "~", &a) {
                                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                                    ip += 1;
                                     continue;
                                 }
                             }
@@ -9234,7 +9227,7 @@ impl Vm {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "<<", &a, &b) {
-                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
                                     Some(Err(msg)) => {
                                         let exc = self.create_exception(b"ValueError", &msg, op.line);
                                         self.current_exception = Some(exc);
@@ -9272,7 +9265,7 @@ impl Vm {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, ">>", &a, &b) {
-                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); ip += 1; continue; }
+                                    Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
                                     Some(Err(msg)) => {
                                         let exc = self.create_exception(b"ValueError", &msg, op.line);
                                         self.current_exception = Some(exc);
@@ -9337,7 +9330,6 @@ impl Vm {
                                 }
                                 if let Some(ord) = cmp_fn(&a, &b) {
                                     self.write_operand(&op.result, if ord == std::cmp::Ordering::Equal { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
-                                    ip += 1;
                                     continue;
                                 }
                             }
@@ -9372,7 +9364,6 @@ impl Vm {
                                 }
                                 if let Some(ord) = cmp_fn(&a, &b) {
                                     self.write_operand(&op.result, if ord != std::cmp::Ordering::Equal { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
-                                    ip += 1;
                                     continue;
                                 }
                             }
@@ -9424,6 +9415,16 @@ impl Vm {
                 OpCode::Less => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(cmp_fn) = self.object_compare {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                if let Some(ord) = cmp_fn(&a, &b) {
+                                    self.write_operand(&op.result, if ord == std::cmp::Ordering::Less { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     self.emit_object_comparison_notice(&a, &b, op.line);
                     let cmp = a.compare(&b);
                     self.write_operand(
@@ -9441,6 +9442,16 @@ impl Vm {
                 OpCode::LessEqual => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(cmp_fn) = self.object_compare {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                if let Some(ord) = cmp_fn(&a, &b) {
+                                    self.write_operand(&op.result, if ord != std::cmp::Ordering::Greater { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     self.emit_object_comparison_notice(&a, &b, op.line);
                     let cmp = a.compare(&b);
                     self.write_operand(
@@ -9458,6 +9469,16 @@ impl Vm {
                 OpCode::Greater => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(cmp_fn) = self.object_compare {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                if let Some(ord) = cmp_fn(&a, &b) {
+                                    self.write_operand(&op.result, if ord == std::cmp::Ordering::Greater { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     self.emit_object_comparison_notice(&a, &b, op.line);
                     let cmp = a.compare(&b);
                     self.write_operand(
@@ -9475,6 +9496,16 @@ impl Vm {
                 OpCode::GreaterEqual => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(cmp_fn) = self.object_compare {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                if let Some(ord) = cmp_fn(&a, &b) {
+                                    self.write_operand(&op.result, if ord != std::cmp::Ordering::Less { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     self.emit_object_comparison_notice(&a, &b, op.line);
                     let cmp = a.compare(&b);
                     self.write_operand(
@@ -9492,6 +9523,17 @@ impl Vm {
                 OpCode::Spaceship => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(cmp_fn) = self.object_compare {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&a) || is_type(&b) {
+                                if let Some(ord) = cmp_fn(&a, &b) {
+                                    let r = match ord { std::cmp::Ordering::Less => -1, std::cmp::Ordering::Equal => 0, std::cmp::Ordering::Greater => 1 };
+                                    self.write_operand(&op.result, Value::Long(r), &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     self.write_operand(
                         &op.result,
                         Value::Long(a.compare(&b)),
@@ -9505,6 +9547,17 @@ impl Vm {
                 OpCode::AssignAdd => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "+", &cv_val, &rhs) {
+                                    Some(Ok(result)) => { self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "+")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -9530,6 +9583,17 @@ impl Vm {
                 OpCode::AssignSub => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "-", &cv_val, &rhs) {
+                                    Some(Ok(result)) => { self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "-")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -9555,6 +9619,17 @@ impl Vm {
                 OpCode::AssignMul => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "*", &cv_val, &rhs) {
+                                    Some(Ok(result)) => { self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "*")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -9893,6 +9968,18 @@ impl Vm {
                 // Increment / Decrement
                 OpCode::PreIncrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // GMP increment
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&val) {
+                                if let Some(Ok(result)) = handler(self, "+", &val, &Value::Long(1)) {
+                                    self.write_operand(&op.op1, result.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     // Check for TypeError on objects/arrays/resources
                     if let Some(err) = check_inc_dec_type(&val, true) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
@@ -9925,6 +10012,17 @@ impl Vm {
                 }
                 OpCode::PreDecrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&val) {
+                                if let Some(Ok(result)) = handler(self, "-", &val, &Value::Long(1)) {
+                                    self.write_operand(&op.op1, result.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     if let Some(err) = check_inc_dec_type(&val, false) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
@@ -9954,6 +10052,17 @@ impl Vm {
                 }
                 OpCode::PostIncrement => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&val) {
+                                if let Some(Ok(result)) = handler(self, "+", &val, &Value::Long(1)) {
+                                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                                    self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     if let Some(err) = check_inc_dec_type(&val, true) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
@@ -16244,15 +16353,16 @@ impl Vm {
                         }
 
                         // Check enum/class interface restrictions
-                        // Skip auto-added interfaces (UnitEnum/BackedEnum for enums)
+                        // Auto-added UnitEnum/BackedEnum are at the END (added after user interfaces)
                         {
                             let auto_iface_count = if class.is_enum {
                                 if class.enum_backing_type.is_some() { 2usize } else { 1usize }
                             } else { 0usize };
-                            // Only check user-specified interfaces (skip auto-added at the beginning)
+                            let user_iface_end = iface_names.len().saturating_sub(auto_iface_count);
+                            // Only check user-specified interfaces (skip auto-added at the end)
                             for (idx, iface_name) in iface_names.iter().enumerate() {
-                                if idx < auto_iface_count {
-                                    continue; // Skip auto-added UnitEnum/BackedEnum
+                                if idx >= user_iface_end && class.is_enum {
+                                    continue; // Skip auto-added UnitEnum/BackedEnum at the end
                                 }
                                 let iface_lower: Vec<u8> = iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 let class_display = String::from_utf8_lossy(&class.name).to_string();
@@ -16349,7 +16459,7 @@ impl Vm {
                                     trait_name: alias_trait,
                                     method: alias_method,
                                     new_name,
-                                    ..
+                                    new_visibility,
                                 } => {
                                     let method_lower: Vec<u8> = alias_method.iter().map(|b| b.to_ascii_lowercase()).collect();
                                     if let Some(tn) = alias_trait {
@@ -16391,6 +16501,13 @@ impl Vm {
                                             }
                                         }
                                         if found_count == 0 {
+                                            // Different error messages for visibility-only change vs actual alias
+                                            if new_name.is_none() && new_visibility.is_some() {
+                                                return Err(VmError {
+                                                    message: format!("The modifiers of the trait method {}() are changed, but this method does not exist. Error", method_display),
+                                                    line: op.line,
+                                                });
+                                            }
                                             let alias_display = if let Some(nn) = new_name {
                                                 String::from_utf8_lossy(nn).to_string()
                                             } else {
@@ -16742,6 +16859,32 @@ impl Vm {
                             }
                         }
 
+                        // Check for private abstract trait methods (must be implemented even in abstract classes)
+                        if !class.is_interface && !class.is_trait {
+                            for (method_name, method) in &class.methods {
+                                if method.is_abstract && method.visibility == Visibility::Private {
+                                    // Check if this abstract private method came from a trait
+                                    let came_from_trait = trait_names.iter().any(|tn| {
+                                        let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if let Some(tc) = self.classes.get(&tn_lower) {
+                                            if let Some(tm) = tc.methods.get(method_name) {
+                                                tm.is_abstract && tm.visibility == Visibility::Private
+                                            } else { false }
+                                        } else { false }
+                                    });
+                                    if came_from_trait {
+                                        let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                        let method_display = String::from_utf8_lossy(&method.name).to_string();
+                                        return Err(VmError {
+                                            message: format!("Class {} must implement 1 abstract method ({}::{})",
+                                                class_display, class_display, method_display),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
                         // Check for unimplemented abstract methods (interface enforcement)
                         if !class.is_abstract && !class.is_interface && !class.is_trait {
                             let mut abstract_methods: Vec<String> = Vec::new();
@@ -16823,10 +16966,11 @@ impl Vm {
                                         self_declared_abstract[0].0
                                     ), if method_line > 0 { method_line } else { op.line })
                                 } else {
-                                    // PHP 8 format: "Class X must implement N abstract method(s) (methods)"
+                                    // PHP format: "Class X contains N abstract method(s) and must therefore be declared abstract or implement the remaining method(s) (methods)"
+                                    let remain_word = if count == 1 { "method" } else { "methods" };
                                     (format!(
-                                        "{} {} must implement {} abstract {} ({})",
-                                        kind, class_name_str, count, method_word, methods_list
+                                        "{} {} contains {} abstract {} and must therefore be declared abstract or implement the remaining {} ({})",
+                                        kind, class_name_str, count, method_word, remain_word, methods_list
                                     ), op.line)
                                 };
                                 return Err(VmError {
@@ -19166,6 +19310,18 @@ impl Vm {
                 let name = obj_borrow.get_property(b"name").to_php_string().to_string_lossy();
                 return PhpString::from_string(name);
             }
+            // Built-in __toString for GMP objects
+            if class_lower == b"gmp" {
+                if let Some(to_str) = self.object_to_string {
+                    if let Some(s) = to_str(val) {
+                        return PhpString::from_string(s);
+                    }
+                }
+                // Fallback: read the "num" property
+                let obj_borrow = obj.borrow();
+                let num = obj_borrow.get_property(b"num");
+                return num.to_php_string();
+            }
         }
         val.to_php_string()
     }
@@ -19226,7 +19382,8 @@ impl Vm {
                 || self.class_extends(&class_lower, b"exception")
                 || self.class_extends(&class_lower, b"error");
             let is_reflection = class_lower.starts_with(b"reflection");
-            if !has_tostring && !is_throwable && !is_reflection {
+            let is_gmp = class_lower == b"gmp";
+            if !has_tostring && !is_throwable && !is_reflection && !is_gmp {
                 let class_display = String::from_utf8_lossy(&class_name).to_string();
                 let msg = format!("Object of class {} could not be converted to string", class_display);
                 let exc = self.create_exception(b"Error", &msg, self.current_line);
