@@ -544,6 +544,12 @@ impl<'a> RegexParser<'a> {
                         }
                         _ => {
                             // (?<name>...) — named capture group
+                            // Validate name doesn't start with a digit
+                            if let Some(first) = self.peek() {
+                                if first.is_ascii_digit() {
+                                    return Err("subpattern name must start with a non-digit".into());
+                                }
+                            }
                             let mut name = Vec::new();
                             while let Some(ch) = self.peek() {
                                 if ch == b'>' {
@@ -575,6 +581,12 @@ impl<'a> RegexParser<'a> {
                     // (?P<name>...) or (?P=name) — named capture/backreference
                     if self.peek() == Some(b'<') {
                         self.advance();
+                        // Validate the name doesn't start with a digit
+                        if let Some(first) = self.peek() {
+                            if first.is_ascii_digit() {
+                                return Err("subpattern name must start with a non-digit".into());
+                            }
+                        }
                         // Capture the name
                         let mut name = Vec::new();
                         while let Some(ch) = self.peek() {
@@ -1592,6 +1604,16 @@ pub struct CompiledRegex {
     group_names: Vec<(usize, Vec<u8>)>, // (group_index, name)
 }
 
+/// Format a PCRE error message following PHP conventions.
+/// Delimiter/modifier errors are reported directly, other errors use "Compilation failed:" prefix.
+fn format_preg_error(func_name: &str, error: &str) -> String {
+    if error.starts_with("Delimiter must") || error.starts_with("No ending delimiter") || error.starts_with("No ending matching delimiter") || error.starts_with("Unknown modifier") || error.starts_with("Empty regular expression") {
+        format!("{}: {}", func_name, error)
+    } else {
+        format!("{}: Compilation failed: {}", func_name, error)
+    }
+}
+
 /// Parse a PHP regex pattern like `/pattern/flags` or `~pattern~flags`
 pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
     if pattern.is_empty() {
@@ -1600,11 +1622,8 @@ pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
 
     // Find delimiter
     let delimiter = pattern[0];
-    if delimiter.is_ascii_alphanumeric() || delimiter == b'\\' {
-        return Err(format!(
-            "invalid delimiter: {:?}",
-            char::from(delimiter)
-        ));
+    if delimiter.is_ascii_alphanumeric() || delimiter == b'\\' || delimiter == 0 {
+        return Err("Delimiter must not be alphanumeric, backslash, or NUL byte".into());
     }
 
     let closing_delimiter = match delimiter {
@@ -1635,7 +1654,13 @@ pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
         i -= 1;
     }
 
-    let end_pos = end_pos.ok_or_else(|| "no closing delimiter".to_string())?;
+    let end_pos = end_pos.ok_or_else(|| {
+        if closing_delimiter != delimiter {
+            format!("No ending matching delimiter '{}' found", char::from(closing_delimiter))
+        } else {
+            format!("No ending delimiter '{}' found", char::from(delimiter))
+        }
+    })?;
 
     let regex_body = &pattern[1..end_pos];
     let flags_str = &pattern[end_pos + 1..];
@@ -1654,8 +1679,12 @@ pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
             b'S' => {} // Extra study — ignore
             b'X' => {} // Extra — ignore
             b'J' => {} // Allow duplicate names — ignore
-            b'\r' | b'\n' => {} // trailing whitespace
-            _ => {}    // ignore unknown flags
+            b'n' => {} // No auto capture — ignore
+            b'r' => {} // Caseless restrict — ignore
+            b'\r' | b'\n' | b' ' => {} // trailing whitespace
+            _ => {
+                return Err(format!("Unknown modifier '{}'", char::from(flag_byte)));
+            }
         }
     }
 
@@ -1795,6 +1824,7 @@ impl CompiledRegex {
 
 /// preg_match($pattern, $subject [, &$matches [, $flags [, $offset]]])
 pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.preg_last_error = 0;
     let pattern = match args.first() {
         Some(v) => v.to_php_string(),
         None => {
@@ -1802,7 +1832,7 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    if pattern.is_empty() {
+    if pattern.is_empty() || pattern.as_bytes().iter().all(|b| b.is_ascii_whitespace()) {
         vm.emit_warning("preg_match(): Empty regular expression");
         return Ok(Value::False);
     }
@@ -1823,7 +1853,17 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if o < 0 {
             // Negative offset counts from end
             let len = subject.len() as i64;
-            (len + o).max(0) as usize
+            if o < -(len) {
+                // Offset too large
+                if o == i64::MIN {
+                    let exc = vm.create_exception(b"ValueError", &format!("preg_match(): Argument #5 ($offset) must be greater than or equal to {}", -(subject.len() as i64)), 0);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                }
+                0
+            } else {
+                (len + o) as usize
+            }
         } else {
             o as usize
         }
@@ -1839,10 +1879,8 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let compiled = match parse_php_regex(pattern.as_bytes()) {
         Ok(c) => c,
         Err(_e) => {
-            vm.emit_warning(&format!(
-                "preg_match(): Compilation failed: {}",
-                _e
-            ));
+            let msg = format_preg_error("preg_match()", &_e);
+            vm.emit_warning(&msg);
             return Ok(Value::False);
         }
     };
@@ -1927,7 +1965,16 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let o = v.to_long();
         if o < 0 {
             let len = subject.len() as i64;
-            (len + o).max(0) as usize
+            if o < -(len) {
+                if o == i64::MIN {
+                    let exc = vm.create_exception(b"ValueError", &format!("preg_match_all(): Argument #5 ($offset) must be greater than or equal to {}", -(subject.len() as i64)), 0);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                }
+                0
+            } else {
+                (len + o) as usize
+            }
         } else {
             o as usize
         }
@@ -1938,10 +1985,7 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let compiled = match parse_php_regex(pattern.as_bytes()) {
         Ok(c) => c,
         Err(_e) => {
-            vm.emit_warning(&format!(
-                "preg_match_all(): Compilation failed: {}",
-                _e
-            ));
+            vm.emit_warning(&format_preg_error("preg_match_all()", &_e));
             return Ok(Value::False);
         }
     };
@@ -2092,11 +2136,20 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             for (key, subject) in subjects_arr.borrow().iter() {
                 let subject_str = subject.to_php_string();
                 let mut current = subject_str.as_bytes().to_vec();
+                let mut had_error = false;
                 for (i, pat) in patterns.iter().enumerate() {
                     let repl = replacements.get(i).unwrap_or(&Value::String(PhpString::empty())).to_php_string();
-                    let (replaced, cnt) = do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit);
-                    current = replaced;
-                    total_count += cnt;
+                    match do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit) {
+                        Some((replaced, cnt)) => {
+                            current = replaced;
+                            total_count += cnt;
+                        }
+                        None => { had_error = true; break; }
+                    }
+                }
+                if had_error {
+                    // return Null for the whole result on error
+                    return Ok(Value::Null);
                 }
                 result.set(key.clone(), Value::String(PhpString::from_vec(current)));
             }
@@ -2112,9 +2165,13 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut current = subject_str.as_bytes().to_vec();
             for (i, pat) in patterns.iter().enumerate() {
                 let repl = replacements.get(i).unwrap_or(&Value::String(PhpString::empty())).to_php_string();
-                let (replaced, cnt) = do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit);
-                current = replaced;
-                total_count += cnt;
+                match do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit) {
+                    Some((replaced, cnt)) => {
+                        current = replaced;
+                        total_count += cnt;
+                    }
+                    None => return Ok(Value::Null),
+                }
             }
             if let Some(count_ref) = args.get(4) {
                 if let Value::Reference(r) = count_ref {
@@ -2133,15 +2190,19 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
         for (key, subject) in subjects_arr.borrow().iter() {
             let subject_str = subject.to_php_string();
-            let (replaced, cnt) = do_preg_replace(
+            match do_preg_replace(
                 vm,
                 pattern.as_bytes(),
                 replacement.as_bytes(),
                 subject_str.as_bytes(),
                 limit,
-            );
-            total_count += cnt;
-            result.set(key.clone(), Value::String(PhpString::from_vec(replaced)));
+            ) {
+                Some((replaced, cnt)) => {
+                    total_count += cnt;
+                    result.set(key.clone(), Value::String(PhpString::from_vec(replaced)));
+                }
+                None => return Ok(Value::Null),
+            }
         }
         if let Some(count_ref) = args.get(4) {
             if let Value::Reference(r) = count_ref {
@@ -2152,13 +2213,16 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let subject = subject_val.to_php_string();
-    let (replaced, cnt) = do_preg_replace(
+    let (replaced, cnt) = match do_preg_replace(
         vm,
         pattern.as_bytes(),
         replacement.as_bytes(),
         subject.as_bytes(),
         limit,
-    );
+    ) {
+        Some(r) => r,
+        None => return Ok(Value::Null),
+    };
     total_count += cnt;
 
     if let Some(count_ref) = args.get(4) {
@@ -2170,12 +2234,12 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(replaced)))
 }
 
-fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u8], limit: i64) -> (Vec<u8>, i64) {
+fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u8], limit: i64) -> Option<(Vec<u8>, i64)> {
     let compiled = match parse_php_regex(pattern) {
         Ok(c) => c,
         Err(_e) => {
-            vm.emit_warning(&format!("preg_replace(): Compilation failed: {}", _e));
-            return (subject.to_vec(), 0);
+            vm.emit_warning(&format_preg_error("preg_replace()", &_e));
+            return None;
         }
     };
 
@@ -2215,7 +2279,7 @@ fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u
         result.extend_from_slice(&subject[offset..]);
     }
 
-    (result, count)
+    Some((result, count))
 }
 
 fn apply_replacement(result: &mut Vec<u8>, replacement: &[u8], subject: &[u8], m: &RegexMatch) {
@@ -2300,7 +2364,7 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let compiled = match parse_php_regex(pattern.as_bytes()) {
         Ok(c) => c,
         Err(_e) => {
-            vm.emit_warning(&format!("preg_split(): Compilation failed: {}", _e));
+            vm.emit_warning(&format_preg_error("preg_split()", &_e));
             return Ok(Value::False);
         }
     };
@@ -2625,7 +2689,7 @@ fn do_preg_replace_callback(
     let compiled = match parse_php_regex(pattern) {
         Ok(c) => c,
         Err(_e) => {
-            vm.emit_warning(&format!("preg_replace_callback(): Compilation failed: {}", _e));
+            vm.emit_warning(&format_preg_error("preg_replace_callback()", &_e));
             return Ok((subject.to_vec(), 0));
         }
     };
@@ -2771,7 +2835,7 @@ pub fn preg_grep(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let compiled = match parse_php_regex(pattern.as_bytes()) {
         Ok(c) => c,
         Err(_e) => {
-            vm.emit_warning(&format!("preg_grep(): Compilation failed: {}", _e));
+            vm.emit_warning(&format_preg_error("preg_grep()", &_e));
             return Ok(Value::False);
         }
     };
@@ -2838,8 +2902,9 @@ pub fn preg_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 if compiled.find(&current, 0).is_some() {
                     had_match = true;
-                    let (replaced, _cnt) = do_preg_replace(vm, pat, repl, &current, limit);
-                    current = replaced;
+                    if let Some((replaced, _cnt)) = do_preg_replace(vm, pat, repl, &current, limit) {
+                        current = replaced;
+                    }
                 }
             }
             if had_match {
@@ -2860,8 +2925,9 @@ pub fn preg_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         if compiled.find(&current, 0).is_some() {
             had_match = true;
-            let (replaced, _cnt) = do_preg_replace(vm, pat, repl, &current, limit);
-            current = replaced;
+            if let Some((replaced, _cnt)) = do_preg_replace(vm, pat, repl, &current, limit) {
+                current = replaced;
+            }
         }
     }
     if had_match {
@@ -2872,13 +2938,23 @@ pub fn preg_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// preg_last_error()
-pub fn preg_last_error(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0)) // PREG_NO_ERROR
+pub fn preg_last_error(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(vm.preg_last_error))
 }
 
 /// preg_last_error_msg()
-pub fn preg_last_error_msg(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"No error")))
+pub fn preg_last_error_msg(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let msg = match vm.preg_last_error {
+        0 => "No error",
+        1 => "Internal error",
+        2 => "Backtrack limit exhausted",
+        3 => "Recursion limit exhausted",
+        4 => "Malformed UTF-8 characters, possibly incorrectly encoded",
+        5 => "Offset doesn't correspond to the beginning of a valid UTF-8 code point",
+        6 => "JIT stack limit exhausted",
+        _ => "Unknown error",
+    };
+    Ok(Value::String(PhpString::from_bytes(msg.as_bytes())))
 }
 
 // ============================================================================

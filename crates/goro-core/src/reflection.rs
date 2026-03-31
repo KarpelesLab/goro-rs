@@ -11,7 +11,6 @@ use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::Vm;
 
-// ==================== Constructors ====================
 
 /// ReflectionClass constructor: sets up __reflection_target and name properties
 pub fn reflection_class_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
@@ -382,7 +381,6 @@ pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u3
     true
 }
 
-// ==================== No-arg method dispatchers ====================
 
 /// ReflectionClass no-arg method dispatch
 pub fn reflection_class_method(
@@ -2541,7 +2539,6 @@ pub fn reflection_static_call(vm: &mut Vm, class_lower: &str, method_lower: &str
     }
 }
 
-// ==================== Helper functions ====================
 
 /// Create a ReflectionClass object for a given class name
 pub fn create_reflection_class(vm: &mut Vm, class_name: &str) -> Value {
@@ -2717,7 +2714,6 @@ pub fn create_reflection_type(vm: &mut Vm, param_type: &ParamType) -> Value {
     }
 }
 
-// ==================== Internal helpers ====================
 
 /// Helper to check if a class has a constant (walks parent chain)
 fn reflection_class_has_constant(vm: &Vm, class_lower: &[u8], const_name: &[u8]) -> bool {

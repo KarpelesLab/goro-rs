@@ -6,6 +6,15 @@ use goro_core::vm::{Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Create a JsonException with the proper error code set
+fn create_json_exception(vm: &mut Vm, class: &[u8], message: &str, code: i64) -> Value {
+    let exc = vm.create_exception(class, message, 0);
+    if let Value::Object(ref obj) = exc {
+        obj.borrow_mut().set_property(b"code".to_vec(), Value::Long(code));
+    }
+    exc
+}
+
 /// Register all JSON extension functions
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"json_encode", json_encode);
@@ -26,6 +35,8 @@ const JSON_UNESCAPED_SLASHES: i64 = 64;
 const JSON_PRETTY_PRINT: i64 = 128;
 const JSON_UNESCAPED_UNICODE: i64 = 256;
 const JSON_PARTIAL_OUTPUT_ON_ERROR: i64 = 512;
+const JSON_PRESERVE_ZERO_FRACTION: i64 = 1024;
+const JSON_UNESCAPED_LINE_TERMINATORS: i64 = 2048;
 const JSON_THROW_ON_ERROR: i64 = 4194304;
 const JSON_OBJECT_AS_ARRAY: i64 = 1; // for json_decode
 
@@ -35,15 +46,25 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.to_long(),
         None => 0,
     };
+    let max_depth: usize = match args.get(2) {
+        Some(Value::Long(n)) if *n <= 0 => {
+            // depth <= 0: return false immediately
+            vm.json_last_error = 1; // JSON_ERROR_DEPTH
+            return Ok(Value::False);
+        }
+        Some(Value::Long(n)) => *n as usize,
+        None => 512,
+        _ => 512,
+    };
     let throw_on_error = flags & JSON_THROW_ON_ERROR != 0;
 
     // Check for NAN/INF at top level
     if let Value::Double(f) = val {
         if f.is_nan() || f.is_infinite() {
             if throw_on_error {
-                let exc = vm.create_exception(b"ValueError", "Inf and NaN cannot be JSON encoded", 0);
+                let exc = create_json_exception(vm, b"JsonException", "Inf and NaN cannot be JSON encoded", 7);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: "Uncaught ValueError: Inf and NaN cannot be JSON encoded".to_string(), line: 0 });
+                return Err(VmError { message: "Uncaught JsonException: Inf and NaN cannot be JSON encoded".to_string(), line: 0 });
             }
             vm.json_last_error = 7; // JSON_ERROR_INF_OR_NAN
             // JSON_PARTIAL_OUTPUT_ON_ERROR flag
@@ -54,42 +75,64 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    if !throw_on_error {
+    // When JSON_PARTIAL_OUTPUT_ON_ERROR is set, it overrides JSON_THROW_ON_ERROR
+    let partial_output = flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0;
+    let effective_throw = throw_on_error && !partial_output;
+
+    if !effective_throw {
         vm.json_last_error = 0;
     }
-    // When JSON_PARTIAL_OUTPUT_ON_ERROR is set, it overrides JSON_THROW_ON_ERROR
-    let throw_on_error = throw_on_error && (flags & JSON_PARTIAL_OUTPUT_ON_ERROR == 0);
     // Pre-process value: call jsonSerialize() on JsonSerializable objects
     let val = resolve_json_serializable(vm, val);
     let mut seen = std::collections::HashSet::new();
     let mut recursion_detected = false;
-    let s = json_encode_value_flags_tracked(&val, 0, flags, &mut seen, &mut recursion_detected);
+    let s = json_encode_value_flags_tracked(&val, 0, flags, max_depth, &mut seen, &mut recursion_detected);
     if s.contains("\x00ENUM_ERROR") {
         // Non-backed enum cannot be serialized
         let err_msg = "Non-backed enums have no default serialization";
-        vm.json_last_error = 11; // JSON_ERROR_NON_BACKED_ENUM
-        if throw_on_error {
-            let exc = vm.create_exception(b"JsonException", err_msg, 0);
+        if !effective_throw {
+            vm.json_last_error = 11; // JSON_ERROR_NON_BACKED_ENUM
+        }
+        if effective_throw {
+            let exc = create_json_exception(vm, b"JsonException", err_msg, 11);
             vm.current_exception = Some(exc);
             return Err(VmError { message: format!("Uncaught JsonException: {}", err_msg), line: 0 });
         }
         return Ok(Value::False);
     }
+    if s == "\x00DEPTH_ERROR" {
+        if !effective_throw {
+            vm.json_last_error = 1; // JSON_ERROR_DEPTH
+        }
+        if effective_throw {
+            let exc = create_json_exception(vm, b"JsonException", "Maximum stack depth exceeded", 1);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: "Uncaught JsonException: Maximum stack depth exceeded".to_string(), line: 0 });
+        }
+        if partial_output {
+            return Ok(Value::String(PhpString::from_bytes(b"false")));
+        }
+        return Ok(Value::False);
+    }
     if recursion_detected {
-        vm.json_last_error = 6; // JSON_ERROR_RECURSION
-        if flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
+        if !effective_throw {
+            vm.json_last_error = 6; // JSON_ERROR_RECURSION
+        }
+        if partial_output {
             return Ok(Value::String(PhpString::from_string(s)));
         }
         return Ok(Value::False);
     }
     if s.contains("\x00UTF8_ERROR") {
-        vm.json_last_error = 5; // JSON_ERROR_UTF8
-        if flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
+        if !effective_throw {
+            vm.json_last_error = 5; // JSON_ERROR_UTF8
+        }
+        if partial_output {
             // PARTIAL_OUTPUT_ON_ERROR overrides THROW_ON_ERROR
             return Ok(Value::String(PhpString::from_bytes(b"null")));
         }
-        if throw_on_error {
-            let exc = vm.create_exception(b"JsonException", "Malformed UTF-8 characters, possibly incorrectly encoded", 5);
+        if effective_throw {
+            let exc = create_json_exception(vm, b"JsonException", "Malformed UTF-8 characters, possibly incorrectly encoded", 5);
             vm.current_exception = Some(exc);
             return Err(VmError { message: "Uncaught JsonException: Malformed UTF-8 characters, possibly incorrectly encoded".to_string(), line: 0 });
         }
@@ -169,12 +212,20 @@ fn resolve_json_serializable_depth(vm: &mut Vm, val: &Value, depth: usize) -> Va
 fn json_encode_value_flags(val: &Value, depth: usize, flags: i64) -> String {
     let mut seen = std::collections::HashSet::new();
     let mut recursion_detected = false;
-    json_encode_value_flags_tracked(val, depth, flags, &mut seen, &mut recursion_detected)
+    json_encode_value_flags_tracked(val, depth, flags, 512, &mut seen, &mut recursion_detected)
 }
 
-fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: &mut std::collections::HashSet<usize>, recursion_detected: &mut bool) -> String {
-    if depth > 512 {
-        return "null".to_string();
+fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, max_depth: usize, seen: &mut std::collections::HashSet<usize>, recursion_detected: &mut bool) -> String {
+    // Check depth limit - depth starts at 0 for top-level
+    // For arrays/objects, we check depth+1 against max_depth before recursing
+    if depth >= max_depth {
+        // Only trigger depth error for compound types
+        match val {
+            Value::Array(_) | Value::Object(_) => {
+                return "\x00DEPTH_ERROR".to_string();
+            }
+            _ => {}
+        }
     }
     let indent = if flags & JSON_PRETTY_PRINT != 0 {
         "    ".repeat(depth)
@@ -216,11 +267,17 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: 
                 } else {
                     goro_core::value::format_php_float_with_precision_pub(*f, sp as usize)
                 };
-                if s.contains('.') || s.contains('e') || s.contains('E') {
-                    s
+                // For json_encode, integer-valued floats are output without .0
+                // e.g., 1230.0 -> "1230", not "1230.0"
+                // Unless JSON_PRESERVE_ZERO_FRACTION is set
+                if flags & JSON_PRESERVE_ZERO_FRACTION != 0 {
+                    if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+                        format!("{}.0", s)
+                    } else {
+                        s
+                    }
                 } else {
-                    // Integer-valued float: PHP outputs it as "12.0" not "12"
-                    format!("{}.0", s)
+                    s
                 }
             }
         }
@@ -264,8 +321,24 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: 
                     return "{}".to_string();
                 }
             }
+            let partial_output = flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0;
             let result = if is_list {
-                let parts: Vec<String> = arr_ref.values().map(|v| json_encode_value_flags_tracked(v, depth + 1, flags, seen, recursion_detected)).collect();
+                let parts: Vec<String> = arr_ref.values().map(|v| {
+                    let encoded = json_encode_value_flags_tracked(v, depth + 1, flags, max_depth, seen, recursion_detected);
+                    if encoded == "\x00DEPTH_ERROR" {
+                        seen.remove(&arr_ptr);
+                        return "\x00DEPTH_ERROR".to_string();
+                    }
+                    if partial_output && encoded.contains("\x00UTF8_ERROR") {
+                        "null".to_string()
+                    } else {
+                        encoded
+                    }
+                }).collect();
+                if parts.iter().any(|p| p == "\x00DEPTH_ERROR") {
+                    seen.remove(&arr_ptr);
+                    return "\x00DEPTH_ERROR".to_string();
+                }
                 if flags & JSON_PRETTY_PRINT != 0 {
                     format!("[{nl}{}{nl}{}]", parts.iter().map(|p| format!("{}{}", inner_indent, p)).collect::<Vec<_>>().join(&format!(",{nl}")), indent)
                 } else {
@@ -278,12 +351,30 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: 
                         let key_str = match k {
                             goro_core::array::ArrayKey::Int(n) => format!("\"{}\"", n),
                             goro_core::array::ArrayKey::String(s) => {
-                                json_encode_string(s.as_bytes(), flags)
+                                let encoded_key = json_encode_string(s.as_bytes(), flags);
+                                if partial_output && encoded_key.contains("\x00UTF8_ERROR") {
+                                    "\"\"".to_string()
+                                } else {
+                                    encoded_key
+                                }
                             }
                         };
-                        format!("{}{}{}", key_str, sep, json_encode_value_flags_tracked(v, depth + 1, flags, seen, recursion_detected))
+                        let encoded_val = json_encode_value_flags_tracked(v, depth + 1, flags, max_depth, seen, recursion_detected);
+                        if encoded_val == "\x00DEPTH_ERROR" {
+                            return "\x00DEPTH_ERROR".to_string();
+                        }
+                        let encoded_val = if partial_output && encoded_val.contains("\x00UTF8_ERROR") {
+                            "null".to_string()
+                        } else {
+                            encoded_val
+                        };
+                        format!("{}{}{}", key_str, sep, encoded_val)
                     })
                     .collect();
+                if parts.iter().any(|p| p == "\x00DEPTH_ERROR") {
+                    seen.remove(&arr_ptr);
+                    return "\x00DEPTH_ERROR".to_string();
+                }
                 if flags & JSON_PRETTY_PRINT != 0 {
                     format!("{{{nl}{}{nl}{}}}", parts.iter().map(|p| format!("{}{}", inner_indent, p)).collect::<Vec<_>>().join(&format!(",{nl}")), indent)
                 } else {
@@ -309,7 +400,7 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: 
                 if obj_ref.has_property(b"__enum_backing_type") {
                     // Backed enum: encode the backing value
                     let value = obj_ref.get_property(b"value");
-                    return json_encode_value_flags_tracked(&value, depth, flags, seen, recursion_detected);
+                    return json_encode_value_flags_tracked(&value, depth, flags, max_depth, seen, recursion_detected);
                 } else {
                     // Non-backed enum: cannot be serialized
                     // Return empty string to signal error
@@ -331,8 +422,16 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: 
             }
             let parts: Vec<String> = visible_props.iter().map(|(name, val)| {
                 let key = json_encode_string(name, flags);
-                format!("{}{}{}", key, sep, json_encode_value_flags_tracked(val, depth + 1, flags, seen, recursion_detected))
+                let encoded_val = json_encode_value_flags_tracked(val, depth + 1, flags, max_depth, seen, recursion_detected);
+                if encoded_val == "\x00DEPTH_ERROR" {
+                    return "\x00DEPTH_ERROR".to_string();
+                }
+                format!("{}{}{}", key, sep, encoded_val)
             }).collect();
+            if parts.iter().any(|p| p == "\x00DEPTH_ERROR") {
+                seen.remove(&obj_ptr);
+                return "\x00DEPTH_ERROR".to_string();
+            }
             let result = if flags & JSON_PRETTY_PRINT != 0 {
                 format!("{{{nl}{}{nl}{}}}", parts.iter().map(|p| format!("{}{}", inner_indent, p)).collect::<Vec<_>>().join(&format!(",{nl}")), indent)
             } else {
@@ -342,7 +441,7 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, seen: 
             result
         }
         Value::Generator(_) => "null".to_string(),
-        Value::Reference(r) => json_encode_value_flags_tracked(&r.borrow(), depth, flags, seen, recursion_detected),
+        Value::Reference(r) => json_encode_value_flags_tracked(&r.borrow(), depth, flags, max_depth, seen, recursion_detected),
     }
 }
 
@@ -390,9 +489,13 @@ fn json_encode_string(bytes: &[u8], flags: i64) -> String {
                 let remaining = &bytes[i..];
                 let (codepoint, len) = decode_utf8_char(remaining);
                 if let Some(cp) = codepoint {
+                    let unescaped_line_terminators = flags & JSON_UNESCAPED_LINE_TERMINATORS != 0;
                     if unescaped_unicode {
-                        // Output the raw UTF-8 bytes as a valid UTF-8 string
-                        if let Some(c) = char::from_u32(cp) {
+                        // Even with UNESCAPED_UNICODE, U+2028 and U+2029 must be escaped
+                        // unless JSON_UNESCAPED_LINE_TERMINATORS is also set
+                        if !unescaped_line_terminators && (cp == 0x2028 || cp == 0x2029) {
+                            result.push_str(&format!("\\u{:04x}", cp));
+                        } else if let Some(c) = char::from_u32(cp) {
                             result.push(c);
                         } else {
                             for j in 0..len {
@@ -414,8 +517,24 @@ fn json_encode_string(bytes: &[u8], flags: i64) -> String {
                     i += len;
                     continue;
                 } else {
-                    // Invalid UTF-8: return special error marker
-                    return format!("\x00UTF8_ERROR");
+                    // Invalid UTF-8
+                    if flags & JSON_INVALID_UTF8_IGNORE != 0 {
+                        // Skip this byte
+                        i += 1;
+                        continue;
+                    } else if flags & JSON_INVALID_UTF8_SUBSTITUTE != 0 {
+                        // Replace with U+FFFD
+                        if flags & JSON_UNESCAPED_UNICODE != 0 {
+                            result.push('\u{FFFD}');
+                        } else {
+                            result.push_str("\\ufffd");
+                        }
+                        i += 1;
+                        continue;
+                    } else {
+                        // Return special error marker
+                        return format!("\x00UTF8_ERROR");
+                    }
                 }
             }
         }
@@ -475,9 +594,20 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.is_truthy(),
     };
 
-    // $depth parameter (arg 2) - we don't enforce it strictly but parse it
+    // $depth parameter (arg 2)
     let max_depth: usize = match args.get(2) {
-        Some(Value::Long(n)) if *n > 0 => *n as usize,
+        Some(Value::Long(n)) if *n > 0 && *n <= 0x7FFFFFFF => *n as usize,
+        Some(Value::Long(n)) if *n > 0x7FFFFFFF => {
+            // Too large depth - ValueError
+            let exc = vm.create_exception(b"ValueError", &format!("json_decode(): Argument #3 ($depth) must be less than {}", 0x7FFFFFFF_i64), 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+        }
+        Some(Value::Long(n)) if *n <= 0 => {
+            let exc = vm.create_exception(b"ValueError", "json_decode(): Argument #3 ($depth) must be greater than 0", 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+        }
         Some(Value::Long(_)) => return Ok(Value::Null),
         None => 512,
         _ => 512,
@@ -496,6 +626,30 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         associative = true;
     }
 
+    // Pre-validate UTF-8 of the input
+    if let Some(utf8_err) = check_json_utf8(json_bytes) {
+        match utf8_err {
+            JsonUtf8Error::InvalidUtf8 => {
+                if throw_on_error {
+                    let exc = create_json_exception(vm, b"JsonException", "Malformed UTF-8 characters, possibly incorrectly encoded", 5);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: "Uncaught JsonException".to_string(), line: 0 });
+                }
+                vm.json_last_error = 5; // JSON_ERROR_UTF8
+                return Ok(Value::Null);
+            }
+            JsonUtf8Error::ControlChar => {
+                if throw_on_error {
+                    let exc = create_json_exception(vm, b"JsonException", "Control character error, possibly incorrectly encoded", 3);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: "Uncaught JsonException".to_string(), line: 0 });
+                }
+                vm.json_last_error = 3; // JSON_ERROR_CTRL_CHAR
+                return Ok(Value::Null);
+            }
+        }
+    }
+
     let mut parser = JsonParser {
         input: json_bytes,
         pos: 0,
@@ -503,16 +657,29 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         max_depth,
         associative,
         bigint_as_string,
+        error_code: 0,
         vm,
     };
 
     match parser.parse_value() {
         Some(val) => {
             parser.skip_whitespace();
+            let error_code = parser.error_code;
+            if error_code != 0 {
+                // Parser encountered an error (e.g., null byte in property name)
+                let error_msg = json_error_msg(error_code);
+                if throw_on_error {
+                    let exc = create_json_exception(vm, b"JsonException", error_msg, error_code);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: format!("Uncaught JsonException: {}", error_msg), line: 0 });
+                }
+                vm.json_last_error = error_code;
+                return Ok(Value::Null);
+            }
             if parser.pos < parser.input.len() {
                 // Trailing data after valid JSON
                 if throw_on_error {
-                    let exc = vm.create_exception(b"JsonException", "Syntax error", 0);
+                    let exc = create_json_exception(vm, b"JsonException", "Syntax error", 4);
                     vm.current_exception = Some(exc);
                     return Err(VmError { message: "Uncaught JsonException: Syntax error".to_string(), line: 0 });
                 }
@@ -529,10 +696,14 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Determine error type
             let error_code;
             let error_msg;
-            if json_bytes.is_empty() {
+            let parser_error = parser.error_code;
+            if parser_error != 0 {
+                error_code = parser_error;
+                error_msg = json_error_msg(error_code);
+            } else if json_bytes.is_empty() {
                 error_code = 4;
                 error_msg = "Syntax error";
-            } else if parser.depth > parser.max_depth {
+            } else if parser.depth >= parser.max_depth {
                 error_code = 1; // JSON_ERROR_DEPTH
                 error_msg = "Maximum stack depth exceeded";
             } else {
@@ -540,7 +711,7 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 error_msg = "Syntax error";
             }
             if throw_on_error {
-                let exc = vm.create_exception(b"JsonException", error_msg, error_code as u32);
+                let exc = create_json_exception(vm, b"JsonException", error_msg, error_code);
                 vm.current_exception = Some(exc);
                 return Err(VmError { message: format!("Uncaught JsonException: {}", error_msg), line: 0 });
             }
@@ -548,6 +719,98 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::Null)
         }
     }
+}
+
+fn json_error_msg(code: i64) -> &'static str {
+    match code {
+        0 => "No error",
+        1 => "Maximum stack depth exceeded",
+        2 => "Invalid or malformed JSON",
+        3 => "Control character error, possibly incorrectly encoded",
+        4 => "Syntax error",
+        5 => "Malformed UTF-8 characters, possibly incorrectly encoded",
+        6 => "Recursion detected",
+        7 => "Inf and NaN cannot be JSON encoded",
+        8 => "Type is not supported",
+        9 => "The decoded property name is invalid",
+        10 => "Single unpaired UTF-16 surrogate in unicode escape",
+        11 => "Non-backed enums have no default serialization",
+        _ => "Unknown error",
+    }
+}
+
+enum JsonUtf8Error {
+    InvalidUtf8,
+    ControlChar,
+}
+
+/// Check raw JSON bytes for invalid UTF-8 or bare control characters (outside string escapes).
+/// Returns Some(error) if there's a problem.
+fn check_json_utf8(bytes: &[u8]) -> Option<JsonUtf8Error> {
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if b == b'\\' {
+                // Skip escaped character
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_string = false;
+                i += 1;
+                continue;
+            }
+            // Check for bare control characters inside strings
+            if b < 0x20 {
+                return Some(JsonUtf8Error::ControlChar);
+            }
+            // Check for valid UTF-8 inside strings
+            if b >= 0x80 {
+                let (cp, len) = decode_utf8_char(&bytes[i..]);
+                if cp.is_none() {
+                    return Some(JsonUtf8Error::InvalidUtf8);
+                }
+                // Check for surrogate codepoints (U+D800-U+DFFF) - invalid in UTF-8
+                if let Some(cp_val) = cp {
+                    if (0xD800..=0xDFFF).contains(&cp_val) {
+                        return Some(JsonUtf8Error::InvalidUtf8);
+                    }
+                }
+                i += len;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        // Not in string
+        if b == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        // Outside strings, check for bare control chars (but tabs/newlines/spaces are whitespace)
+        if b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r' {
+            return Some(JsonUtf8Error::ControlChar);
+        }
+        // Check for invalid UTF-8 outside strings
+        if b >= 0x80 {
+            let (cp, len) = decode_utf8_char(&bytes[i..]);
+            if cp.is_none() {
+                return Some(JsonUtf8Error::InvalidUtf8);
+            }
+            if let Some(cp_val) = cp {
+                if (0xD800..=0xDFFF).contains(&cp_val) {
+                    return Some(JsonUtf8Error::InvalidUtf8);
+                }
+            }
+            i += len;
+            continue;
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Hand-rolled JSON parser that converts JSON to PHP values.
@@ -558,6 +821,7 @@ struct JsonParser<'a, 'b> {
     max_depth: usize,
     associative: bool,
     bigint_as_string: bool,
+    error_code: i64,
     vm: &'b mut Vm,
 }
 
@@ -636,27 +900,37 @@ impl<'a, 'b> JsonParser<'a, 'b> {
                             // Handle UTF-16 surrogate pairs
                             if (0xD800..=0xDBFF).contains(&cp) {
                                 // High surrogate, expect \uXXXX low surrogate
-                                if self.advance()? != b'\\' {
-                                    return None;
-                                }
-                                if self.advance()? != b'u' {
-                                    return None;
-                                }
-                                let low = self.parse_hex4()?;
-                                if !(0xDC00..=0xDFFF).contains(&low) {
-                                    return None;
-                                }
-                                let codepoint =
-                                    0x10000 + ((cp as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
-                                if let Some(c) = char::from_u32(codepoint) {
-                                    let mut buf = [0u8; 4];
-                                    let s = c.encode_utf8(&mut buf);
-                                    result.extend_from_slice(s.as_bytes());
+                                let saved_pos = self.pos;
+                                let has_low = self.pos + 1 < self.input.len()
+                                    && self.input[self.pos] == b'\\'
+                                    && self.input[self.pos + 1] == b'u';
+                                if has_low {
+                                    self.pos += 2; // skip \u
+                                    let low = self.parse_hex4()?;
+                                    if !(0xDC00..=0xDFFF).contains(&low) {
+                                        // High surrogate followed by non-low-surrogate
+                                        self.error_code = 10; // JSON_ERROR_UTF16
+                                        return None;
+                                    }
+                                    let codepoint =
+                                        0x10000 + ((cp as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
+                                    if let Some(c) = char::from_u32(codepoint) {
+                                        let mut buf = [0u8; 4];
+                                        let s = c.encode_utf8(&mut buf);
+                                        result.extend_from_slice(s.as_bytes());
+                                    } else {
+                                        self.error_code = 10;
+                                        return None;
+                                    }
                                 } else {
+                                    // Lone high surrogate
+                                    self.pos = saved_pos;
+                                    self.error_code = 10; // JSON_ERROR_UTF16
                                     return None;
                                 }
                             } else if (0xDC00..=0xDFFF).contains(&cp) {
                                 // Lone low surrogate is invalid
+                                self.error_code = 10; // JSON_ERROR_UTF16
                                 return None;
                             } else {
                                 if let Some(c) = char::from_u32(cp as u32) {
@@ -776,7 +1050,7 @@ impl<'a, 'b> JsonParser<'a, 'b> {
         }
 
         self.depth += 1;
-        if self.depth > self.max_depth {
+        if self.depth >= self.max_depth {
             return None;
         }
 
@@ -815,7 +1089,7 @@ impl<'a, 'b> JsonParser<'a, 'b> {
         }
 
         self.depth += 1;
-        if self.depth > self.max_depth {
+        if self.depth >= self.max_depth {
             return None;
         }
 
@@ -874,6 +1148,12 @@ impl<'a, 'b> JsonParser<'a, 'b> {
                 self.skip_whitespace();
                 let key = self.parse_string()?;
 
+                // Check for null bytes in property names (invalid for stdClass)
+                if key.contains(&0) {
+                    self.error_code = 9; // JSON_ERROR_INVALID_PROPERTY_NAME
+                    return None;
+                }
+
                 self.skip_whitespace();
                 if self.advance()? != b':' {
                     return None;
@@ -902,23 +1182,12 @@ fn json_last_error(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(vm.json_last_error))
 }
 fn json_last_error_msg(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let msg = match vm.json_last_error {
-        0 => "No error",
-        1 => "Maximum stack depth exceeded",
-        2 => "Invalid or malformed JSON",
-        3 => "Control character error, possibly incorrectly encoded",
-        4 => "Syntax error",
-        5 => "Malformed UTF-8 characters, possibly incorrectly encoded",
-        6 => "Recursion detected",
-        7 => "Inf and NaN cannot be JSON encoded",
-        8 => "Type is not supported",
-        9 => "The decoded property name is invalid",
-        10 => "Single unpaired UTF-16 surrogate in unicode escape",
-        11 => "Non-backed enums have no default serialization",
-        _ => "Unknown error",
-    };
+    let msg = json_error_msg(vm.json_last_error);
     Ok(Value::String(PhpString::from_bytes(msg.as_bytes())))
 }
+
+const JSON_INVALID_UTF8_IGNORE: i64 = 1048576;
+const JSON_INVALID_UTF8_SUBSTITUTE: i64 = 2097152;
 
 fn json_validate(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let json_str = match args.first() {
@@ -928,11 +1197,61 @@ fn json_validate(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let json_bytes = json_str.as_bytes();
 
     let max_depth: usize = match args.get(1) {
-        Some(Value::Long(n)) if *n > 0 => *n as usize,
-        Some(Value::Long(_)) => return Ok(Value::False),
+        Some(Value::Long(n)) if *n > 0 && *n <= 0x7FFFFFFF => *n as usize,
+        Some(Value::Long(n)) if *n > 0x7FFFFFFF => {
+            let exc = vm.create_exception(b"ValueError", &format!("json_validate(): Argument #2 ($depth) must be less than {}", 0x7FFFFFFF_i64), 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+        }
+        Some(Value::Long(n)) if *n == 0 => {
+            // depth == 0 is a ValueError
+            let exc = vm.create_exception(b"ValueError", "json_validate(): Argument #2 ($depth) must be greater than 0", 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+        }
+        Some(Value::Long(n)) if *n < 0 => {
+            // Negative depth: return false with syntax error
+            vm.json_last_error = 4;
+            return Ok(Value::False);
+        }
+        Some(Value::Long(_)) => {
+            vm.json_last_error = 4;
+            return Ok(Value::False);
+        }
         None => 512,
         _ => 512,
     };
+
+    let flags: i64 = match args.get(2) {
+        Some(v) => v.to_long(),
+        None => 0,
+    };
+
+    // Only JSON_INVALID_UTF8_IGNORE is allowed
+    if flags != 0 && flags != JSON_INVALID_UTF8_IGNORE {
+        let exc = vm.create_exception(b"ValueError", "json_validate(): Argument #3 ($flags) must be a valid flag (allowed flags: JSON_INVALID_UTF8_IGNORE)", 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+    }
+
+    let ignore_utf8 = flags & JSON_INVALID_UTF8_IGNORE != 0;
+
+    // Check UTF-8 validity unless JSON_INVALID_UTF8_IGNORE is set
+    if !ignore_utf8 {
+        if let Some(utf8_err) = check_json_utf8(json_bytes) {
+            match utf8_err {
+                JsonUtf8Error::InvalidUtf8 => {
+                    vm.json_last_error = 5;
+                    return Ok(Value::False);
+                }
+                JsonUtf8Error::ControlChar => {
+                    // Control chars inside strings are syntax errors for validate
+                    vm.json_last_error = 5;
+                    return Ok(Value::False);
+                }
+            }
+        }
+    }
 
     let mut parser = JsonParser {
         input: json_bytes,
@@ -941,6 +1260,7 @@ fn json_validate(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         max_depth,
         associative: true,
         bigint_as_string: false,
+        error_code: 0,
         vm,
     };
 
@@ -948,11 +1268,23 @@ fn json_validate(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(_) => {
             parser.skip_whitespace();
             if parser.pos < parser.input.len() {
+                vm.json_last_error = 4;
                 Ok(Value::False)
             } else {
+                vm.json_last_error = 0;
                 Ok(Value::True)
             }
         }
-        None => Ok(Value::False),
+        None => {
+            let error_code = if parser.error_code != 0 {
+                parser.error_code
+            } else if parser.depth >= parser.max_depth {
+                1 // JSON_ERROR_DEPTH
+            } else {
+                4 // JSON_ERROR_SYNTAX
+            };
+            vm.json_last_error = error_code;
+            Ok(Value::False)
+        }
     }
 }
