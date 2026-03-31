@@ -6450,16 +6450,38 @@ impl Vm {
                             let ob = obj.borrow();
                             let path_val = ob.get_property(b"__spl_file_path");
                             let path_str = path_val.to_php_string().to_string_lossy();
+                            let is_temp = path_str.starts_with("php://temp") || path_str.starts_with("php://memory");
                             drop(ob);
-                            // Append to file
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path_str) {
-                                match f.write(data.as_bytes()) {
-                                    Ok(n) => Some(Value::Long(n as i64)),
-                                    Err(_) => Some(Value::False),
+                            let bytes_written = data.len() as i64;
+                            if is_temp {
+                                // Write to in-memory lines array
+                                let ob = obj.borrow();
+                                let lines = ob.get_property(b"__spl_file_lines");
+                                if let Value::Array(a) = lines {
+                                    // Append data as new line(s)
+                                    let content = data.to_string_lossy();
+                                    let mut a_mut = a.borrow_mut();
+                                    for line in content.split('\n') {
+                                        a_mut.push(Value::String(PhpString::from_string(format!("{}\n", line))));
+                                    }
+                                } else {
+                                    drop(ob);
+                                    let mut lines_arr = PhpArray::new();
+                                    lines_arr.push(Value::String(PhpString::from_vec(data.as_bytes().to_vec())));
+                                    obj.borrow_mut().set_property(b"__spl_file_lines".to_vec(), Value::Array(Rc::new(RefCell::new(lines_arr))));
                                 }
+                                Some(Value::Long(bytes_written))
                             } else {
-                                Some(Value::False)
+                                // Write to file on disk
+                                use std::io::Write;
+                                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path_str) {
+                                    match f.write(data.as_bytes()) {
+                                        Ok(n) => Some(Value::Long(n as i64)),
+                                        Err(_) => Some(Value::False),
+                                    }
+                                } else {
+                                    Some(Value::False)
+                                }
                             }
                         }
                         b"getbasename" => {

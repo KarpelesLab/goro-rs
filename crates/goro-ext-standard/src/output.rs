@@ -192,15 +192,25 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 }
             }
 
-            // Check if class has __debugInfo method
+            // Check if class has __debugInfo method (user-defined or SPL built-in)
             let has_debug_info = {
                 let class_entry = vm.classes.get(&class_lower).cloned();
                 class_entry.as_ref().and_then(|c| c.get_method(b"__debuginfo")).is_some()
             };
+            // Also check SPL built-in __debugInfo
+            let is_spl_debug = !has_debug_info && matches!(
+                class_lower.as_slice(),
+                b"splfileinfo" | b"splfileobject" | b"spltempfileobject"
+                    | b"directoryiterator" | b"filesystemiterator"
+                    | b"recursivedirectoryiterator" | b"globiterator"
+            );
 
-            if has_debug_info {
+            if has_debug_info || is_spl_debug {
                 // Call __debugInfo() and use the returned array for display
-                let debug_result = {
+                let debug_result = if is_spl_debug {
+                    // Use SPL dispatch for __debugInfo
+                    vm.call_object_method(val, b"__debugInfo", &[])
+                } else {
                     let class_entry = vm.classes.get(&class_lower).cloned();
                     if let Some(class) = class_entry {
                         if let Some(method) = class.get_method(b"__debuginfo") {
