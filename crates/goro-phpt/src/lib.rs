@@ -213,9 +213,18 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
                 actual: actual_trimmed.to_string(),
             }
         }
-    } else if test.expect_regex_section().is_some() {
-        // We don't support EXPECTREGEX yet
-        TestResult::Skip("EXPECTREGEX not supported".into())
+    } else if let Some(regex_pattern) = test.expect_regex_section() {
+        // EXPECTREGEX: match output against regex pattern
+        let regex_trimmed = regex_pattern.trim();
+        let actual_trimmed = actual_normalized.trim();
+        if matches_expect_regex(regex_trimmed, actual_trimmed) {
+            TestResult::Pass
+        } else {
+            TestResult::Fail {
+                expected: regex_trimmed.to_string(),
+                actual: actual_trimmed.to_string(),
+            }
+        }
     } else {
         TestResult::Error("missing --EXPECT-- or --EXPECTF-- section".into())
     }
@@ -789,6 +798,40 @@ fn format_exception_trace(trace_val: &goro_core::value::Value, fallback_trace: &
         return lines.join("\n");
     }
     fallback_trace.to_string()
+}
+
+fn matches_expect_regex(pattern: &str, actual: &str) -> bool {
+    // EXPECTREGEX uses raw regex patterns. Each line of the pattern is a regex for
+    // matching the corresponding line of output.
+    // First try matching the entire output as one regex
+    let full_pattern = format!("^(?:{})$", pattern);
+    if let Ok(re) = regex::Regex::new(&full_pattern) {
+        if re.is_match(actual) {
+            return true;
+        }
+    }
+    // Fall back to line-by-line matching
+    let pattern_lines: Vec<&str> = pattern.lines().collect();
+    let actual_lines: Vec<&str> = actual.lines().collect();
+    if pattern_lines.len() != actual_lines.len() {
+        return false;
+    }
+    for (p, a) in pattern_lines.iter().zip(actual_lines.iter()) {
+        let line_pattern = format!("^(?:{})$", p);
+        match regex::Regex::new(&line_pattern) {
+            Ok(re) => {
+                if !re.is_match(a) {
+                    return false;
+                }
+            }
+            Err(_) => {
+                if p != a {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 fn matches_expectf(pattern: &str, actual: &str) -> bool {

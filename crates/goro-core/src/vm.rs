@@ -267,6 +267,14 @@ pub struct Vm {
     fiber_stack: Vec<Option<Value>>,
     /// Stack of property names whose hooks are currently executing (recursion guard)
     property_hook_stack: Vec<Vec<u8>>,
+    /// CVs returned from the most recent include/eval execution (for scope sharing)
+    include_return_cvs: Option<Vec<(Vec<u8>, Value)>>,
+    /// Set of files that have been included via include_once/require_once (canonical paths)
+    included_files: std::collections::HashSet<String>,
+    /// Autoload callback functions (spl_autoload_register)
+    pub autoload_functions: Vec<Value>,
+    /// Shutdown functions registered via register_shutdown_function
+    pub shutdown_functions: Vec<(Value, Vec<Value>)>,
 }
 
 impl Vm {
@@ -312,6 +320,10 @@ impl Vm {
             current_fiber: None,
             fiber_stack: Vec::new(),
             property_hook_stack: Vec::new(),
+            include_return_cvs: None,
+            included_files: std::collections::HashSet::new(),
+            autoload_functions: Vec::new(),
+            shutdown_functions: Vec::new(),
             constants: {
                 let mut c = HashMap::new();
                 // Default ini values
@@ -445,10 +457,10 @@ impl Vm {
                 c.insert(b"SORT_NATURAL".to_vec(), Value::Long(6));
                 c.insert(b"SORT_FLAG_CASE".to_vec(), Value::Long(8));
                 // Round constants
-                c.insert(b"PHP_ROUND_HALF_UP".to_vec(), Value::Long(0));
-                c.insert(b"PHP_ROUND_HALF_DOWN".to_vec(), Value::Long(1));
-                c.insert(b"PHP_ROUND_HALF_EVEN".to_vec(), Value::Long(2));
-                c.insert(b"PHP_ROUND_HALF_ODD".to_vec(), Value::Long(3));
+                c.insert(b"PHP_ROUND_HALF_UP".to_vec(), Value::Long(1));
+                c.insert(b"PHP_ROUND_HALF_DOWN".to_vec(), Value::Long(2));
+                c.insert(b"PHP_ROUND_HALF_EVEN".to_vec(), Value::Long(3));
+                c.insert(b"PHP_ROUND_HALF_ODD".to_vec(), Value::Long(4));
                 c.insert(b"ARRAY_FILTER_USE_BOTH".to_vec(), Value::Long(1));
                 c.insert(b"ARRAY_FILTER_USE_KEY".to_vec(), Value::Long(2));
                 c.insert(b"ARRAY_UNIQUE_REGULAR".to_vec(), Value::Long(0));
@@ -610,14 +622,14 @@ impl Vm {
                 c.insert(b"PREG_SPLIT_DELIM_CAPTURE".to_vec(), Value::Long(2));
                 c.insert(b"T_STRING".to_vec(), Value::Long(319));
                 // Rounding mode constants
-                c.insert(b"PHP_ROUND_HALF_UP".to_vec(), Value::Long(0));
-                c.insert(b"PHP_ROUND_HALF_DOWN".to_vec(), Value::Long(1));
-                c.insert(b"PHP_ROUND_HALF_EVEN".to_vec(), Value::Long(2));
-                c.insert(b"PHP_ROUND_HALF_ODD".to_vec(), Value::Long(3));
-                c.insert(b"PHP_ROUND_CEILING".to_vec(), Value::Long(4));
-                c.insert(b"PHP_ROUND_FLOOR".to_vec(), Value::Long(5));
-                c.insert(b"PHP_ROUND_TOWARD_ZERO".to_vec(), Value::Long(6));
-                c.insert(b"PHP_ROUND_AWAY_FROM_ZERO".to_vec(), Value::Long(7));
+                c.insert(b"PHP_ROUND_HALF_UP".to_vec(), Value::Long(1));
+                c.insert(b"PHP_ROUND_HALF_DOWN".to_vec(), Value::Long(2));
+                c.insert(b"PHP_ROUND_HALF_EVEN".to_vec(), Value::Long(3));
+                c.insert(b"PHP_ROUND_HALF_ODD".to_vec(), Value::Long(4));
+                c.insert(b"PHP_ROUND_CEILING".to_vec(), Value::Long(5));
+                c.insert(b"PHP_ROUND_FLOOR".to_vec(), Value::Long(6));
+                c.insert(b"PHP_ROUND_TOWARD_ZERO".to_vec(), Value::Long(7));
+                c.insert(b"PHP_ROUND_AWAY_FROM_ZERO".to_vec(), Value::Long(8));
                 // INI constants
                 c.insert(b"INI_USER".to_vec(), Value::Long(1));
                 c.insert(b"INI_PERDIR".to_vec(), Value::Long(2));
@@ -1187,6 +1199,68 @@ impl Vm {
                     }
                 }
                 _ => {}
+            }
+        }
+        false
+    }
+
+    /// Try to autoload a class by calling registered autoload functions
+    pub fn try_autoload_class(&mut self, class_name: &[u8]) -> bool {
+        if self.autoload_functions.is_empty() {
+            return false;
+        }
+        let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        // Already loaded?
+        if self.classes.contains_key(&class_lower) {
+            return true;
+        }
+        // Clone autoload functions to avoid borrow issues
+        let autoloaders = self.autoload_functions.clone();
+        let class_str = Value::String(PhpString::from_vec(class_name.to_vec()));
+        for callback in &autoloaders {
+            let call_args = vec![class_str.clone()];
+            match callback {
+                Value::String(s) => {
+                    let func_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                        let _ = self.execute_fn(&user_fn, call_args);
+                    } else if let Some(builtin) = self.functions.get(&func_lower).copied() {
+                        let _ = builtin(self, &call_args);
+                    }
+                }
+                Value::Array(arr) => {
+                    let arr_borrow = arr.borrow();
+                    let vals: Vec<Value> = arr_borrow.values().cloned().collect();
+                    drop(arr_borrow);
+                    if vals.len() >= 2 {
+                        let name = vals[0].to_php_string().as_bytes().to_vec();
+                        let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                            let captured: Vec<Value> = vals[1..].to_vec();
+                            let mut combined_args = captured;
+                            combined_args.extend(call_args);
+                            let _ = self.execute_fn(&user_fn, combined_args);
+                        }
+                    }
+                }
+                Value::Object(obj) => {
+                    // Check if it has __invoke
+                    let class_lower_cb: Vec<u8> = {
+                        let obj_borrow = obj.borrow();
+                        obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect()
+                    };
+                    if let Some(class) = self.classes.get(&class_lower_cb).cloned() {
+                        if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
+                            let op = method.op_array.clone();
+                            let _ = self.execute_fn_with_named_args(&op, call_args, vec![], Some(Value::Object(obj.clone())));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // Check if the class was loaded
+            if self.classes.contains_key(&class_lower) {
+                return true;
             }
         }
         false
@@ -2043,6 +2117,188 @@ impl Vm {
             }
         }
         None
+    }
+
+    /// Coerce function arguments to match their declared parameter types (weak mode only).
+    /// This should be called after check_param_types passes, to actually convert values
+    /// like string "42" to int(42) when the parameter type is int.
+    fn coerce_param_types(
+        user_fn: &OpArray,
+        args: &mut [Value],
+        implicit_args: usize,
+        caller_strict: bool,
+    ) {
+        if caller_strict {
+            return; // strict mode doesn't coerce (except int->float)
+        }
+        for (i, arg) in args.iter_mut().enumerate() {
+            if i >= user_fn.param_types.len() {
+                continue;
+            }
+            if matches!(arg, Value::Undef) {
+                continue;
+            }
+            if let Some(type_info) = &user_fn.param_types[i] {
+                Self::coerce_value_to_type(arg, &type_info.param_type, caller_strict);
+            }
+        }
+    }
+
+    /// Coerce a single value to match a parameter type.
+    fn coerce_value_to_type(value: &mut Value, param_type: &ParamType, strict: bool) {
+        match param_type {
+            ParamType::Simple(type_name) => {
+                match type_name.as_slice() {
+                    b"int" | b"integer" => {
+                        match value {
+                            Value::Long(_) => {} // already int
+                            Value::Double(f) if !strict => {
+                                *value = Value::Long(*f as i64);
+                            }
+                            Value::True if !strict => {
+                                *value = Value::Long(1);
+                            }
+                            Value::False if !strict => {
+                                *value = Value::Long(0);
+                            }
+                            Value::String(s) if !strict => {
+                                if let Some(n) = crate::value::parse_numeric_string(s.as_bytes()) {
+                                    *value = Value::Long(n as i64);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    b"float" | b"double" => {
+                        match value {
+                            Value::Double(_) => {} // already float
+                            Value::Long(n) => {
+                                // int->float coercion happens even in strict mode
+                                *value = Value::Double(*n as f64);
+                            }
+                            Value::True if !strict => {
+                                *value = Value::Double(1.0);
+                            }
+                            Value::False if !strict => {
+                                *value = Value::Double(0.0);
+                            }
+                            Value::String(s) if !strict => {
+                                if let Some(n) = crate::value::parse_numeric_string(s.as_bytes()) {
+                                    *value = Value::Double(n);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    b"string" => {
+                        if !strict {
+                            match value {
+                                Value::String(_) => {} // already string
+                                Value::Long(n) => {
+                                    *value = Value::String(PhpString::from_string(n.to_string()));
+                                }
+                                Value::Double(f) => {
+                                    *value = Value::String(PhpString::from_string(
+                                        crate::value::format_php_float(*f),
+                                    ));
+                                }
+                                Value::True => {
+                                    *value = Value::String(PhpString::from_bytes(b"1"));
+                                }
+                                Value::False => {
+                                    *value = Value::String(PhpString::from_bytes(b""));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"bool" | b"boolean" => {
+                        if !strict {
+                            match value {
+                                Value::True | Value::False => {} // already bool
+                                _ => {
+                                    let b = value.is_truthy();
+                                    *value = if b { Value::True } else { Value::False };
+                                }
+                            }
+                        }
+                    }
+                    _ => {} // no coercion for array, object, callable, etc.
+                }
+            }
+            ParamType::Nullable(inner) => {
+                if !matches!(value, Value::Null) {
+                    Self::coerce_value_to_type(value, inner, strict);
+                }
+            }
+            ParamType::Union(types) => {
+                // For union types, find the first matching type and coerce to it
+                // Priority: exact match first, then coercible match
+                // Check for exact match first
+                for t in types {
+                    if Self::value_exact_match(value, t) {
+                        return; // already exact match
+                    }
+                }
+                // Try coercion to first coercible type
+                for t in types {
+                    if Self::value_can_coerce(value, t, strict) {
+                        Self::coerce_value_to_type(value, t, strict);
+                        return;
+                    }
+                }
+            }
+            _ => {} // Intersection types etc. don't need coercion
+        }
+    }
+
+    /// Check if a value is an exact type match (no coercion needed)
+    fn value_exact_match(value: &Value, param_type: &ParamType) -> bool {
+        match param_type {
+            ParamType::Simple(type_name) => match type_name.as_slice() {
+                b"int" | b"integer" => matches!(value, Value::Long(_)),
+                b"float" | b"double" => matches!(value, Value::Double(_)),
+                b"string" => matches!(value, Value::String(_)),
+                b"bool" | b"boolean" => matches!(value, Value::True | Value::False),
+                b"array" => matches!(value, Value::Array(_)),
+                b"object" => matches!(value, Value::Object(_)),
+                b"null" => matches!(value, Value::Null),
+                _ => false,
+            },
+            ParamType::Nullable(inner) => {
+                matches!(value, Value::Null) || Self::value_exact_match(value, inner)
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a value can be coerced to a type
+    fn value_can_coerce(value: &Value, param_type: &ParamType, strict: bool) -> bool {
+        match param_type {
+            ParamType::Simple(type_name) => match type_name.as_slice() {
+                b"int" | b"integer" => {
+                    if strict { false } else {
+                        matches!(value, Value::Double(_) | Value::True | Value::False)
+                            || matches!(value, Value::String(s) if crate::value::parse_numeric_string(s.as_bytes()).is_some())
+                    }
+                }
+                b"float" | b"double" => {
+                    matches!(value, Value::Long(_))
+                        || (!strict && (matches!(value, Value::True | Value::False)
+                            || matches!(value, Value::String(s) if crate::value::parse_numeric_string(s.as_bytes()).is_some())))
+                }
+                b"string" => {
+                    if strict { false } else {
+                        matches!(value, Value::Long(_) | Value::Double(_) | Value::True | Value::False)
+                    }
+                }
+                b"bool" | b"boolean" => {
+                    if strict { false } else { true }
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// Execute a function OpArray with given CVs (public interface for ext crates)
@@ -8582,7 +8838,52 @@ impl Vm {
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
-        let result = self.execute_op_array(op_array, cvs)?;
+        let result = self.execute_op_array(op_array, cvs);
+
+        // Call shutdown functions (before destructors, like PHP does)
+        let shutdown_fns = std::mem::take(&mut self.shutdown_functions);
+        for (callback, extra_args) in shutdown_fns {
+            match &callback {
+                Value::String(s) => {
+                    let func_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                        let _ = self.execute_fn(&user_fn, extra_args);
+                    } else if let Some(builtin) = self.functions.get(&func_lower).copied() {
+                        let _ = builtin(self, &extra_args);
+                    }
+                }
+                Value::Array(arr) => {
+                    let arr_borrow = arr.borrow();
+                    let vals: Vec<Value> = arr_borrow.values().cloned().collect();
+                    drop(arr_borrow);
+                    if vals.len() >= 2 {
+                        let name = vals[0].to_php_string().as_bytes().to_vec();
+                        let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                            let captured: Vec<Value> = vals[1..].to_vec();
+                            let mut combined_args = captured;
+                            combined_args.extend(extra_args);
+                            let _ = self.execute_fn(&user_fn, combined_args);
+                        }
+                    }
+                }
+                Value::Object(obj) => {
+                    let class_lower_cb: Vec<u8> = {
+                        let obj_borrow = obj.borrow();
+                        obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect()
+                    };
+                    if let Some(class) = self.classes.get(&class_lower_cb).cloned() {
+                        if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
+                            let op = method.op_array.clone();
+                            let _ = self.execute_fn_with_named_args(&op, extra_args, vec![], Some(Value::Object(obj.clone())));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let result = result?;
 
         // Call __destruct on all tracked objects in reverse creation order
         // Skip objects whose constructor threw (marked with __ctor_pending)
@@ -8644,9 +8945,14 @@ impl Vm {
         let implicit_return = matches!(result, Ok(Value::Undef) | Ok(Value::Null))
             && op_array.ops.last().map_or(false, |op| op.opcode == OpCode::Return && op.line == 0)
             && !op_array.ops.iter().any(|op| op.opcode == OpCode::Return && op.line != 0);
-        let result = result.map(|v| if matches!(v, Value::Undef) { Value::Null } else { v });
-        if let Ok(ref val) = result {
+        let mut result = result.map(|v| if matches!(v, Value::Undef) { Value::Null } else { v });
+        // Coerce return value in weak mode
+        if let Ok(ref mut val) = result {
             if let Some(ref ret_type) = op_array.return_type {
+                if !op_array.strict_types {
+                    // Weak mode: coerce return value
+                    Self::coerce_value_to_type(val, ret_type, false);
+                }
                 if !self.value_matches_return_type(val, ret_type) {
                     let raw_name = String::from_utf8_lossy(&op_array.name);
                     // Include class name in the function display name for methods
@@ -11272,6 +11578,13 @@ impl Vm {
                                     });
                                 }
                             }
+                            // Coerce args to their declared types (weak mode)
+                            Self::coerce_param_types(
+                                &user_fn,
+                                &mut call.args,
+                                implicit_args,
+                                op_array.strict_types,
+                            );
                         }
 
                         // Check if this is a generator function
@@ -12574,8 +12887,11 @@ impl Vm {
                             .map(|c| c.get_method(b"offsetget").is_some())
                             .unwrap_or(false);
                         if !is_spl_array && !has_user_offset {
+                            let msg = format!("Cannot use object of type {} as array", class_name_orig);
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
                             return Err(VmError {
-                                message: format!("Uncaught Error: Cannot use object of type {} as array", class_name_orig),
+                                message: format!("Uncaught Error: {}", msg),
                                 line: op.line,
                             });
                         }
@@ -12637,8 +12953,11 @@ impl Vm {
                             .map(|c| c.get_method(b"offsetget").is_some())
                             .unwrap_or(false);
                         if !is_spl_array && !has_user_offset {
+                            let msg = format!("Cannot use object of type {} as array", class_name_orig);
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
                             return Err(VmError {
-                                message: format!("Uncaught Error: Cannot use object of type {} as array", class_name_orig),
+                                message: format!("Uncaught Error: {}", msg),
                                 line: op.line,
                             });
                         }
@@ -13710,6 +14029,14 @@ impl Vm {
                     let path_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let path_str = path_val.to_php_string().to_string_lossy();
 
+                    // Get include kind from op2: 0=include, 1=include_once, 2=require, 3=require_once
+                    let include_kind = match &op.op2 {
+                        OperandType::Const(k) => *k,
+                        _ => 0, // default to include
+                    };
+                    let is_once = include_kind == 1 || include_kind == 3;
+                    let is_require = include_kind == 2 || include_kind == 3;
+
                     // Try to read and execute the file
                     let path: &str = &path_str;
                     // Resolve to absolute path for __DIR__/__FILE__
@@ -13728,9 +14055,18 @@ impl Vm {
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or(joined)
                     };
+
+                    // For include_once/require_once, skip if already included
+                    if is_once && self.included_files.contains(&abs_path) {
+                        self.write_operand(&op.result, Value::True, &mut cvs, &mut tmps, &static_cv_keys);
+                        continue;
+                    }
+
                     let old_file = self.current_file.clone();
                     let result = match std::fs::read(&abs_path) {
                         Ok(source) => {
+                            // Track file for _once variants
+                            self.included_files.insert(abs_path.clone());
                             // Compile and execute
                             let mut lexer = goro_parser::Lexer::new(&source);
                             let tokens = lexer.tokenize();
@@ -13746,13 +14082,52 @@ impl Vm {
                                             for class in inc_classes {
                                                 self.pending_classes.push(class);
                                             }
-                                            // Execute included file's op_array
-                                            let inc_cvs =
+                                            // Execute included file's op_array, sharing caller's scope
+                                            let mut inc_cvs =
                                                 vec![Value::Undef; inc_op_array.cv_names.len()];
-                                            match self.execute_op_array(&inc_op_array, inc_cvs) {
+
+                                            if self.is_global_scope {
+                                                // Save caller's CVs to globals first
+                                                for (i, cv) in cvs.iter().enumerate() {
+                                                    if !matches!(cv, Value::Undef) {
+                                                        if let Some(name) = op_array.cv_names.get(i) {
+                                                            self.globals.insert(name.clone(), cv.clone());
+                                                        }
+                                                    }
+                                                }
+                                                // Initialize include CVs from globals
+                                                for (inc_idx, inc_name) in inc_op_array.cv_names.iter().enumerate() {
+                                                    if let Some(val) = self.globals.get(inc_name) {
+                                                        inc_cvs[inc_idx] = val.clone();
+                                                    }
+                                                }
+                                            } else {
+                                                // Copy caller's variables into included file's scope by name
+                                                for (inc_idx, inc_name) in inc_op_array.cv_names.iter().enumerate() {
+                                                    if let Some(caller_idx) = op_array.cv_names.iter().position(|n| n == inc_name) {
+                                                        inc_cvs[inc_idx] = cvs[caller_idx].clone();
+                                                    }
+                                                }
+                                            }
+
+                                            let result = match self.execute_op_array(&inc_op_array, inc_cvs) {
                                                 Ok(v) => v,
                                                 Err(_) => Value::False,
+                                            };
+
+                                            if self.is_global_scope {
+                                                // After include, refresh caller's CVs from globals
+                                                // (included file may have set new variables)
+                                                for (i, cv_name) in op_array.cv_names.iter().enumerate() {
+                                                    if let Some(val) = self.globals.get(cv_name) {
+                                                        if i < cvs.len() {
+                                                            cvs[i] = val.clone();
+                                                        }
+                                                    }
+                                                }
                                             }
+
+                                            result
                                         }
                                         Err(_) => Value::False,
                                     }
@@ -13760,7 +14135,43 @@ impl Vm {
                                 Err(_) => Value::False,
                             }
                         }
-                        Err(_) => Value::False,
+                        Err(_) => {
+                            let kind_name = match include_kind {
+                                1 => "include_once",
+                                2 => "require",
+                                3 => "require_once",
+                                _ => "include",
+                            };
+                            let inc_path = &abs_path;
+                            let warning_msg = format!(
+                                "{}({}): Failed to open stream: No such file or directory",
+                                kind_name, inc_path
+                            );
+                            self.emit_warning_at(&warning_msg, op.line);
+                            if is_require {
+                                // require/require_once: fatal error
+                                let msg = format!(
+                                    "{}(): Failed opening required '{}' (include_path='')",
+                                    kind_name, inc_path
+                                );
+                                let fatal = format!(
+                                    "\nFatal error: {} in {} on line {}\n",
+                                    msg, self.current_file, op.line
+                                );
+                                self.output.extend_from_slice(fatal.as_bytes());
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
+                            } else {
+                                let warning_msg2 = format!(
+                                    "{}(): Failed opening '{}' for inclusion (include_path='')",
+                                    kind_name, inc_path
+                                );
+                                self.emit_warning_at(&warning_msg2, op.line);
+                                Value::False
+                            }
+                        }
                     };
                     self.current_file = old_file;
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
@@ -13794,9 +14205,33 @@ impl Vm {
                                             self.pending_classes.push(class);
                                         }
                                         // Eval shares the calling scope's variables
-                                        // Create new CVs but copy global scope if we're in global scope
-                                        let eval_cvs = vec![Value::Undef; eval_op_array.cv_names.len()];
-                                        match self.execute_op_array(&eval_op_array, eval_cvs) {
+                                        let mut eval_cvs = vec![Value::Undef; eval_op_array.cv_names.len()];
+
+                                        if self.is_global_scope {
+                                            // Save caller's CVs to globals first
+                                            for (i, cv) in cvs.iter().enumerate() {
+                                                if !matches!(cv, Value::Undef) {
+                                                    if let Some(name) = op_array.cv_names.get(i) {
+                                                        self.globals.insert(name.clone(), cv.clone());
+                                                    }
+                                                }
+                                            }
+                                            // Initialize eval CVs from globals
+                                            for (eval_idx, eval_name) in eval_op_array.cv_names.iter().enumerate() {
+                                                if let Some(val) = self.globals.get(eval_name) {
+                                                    eval_cvs[eval_idx] = val.clone();
+                                                }
+                                            }
+                                        } else {
+                                            // Copy caller's variables into eval's scope by name
+                                            for (eval_idx, eval_name) in eval_op_array.cv_names.iter().enumerate() {
+                                                if let Some(caller_idx) = op_array.cv_names.iter().position(|n| n == eval_name) {
+                                                    eval_cvs[eval_idx] = cvs[caller_idx].clone();
+                                                }
+                                            }
+                                        }
+
+                                        let eval_result = match self.execute_op_array(&eval_op_array, eval_cvs) {
                                             Ok(v) => v,
                                             Err(e) => {
                                                 // Propagate errors from eval
@@ -13809,7 +14244,20 @@ impl Vm {
                                                 }
                                                 return Err(e);
                                             }
+                                        };
+
+                                        if self.is_global_scope {
+                                            // After eval, refresh caller's CVs from globals
+                                            for (i, cv_name) in op_array.cv_names.iter().enumerate() {
+                                                if let Some(val) = self.globals.get(cv_name) {
+                                                    if i < cvs.len() {
+                                                        cvs[i] = val.clone();
+                                                    }
+                                                }
+                                            }
                                         }
+
+                                        eval_result
                                     }
                                     Err(e) => {
                                         // Compile error in eval - output as parse error
@@ -14792,6 +15240,26 @@ impl Vm {
                                         }
                                     }
                                 }
+                            } else {
+                                // Check if this is a known built-in interface that we don't explicitly register
+                                let known_builtin_interfaces: &[&[u8]] = &[
+                                    b"unitenum", b"backedenum", b"serializable", b"stringable",
+                                    b"throwable", b"traversable", b"iteratoraggregate", b"iterator",
+                                    b"arrayaccess", b"countable", b"jsonserializable",
+                                    b"reflector", b"splobserver", b"splsubject",
+                                    b"dateinterface", b"datetimeinterface",
+                                    b"fiber",
+                                ];
+                                if !known_builtin_interfaces.contains(&iface_lower.as_slice()) {
+                                    let iface_display = crate::value::display_class_name(iface_name);
+                                    let msg = format!("Interface \"{}\" not found", iface_display);
+                                    let exc_val = self.create_exception(b"Error", &msg, op.line);
+                                    self.current_exception = Some(exc_val);
+                                    return Err(VmError {
+                                        message: format!("Uncaught Error: {}", msg),
+                                        line: op.line,
+                                    });
+                                }
                             }
                         }
 
@@ -15333,6 +15801,11 @@ impl Vm {
                         .iter()
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
+
+                    // Try autoload if class not found
+                    if !self.classes.contains_key(&name_lower) {
+                        self.try_autoload_class(class_name.as_bytes());
+                    }
 
                     // Check for reserved internal classes
                     if name_lower == b"generator" || name_lower == b"closure" || name_lower == b"fibererror" {
@@ -15909,7 +16382,7 @@ impl Vm {
 
                 OpCode::PropertySet => {
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let mut value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
@@ -16073,6 +16546,10 @@ impl Vm {
                             // Enforce typed properties (only if no readonly error, since readonly takes precedence)
                             if readonly_error.is_none() && visibility_error.is_none() {
                                 if let Some(ref pt) = prop_type {
+                                    // Try coercion in weak mode
+                                    if !op_array.strict_types {
+                                        Self::coerce_value_to_type(&mut value, pt, false);
+                                    }
                                     if !self.value_matches_type(&value, pt) {
                                         let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
                                         let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();

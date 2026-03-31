@@ -57,6 +57,8 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !throw_on_error {
         vm.json_last_error = 0;
     }
+    // When JSON_PARTIAL_OUTPUT_ON_ERROR is set, it overrides JSON_THROW_ON_ERROR
+    let throw_on_error = throw_on_error && (flags & JSON_PARTIAL_OUTPUT_ON_ERROR == 0);
     // Pre-process value: call jsonSerialize() on JsonSerializable objects
     let val = resolve_json_serializable(vm, val);
     let mut seen = std::collections::HashSet::new();
@@ -82,13 +84,14 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     if s.contains("\x00UTF8_ERROR") {
         vm.json_last_error = 5; // JSON_ERROR_UTF8
+        if flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
+            // PARTIAL_OUTPUT_ON_ERROR overrides THROW_ON_ERROR
+            return Ok(Value::String(PhpString::from_bytes(b"null")));
+        }
         if throw_on_error {
-            let exc = vm.create_exception(b"JsonException", "Malformed UTF-8 characters, possibly incorrectly encoded", 0);
+            let exc = vm.create_exception(b"JsonException", "Malformed UTF-8 characters, possibly incorrectly encoded", 5);
             vm.current_exception = Some(exc);
             return Err(VmError { message: "Uncaught JsonException: Malformed UTF-8 characters, possibly incorrectly encoded".to_string(), line: 0 });
-        }
-        if flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
-            return Ok(Value::String(PhpString::from_bytes(b"null")));
         }
         return Ok(Value::False);
     }
@@ -537,7 +540,7 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 error_msg = "Syntax error";
             }
             if throw_on_error {
-                let exc = vm.create_exception(b"JsonException", error_msg, 0);
+                let exc = vm.create_exception(b"JsonException", error_msg, error_code as u32);
                 vm.current_exception = Some(exc);
                 return Err(VmError { message: format!("Uncaught JsonException: {}", error_msg), line: 0 });
             }

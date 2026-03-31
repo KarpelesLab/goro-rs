@@ -15,3 +15,4 @@ goro-ext-json = { path = "../goro-ext-json" }
 goro-ext-ctype = { path = "../goro-ext-ctype" }
 goro-ext-hash = { path = "../goro-ext-hash" }
 libc = "0.2"
+regex = "1"

@@ -6,6 +6,33 @@ use goro_core::vm::{Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Validate that an argument is an array and throw TypeError if not.
+/// Returns Ok(()) if valid array (or reference to array), Err with VmError if not.
+fn require_array_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<(), VmError> {
+    match val {
+        Value::Array(_) => Ok(()),
+        Value::Reference(r) => {
+            let inner = r.borrow();
+            if matches!(&*inner, Value::Array(_)) {
+                Ok(())
+            } else {
+                let type_name = Vm::value_type_name(&*inner);
+                let msg = format!("{}(): Argument #{} (${}) must be of type array, {} given", func_name, param_num, param_name, type_name);
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                Err(VmError { message: msg, line: vm.current_line })
+            }
+        }
+        _ => {
+            let type_name = Vm::value_type_name(val);
+            let msg = format!("{}(): Argument #{} (${}) must be of type array, {} given", func_name, param_num, param_name, type_name);
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: vm.current_line })
+        }
+    }
+}
+
 /// Normalize a namespaced constant name: lowercase the namespace prefix, keep constant name as-is.
 /// For "NS1\ns2\const1", returns "ns1\ns2\const1" (namespace lowered, const name preserved).
 /// For "CONST" (no namespace), returns "CONST" as-is.
@@ -1275,9 +1302,10 @@ fn array_values(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_merge(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_merge(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
-    for arg in args {
+    for (i, arg) in args.iter().enumerate() {
+        require_array_arg(vm, arg, "array_merge", "arrays", (i + 1) as u32)?;
         if let Value::Array(arr) = arg {
             let arr = arr.borrow();
             for (key, val) in arr.iter() {
@@ -1316,6 +1344,8 @@ fn array_reverse(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_flip(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "array_flip", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
         let mut result = PhpArray::new();
@@ -1352,7 +1382,9 @@ fn array_flip(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_unique(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "array_unique", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
         let mut result = PhpArray::new();
@@ -1810,6 +1842,8 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "array_filter", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let arr_data: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let callback = args.get(1);
@@ -1867,6 +1901,8 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "array_walk", "array", 1)?;
     if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
         let entries: Vec<_> = {
             let arr_borrow = arr.borrow();
@@ -2092,8 +2128,9 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_fill_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let keys = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, keys, "array_fill_keys", "keys", 1)?;
     let fill_val = args.get(1).cloned().unwrap_or(Value::Null);
     let mut result = PhpArray::new();
     if let Value::Array(arr) = keys {
@@ -2113,9 +2150,10 @@ fn array_fill_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_merge_recursive(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
-    for arg in args {
+    for (i, arg) in args.iter().enumerate() {
+        require_array_arg(vm, arg, "array_merge_recursive", "arrays", (i + 1) as u32)?;
         if let Value::Array(arr) = arg {
             let arr = arr.borrow();
             for (key, val) in arr.iter() {
@@ -2205,9 +2243,13 @@ fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_intersect(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.len() < 1 {
+fn array_intersect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    // Validate all arguments are arrays
+    for (i, arg) in args.iter().enumerate() {
+        require_array_arg(vm, arg, "array_intersect", "array", (i + 1) as u32)?;
     }
     // Single array: return it as-is
     if args.len() == 1 {
@@ -2349,7 +2391,9 @@ fn php_key_sort_cmp_flags(a: &ArrayKey, b: &ArrayKey, flags: i64) -> std::cmp::O
     }
 }
 
-fn sort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn sort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "sort", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
@@ -2365,7 +2409,9 @@ fn sort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::True)
 }
-fn rsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn rsort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "rsort", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
@@ -2381,7 +2427,9 @@ fn rsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::True)
 }
-fn asort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn asort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "asort", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
@@ -2396,7 +2444,9 @@ fn asort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::True)
 }
-fn arsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn arsort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "arsort", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
@@ -2411,7 +2461,9 @@ fn arsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::True)
 }
-fn ksort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn ksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "ksort", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
@@ -2424,7 +2476,9 @@ fn ksort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::True)
 }
-fn krsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn krsort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "krsort", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let mut arr = arr.borrow_mut();
@@ -2909,6 +2963,17 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         return Ok(Value::True);
     }
+    // Try autoload if second arg is true (default)
+    let autoload = args.get(1).map_or(true, |v| v.to_bool());
+    if autoload {
+        vm.try_autoload_class(name_bytes);
+        if let Some(class) = vm.classes.get(&name_lower) {
+            if class.is_interface || class.is_trait {
+                return Ok(Value::False);
+            }
+            return Ok(Value::True);
+        }
+    }
     Ok(Value::False)
 }
 fn get_class(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3267,6 +3332,8 @@ fn value_to_array_key(val: &Value) -> goro_core::array::ArrayKey {
     }
 }
 fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, "array_count_values", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
         let mut result = PhpArray::new();
@@ -3437,7 +3504,18 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::String(PhpString::from_string(format!("{}INF", prefix))));
         }
         let neg = num < 0.0;
-        let abs_num = num.abs();
+        // Use PHP's rounding approach: floor(f + 0.5) to handle edge cases
+        // like number_format(0.045, 2) which should give "0.05"
+        let abs_num = {
+            let factor = 10f64.powi(decimals as i32);
+            let f = num.abs() * factor;
+            if f.abs() < 1e15 {
+                let rounded = (f + 0.5).floor();
+                rounded / factor
+            } else {
+                num.abs()
+            }
+        };
         let formatted = format!("{:.prec$}", abs_num, prec = decimals);
         // Check if result rounds to zero
         let is_zero = formatted.chars().all(|c| c == '0' || c == '.');
@@ -5077,7 +5155,13 @@ fn pathinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 // Additional commonly needed stubs
-fn register_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn register_shutdown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        return Ok(Value::Null);
+    }
+    let callback = args[0].clone();
+    let extra_args: Vec<Value> = args[1..].to_vec();
+    vm.shutdown_functions.push((callback, extra_args));
     Ok(Value::Null)
 }
 fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -5101,39 +5185,45 @@ fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             | b"stringable"
             | b"traversable"
     );
-    Ok(
-        if is_builtin
-            || vm
-                .classes
-                .get(&name_lower)
-                .map(|c| c.is_interface)
-                .unwrap_or(false)
-        {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    if is_builtin
+        || vm
+            .classes
+            .get(&name_lower)
+            .map(|c| c.is_interface)
+            .unwrap_or(false)
+    {
+        return Ok(Value::True);
+    }
+    // Try autoload if second arg is true (default)
+    let autoload = args.get(1).map_or(true, |v| v.to_bool());
+    if autoload {
+        vm.try_autoload_class(name_bytes);
+        if vm.classes.get(&name_lower).map(|c| c.is_interface).unwrap_or(false) {
+            return Ok(Value::True);
+        }
+    }
+    Ok(Value::False)
 }
 fn trait_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let name_lower: Vec<u8> = name
-        .as_bytes()
+    let raw_bytes = name.as_bytes();
+    let name_bytes = if raw_bytes.starts_with(b"\\") { &raw_bytes[1..] } else { raw_bytes };
+    let name_lower: Vec<u8> = name_bytes
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    Ok(
-        if vm
-            .classes
-            .get(&name_lower)
-            .map(|c| c.is_trait)
-            .unwrap_or(false)
-        {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    if vm.classes.get(&name_lower).map(|c| c.is_trait).unwrap_or(false) {
+        return Ok(Value::True);
+    }
+    // Try autoload if second arg is true (default)
+    let autoload = args.get(1).map_or(true, |v| v.to_bool());
+    if autoload {
+        vm.try_autoload_class(name_bytes);
+        if vm.classes.get(&name_lower).map(|c| c.is_trait).unwrap_or(false) {
+            return Ok(Value::True);
+        }
+    }
+    Ok(Value::False)
 }
 fn enum_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -5143,18 +5233,18 @@ fn enum_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    Ok(
-        if vm
-            .classes
-            .get(&name_lower)
-            .map(|c| c.is_enum)
-            .unwrap_or(false)
-        {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    if vm.classes.get(&name_lower).map(|c| c.is_enum).unwrap_or(false) {
+        return Ok(Value::True);
+    }
+    // Try autoload if second arg is true (default)
+    let autoload = args.get(1).map_or(true, |v| v.to_bool());
+    if autoload {
+        vm.try_autoload_class(name_bytes);
+        if vm.classes.get(&name_lower).map(|c| c.is_enum).unwrap_or(false) {
+            return Ok(Value::True);
+        }
+    }
+    Ok(Value::False)
 }
 fn gc_collect_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
@@ -5814,16 +5904,41 @@ fn putenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::True)
     }
 }
-fn spl_autoload_register_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn spl_autoload_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let callback = args.first().cloned().unwrap_or(Value::Null);
+    if matches!(callback, Value::Null) {
+        // Default autoloader (spl_autoload) - not implemented, just return
+        return Ok(Value::True);
+    }
+    // Optional second arg: throw (default true) - ignored for now
+    // Optional third arg: prepend (default false)
+    let prepend = args.get(2).map_or(false, |v| v.to_bool());
+    if prepend {
+        vm.autoload_functions.insert(0, callback);
+    } else {
+        vm.autoload_functions.push(callback);
+    }
     Ok(Value::True)
 }
 
-fn spl_autoload_functions_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Return empty array (no autoload functions registered)
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn spl_autoload_functions_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    for (i, func) in vm.autoload_functions.iter().enumerate() {
+        arr.set(ArrayKey::Int(i as i64), func.clone());
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
-fn spl_autoload_unregister_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn spl_autoload_unregister_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let callback = args.first().cloned().unwrap_or(Value::Null);
+    // Try to remove by matching the callback
+    // Simple approach: remove first matching entry
+    if let Some(pos) = vm.autoload_functions.iter().position(|f| {
+        // Compare by string representation for simplicity
+        format!("{:?}", f) == format!("{:?}", callback)
+    }) {
+        vm.autoload_functions.remove(pos);
+    }
     Ok(Value::True)
 }
 
@@ -6577,7 +6692,7 @@ fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = if i == 0 {
                 format!("array_diff_key(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
-                format!("array_diff_key(): Argument #{} must be of type array, {} given", i + 1, type_name)
+                format!("array_diff_key(): Argument #{} ($arrays) must be of type array, {} given", i + 1, type_name)
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -6618,7 +6733,11 @@ fn array_diff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
             let type_name = Vm::value_type_name(&a);
-            let msg = format!("array_diff_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name);
+            let msg = if i == 0 {
+                format!("array_diff_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
+            } else {
+                format!("array_diff_assoc(): Argument #{} ($arrays) must be of type array, {} given", i + 1, type_name)
+            };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
@@ -6662,7 +6781,11 @@ fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
             let type_name = Vm::value_type_name(&a);
-            let msg = format!("array_intersect_key(): Argument #{} must be of type array, {} given", i + 1, type_name);
+            let msg = if i == 0 {
+                format!("array_intersect_key(): Argument #1 ($array) must be of type array, {} given", type_name)
+            } else {
+                format!("array_intersect_key(): Argument #{} ($arrays) must be of type array, {} given", i + 1, type_name)
+            };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
@@ -6699,7 +6822,11 @@ fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
             let type_name = Vm::value_type_name(&a);
-            let msg = format!("array_intersect_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name);
+            let msg = if i == 0 {
+                format!("array_intersect_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
+            } else {
+                format!("array_intersect_assoc(): Argument #{} ($arrays) must be of type array, {} given", i + 1, type_name)
+            };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });

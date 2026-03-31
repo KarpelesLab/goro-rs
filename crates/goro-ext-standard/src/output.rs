@@ -718,16 +718,29 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                 return;
             }
             let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
-            // PHP prefixes class names with \ in var_export unless they already start with \
-            let prefix_backslash = if class_name.starts_with('\\') { "" } else { "\\" };
-            buf.extend_from_slice(format!("{}{}::__set_state(array(\n", prefix_backslash, class_name).as_bytes());
-            for (name, value) in &obj_borrow.properties {
-                let name_str = String::from_utf8_lossy(name);
-                buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
-                var_export_value(value, buf, indent + 2);
-                buf.extend_from_slice(b",\n");
+            let class_lower = class_name.to_ascii_lowercase();
+            if class_lower == "stdclass" {
+                // PHP 8.2+: stdClass uses (object) array(...) format
+                buf.extend_from_slice(b"(object) array(\n");
+                for (name, value) in &obj_borrow.properties {
+                    let name_str = String::from_utf8_lossy(name);
+                    buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
+                    var_export_value(value, buf, indent + 2);
+                    buf.extend_from_slice(b",\n");
+                }
+                buf.extend_from_slice(format!("{})", prefix).as_bytes());
+            } else {
+                // PHP prefixes class names with \ in var_export unless they already start with \
+                let prefix_backslash = if class_name.starts_with('\\') { "" } else { "\\" };
+                buf.extend_from_slice(format!("{}{}::__set_state(array(\n", prefix_backslash, class_name).as_bytes());
+                for (name, value) in &obj_borrow.properties {
+                    let name_str = String::from_utf8_lossy(name);
+                    buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
+                    var_export_value(value, buf, indent + 2);
+                    buf.extend_from_slice(b",\n");
+                }
+                buf.extend_from_slice(format!("{}))", prefix).as_bytes());
             }
-            buf.extend_from_slice(format!("{}))", prefix).as_bytes());
         }
         Value::Generator(_) => {
             buf.extend_from_slice(b"NULL");

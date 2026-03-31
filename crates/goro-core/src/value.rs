@@ -171,6 +171,24 @@ impl Value {
 
     // ---- Conversion helpers ----
 
+    /// Convert to long using PHP's zval_get_long() semantics for typed parameters.
+    /// For strings, this first parses as float (handling scientific notation like "2.1e1")
+    /// then truncates to int. This differs from to_long() which does (int) cast semantics.
+    pub fn to_long_coerced(&self) -> i64 {
+        match self {
+            Value::String(s) => {
+                let bytes = s.as_bytes();
+                if let Some(f) = parse_numeric_string(bytes) {
+                    f as i64
+                } else {
+                    self.to_long()
+                }
+            }
+            Value::Reference(r) => r.borrow().to_long_coerced(),
+            _ => self.to_long(),
+        }
+    }
+
     pub fn to_long(&self) -> i64 {
         match self {
             Value::Undef | Value::Null | Value::False => 0,

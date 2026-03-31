@@ -129,6 +129,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"strcoll", strcoll_fn);
     vm.register_function(b"money_format", money_format_fn);
     vm.register_function(b"settype", settype_fn);
+    vm.register_function(b"mb_get_info", mb_get_info_fn);
+    vm.register_function(b"mb_regex_encoding", mb_regex_encoding_fn);
+    vm.register_function(b"mb_http_output", mb_http_output_fn);
+    vm.register_function(b"mb_preferred_mime_name", mb_preferred_mime_name_fn);
+    vm.register_function(b"mb_output_handler", mb_output_handler_fn);
+    vm.register_function(b"mb_str_pad", mb_str_pad_fn);
 }
 
 fn strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -572,8 +578,28 @@ fn implode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             (args[0].to_php_string(), &args[1])
         }
+    } else if let Some(first) = args.first() {
+        if matches!(first, Value::Array(_)) {
+            // implode(array) - no glue
+            (PhpString::empty(), first)
+        } else {
+            // implode(string) with no array - this is an error in PHP 8
+            let type_name = Vm::value_type_name(first);
+            if matches!(first, Value::String(_)) {
+                let msg = "implode(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given".to_string();
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            } else {
+                let msg = format!("implode(): Argument #1 ($separator) must be of type string|array, {} given", type_name);
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
     } else {
-        (PhpString::empty(), args.first().unwrap_or(&Value::Null))
+        let msg = "implode() expects at least 1 argument, 0 given".to_string();
+        return Err(VmError { message: msg, line: vm.current_line });
     };
 
     match pieces {
@@ -596,7 +622,7 @@ fn implode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::String(PhpString::from_vec(result)))
         }
         Value::Null | Value::Undef => {
-            // implode with null pieces - deprecated in PHP 8.x but returns ""
+            // Two-arg case: implode(glue, null) - deprecated in PHP 8.x
             vm.emit_deprecated_at(
                 "implode(): Passing null to parameter #2 ($array) of type array is deprecated",
                 vm.current_line,
@@ -2841,61 +2867,62 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::empty()));
     }
 
-    let width = if width < 1 { 1 } else { width };
+    let width = width.max(1) as usize;
 
-    let mut result = Vec::new();
-    let mut line_start = 0;
-    let mut last_space: Option<usize> = None;
-    let mut current_len: usize = 0;
+    // PHP's wordwrap algorithm (mirrors PHP's C implementation for multi-char breaks):
+    // 1. Detect existing break sequences in text and copy through.
+    // 2. For spaces: if line_len >= width, replace space with break.
+    // 3. For cut_long: if line_len >= width and no valid space, force cut.
+    // 4. For word boundary: if line_len >= width and valid space, break at lastspace.
 
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\n' {
-            // Newline: emit everything up to and including the newline
-            result.extend_from_slice(&bytes[line_start..=i]);
-            line_start = i + 1;
-            last_space = None;
-            current_len = 0;
-            i += 1;
+    let mut result = Vec::with_capacity(bytes.len() + bytes.len() / width * brk_bytes.len());
+    let mut laststart: usize = 0;
+    let mut lastspace: usize = 0;
+    let mut current: usize = 0;
+
+    while current < bytes.len() {
+        let ch = bytes[current];
+
+        // Check for existing break string in text
+        if ch == brk_bytes[0]
+            && current + brk_bytes.len() <= bytes.len()
+            && &bytes[current..current + brk_bytes.len()] == brk_bytes
+        {
+            // Copy everything from laststart through the break string
+            result.extend_from_slice(&bytes[laststart..current + brk_bytes.len()]);
+            current += brk_bytes.len();
+            laststart = current;
+            lastspace = current;
             continue;
-        }
-
-        current_len += 1;
-
-        if bytes[i] == b' ' {
-            last_space = Some(i);
-        }
-
-        if current_len > width {
-            if let Some(sp) = last_space {
-                // Break at last space
-                result.extend_from_slice(&bytes[line_start..sp]);
+        } else if ch == b' ' {
+            if current - laststart >= width {
+                // Line is long enough - break at this space (replace space with break)
+                result.extend_from_slice(&bytes[laststart..current]);
                 result.extend_from_slice(brk_bytes);
-                line_start = sp + 1;
-                current_len = i + 1 - line_start;
-                last_space = None;
-                // Re-scan for spaces in the kept portion
-                for j in line_start..=i {
-                    if j < bytes.len() && bytes[j] == b' ' {
-                        last_space = Some(j);
-                    }
-                }
-            } else if cut_long {
-                // No space found, cut the word at width
-                result.extend_from_slice(&bytes[line_start..i]);
-                result.extend_from_slice(brk_bytes);
-                line_start = i;
-                current_len = 1;
+                laststart = current + 1;
             }
-            // else: no space, no cut - just continue
+            lastspace = current;
+        } else if current - laststart >= width && cut_long && laststart >= lastspace {
+            // Force cut at current position (no valid space available)
+            result.extend_from_slice(&bytes[laststart..current]);
+            result.extend_from_slice(brk_bytes);
+            laststart = current;
+            lastspace = current;
+            continue; // re-examine current character (like PHP's chk--)
+        } else if current - laststart >= width && laststart < lastspace {
+            // Break at last recorded space
+            result.extend_from_slice(&bytes[laststart..lastspace]);
+            result.extend_from_slice(brk_bytes);
+            laststart = lastspace + 1;
+            lastspace = laststart;
         }
 
-        i += 1;
+        current += 1;
     }
 
     // Append remaining
-    if line_start < bytes.len() {
-        result.extend_from_slice(&bytes[line_start..]);
+    if laststart < bytes.len() {
+        result.extend_from_slice(&bytes[laststart..]);
     }
 
     Ok(Value::String(PhpString::from_vec(result)))
@@ -2907,17 +2934,27 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let h = haystack.as_bytes();
     let n = needle.as_bytes();
-    // Compute start position from offset
-    let start = if offset >= 0 {
-        let o = offset as usize;
-        if o > h.len() {
+    if n.is_empty() {
+        return Ok(Value::Long(h.len() as i64));
+    }
+    if offset >= 0 {
+        let start = offset as usize;
+        if start > h.len() {
             let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.into(), line: vm.current_line });
         }
-        o
+        if n.len() > h.len() || start >= h.len() {
+            return Ok(Value::False);
+        }
+        if let Some(pos) = h[start..].windows(n.len()).rposition(|w| w == n) {
+            Ok(Value::Long((start + pos) as i64))
+        } else {
+            Ok(Value::False)
+        }
     } else {
+        // Negative offset: search from beginning, but limit end position
         let abs = (-offset) as usize;
         if abs > h.len() {
             let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
@@ -2925,19 +2962,15 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.into(), line: vm.current_line });
         }
-        h.len() - abs
-    };
-    if n.is_empty() {
-        // Empty needle: return the length of the haystack
-        return Ok(Value::Long(h.len() as i64));
-    }
-    if n.len() > h.len() || start >= h.len() {
-        return Ok(Value::False);
-    }
-    if let Some(pos) = h[start..].windows(n.len()).rposition(|w| w == n) {
-        Ok(Value::Long((start + pos) as i64))
-    } else {
-        Ok(Value::False)
+        let end = h.len() - abs;
+        if end == 0 || n.len() > end {
+            return Ok(Value::False);
+        }
+        if let Some(pos) = h[..end].windows(n.len()).rposition(|w| w == n) {
+            Ok(Value::Long(pos as i64))
+        } else {
+            Ok(Value::False)
+        }
     }
 }
 
@@ -3002,17 +3035,28 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    // Compute start position from offset
-    let start = if offset >= 0 {
-        let o = offset as usize;
-        if o > h.len() {
+    if n.is_empty() {
+        return Ok(Value::Long(h.len() as i64));
+    }
+    if offset >= 0 {
+        let start = offset as usize;
+        if start > h.len() {
             let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.into(), line: vm.current_line });
         }
-        o
+        // Search from start to end, find last occurrence
+        if start >= h.len() {
+            return Ok(Value::False);
+        }
+        if let Some(pos) = h[start..].windows(n.len()).rposition(|w| w == n.as_slice()) {
+            Ok(Value::Long((start + pos) as i64))
+        } else {
+            Ok(Value::False)
+        }
     } else {
+        // Negative offset: search from beginning, but limit end position
         let abs = (-offset) as usize;
         if abs > h.len() {
             let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
@@ -3020,18 +3064,15 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.into(), line: vm.current_line });
         }
-        h.len() - abs
-    };
-    if n.is_empty() {
-        return Ok(Value::Long(h.len() as i64));
-    }
-    if start >= h.len() {
-        return Ok(Value::False);
-    }
-    if let Some(pos) = h[start..].windows(n.len()).rposition(|w| w == n.as_slice()) {
-        Ok(Value::Long((start + pos) as i64))
-    } else {
-        Ok(Value::False)
+        let end = h.len() - abs;
+        if end == 0 || n.len() > end {
+            return Ok(Value::False);
+        }
+        if let Some(pos) = h[..end].windows(n.len()).rposition(|w| w == n.as_slice()) {
+            Ok(Value::Long(pos as i64))
+        } else {
+            Ok(Value::False)
+        }
     }
 }
 
@@ -4795,8 +4836,15 @@ fn nl2br_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         } else if bytes[i] == b'\n' {
             result.extend_from_slice(br);
-            result.push(b'\n');
-            i += 1;
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\r' {
+                // \n\r - emit both chars but only one <br>
+                result.push(b'\n');
+                result.push(b'\r');
+                i += 2;
+            } else {
+                result.push(b'\n');
+                i += 1;
+            }
         } else {
             result.push(bytes[i]);
             i += 1;
@@ -4987,4 +5035,124 @@ fn settype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     Ok(Value::True)
+}
+
+fn mb_get_info_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let info_type = args.first().map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"all"));
+    let info_lower: Vec<u8> = info_type.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    match info_lower.as_slice() {
+        b"internal_encoding" => Ok(Value::String(PhpString::from_bytes(b"UTF-8"))),
+        b"http_output" => Ok(Value::String(PhpString::from_bytes(b"UTF-8"))),
+        b"http_output_conv_mimetypes" => Ok(Value::String(PhpString::from_bytes(b"^(text/|application/xhtml\\+xml)"))),
+        b"mail_charset" => Ok(Value::String(PhpString::from_bytes(b"UTF-8"))),
+        b"mail_header_encoding" => Ok(Value::String(PhpString::from_bytes(b"BASE64"))),
+        b"mail_body_encoding" => Ok(Value::String(PhpString::from_bytes(b"BASE64"))),
+        b"illegal_chars" => Ok(Value::Long(0)),
+        b"encoding_translation" => Ok(Value::String(PhpString::from_bytes(b"Off"))),
+        b"language" => Ok(Value::String(PhpString::from_bytes(b"neutral"))),
+        b"substitute_character" => Ok(Value::Long(63)),
+        b"strict_detection" => Ok(Value::String(PhpString::from_bytes(b"Off"))),
+        b"detect_order" | b"all" => {
+            let mut arr = PhpArray::new();
+            if info_lower.as_slice() == b"detect_order" {
+                arr.set(ArrayKey::Int(0), Value::String(PhpString::from_bytes(b"ASCII")));
+                arr.set(ArrayKey::Int(1), Value::String(PhpString::from_bytes(b"UTF-8")));
+                return Ok(Value::Array(Rc::new(RefCell::new(arr))));
+            }
+            // Return all info as array
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"internal_encoding")), Value::String(PhpString::from_bytes(b"UTF-8")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"http_output")), Value::String(PhpString::from_bytes(b"UTF-8")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"http_output_conv_mimetypes")), Value::String(PhpString::from_bytes(b"^(text/|application/xhtml\\+xml)")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"mail_charset")), Value::String(PhpString::from_bytes(b"UTF-8")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"mail_header_encoding")), Value::String(PhpString::from_bytes(b"BASE64")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"mail_body_encoding")), Value::String(PhpString::from_bytes(b"BASE64")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"illegal_chars")), Value::Long(0));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"encoding_translation")), Value::String(PhpString::from_bytes(b"Off")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"language")), Value::String(PhpString::from_bytes(b"neutral")));
+            let mut detect_order = PhpArray::new();
+            detect_order.set(ArrayKey::Int(0), Value::String(PhpString::from_bytes(b"ASCII")));
+            detect_order.set(ArrayKey::Int(1), Value::String(PhpString::from_bytes(b"UTF-8")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"detect_order")), Value::Array(Rc::new(RefCell::new(detect_order))));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"substitute_character")), Value::Long(63));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"strict_detection")), Value::String(PhpString::from_bytes(b"Off")));
+            Ok(Value::Array(Rc::new(RefCell::new(arr))))
+        }
+        _ => Ok(Value::False),
+    }
+}
+
+fn mb_regex_encoding_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        return Ok(Value::String(PhpString::from_bytes(b"UTF-8")));
+    }
+    // Setting regex encoding - just return true
+    Ok(Value::True)
+}
+
+fn mb_http_output_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        return Ok(Value::String(PhpString::from_bytes(b"UTF-8")));
+    }
+    // Setting http output encoding - just return true
+    Ok(Value::True)
+}
+
+fn mb_preferred_mime_name_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let encoding = args.first().unwrap_or(&Value::Null).to_php_string();
+    let enc_lower: Vec<u8> = encoding.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    match enc_lower.as_slice() {
+        b"utf-8" | b"utf8" => Ok(Value::String(PhpString::from_bytes(b"UTF-8"))),
+        b"iso-8859-1" | b"latin1" => Ok(Value::String(PhpString::from_bytes(b"ISO-8859-1"))),
+        b"ascii" | b"us-ascii" => Ok(Value::String(PhpString::from_bytes(b"US-ASCII"))),
+        b"shift_jis" | b"sjis" => Ok(Value::String(PhpString::from_bytes(b"Shift_JIS"))),
+        b"euc-jp" => Ok(Value::String(PhpString::from_bytes(b"EUC-JP"))),
+        b"iso-2022-jp" => Ok(Value::String(PhpString::from_bytes(b"ISO-2022-JP"))),
+        _ => Ok(Value::False),
+    }
+}
+
+fn mb_output_handler_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Just pass through the content without conversion
+    let content = args.first().unwrap_or(&Value::Null).to_php_string();
+    Ok(Value::String(content))
+}
+
+fn mb_str_pad_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // mb_str_pad is like str_pad but multibyte aware
+    // For simplicity, delegate to str_pad since our strings are already UTF-8
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let length = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let pad_string = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b" "));
+    let pad_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // STR_PAD_RIGHT
+    // Count actual UTF-8 characters
+    let s_bytes = s.as_bytes();
+    let char_count = String::from_utf8_lossy(s_bytes).chars().count();
+    if length as usize <= char_count || pad_string.as_bytes().is_empty() {
+        return Ok(Value::String(s));
+    }
+    let pad_chars: Vec<char> = String::from_utf8_lossy(pad_string.as_bytes()).chars().collect();
+    let pad_len = length as usize - char_count;
+    let mut pad = String::new();
+    for i in 0..pad_len {
+        pad.push(pad_chars[i % pad_chars.len()]);
+    }
+    let result = match pad_type {
+        0 => format!("{}{}", pad, String::from_utf8_lossy(s_bytes)), // STR_PAD_LEFT
+        2 => { // STR_PAD_BOTH
+            let left = pad_len / 2;
+            let right = pad_len - left;
+            let mut lp = String::new();
+            for i in 0..left {
+                lp.push(pad_chars[i % pad_chars.len()]);
+            }
+            let mut rp = String::new();
+            for i in 0..right {
+                rp.push(pad_chars[i % pad_chars.len()]);
+            }
+            format!("{}{}{}", lp, String::from_utf8_lossy(s_bytes), rp)
+        }
+        _ => format!("{}{}", String::from_utf8_lossy(s_bytes), pad), // STR_PAD_RIGHT
+    };
+    Ok(Value::String(PhpString::from_vec(result.into_bytes())))
 }

@@ -4997,14 +4997,14 @@ impl Compiler {
                     b"count_normal" => Value::Long(0),
                     b"count_recursive" => Value::Long(1),
                     // Rounding mode constants
-                    b"php_round_half_up" => Value::Long(0),
-                    b"php_round_half_down" => Value::Long(1),
-                    b"php_round_half_even" => Value::Long(2),
-                    b"php_round_half_odd" => Value::Long(3),
-                    b"php_round_ceiling" => Value::Long(4),
-                    b"php_round_floor" => Value::Long(5),
-                    b"php_round_toward_zero" => Value::Long(6),
-                    b"php_round_away_from_zero" => Value::Long(7),
+                    b"php_round_half_up" => Value::Long(1),
+                    b"php_round_half_down" => Value::Long(2),
+                    b"php_round_half_even" => Value::Long(3),
+                    b"php_round_half_odd" => Value::Long(4),
+                    b"php_round_ceiling" => Value::Long(5),
+                    b"php_round_floor" => Value::Long(6),
+                    b"php_round_toward_zero" => Value::Long(7),
+                    b"php_round_away_from_zero" => Value::Long(8),
                     // INI
                     b"ini_user" => Value::Long(1),
                     b"ini_perdir" => Value::Long(2),
@@ -5205,10 +5205,17 @@ impl Compiler {
             ExprKind::Include { kind, path } => {
                 let path_op = self.compile_expr(path)?;
                 let tmp = self.op_array.alloc_temp();
+                // Encode include kind in op2: 0=include, 1=include_once, 2=require, 3=require_once
+                let kind_val = match kind {
+                    IncludeKind::Include => 0u32,
+                    IncludeKind::IncludeOnce => 1u32,
+                    IncludeKind::Require => 2u32,
+                    IncludeKind::RequireOnce => 3u32,
+                };
                 self.op_array.emit(Op {
                     opcode: OpCode::IncludeFile,
                     op1: path_op,
-                    op2: OperandType::Unused,
+                    op2: OperandType::Const(kind_val),
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
                 });

@@ -1,6 +1,28 @@
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
+/// PHP-compatible rounding using floor(f + 0.5) approach.
+/// This matches PHP's _php_math_round() which uses floor(f + 0.5) for positive
+/// and ceil(f - 0.5) for negative, which handles edge cases like 0.045*100
+/// differently from Rust's f64::round().
+fn php_round_value(val: f64, places: i32) -> f64 {
+    if val.is_nan() || val.is_infinite() || val == 0.0 {
+        return val;
+    }
+    let factor = 10f64.powi(places);
+    let f = val * factor;
+    // Beyond our precision, rounding is pointless
+    if f.abs() >= 1e15 {
+        return val;
+    }
+    let tmp = if f >= 0.0 {
+        (f + 0.5).floor()
+    } else {
+        (f - 0.5).ceil()
+    };
+    tmp / factor
+}
+
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"abs", abs);
     vm.register_function(b"ceil", ceil);
@@ -94,19 +116,14 @@ fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &st
             // PHP 8: Only numeric strings are accepted for int|float params
             // Non-numeric strings throw TypeError
             let bytes = s.as_bytes();
-            if goro_core::value::parse_numeric_string(bytes).is_some() || bytes.is_empty() {
+            if goro_core::value::parse_numeric_string(bytes).is_some() {
                 Ok(true) // numeric strings are coerced to numbers
             } else {
-                // Check if it's a leading-numeric string (has trailing non-numeric chars)
-                let trimmed = s.to_string_lossy();
-                let trimmed = trimmed.trim();
-                if !trimmed.is_empty() && (trimmed.bytes().next().map(|b| b.is_ascii_digit() || b == b'-' || b == b'+' || b == b'.').unwrap_or(false)) {
-                    Ok(true) // leading numeric string, will be coerced
-                } else {
-                    let type_name = Vm::value_type_name(val);
-                    throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
-                    Ok(false)
-                }
+                // In PHP 8, typed parameters (int|float) only accept fully numeric strings
+                // Non-numeric and leading-numeric strings throw TypeError
+                let type_name = Vm::value_type_name(val);
+                throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
+                Ok(false)
             }
         }
         Value::Reference(r) => {
@@ -253,7 +270,14 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
     let f = val.to_double();
-    let precision = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let precision = if let Some(prec_val) = args.get(1) {
+        if !check_int_arg(vm, prec_val, "round", "precision", 2)? {
+            return Ok(Value::Null);
+        }
+        prec_val.to_long_coerced()
+    } else {
+        0
+    };
     // mode: 0=HALF_UP(default), 1=HALF_DOWN, 2=HALF_EVEN, 3=HALF_ODD
     // Also support RoundingMode enum backed values
     let mode = if let Some(mode_val) = args.get(2) {
@@ -282,8 +306,11 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let factor = 10f64.powi(precision as i32);
     let scaled = f * factor;
     let rounded = match mode {
-        0 => scaled.round(), // HALF_UP (PHP default, rounds .5 away from zero)
-        1 => { // HALF_DOWN (rounds .5 toward zero)
+        0 | 1 => { // HALF_UP / HalfAwayFromZero (PHP default, PHP_ROUND_HALF_UP=1)
+            // Use PHP's floor(f+0.5) approach for correct edge case handling
+            if scaled >= 0.0 { (scaled + 0.5).floor() } else { (scaled - 0.5).ceil() }
+        }
+        2 => { // HALF_DOWN / HalfTowardsZero (PHP_ROUND_HALF_DOWN=2)
             let frac = scaled.fract().abs();
             if (frac - 0.5).abs() < 1e-9 {
                 scaled.trunc()
@@ -291,7 +318,7 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 scaled.round()
             }
         }
-        2 => { // HALF_EVEN (rounds .5 to nearest even)
+        3 => { // HALF_EVEN / HalfEven (PHP_ROUND_HALF_EVEN=3)
             let frac = scaled.fract().abs();
             if (frac - 0.5).abs() < 1e-9 {
                 let t = scaled.trunc();
@@ -304,7 +331,7 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 scaled.round()
             }
         }
-        3 => { // HALF_ODD (rounds .5 to nearest odd)
+        4 => { // HALF_ODD / HalfOdd (PHP_ROUND_HALF_ODD=4)
             let frac = scaled.fract().abs();
             if (frac - 0.5).abs() < 1e-9 {
                 let t = scaled.trunc();
@@ -317,17 +344,17 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 scaled.round()
             }
         }
-        4 => { // TowardsZero / HALF_TOWARD_ZERO (PHP 8.4 RoundingMode::TowardsZero)
-            scaled.trunc()
+        5 => { // PHP_ROUND_CEILING / PositiveInfinity
+            scaled.ceil()
         }
-        5 => { // AwayFromZero / HALF_AWAY_FROM_ZERO (PHP 8.4 RoundingMode::AwayFromZero)
-            if scaled > 0.0 { scaled.ceil() } else { scaled.floor() }
-        }
-        6 => { // NegativeInfinity (PHP 8.4 RoundingMode::NegativeInfinity)
+        6 => { // PHP_ROUND_FLOOR / NegativeInfinity
             scaled.floor()
         }
-        7 => { // PositiveInfinity (PHP 8.4 RoundingMode::PositiveInfinity)
-            scaled.ceil()
+        7 => { // PHP_ROUND_TOWARD_ZERO / TowardsZero
+            scaled.trunc()
+        }
+        8 => { // PHP_ROUND_AWAY_FROM_ZERO / AwayFromZero
+            if scaled > 0.0 { scaled.ceil() } else { scaled.floor() }
         }
         _ => {
             vm.throw_type_error("round(): Argument #3 ($mode) must be a valid rounding mode (PHP_ROUND_HALF_*)".to_string());
@@ -877,7 +904,7 @@ fn decbin_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
     Ok(Value::String(goro_core::string::PhpString::from_string(
-        format!("{:b}", val.to_long()),
+        format!("{:b}", val.to_long_coerced()),
     )))
 }
 fn decoct_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -886,7 +913,7 @@ fn decoct_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
     Ok(Value::String(goro_core::string::PhpString::from_string(
-        format!("{:o}", val.to_long()),
+        format!("{:o}", val.to_long_coerced()),
     )))
 }
 fn dechex_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -895,7 +922,7 @@ fn dechex_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
     Ok(Value::String(goro_core::string::PhpString::from_string(
-        format!("{:x}", val.to_long()),
+        format!("{:x}", val.to_long_coerced()),
     )))
 }
 fn is_nan_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1072,7 +1099,7 @@ fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Handle negative decimals: round to nearest 10^(-decimals)
     let (num_to_format, decimals) = if decimals_raw < 0 {
-        let neg_dec = (-decimals_raw) as u32;
+        let neg_dec = decimals_raw.checked_neg().unwrap_or(i64::MAX) as u64;
         if neg_dec >= 20 {
             (0.0f64, 0usize)
         } else {
@@ -1081,7 +1108,9 @@ fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             (rounded, 0usize)
         }
     } else {
-        (num, decimals_raw.min(100000) as usize)
+        // Round using PHP's rounding (half away from zero) before formatting
+        let rounded = php_round_value(num, decimals_raw.min(100000) as i32);
+        (rounded, decimals_raw.min(100000) as usize)
     };
 
     // For integer values with no decimals, format without going through float
