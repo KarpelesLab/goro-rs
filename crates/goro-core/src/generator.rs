@@ -60,6 +60,9 @@ pub struct PhpGenerator {
     /// When fiber suspension happens during DoFCall, this stores the result operand
     /// that should receive the resume value when the fiber resumes
     pub fiber_suspend_result: Option<crate::opcode::OperandType>,
+    /// Whether this generator is currently running (executing its body).
+    /// Used to detect and prevent recursive resumption.
+    pub is_running: bool,
 }
 
 impl PhpGenerator {
@@ -84,6 +87,7 @@ impl PhpGenerator {
             yield_from_source: None,
             yield_from_pos: 0,
             fiber_suspend_result: None,
+            is_running: false,
         }
     }
 
@@ -93,11 +97,19 @@ impl PhpGenerator {
         if self.state == GeneratorState::Completed {
             return Ok(false);
         }
+        if self.is_running {
+            let err_msg = "Cannot resume an already running generator";
+            let exc = vm.create_exception(b"Error", err_msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: 0 });
+        }
 
         // Track call depth to prevent stack overflow from recursive yield-from
         vm.enter_generator_resume(0)?;
 
+        self.is_running = true;
         let result = self.resume_inner(vm);
+        self.is_running = false;
 
         vm.leave_generator_resume();
 
@@ -1246,6 +1258,71 @@ impl PhpGenerator {
                                 });
                             }
                         }
+                    } else if let Value::Generator(inner_gen_rc) = &obj_val {
+                        // Calling a method on another generator from within this generator
+                        let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        // Check if the inner generator is already running (to prevent
+                        // "Cannot resume an already running generator" crash/panic).
+                        // If try_borrow() fails, the RefCell is mutably borrowed = generator is running.
+                        // If it succeeds, check the is_running flag for nested resume detection.
+                        let already_running = inner_gen_rc.try_borrow().map(|b| b.is_running).unwrap_or(true);
+                        if already_running && (method_lower == b"next" || method_lower == b"send" || method_lower == b"rewind") {
+                            // Set up a pending call that will throw the error in DoFCall
+                            let err_msg = b"Cannot resume an already running generator";
+                            vm.generator_init_fcall(Value::String(crate::string::PhpString::from_bytes(b"__throw_error")));
+                            vm.generator_send_val(Value::String(crate::string::PhpString::from_bytes(err_msg)));
+                            vm.generator_send_val(Value::Long(op.line as i64));
+                            continue; // let DoFCall handle the throw
+                        }
+                        let result = match method_lower.as_slice() {
+                            b"valid" => {
+                                if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
+                                    if inner.state == GeneratorState::Created {
+                                        let _ = inner.resume(vm);
+                                    }
+                                    if inner.state == GeneratorState::Completed { Value::False } else { Value::True }
+                                } else { Value::False }
+                            }
+                            b"current" => {
+                                if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
+                                    if inner.state == GeneratorState::Created {
+                                        let _ = inner.resume(vm);
+                                    }
+                                    inner.current_value.clone()
+                                } else { Value::Null }
+                            }
+                            b"key" => {
+                                if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
+                                    if inner.state == GeneratorState::Created {
+                                        let _ = inner.resume(vm);
+                                    }
+                                    inner.current_key.clone()
+                                } else { Value::Null }
+                            }
+                            b"next" => {
+                                if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
+                                    if inner.state == GeneratorState::Created {
+                                        let _ = inner.resume(vm);
+                                    }
+                                    inner.write_send_value();
+                                    let _ = inner.resume(vm);
+                                }
+                                Value::Null
+                            }
+                            b"rewind" => Value::Null, // no-op for started generators
+                            b"send" => {
+                                // send() will be handled via __generator_send in DoFCall
+                                // Set up a pending call with the generator as first arg
+                                vm.generator_init_fcall(Value::String(crate::string::PhpString::from_bytes(b"__generator_send")));
+                                vm.generator_send_val(obj_val.clone());
+                                // The actual argument(s) will be added by subsequent SendVal opcodes
+                                // Don't push __builtin_return here; let DoFCall handle it
+                                continue; // skip the push_pending below
+                            }
+                            _ => Value::Null,
+                        };
+                        vm.generator_init_fcall(Value::String(crate::string::PhpString::from_bytes(b"__builtin_return")));
+                        vm.generator_send_val(result);
                     } else {
                         self.state = GeneratorState::Completed;
                         self.ip = ip;

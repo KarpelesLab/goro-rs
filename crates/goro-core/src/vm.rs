@@ -18745,6 +18745,46 @@ impl Vm {
 
         if func_name_lower == b"__builtin_return" {
             Ok(call.args.first().cloned().unwrap_or(Value::Null))
+        } else if func_name_lower == b"__throw_error" {
+            // Throw an Error exception (for "Cannot resume an already running generator" etc.)
+            let err_msg = call.args.first()
+                .map(|v| v.to_php_string().to_string_lossy().to_string())
+                .unwrap_or_else(|| "Error".to_string());
+            let err_line = call.args.get(1)
+                .and_then(|v| if let Value::Long(n) = v { Some(*n as u32) } else { None })
+                .unwrap_or(line);
+            let exc = self.create_exception(b"Error", &err_msg, err_line);
+            self.current_exception = Some(exc);
+            Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: err_line })
+        } else if func_name_lower == b"__generator_send" {
+            // Generator send() called from within another generator
+            if let Some(Value::Generator(gen_rc)) = call.args.first() {
+                let sent_value = call.args.get(1).cloned().unwrap_or(Value::Null);
+                let mut gen_borrow = gen_rc.borrow_mut();
+                let was_created = gen_borrow.state == crate::generator::GeneratorState::Created;
+                if was_created {
+                    let _ = gen_borrow.resume(self);
+                    if self.current_exception.is_some() {
+                        drop(gen_borrow);
+                        let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                            let ob = obj.borrow();
+                            format!("Uncaught {}: {}", String::from_utf8_lossy(&ob.class_name), ob.get_property(b"message").to_php_string().to_string_lossy())
+                        } else { "Uncaught exception".to_string() };
+                        return Err(VmError { message: exc_msg, line });
+                    }
+                    gen_borrow.send_value = sent_value;
+                    gen_borrow.write_send_value();
+                    let _ = gen_borrow.resume(self);
+                } else {
+                    gen_borrow.send_value = sent_value;
+                    gen_borrow.write_send_value();
+                    let _ = gen_borrow.resume(self);
+                }
+                let result = gen_borrow.current_value.clone();
+                Ok(result)
+            } else {
+                Ok(Value::Null)
+            }
         } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
             func(self, &call.args).map_err(|e| VmError {
                 message: e.message,

@@ -6,3 +6,4 @@ description = "PHP xml extension for goro-rs"
 
 [dependencies]
 goro-core = { path = "../goro-core" }
+quick-xml = "0.37"

@@ -6,3 +6,6 @@ description = "PHP gmp extension for goro-rs"
 
 [dependencies]
 goro-core = { path = "../goro-core" }
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"

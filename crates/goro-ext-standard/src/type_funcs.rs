@@ -418,8 +418,10 @@ fn count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::Long(1))
         }
         Value::Generator(_) => {
-            vm.throw_type_error("count(): Argument #1 ($value) must be of type Countable|array, Generator given".to_string());
-            Ok(Value::Long(0))
+            let err_msg = "count(): Argument #1 ($value) must be of type Countable|array, Generator given";
+            let exc = vm.throw_type_error(err_msg.to_string());
+            vm.current_exception = Some(exc);
+            Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: vm.current_line })
         }
         Value::Null | Value::Undef => Ok(Value::Long(0)),
         _ => {

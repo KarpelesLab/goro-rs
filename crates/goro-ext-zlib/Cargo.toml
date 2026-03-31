@@ -6,3 +6,4 @@ description = "PHP zlib extension for goro-rs"
 
 [dependencies]
 goro-core = { path = "../goro-core" }
+flate2 = "1"

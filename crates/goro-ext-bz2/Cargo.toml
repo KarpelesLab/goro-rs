@@ -6,3 +6,4 @@ description = "PHP bz2 extension for goro-rs"
 
 [dependencies]
 goro-core = { path = "../goro-core" }
+bzip2 = "0.6"
