@@ -243,6 +243,8 @@ pub struct Vm {
     next_bound_closure_id: u64,
     /// JSON last error code (0 = no error)
     pub json_last_error: i64,
+    /// Last PCRE error code
+    pub preg_last_error: i64,
     /// Named args being forwarded to a builtin function call (for call_user_func etc.)
     pub pending_named_args: Vec<(Vec<u8>, Value)>,
     /// Current executing file path
@@ -310,6 +312,7 @@ impl Vm {
             exception_handler: None,
             next_bound_closure_id: 0,
             json_last_error: 0,
+            preg_last_error: 0,
             pending_named_args: Vec::new(),
             current_file: "Unknown.php".to_string(),
             last_return_line: 0,
