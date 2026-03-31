@@ -3780,6 +3780,15 @@ impl Vm {
                 Some(Value::Array(Rc::new(RefCell::new(result))))
             }
             b"__unserialize" => None, // handled in handle_spl_docall
+            b"serialize" => {
+                // Serializable interface: returns a string representation
+                // Returns an empty string as stub for now
+                let ob = obj.borrow();
+                let arr = ob.get_property(b"__spl_array");
+                let count = if let Value::Array(a) = arr { a.borrow().len() } else { 0 };
+                Some(Value::String(PhpString::from_string(format!("x:i:{};m:a:0:{{}}", count))))
+            }
+            b"unserialize" => None, // handled in handle_spl_docall
             _ => None,
         }
     }
@@ -5188,6 +5197,7 @@ impl Vm {
             b"splobjectstorage" => matches!(
                 method,
                 b"attach" | b"detach" | b"contains" | b"offsetget" | b"offsetset" | b"offsetexists" | b"seek"
+                    | b"unserialize" | b"setinfo"
             ),
             b"splpriorityqueue" => matches!(method, b"insert" | b"extract" | b"next" | b"setextractflags"),
             b"splheap" | b"splminheap" | b"splmaxheap" => matches!(
@@ -5713,21 +5723,43 @@ impl Vm {
                         b"fromarray" => {
                             // Static method: SplFixedArray::fromArray(array $array, bool $preserveKeys = true)
                             let arr_arg = args.get(1).cloned().unwrap_or(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                            let _preserve_keys = args.get(2).map(|v| v.to_bool()).unwrap_or(true);
+                            let preserve_keys = args.get(2).map(|v| v.to_bool()).unwrap_or(true);
                             if let Value::Array(a) = arr_arg {
-                                let a_borrow = a.borrow();
-                                let size = a_borrow.len() as i64;
+                                // Collect entries first to avoid borrow issues
+                                let entries: Vec<(ArrayKey, Value)> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                                 let mut new_arr = PhpArray::new();
-                                if _preserve_keys {
-                                    for (k, v) in a_borrow.iter() {
-                                        new_arr.set(k.clone(), v.clone());
+                                let size;
+                                if preserve_keys {
+                                    let mut max_key: i64 = -1;
+                                    let mut has_string_key = false;
+                                    for (k, v) in &entries {
+                                        if let ArrayKey::Int(n) = k {
+                                            if *n > max_key { max_key = *n; }
+                                            new_arr.set(k.clone(), v.clone());
+                                        } else {
+                                            has_string_key = true;
+                                            break;
+                                        }
+                                    }
+                                    if has_string_key {
+                                        let exc = self.create_exception(b"InvalidArgumentException",
+                                            "array must contain only positive integer keys", 0);
+                                        self.current_exception = Some(exc);
+                                        return Some(Value::Null);
+                                    }
+                                    size = max_key + 1;
+                                    // Fill in missing indices with NULL
+                                    for i in 0..size {
+                                        if new_arr.get(&ArrayKey::Int(i)).is_none() {
+                                            new_arr.set(ArrayKey::Int(i), Value::Null);
+                                        }
                                     }
                                 } else {
-                                    for (_k, v) in a_borrow.iter() {
+                                    size = entries.len() as i64;
+                                    for (_k, v) in &entries {
                                         new_arr.push(v.clone());
                                     }
                                 }
-                                drop(a_borrow);
                                 let obj_id = self.next_object_id;
                                 self.next_object_id += 1;
                                 let mut fa_obj = PhpObject::new(b"SplFixedArray".to_vec(), obj_id);
@@ -5860,6 +5892,28 @@ impl Vm {
                             }
                             drop(ob);
                             obj.borrow_mut().set_property(b"__spl_pos".to_vec(), Value::Long(pos));
+                            Some(Value::Null)
+                        }
+                        b"setinfo" => {
+                            let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            let ob = obj.borrow();
+                            let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p as usize } else { 0 };
+                            let arr = ob.get_property(b"__spl_array");
+                            if let Value::Array(a) = arr {
+                                let key_opt = {
+                                    let a_borrow = a.borrow();
+                                    a_borrow.keys().nth(pos).cloned()
+                                };
+                                if let Some(key) = key_opt {
+                                    a.borrow_mut().set(key, data);
+                                }
+                            }
+                            Some(Value::Null)
+                        }
+                        b"unserialize" => {
+                            // Deserialize SplObjectStorage from string
+                            // For now, just accept without error for compatibility
+                            let _data = args.get(1).cloned().unwrap_or(Value::Null);
                             Some(Value::Null)
                         }
                         _ => None,
