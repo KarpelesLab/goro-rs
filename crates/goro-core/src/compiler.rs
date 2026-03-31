@@ -5682,10 +5682,12 @@ impl Compiler {
 
             ExprKind::New { class, args } => {
                 // Get class name
+                let mut is_self_new = false;
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => {
                         if name.eq_ignore_ascii_case(b"self") {
                             // Resolve self at compile time
+                            is_self_new = true;
                             self.current_class.clone().unwrap_or(name.clone())
                         } else if name.starts_with(b"__anonymous_class_") {
                             // Anonymous class: look up the NUL-byte PHP name from the map
@@ -5739,6 +5741,10 @@ impl Compiler {
                 let name_idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(class_name)));
+                // Track `new self()` for trait patching
+                if is_self_new && self.is_in_trait {
+                    self.op_array.class_const_literals.push(name_idx);
+                }
                 let tmp = self.op_array.alloc_temp();
 
                 // Create the object
