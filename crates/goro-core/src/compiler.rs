@@ -2123,6 +2123,7 @@ impl Compiler {
                     });
                 }
                 let mut class = ClassEntry::new(qualified_name.clone());
+                class.start_line = stmt.span.line;
                 // Resolve parent class name - also check for reserved names
                 if let Some(p) = extends.as_ref() {
                     let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -2680,6 +2681,7 @@ impl Compiler {
                                         is_final: false,
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower.clone(),
+                                        doc_comment: None,
                                     },
                                 );
                             }
@@ -2736,6 +2738,7 @@ impl Compiler {
                                         is_final: false,
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower,
+                                        doc_comment: None,
                                     },
                                 );
                             }
@@ -3330,6 +3333,7 @@ impl Compiler {
                                         is_final: *method_is_final,
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
+                                        doc_comment: None,
                                     },
                                 );
                             } else {
@@ -3364,6 +3368,7 @@ impl Compiler {
                                         is_final: *method_is_final,
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
+                                        doc_comment: None,
                                     },
                                 );
                             }

@@ -333,6 +333,55 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -
     true
 }
 
+/// ReflectionClassConstant constructor
+pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+    let this = match args.first() {
+        Some(Value::Object(o)) => o.clone(),
+        _ => return true,
+    };
+
+    let class_arg = args.get(1).cloned().unwrap_or(Value::Null);
+    let const_arg = args.get(2).cloned().unwrap_or(Value::Null);
+
+    let class_name = match &class_arg {
+        Value::Object(obj) => {
+            let ob = obj.borrow();
+            String::from_utf8_lossy(&ob.class_name).to_string()
+        }
+        _ => class_arg.to_php_string().to_string_lossy(),
+    };
+    let const_name = const_arg.to_php_string().to_string_lossy();
+
+    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    // Check class exists
+    if !vm.classes.contains_key(&class_lower) && !vm.is_known_builtin_class(&class_lower) {
+        let err_msg = format!("Class \"{}\" does not exist", class_name);
+        let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
+        vm.current_exception = Some(exc);
+        return false;
+    }
+
+    let canonical_class = vm.classes.get(&class_lower)
+        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+        .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower));
+
+    // Check constant exists
+    let const_val = reflection_class_get_constant(vm, &class_lower, const_name.as_bytes());
+    if const_val.is_none() {
+        let err_msg = format!("Constant {}::{} does not exist", canonical_class, const_name);
+        let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
+        vm.current_exception = Some(exc);
+        return false;
+    }
+
+    let mut obj = this.borrow_mut();
+    obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(const_name.clone())));
+    obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical_class)));
+    obj.set_property(b"__reflection_value".to_vec(), const_val.unwrap());
+    true
+}
+
 // ==================== No-arg method dispatchers ====================
 
 /// ReflectionClass no-arg method dispatch
@@ -485,6 +534,32 @@ pub fn reflection_class_method(
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
+        b"gettraitaliases" => {
+            let mut result = PhpArray::new();
+            if let Some(ce) = vm.classes.get(&class_lower) {
+                for adapt in &ce.trait_adaptations {
+                    if let crate::object::TraitAdaptation::Alias { trait_name, method, new_name, .. } = adapt {
+                        if let Some(alias) = new_name {
+                            let trait_str = trait_name.as_ref()
+                                .map(|t| String::from_utf8_lossy(t).to_string())
+                                .unwrap_or_default();
+                            let method_str = String::from_utf8_lossy(method).to_string();
+                            let alias_str = String::from_utf8_lossy(alias).to_string();
+                            let source = if trait_str.is_empty() {
+                                method_str
+                            } else {
+                                format!("{}::{}", trait_str, method_str)
+                            };
+                            result.set(
+                                ArrayKey::String(PhpString::from_string(alias_str)),
+                                Value::String(PhpString::from_string(source)),
+                            );
+                        }
+                    }
+                }
+            }
+            Some(Value::Array(Rc::new(RefCell::new(result))))
+        }
         b"getconstructor" => {
             if let Some(ce) = vm.classes.get(&class_lower) {
                 if ce.get_method(b"__construct").is_some() {
@@ -554,21 +629,48 @@ pub fn reflection_class_method(
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"getfilename" => {
-            // User-defined classes - return false for built-in
-            if vm.classes.contains_key(&class_lower) {
-                Some(Value::String(PhpString::from_string(vm.current_file.clone())))
+            if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ref filename) = ce.filename {
+                    Some(Value::String(PhpString::from_string(filename.clone())))
+                } else {
+                    Some(Value::String(PhpString::from_string(vm.current_file.clone())))
+                }
             } else {
                 Some(Value::False)
             }
         }
         b"getstartline" => {
-            Some(Value::False)
+            if let Some(ce) = vm.classes.get(&class_lower) {
+                if ce.start_line > 0 {
+                    Some(Value::Long(ce.start_line as i64))
+                } else {
+                    Some(Value::False)
+                }
+            } else {
+                Some(Value::False)
+            }
         }
         b"getendline" => {
-            Some(Value::False)
+            if let Some(ce) = vm.classes.get(&class_lower) {
+                if ce.end_line > 0 {
+                    Some(Value::Long(ce.end_line as i64))
+                } else {
+                    Some(Value::False)
+                }
+            } else {
+                Some(Value::False)
+            }
         }
         b"getdoccomment" => {
-            Some(Value::False)
+            if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ref doc) = ce.doc_comment {
+                    Some(Value::String(PhpString::from_string(doc.clone())))
+                } else {
+                    Some(Value::False)
+                }
+            } else {
+                Some(Value::False)
+            }
         }
         b"newinstancewithoutconstructor" => {
             // Create an instance without calling the constructor
@@ -616,42 +718,71 @@ pub fn reflection_class_method(
                 Some(Value::String(PhpString::from_string(target)))
             }
         }
+        // ReflectionEnum-specific methods
+        b"isbacked" => {
+            let is_backed = vm.classes.get(&class_lower)
+                .map(|c| c.is_enum && c.enum_backing_type.is_some())
+                .unwrap_or(false);
+            Some(if is_backed { Value::True } else { Value::False })
+        }
+        b"getbackingtype" => {
+            if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ref bt) = ce.enum_backing_type {
+                    Some(create_reflection_type(vm, &crate::opcode::ParamType::Simple(bt.clone())))
+                } else {
+                    Some(Value::Null)
+                }
+            } else {
+                Some(Value::Null)
+            }
+        }
+        b"getcases" => {
+            let mut result = PhpArray::new();
+            // Collect case info first, then create objects
+            let case_info: Vec<(String, bool, String)> = if let Some(ce) = vm.classes.get(&class_lower) {
+                let canonical = String::from_utf8_lossy(&ce.name).to_string();
+                let is_backed = ce.enum_backing_type.is_some();
+                ce.enum_cases.iter().map(|(case_name, _)| {
+                    let case_str = String::from_utf8_lossy(case_name).to_string();
+                    (case_str, is_backed, canonical.clone())
+                }).collect()
+            } else {
+                vec![]
+            };
+            for (case_str, is_backed, canonical) in case_info {
+                let class_type = if is_backed { "ReflectionEnumBackedCase" } else { "ReflectionEnumUnitCase" };
+                let obj_id = vm.next_object_id();
+                let mut case_obj = PhpObject::new(class_type.as_bytes().to_vec(), obj_id);
+                case_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(case_str.clone())));
+                case_obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical)));
+                let case_val = reflection_class_get_constant(vm, &class_lower, case_str.as_bytes());
+                if let Some(cv) = case_val {
+                    case_obj.set_property(b"__reflection_value".to_vec(), cv);
+                }
+                result.push(Value::Object(Rc::new(RefCell::new(case_obj))));
+            }
+            Some(Value::Array(Rc::new(RefCell::new(result))))
+        }
+        b"hascase" => {
+            if let Some(ce) = vm.classes.get(&class_lower) {
+                let ob = obj.borrow();
+                // The case name is passed as first arg but for no-arg dispatch, we check if it's been called
+                // Actually hasCase needs args - but since it's dispatched via no-arg, let's handle it here
+                // No-arg means we got called with no specific args (should be impossible for hasCase)
+                drop(ob);
+                Some(Value::False)
+            } else {
+                Some(Value::False)
+            }
+        }
         b"__tostring" => {
-            // Build a __toString representation for ReflectionClass
+            // Build a detailed __toString representation for ReflectionClass
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
             drop(ob);
-            let mut s = String::new();
-            // Determine class type
-            let is_interface = vm.classes.get(&class_lower).map(|c| c.is_interface).unwrap_or(false);
-            let is_trait = vm.classes.get(&class_lower).map(|c| c.is_trait).unwrap_or(false);
-            let is_abstract = vm.classes.get(&class_lower).map(|c| c.is_abstract).unwrap_or(false);
-            let is_final = vm.classes.get(&class_lower).map(|c| c.is_final).unwrap_or(false);
-
-            if is_interface {
-                s.push_str(&format!("Interface [ <user> interface {} ", name));
-            } else if is_trait {
-                s.push_str(&format!("Trait [ <user> trait {} ", name));
-            } else {
-                let kind = if vm.classes.contains_key(&class_lower) { "user" } else { "internal" };
-                let modifiers = if is_abstract { "abstract " } else if is_final { "final " } else { "" };
-                s.push_str(&format!("Class [ <{}> {}class {} ", kind, modifiers, name));
-            }
-
-            // Parent
-            if let Some(ce) = vm.classes.get(&class_lower) {
-                if let Some(ref parent) = ce.parent {
-                    s.push_str(&format!("extends {} ", String::from_utf8_lossy(parent)));
-                }
-                if !ce.interfaces.is_empty() {
-                    s.push_str("implements ");
-                    let ifaces: Vec<String> = ce.interfaces.iter().map(|i| String::from_utf8_lossy(i).to_string()).collect();
-                    s.push_str(&ifaces.join(", "));
-                    s.push(' ');
-                }
-            }
-            s.push_str("] {\n}\n");
-            Some(Value::String(PhpString::from_string(s)))
+            Some(Value::String(PhpString::from_string(
+                reflection_class_to_string(vm, &name, &class_lower)
+            )))
         }
         _ => None,
     }
@@ -738,7 +869,7 @@ pub fn reflection_class_docall(
                 }
             }
             b"getmethods" => {
-                let filter = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+                let filter = args.get(1).map(|v| if matches!(v, Value::Null) { -1 } else { v.to_long() }).unwrap_or(-1);
                 let mut result = PhpArray::new();
                 // Collect method info first to avoid borrow issues
                 let method_info: Vec<(String, String)> = if let Some(ce) = vm.classes.get(&class_lower) {
@@ -784,7 +915,7 @@ pub fn reflection_class_docall(
                 }
             }
             b"getproperties" => {
-                let filter = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+                let filter = args.get(1).map(|v| if matches!(v, Value::Null) { -1 } else { v.to_long() }).unwrap_or(-1);
                 let mut result = PhpArray::new();
                 let prop_names: Vec<String> = if let Some(ce) = vm.classes.get(&class_lower) {
                     ce.properties.iter().filter_map(|prop| {
@@ -846,6 +977,28 @@ pub fn reflection_class_docall(
                     _ => iface_arg.to_php_string().to_string_lossy(),
                 };
                 let iface_lower: Vec<u8> = iface_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                // Check if the target is actually an interface
+                let is_interface = vm.classes.get(&iface_lower)
+                    .map(|c| c.is_interface)
+                    .unwrap_or_else(|| vm.builtin_is_interface(&iface_lower));
+
+                if !is_interface {
+                    // Check if class exists
+                    let exists = vm.classes.contains_key(&iface_lower) || vm.is_known_builtin_class(&iface_lower);
+                    if exists {
+                        let err_msg = format!("{} is not an interface", iface_name);
+                        let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    } else {
+                        let err_msg = format!("Interface \"{}\" does not exist", iface_name);
+                        let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
+
                 let result = vm.class_implements_interface(&class_lower, &iface_lower)
                     || vm.builtin_implements_interface(&class_lower, &iface_lower);
                 Some(if result { Value::True } else { Value::False })
@@ -1021,6 +1174,49 @@ pub fn reflection_class_docall(
                 }
                 Some(Value::Array(Rc::new(RefCell::new(result))))
             }
+            b"hascase" => {
+                let case_name = args.get(1)?.to_php_string();
+                let has = vm.classes.get(&class_lower)
+                    .map(|ce| ce.enum_cases.iter().any(|(cn, _)| cn == case_name.as_bytes()))
+                    .unwrap_or(false);
+                Some(if has { Value::True } else { Value::False })
+            }
+            b"getcase" => {
+                let case_name = args.get(1)?.to_php_string().to_string_lossy();
+                if let Some(ce) = vm.classes.get(&class_lower) {
+                    let is_case = ce.enum_cases.iter().any(|(cn, _)| cn == case_name.as_bytes());
+                    if is_case {
+                        let canonical = String::from_utf8_lossy(&ce.name).to_string();
+                        let is_backed = ce.enum_backing_type.is_some();
+                        let class_type = if is_backed { "ReflectionEnumBackedCase" } else { "ReflectionEnumUnitCase" };
+                        let obj_id = vm.next_object_id();
+                        let mut case_obj = PhpObject::new(class_type.as_bytes().to_vec(), obj_id);
+                        case_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(case_name.clone())));
+                        case_obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical)));
+                        let case_val = reflection_class_get_constant(vm, &class_lower, case_name.as_bytes());
+                        if let Some(cv) = case_val {
+                            case_obj.set_property(b"__reflection_value".to_vec(), cv);
+                        }
+                        Some(Value::Object(Rc::new(RefCell::new(case_obj))))
+                    } else {
+                        // Check if it's a constant but not a case
+                        let is_const = ce.constants.contains_key(case_name.as_bytes());
+                        let canonical = String::from_utf8_lossy(&ce.name).to_string();
+                        if is_const {
+                            let err_msg = format!("{}::{} is not a case", canonical, case_name);
+                            let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                            vm.current_exception = Some(exc);
+                        } else {
+                            let err_msg = format!("Case {}::{} does not exist", canonical, case_name);
+                            let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                            vm.current_exception = Some(exc);
+                        }
+                        Some(Value::Null)
+                    }
+                } else {
+                    Some(Value::Null)
+                }
+            }
             _ => None,
         }
     } else {
@@ -1105,23 +1301,29 @@ pub fn reflection_method_method(
             Some(Value::Long(mods))
         }
         b"getnumberofparameters" => {
-            let count = vm.classes.get(&class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.op_array.param_count))
-                .unwrap_or(0);
+            let method_def = vm.classes.get(&class_lower)
+                .and_then(|c| c.get_method(method_lower.as_bytes()));
+            let count = method_def.map(|m| {
+                let skip = if !m.is_static { 1u32 } else { 0u32 };
+                m.op_array.param_count.saturating_sub(skip)
+            }).unwrap_or(0);
             Some(Value::Long(count as i64))
         }
         b"getnumberofrequiredparameters" => {
-            let count = vm.classes.get(&class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.op_array.required_param_count))
-                .unwrap_or(0);
+            let method_def = vm.classes.get(&class_lower)
+                .and_then(|c| c.get_method(method_lower.as_bytes()));
+            let count = method_def.map(|m| {
+                let skip = if !m.is_static { 1u32 } else { 0u32 };
+                m.op_array.required_param_count.saturating_sub(skip)
+            }).unwrap_or(0);
             Some(Value::Long(count as i64))
         }
         b"getparameters" => {
-            let op_array = vm.classes.get(&class_lower)
+            let method_data = vm.classes.get(&class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
-                .map(|m| m.op_array.clone());
-            let params = if let Some(oa) = op_array {
-                create_reflection_parameters(vm, &oa)
+                .map(|m| (m.op_array.clone(), m.is_static));
+            let params = if let Some((oa, is_static)) = method_data {
+                create_reflection_parameters_method(vm, &oa, is_static)
             } else {
                 Value::Array(Rc::new(RefCell::new(PhpArray::new())))
             };
@@ -1155,7 +1357,11 @@ pub fn reflection_method_method(
             Some(Value::False)
         }
         b"getfilename" => {
-            Some(Value::String(PhpString::from_string(vm.current_file.clone())))
+            // Use the class's filename if available
+            let filename = vm.classes.get(&class_lower)
+                .and_then(|c| c.filename.clone())
+                .unwrap_or_else(|| vm.current_file.clone());
+            Some(Value::String(PhpString::from_string(filename)))
         }
         b"getstartline" => {
             let line = vm.classes.get(&class_lower)
@@ -1167,7 +1373,15 @@ pub fn reflection_method_method(
             Some(Value::False)
         }
         b"getdoccomment" => {
-            Some(Value::False)
+            let doc = vm.classes.get(&class_lower)
+                .and_then(|c| c.get_method(method_lower.as_bytes()))
+                .and_then(|m| m.doc_comment.as_ref())
+                .cloned();
+            if let Some(doc) = doc {
+                Some(Value::String(PhpString::from_string(doc)))
+            } else {
+                Some(Value::False)
+            }
         }
         b"isvariadic" => {
             let is_variadic = vm.classes.get(&class_lower)
@@ -1191,6 +1405,51 @@ pub fn reflection_method_method(
         }
         b"getattributes" => {
             Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+        }
+        b"getprototype" => {
+            // Look for the method in parent classes/interfaces
+            let method_lower_bytes = method_lower.as_bytes();
+            let proto_class = vm.classes.get(&class_lower)
+                .and_then(|ce| {
+                    // Walk parent chain
+                    let mut check = ce.parent.clone();
+                    while let Some(ref p) = check {
+                        let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(pce) = vm.classes.get(&p_lower) {
+                            if pce.get_method(method_lower_bytes).is_some() {
+                                return Some(String::from_utf8_lossy(&pce.name).to_string());
+                            }
+                            check = pce.parent.clone();
+                        } else {
+                            break;
+                        }
+                    }
+                    // Check interfaces
+                    for iface in &ce.interfaces {
+                        let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(ice) = vm.classes.get(&iface_lower) {
+                            if ice.get_method(method_lower_bytes).is_some() {
+                                return Some(String::from_utf8_lossy(&ice.name).to_string());
+                            }
+                        }
+                    }
+                    None
+                });
+            if let Some(proto) = proto_class {
+                let method_name = vm.classes.get(&class_lower)
+                    .and_then(|c| c.get_method(method_lower_bytes).map(|m| String::from_utf8_lossy(&m.name).to_string()))
+                    .unwrap_or_default();
+                Some(create_reflection_method(vm, &proto, &method_name))
+            } else {
+                // No prototype found - throw
+                let ob2 = obj.borrow();
+                let method_display = ob2.get_property(b"name").to_php_string().to_string_lossy();
+                drop(ob2);
+                let err_msg = format!("Method {}::{}() does not have a prototype", class_name, method_display);
+                let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                Some(Value::Null)
+            }
         }
         b"__tostring" => {
             let ob = obj.borrow();
@@ -1664,10 +1923,25 @@ pub fn reflection_property_method(
             Some(Value::False)
         }
         b"hastype" => {
-            Some(Value::False)
+            let has = vm.classes.get(&class_lower)
+                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .map(|p| p.property_type.is_some())
+                .unwrap_or(false);
+            Some(if has { Value::True } else { Value::False })
         }
         b"gettype" => {
-            Some(Value::Null)
+            let pt = vm.classes.get(&class_lower)
+                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|p| p.property_type.as_ref())
+                .cloned();
+            if let Some(pt) = pt {
+                Some(create_reflection_type(vm, &pt))
+            } else {
+                Some(Value::Null)
+            }
+        }
+        b"ispromoted" => {
+            Some(Value::False)
         }
         b"setaccessible" => {
             Some(Value::Null)
@@ -1681,7 +1955,7 @@ pub fn reflection_property_method(
 
 /// ReflectionProperty methods with args
 pub fn reflection_property_docall(
-    _vm: &mut Vm,
+    vm: &mut Vm,
     method: &[u8],
     args: &[Value],
 ) -> Option<Value> {
@@ -1689,20 +1963,48 @@ pub fn reflection_property_docall(
     if let Value::Object(obj) = this {
         let ob = obj.borrow();
         let prop_name = ob.get_property(b"__reflection_prop").to_php_string().to_string_lossy();
+        let class_name = ob.get_property(b"__reflection_class").to_php_string().to_string_lossy();
+        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
         drop(ob);
+
+        // Check if this is a static property
+        let is_static = vm.classes.get(&class_lower)
+            .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_static))
+            .unwrap_or(false);
 
         match method {
             b"getvalue" => {
-                let target = args.get(1)?;
-                if let Value::Object(target_obj) = target {
-                    let target_ob = target_obj.borrow();
-                    Some(target_ob.get_property(prop_name.as_bytes()))
+                if is_static {
+                    // For static properties, look up from class
+                    let val = vm.classes.get(&class_lower)
+                        .and_then(|c| c.static_properties.get(prop_name.as_bytes()).cloned())
+                        .unwrap_or(Value::Null);
+                    Some(val)
+                } else if let Some(target) = args.get(1) {
+                    if let Value::Object(target_obj) = target {
+                        let target_ob = target_obj.borrow();
+                        Some(target_ob.get_property(prop_name.as_bytes()))
+                    } else {
+                        Some(Value::Null)
+                    }
                 } else {
                     Some(Value::Null)
                 }
             }
             b"setvalue" => {
-                if args.len() >= 3 {
+                if is_static {
+                    // For static properties, set on the class
+                    let value = if args.len() >= 3 {
+                        args[2].clone()
+                    } else if args.len() >= 2 {
+                        args[1].clone()
+                    } else {
+                        Value::Null
+                    };
+                    if let Some(ce) = vm.classes.get_mut(&class_lower) {
+                        ce.static_properties.insert(prop_name.as_bytes().to_vec(), value);
+                    }
+                } else if args.len() >= 3 {
                     let target = &args[1];
                     let value = args[2].clone();
                     if let Value::Object(target_obj) = target {
@@ -1995,20 +2297,47 @@ pub fn reflection_class_constant_method(
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
     let ob = obj.borrow();
+    let const_name = ob.get_property(b"name").to_php_string().to_string_lossy();
+    let class_name = ob.get_property(b"class").to_php_string().to_string_lossy();
+    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    // Look up constant metadata
+    let meta = vm.classes.get(&class_lower)
+        .and_then(|ce| ce.constants_meta.get(const_name.as_bytes()).cloned());
+
+    let visibility = meta.as_ref().map(|m| m.visibility).unwrap_or(Visibility::Public);
+    let is_final = meta.as_ref().map(|m| m.is_final).unwrap_or(false);
+
     match method {
         b"getname" => Some(ob.get_property(b"name")),
         b"getvalue" => Some(ob.get_property(b"__reflection_value")),
         b"getdeclaringclass" => {
-            let class_name = ob.get_property(b"class").to_php_string().to_string_lossy();
+            let declaring = meta.as_ref()
+                .map(|m| {
+                    let dc_lower = &m.declaring_class;
+                    vm.classes.get(dc_lower.as_slice())
+                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                        .unwrap_or(class_name.clone())
+                })
+                .unwrap_or(class_name.clone());
             drop(ob);
-            Some(create_reflection_class(vm, &class_name))
+            Some(create_reflection_class(vm, &declaring))
         }
-        b"ispublic" => Some(Value::True),
-        b"isprotected" => Some(Value::False),
-        b"isprivate" => Some(Value::False),
-        b"getmodifiers" => Some(Value::Long(1)), // IS_PUBLIC
+        b"ispublic" => Some(if visibility == Visibility::Public { Value::True } else { Value::False }),
+        b"isprotected" => Some(if visibility == Visibility::Protected { Value::True } else { Value::False }),
+        b"isprivate" => Some(if visibility == Visibility::Private { Value::True } else { Value::False }),
+        b"getmodifiers" => {
+            let mut mods = 0i64;
+            match visibility {
+                Visibility::Public => mods |= 1,
+                Visibility::Protected => mods |= 2,
+                Visibility::Private => mods |= 4,
+            }
+            if is_final { mods |= 0x20; }
+            Some(Value::Long(mods))
+        }
         b"getdoccomment" => Some(Value::False),
-        b"isfinal" => Some(Value::False),
+        b"isfinal" => Some(if is_final { Value::True } else { Value::False }),
         b"isenumcase" => {
             let val = ob.get_property(b"__reflection_value");
             drop(ob);
@@ -2017,11 +2346,48 @@ pub fn reflection_class_constant_method(
         b"isdeprecated" => Some(Value::False),
         b"hastype" => Some(Value::False),
         b"gettype" => Some(Value::Null),
+        b"getattributes" => {
+            drop(ob);
+            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+        }
+        // ReflectionEnumUnitCase/BackedCase methods
+        b"getenum" => {
+            drop(ob);
+            Some(create_reflection_class(vm, &class_name))
+        }
+        b"getbackingvalue" => {
+            // For backed enum cases, return the backing value
+            let val = ob.get_property(b"__reflection_value");
+            drop(ob);
+            if let Value::Object(enum_obj) = &val {
+                let eo = enum_obj.borrow();
+                let backing = eo.get_property(b"value");
+                if matches!(backing, Value::Null) && !eo.has_property(b"value") {
+                    // Not a backed case
+                    let case_name_str = const_name.clone();
+                    let err_msg = format!("Enum case {}::{} is not a backed case", class_name, case_name_str);
+                    let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    Some(Value::Null)
+                } else {
+                    Some(backing)
+                }
+            } else {
+                Some(Value::Null)
+            }
+        }
         b"__tostring" => {
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
             let val = ob.get_property(b"__reflection_value");
             drop(ob);
-            Some(Value::String(PhpString::from_string(format!("Constant [ public {} {} ]", name, val.to_php_string().to_string_lossy()))))
+            let vis_str = match visibility {
+                Visibility::Public => "public",
+                Visibility::Protected => "protected",
+                Visibility::Private => "private",
+            };
+            let final_str = if is_final { "final " } else { "" };
+            let val_str = reflection_value_repr(&val);
+            Some(Value::String(PhpString::from_string(format!("Constant [ {}{} {} ] {{ {} }}\n", final_str, vis_str, name, val_str))))
         }
         _ => None,
     }
@@ -2181,6 +2547,27 @@ pub fn create_reflection_parameters(vm: &mut Vm, op_array: &OpArray) -> Value {
         let obj_id = vm.next_object_id();
         let mut obj = PhpObject::new(b"ReflectionParameter".to_vec(), obj_id);
         obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(param_name)));
+        result.push(Value::Object(Rc::new(RefCell::new(obj))));
+    }
+    Value::Array(Rc::new(RefCell::new(result)))
+}
+
+/// Create ReflectionParameter objects for a method's parameters (skipping $this for non-static methods)
+pub fn create_reflection_parameters_method(vm: &mut Vm, op_array: &OpArray, is_static: bool) -> Value {
+    let mut result = PhpArray::new();
+    let skip = if !is_static { 1usize } else { 0usize };
+    let param_count = if op_array.param_count as usize > skip { op_array.param_count as usize - skip } else { 0 };
+    for i in 0..param_count {
+        let cv_idx = i + skip;
+        let param_name = if cv_idx < op_array.cv_names.len() {
+            String::from_utf8_lossy(&op_array.cv_names[cv_idx]).to_string()
+        } else {
+            format!("param{}", i)
+        };
+        let obj_id = vm.next_object_id();
+        let mut obj = PhpObject::new(b"ReflectionParameter".to_vec(), obj_id);
+        obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(param_name)));
+        obj.set_property(b"__reflection_param_idx".to_vec(), Value::Long(cv_idx as i64));
         result.push(Value::Object(Rc::new(RefCell::new(obj))));
     }
     Value::Array(Rc::new(RefCell::new(result)))
@@ -2354,4 +2741,257 @@ fn reflection_property_modifiers_static(prop: &crate::object::PropertyDef) -> i6
     if prop.is_static { mods |= 0x10; }
     if prop.is_readonly { mods |= 0x10000; }
     mods
+}
+
+/// Build the complete __toString representation for a ReflectionClass
+fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8]) -> String {
+    let mut s = String::new();
+
+    let is_interface = vm.classes.get(class_lower).map(|c| c.is_interface).unwrap_or(false);
+    let is_trait = vm.classes.get(class_lower).map(|c| c.is_trait).unwrap_or(false);
+    let is_enum = vm.classes.get(class_lower).map(|c| c.is_enum).unwrap_or(false);
+    let is_abstract = vm.classes.get(class_lower).map(|c| c.is_abstract).unwrap_or(false);
+    let is_final = vm.classes.get(class_lower).map(|c| c.is_final).unwrap_or(false);
+    let is_readonly = vm.classes.get(class_lower).map(|c| c.is_readonly).unwrap_or(false);
+    let is_user = vm.classes.contains_key(class_lower);
+
+    // Header line
+    if is_interface {
+        s.push_str(&format!("Interface [ <user> interface {} ", name));
+    } else if is_trait {
+        s.push_str(&format!("Trait [ <user> trait {} ", name));
+    } else if is_enum {
+        let kind = if is_user { "user" } else { "internal" };
+        s.push_str(&format!("Class [ <{}> final class {} ", kind, name));
+    } else {
+        let kind = if is_user { "user" } else { "internal" };
+        let mut modifiers = String::new();
+        if is_abstract { modifiers.push_str("abstract "); }
+        if is_final { modifiers.push_str("final "); }
+        if is_readonly { modifiers.push_str("readonly "); }
+        s.push_str(&format!("Class [ <{}> {}class {} ", kind, modifiers, name));
+    }
+
+    // Parent and interfaces
+    if let Some(ce) = vm.classes.get(class_lower) {
+        if let Some(ref parent) = ce.parent {
+            s.push_str(&format!("extends {} ", String::from_utf8_lossy(parent)));
+        }
+        if !ce.interfaces.is_empty() {
+            let keyword = if is_interface { "extends" } else { "implements" };
+            s.push_str(&format!("{} ", keyword));
+            let ifaces: Vec<String> = ce.interfaces.iter().map(|i| String::from_utf8_lossy(i).to_string()).collect();
+            s.push_str(&ifaces.join(", "));
+            s.push(' ');
+        }
+    }
+    s.push_str("] {\n");
+
+    // File info
+    if let Some(ce) = vm.classes.get(class_lower) {
+        if let Some(ref filename) = ce.filename {
+            if ce.start_line > 0 {
+                let end = if ce.end_line > 0 { ce.end_line } else { ce.start_line };
+                s.push_str(&format!("  @@ {} {}-{}\n", filename, ce.start_line, end));
+            }
+        }
+    }
+
+    // Constants section
+    if let Some(ce) = vm.classes.get(class_lower) {
+        let const_count = ce.constants.len();
+        s.push_str(&format!("\n  - Constants [{}] {{\n", const_count));
+        for (cname, cval) in &ce.constants {
+            let const_name_str = String::from_utf8_lossy(cname);
+            let meta = ce.constants_meta.get(cname.as_slice());
+            let vis = meta.map(|m| m.visibility).unwrap_or(Visibility::Public);
+            let is_final_const = meta.map(|m| m.is_final).unwrap_or(false);
+            let vis_str = match vis {
+                Visibility::Public => "public",
+                Visibility::Protected => "protected",
+                Visibility::Private => "private",
+            };
+            let final_str = if is_final_const { "final " } else { "" };
+            let val_str = reflection_value_repr(cval);
+            s.push_str(&format!("    Constant [ {}{} {} ] {{ {} }}\n", final_str, vis_str, const_name_str, val_str));
+        }
+        s.push_str("  }\n");
+    } else {
+        s.push_str("\n  - Constants [0] {\n  }\n");
+    }
+
+    // Static properties
+    if let Some(ce) = vm.classes.get(class_lower) {
+        let static_props: Vec<_> = ce.properties.iter().filter(|p| p.is_static).collect();
+        s.push_str(&format!("\n  - Static properties [{}] {{\n", static_props.len()));
+        for prop in static_props {
+            let vis = match prop.visibility {
+                Visibility::Public => "public",
+                Visibility::Protected => "protected",
+                Visibility::Private => "private",
+            };
+            let type_str = prop.property_type.as_ref().map(|t| format!(" {}", param_type_name(t))).unwrap_or_default();
+            let prop_name_str = String::from_utf8_lossy(&prop.name);
+            s.push_str(&format!("    Property [ {} static{} ${} ]\n", vis, type_str, prop_name_str));
+        }
+        s.push_str("  }\n");
+    } else {
+        s.push_str("\n  - Static properties [0] {\n  }\n");
+    }
+
+    // Static methods
+    if let Some(ce) = vm.classes.get(class_lower) {
+        let static_methods: Vec<_> = ce.methods.values().filter(|m| m.is_static).collect();
+        s.push_str(&format!("\n  - Static methods [{}] {{\n", static_methods.len()));
+        for m in static_methods {
+            reflection_method_to_string_section(&mut s, m);
+        }
+        s.push_str("  }\n");
+    } else {
+        s.push_str("\n  - Static methods [0] {\n  }\n");
+    }
+
+    // Properties (non-static)
+    if let Some(ce) = vm.classes.get(class_lower) {
+        let inst_props: Vec<_> = ce.properties.iter().filter(|p| !p.is_static).collect();
+        s.push_str(&format!("\n  - Properties [{}] {{\n", inst_props.len()));
+        for prop in inst_props {
+            let vis = match prop.visibility {
+                Visibility::Public => "public",
+                Visibility::Protected => "protected",
+                Visibility::Private => "private",
+            };
+            let readonly_str = if prop.is_readonly { " readonly" } else { "" };
+            let type_str = prop.property_type.as_ref().map(|t| format!(" {}", param_type_name(t))).unwrap_or_default();
+            let prop_name_str = String::from_utf8_lossy(&prop.name);
+            s.push_str(&format!("    Property [ {}{}{} ${} ]\n", vis, readonly_str, type_str, prop_name_str));
+        }
+        s.push_str("  }\n");
+    } else {
+        s.push_str("\n  - Properties [0] {\n  }\n");
+    }
+
+    // Methods (non-static)
+    if let Some(ce) = vm.classes.get(class_lower) {
+        let inst_methods: Vec<_> = ce.methods.values().filter(|m| !m.is_static).collect();
+        s.push_str(&format!("\n  - Methods [{}] {{\n", inst_methods.len()));
+        for m in inst_methods {
+            reflection_method_to_string_section(&mut s, m);
+        }
+        s.push_str("  }\n");
+    } else {
+        s.push_str("\n  - Methods [0] {\n  }\n");
+    }
+
+    s.push_str("}\n");
+    s
+}
+
+/// Helper to add a method's __toString to the class output
+fn reflection_method_to_string_section(s: &mut String, m: &crate::object::MethodDef) {
+    let vis = match m.visibility {
+        Visibility::Public => "public",
+        Visibility::Protected => "protected",
+        Visibility::Private => "private",
+    };
+    let mut modifiers = String::new();
+    if m.is_abstract { modifiers.push_str("abstract "); }
+    if m.is_final { modifiers.push_str("final "); }
+    if m.is_static { modifiers.push_str("static "); }
+    let method_name = String::from_utf8_lossy(&m.name);
+
+    // Skip internal hook methods
+    if method_name.starts_with("__property_get_") || method_name.starts_with("__property_set_") {
+        return;
+    }
+
+    // Check if it's a constructor
+    let ctor_str = if method_name.eq_ignore_ascii_case("__construct") { ", ctor" } else { "" };
+
+    let mod_vis = if modifiers.is_empty() {
+        vis.to_string()
+    } else {
+        format!("{}{}", modifiers, vis)
+    };
+    s.push_str(&format!("    Method [ <user{}> {} method {} ] {{\n", ctor_str, mod_vis, method_name));
+
+    // Parameters - skip $this (first param for non-static methods)
+    let skip = if !m.is_static { 1usize } else { 0usize };
+    let param_count = if m.op_array.param_count as usize > skip { m.op_array.param_count as usize - skip } else { 0 };
+    let required_count = if m.op_array.required_param_count as usize > skip { m.op_array.required_param_count as usize - skip } else { 0 };
+
+    s.push_str(&format!("\n      - Parameters [{}] {{\n", param_count));
+    for i in 0..param_count {
+        let cv_idx = i + skip;
+        if cv_idx < m.op_array.cv_names.len() {
+            let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
+            let required = i < required_count;
+            let type_str = if cv_idx < m.op_array.param_types.len() {
+                if let Some(ref pti) = m.op_array.param_types[cv_idx] {
+                    format!("{} ", param_type_name(&pti.param_type))
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            s.push_str(&format!("        Parameter #{} [ <{}> {}${} ]\n", i,
+                if required { "required" } else { "optional" }, type_str, pname));
+        }
+    }
+    s.push_str("      }\n");
+
+    // Return type
+    if let Some(ref rt) = m.op_array.return_type {
+        s.push_str(&format!("      - Return [ {} ]\n", param_type_name(rt)));
+    }
+
+    s.push_str("    }\n\n");
+}
+
+/// Convert a ParamType to its string representation
+fn param_type_name(pt: &crate::opcode::ParamType) -> String {
+    use crate::opcode::ParamType;
+    match pt {
+        ParamType::Simple(name) => String::from_utf8_lossy(name).to_string(),
+        ParamType::Nullable(inner) => format!("?{}", param_type_name(inner)),
+        ParamType::Union(types) => {
+            let names: Vec<String> = types.iter().map(|t| param_type_name(t)).collect();
+            names.join("|")
+        }
+        ParamType::Intersection(types) => {
+            let names: Vec<String> = types.iter().map(|t| param_type_name(t)).collect();
+            names.join("&")
+        }
+    }
+}
+
+/// Format a value for display in reflection __toString output
+fn reflection_value_repr(val: &Value) -> String {
+    match val {
+        Value::Null => "NULL".to_string(),
+        Value::True => "true".to_string(),
+        Value::False => "false".to_string(),
+        Value::Long(n) => n.to_string(),
+        Value::Double(f) => {
+            if f.fract() == 0.0 && f.is_finite() {
+                format!("{:.1}", f)
+            } else {
+                format!("{}", f)
+            }
+        }
+        Value::String(s) => s.to_string_lossy(),
+        Value::Array(_) => "Array".to_string(),
+        Value::Object(obj) => {
+            let ob = obj.borrow();
+            if ob.has_property(b"__enum_name") {
+                let enum_class = String::from_utf8_lossy(&ob.class_name).to_string();
+                let case_name = ob.get_property(b"__enum_name").to_php_string().to_string_lossy();
+                format!("\\{}::{}", enum_class, case_name)
+            } else {
+                format!("object({})", String::from_utf8_lossy(&ob.class_name))
+            }
+        }
+        _ => String::new(),
+    }
 }

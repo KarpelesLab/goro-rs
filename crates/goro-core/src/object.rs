@@ -56,6 +56,14 @@ pub struct ClassEntry {
     /// For enums: list of (case_name, backing_value) pairs
     /// backing_value is Value::Null for unit enums
     pub enum_cases: Vec<(Vec<u8>, Value)>,
+    /// Line number where the class declaration starts
+    pub start_line: u32,
+    /// Line number where the class declaration ends
+    pub end_line: u32,
+    /// File where the class was declared
+    pub filename: Option<String>,
+    /// Doc comment for the class (if any)
+    pub doc_comment: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +98,8 @@ pub struct MethodDef {
     pub visibility: Visibility,
     /// The class that originally declared this method (lowercase)
     pub declaring_class: Vec<u8>,
+    /// Doc comment for the method (if any)
+    pub doc_comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +130,10 @@ impl ClassEntry {
             is_enum: false,
             enum_backing_type: None,
             enum_cases: Vec::new(),
+            start_line: 0,
+            end_line: 0,
+            filename: None,
+            doc_comment: None,
         }
     }
 

@@ -3145,6 +3145,18 @@ impl Vm {
         false
     }
 
+    /// Check if a built-in class name is an interface
+    pub fn builtin_is_interface(&self, class_lower: &[u8]) -> bool {
+        matches!(
+            class_lower,
+            b"iterator" | b"iteratoraggregate" | b"traversable" | b"countable"
+                | b"arrayaccess" | b"serializable" | b"stringable" | b"jsonserializable"
+                | b"outeriterator" | b"recursiveiterator" | b"seekableiterator"
+                | b"throwable" | b"backedenum" | b"unitenum"
+                | b"reflector"
+        )
+    }
+
     /// Check if a built-in class implements a given interface
     pub fn builtin_implements_interface(&self, class_lower: &[u8], iface_name: &[u8]) -> bool {
         match iface_name {
@@ -6776,7 +6788,8 @@ impl Vm {
                 | b"reflectionuniontype" | b"reflectionintersectiontype"
                 | b"reflectionenum" | b"reflectionenumunitcase" | b"reflectionenumbackedcase"
                 | b"reflectionclassconstant" | b"reflectiongenerator"
-                | b"reflectionattribute"
+                | b"reflectionattribute" | b"reflectionconstant" | b"reflectionfiber"
+                | b"reflectiontype" | b"reflectionreference"
                 | b"arithmeticerror" | b"divisionbyzeroerror" | b"argumentcounterror"
                 | b"rangeerror" | b"unhandledmatcherror" | b"assertionerror"
                 | b"closedgeneratorexception" | b"badfunctioncallexception"
@@ -11650,6 +11663,21 @@ impl Vm {
                                                 }
                                             }
                                         }
+                                        b"reflectionclassconstant" => {
+                                            drop(obj_mut);
+                                            let ctor_handled = crate::reflection::reflection_class_constant_construct(self, &call.args, op.line);
+                                            if !ctor_handled {
+                                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                } else {
+                                                    return Err(VmError {
+                                                        message: "Uncaught ReflectionException".to_string(),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
+                                        }
                                         b"reflectionextension" => {
                                             // ReflectionExtension::__construct(string $name)
                                             if call.args.len() > 1 {
@@ -16104,6 +16132,10 @@ impl Vm {
                             };
                             let msg = format!("Cannot redeclare class {}", canonical);
                             return Err(VmError { message: msg, line: op.line });
+                        }
+                        // Set filename if not already set
+                        if class.filename.is_none() {
+                            class.filename = Some(self.current_file.clone());
                         }
                         self.classes.insert(name_lower, class);
                     }

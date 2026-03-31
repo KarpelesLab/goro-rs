@@ -6,3 +6,4 @@ description = "PHP mbstring extension for goro-rs"
 
 [dependencies]
 goro-core = { path = "../goro-core" }
+encoding_rs = "0.8"
