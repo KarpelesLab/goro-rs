@@ -2163,6 +2163,67 @@ pub fn reflection_parameter_method(
     }
 }
 
+/// ReflectionConstant method dispatch (PHP 8.3+)
+pub fn reflection_constant_method(
+    vm: &mut Vm,
+    method: &[u8],
+    obj: &Rc<RefCell<PhpObject>>,
+) -> Option<Value> {
+    let ob = obj.borrow();
+    let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+    drop(ob);
+
+    match method {
+        b"getname" => {
+            Some(Value::String(PhpString::from_string(name)))
+        }
+        b"getnamespacename" => {
+            if let Some(pos) = name.rfind('\\') {
+                Some(Value::String(PhpString::from_string(name[..pos].to_string())))
+            } else {
+                Some(Value::String(PhpString::empty()))
+            }
+        }
+        b"getshortname" => {
+            if let Some(pos) = name.rfind('\\') {
+                Some(Value::String(PhpString::from_string(name[pos + 1..].to_string())))
+            } else {
+                Some(Value::String(PhpString::from_string(name)))
+            }
+        }
+        b"getvalue" => {
+            // Look up the constant value
+            let const_lower: Vec<u8> = name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(val) = vm.get_constant(name.as_bytes()) {
+                Some(val.clone())
+            } else if let Some(val) = vm.get_constant(&const_lower) {
+                Some(val.clone())
+            } else {
+                Some(Value::Null)
+            }
+        }
+        b"isdefault" | b"isdeprecated" => {
+            Some(Value::False)
+        }
+        b"getfilename" => {
+            Some(Value::False)
+        }
+        b"getextension" => {
+            Some(Value::Null)
+        }
+        b"getextensionname" => {
+            Some(Value::False)
+        }
+        b"getattributes" => {
+            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+        }
+        b"__tostring" => {
+            Some(Value::String(PhpString::from_string(format!("Constant [ {} ]\n", name))))
+        }
+        _ => None,
+    }
+}
+
 /// ReflectionExtension no-arg method dispatch
 pub fn reflection_extension_method(
     _vm: &mut Vm,
@@ -2864,7 +2925,12 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8]) -> String
             let readonly_str = if prop.is_readonly { " readonly" } else { "" };
             let type_str = prop.property_type.as_ref().map(|t| format!(" {}", param_type_name(t))).unwrap_or_default();
             let prop_name_str = String::from_utf8_lossy(&prop.name);
-            s.push_str(&format!("    Property [ {}{}{} ${} ]\n", vis, readonly_str, type_str, prop_name_str));
+            let default_str = if !matches!(prop.default, Value::Undef) {
+                format!(" = {}", reflection_value_repr(&prop.default))
+            } else {
+                String::new()
+            };
+            s.push_str(&format!("    Property [ {}{}{} ${}{} ]\n", vis, readonly_str, type_str, prop_name_str, default_str));
         }
         s.push_str("  }\n");
     } else {

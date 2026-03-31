@@ -117,6 +117,17 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gettimeofday", gettimeofday_fn);
     vm.register_function(b"date_timezone_get", date_timezone_get_fn);
     vm.register_function(b"date_timezone_set", date_timezone_set_fn);
+    vm.register_function(b"date_isodate_set", date_isodate_set_fn);
+    vm.register_function(b"timezone_abbreviations_list", timezone_abbreviations_list_fn);
+    vm.register_function(b"timezone_name_from_abbr", timezone_name_from_abbr_fn);
+    vm.register_function(b"timezone_offset_get", timezone_offset_get_fn);
+    vm.register_function(b"timezone_identifiers_list", timezone_identifiers_list_fn);
+    vm.register_function(b"timezone_name_get", timezone_name_get_fn);
+    vm.register_function(b"timezone_version_get", timezone_version_get_fn);
+    vm.register_function(b"date_offset_get", date_offset_get_fn);
+    vm.register_function(b"date_sun_info", date_sun_info_fn);
+    vm.register_function(b"date_sunrise", date_sunrise_fn);
+    vm.register_function(b"date_sunset", date_sunset_fn);
 }
 
 fn date_default_timezone_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -271,8 +282,23 @@ fn strtotime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn gmdate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // For now, same as date_fn since we don't handle timezones
-    date_fn(_vm, args)
+    let format = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+    let timestamp = args.get(1).map(|v| v.to_long());
+
+    let secs = timestamp.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    });
+
+    // Always use UTC for gmdate
+    let result = format_timestamp_with_tz(&format, secs, "GMT", 0);
+    Ok(Value::String(PhpString::from_string(result)))
 }
 
 /// gmmktime - UTC version of mktime
@@ -1836,9 +1862,11 @@ fn calc_calendar_diff(sy: i64, sm: i64, sd: i64, sh: i64, si: i64, ss: i64,
     if minutes < 0 { minutes += 60; hours -= 1; }
     if hours < 0 { hours += 24; days_val -= 1; }
     if days_val < 0 {
-        // Days in the start month
-        let dim = match sm as u32 {
-            2 => if sy % 4 == 0 && (sy % 100 != 0 || sy % 400 == 0) { 29 } else { 28 },
+        // Use the days in the month before the end month
+        let prev_m = if em == 1 { 12 } else { em - 1 };
+        let prev_y = if em == 1 { ey - 1 } else { ey };
+        let dim = match prev_m as u32 {
+            2 => if prev_y % 4 == 0 && (prev_y % 100 != 0 || prev_y % 400 == 0) { 29 } else { 28 },
             4 | 6 | 9 | 11 => 30,
             _ => 31,
         };
@@ -2213,4 +2241,238 @@ fn gettimeofday_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         arr.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(b"dsttime")), Value::Long(0));
         Ok(Value::Array(Rc::new(RefCell::new(arr))))
     }
+}
+
+/// date_isodate_set($object, $year, $week, $dayOfWeek = 1)
+fn date_isodate_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let obj = args.first().unwrap_or(&Value::Null);
+    let year = args.get(1).unwrap_or(&Value::Null).to_long();
+    let week = args.get(2).unwrap_or(&Value::Null).to_long();
+    let day_of_week = args.get(3).map(|v| v.to_long()).unwrap_or(1);
+
+    if let Value::Object(o) = obj {
+        let ts = o.borrow().get_property(b"__timestamp").to_long();
+        let tod = ((ts % 86400) + 86400) % 86400;
+        // ISO week 1 contains January 4th
+        let jan4 = ymd_to_days(year, 1, 4);
+        let jan4_dow = (((jan4 % 7) + 4) % 7 + 7) % 7; // 0=Sunday
+        let jan4_iso_dow = if jan4_dow == 0 { 7 } else { jan4_dow };
+        let week1_monday = jan4 - (jan4_iso_dow - 1);
+        let target_days = week1_monday + (week - 1) * 7 + (day_of_week - 1);
+        let new_ts = target_days * 86400 + tod;
+        o.borrow_mut().set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
+        Ok(obj.clone())
+    } else {
+        Ok(Value::False)
+    }
+}
+
+/// timezone_abbreviations_list()
+fn timezone_abbreviations_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Return a simplified version of timezone abbreviations
+    let mut result = PhpArray::new();
+
+    let abbrevs = [
+        ("acst", 34200, 0, "Australia/Adelaide"),
+        ("aest", 36000, 0, "Australia/Brisbane"),
+        ("akst", -32400, 0, "America/Anchorage"),
+        ("ast", -14400, 0, "America/Halifax"),
+        ("brt", -10800, 0, "America/Sao_Paulo"),
+        ("cdt", -18000, 1, "America/Chicago"),
+        ("cest", 7200, 1, "Europe/Berlin"),
+        ("cet", 3600, 0, "Europe/Berlin"),
+        ("cst", -21600, 0, "America/Chicago"),
+        ("eat", 10800, 0, "Africa/Nairobi"),
+        ("edt", -14400, 1, "America/New_York"),
+        ("eest", 10800, 1, "Europe/Helsinki"),
+        ("eet", 7200, 0, "Europe/Helsinki"),
+        ("est", -18000, 0, "America/New_York"),
+        ("gmt", 0, 0, "UTC"),
+        ("hst", -36000, 0, "Pacific/Honolulu"),
+        ("ist", 19800, 0, "Asia/Kolkata"),
+        ("jst", 32400, 0, "Asia/Tokyo"),
+        ("kst", 32400, 0, "Asia/Seoul"),
+        ("mdt", -21600, 1, "America/Denver"),
+        ("msk", 10800, 0, "Europe/Moscow"),
+        ("mst", -25200, 0, "America/Denver"),
+        ("nzdt", 46800, 1, "Pacific/Auckland"),
+        ("nzst", 43200, 0, "Pacific/Auckland"),
+        ("pdt", -25200, 1, "America/Los_Angeles"),
+        ("pst", -28800, 0, "America/Los_Angeles"),
+        ("sast", 7200, 0, "Africa/Johannesburg"),
+        ("utc", 0, 0, "UTC"),
+        ("wat", 3600, 0, "Africa/Lagos"),
+        ("wet", 0, 0, "Europe/London"),
+    ];
+
+    for (abbr, offset, dst, tz_id) in &abbrevs {
+        let mut entry = PhpArray::new();
+        entry.set(ArrayKey::String(PhpString::from_bytes(b"dst")), if *dst != 0 { Value::True } else { Value::False });
+        entry.set(ArrayKey::String(PhpString::from_bytes(b"offset")), Value::Long(*offset));
+        entry.set(ArrayKey::String(PhpString::from_bytes(b"timezone_id")), Value::String(PhpString::from_string(tz_id.to_string())));
+
+        let mut arr = PhpArray::new();
+        arr.push(Value::Array(Rc::new(RefCell::new(entry))));
+
+        result.set(ArrayKey::String(PhpString::from_string(abbr.to_string())), Value::Array(Rc::new(RefCell::new(arr))));
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// timezone_name_from_abbr($abbr, $utcOffset = -1, $isDST = -1)
+fn timezone_name_from_abbr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let abbr = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
+    let _utc_offset = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+    let _is_dst = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+
+    let tz = match abbr.as_str() {
+        "est" => "America/New_York",
+        "edt" => "America/New_York",
+        "cst" => "America/Chicago",
+        "cdt" => "America/Chicago",
+        "mst" => "America/Denver",
+        "mdt" => "America/Denver",
+        "pst" => "America/Los_Angeles",
+        "pdt" => "America/Los_Angeles",
+        "gmt" => "Europe/London",
+        "utc" => "UTC",
+        "cet" => "Europe/Berlin",
+        "cest" => "Europe/Berlin",
+        "eet" => "Europe/Helsinki",
+        "eest" => "Europe/Helsinki",
+        "msk" => "Europe/Moscow",
+        "jst" => "Asia/Tokyo",
+        "kst" => "Asia/Seoul",
+        "ist" => "Asia/Kolkata",
+        "aest" => "Australia/Sydney",
+        "acst" => "Australia/Adelaide",
+        "nzst" => "Pacific/Auckland",
+        "nzdt" => "Pacific/Auckland",
+        "hst" => "Pacific/Honolulu",
+        "akst" => "America/Anchorage",
+        "brt" => "America/Sao_Paulo",
+        "sast" => "Africa/Johannesburg",
+        "eat" => "Africa/Nairobi",
+        "wat" => "Africa/Lagos",
+        "wet" => "Europe/London",
+        _ => return Ok(Value::False),
+    };
+    Ok(Value::String(PhpString::from_string(tz.to_string())))
+}
+
+/// timezone_offset_get($timezone, $datetime)
+fn timezone_offset_get_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let tz_obj = args.first().unwrap_or(&Value::Null);
+    let dt_obj = args.get(1).unwrap_or(&Value::Null);
+
+    let tz_name = if let Value::Object(o) = tz_obj {
+        let ob = o.borrow();
+        let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+        if tz.is_empty() { "UTC".to_string() } else { tz }
+    } else {
+        return Ok(Value::False);
+    };
+
+    let ts = if let Value::Object(o) = dt_obj {
+        o.borrow().get_property(b"__timestamp").to_long()
+    } else {
+        0
+    };
+
+    let (offset, _) = timezone_offset_and_abbrev(&tz_name, ts);
+    Ok(Value::Long(offset))
+}
+
+/// timezone_identifiers_list()
+fn timezone_identifiers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    let timezones = [
+        "Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers",
+        "Africa/Cairo", "Africa/Casablanca", "Africa/Johannesburg", "Africa/Lagos", "Africa/Nairobi",
+        "America/Anchorage", "America/Argentina/Buenos_Aires", "America/Chicago",
+        "America/Denver", "America/Halifax", "America/Los_Angeles", "America/New_York",
+        "America/Phoenix", "America/Sao_Paulo", "America/Toronto", "America/Vancouver",
+        "Asia/Bangkok", "Asia/Calcutta", "Asia/Dhaka", "Asia/Dubai", "Asia/Hong_Kong",
+        "Asia/Jakarta", "Asia/Karachi", "Asia/Kolkata", "Asia/Seoul", "Asia/Shanghai",
+        "Asia/Singapore", "Asia/Taipei", "Asia/Tokyo",
+        "Atlantic/Reykjavik",
+        "Australia/Adelaide", "Australia/Brisbane", "Australia/Darwin",
+        "Australia/Hobart", "Australia/Melbourne", "Australia/Perth", "Australia/Sydney",
+        "Europe/Amsterdam", "Europe/Athens", "Europe/Berlin", "Europe/Brussels",
+        "Europe/Budapest", "Europe/Copenhagen", "Europe/Helsinki", "Europe/Istanbul",
+        "Europe/Kiev", "Europe/London", "Europe/Madrid", "Europe/Moscow",
+        "Europe/Oslo", "Europe/Paris", "Europe/Prague", "Europe/Rome",
+        "Europe/Stockholm", "Europe/Vienna", "Europe/Warsaw", "Europe/Zurich",
+        "Pacific/Auckland", "Pacific/Fiji", "Pacific/Honolulu",
+        "UTC",
+    ];
+    for tz in &timezones {
+        arr.push(Value::String(PhpString::from_string(tz.to_string())));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+/// timezone_name_get($timezone)
+fn timezone_name_get_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let tz_obj = args.first().unwrap_or(&Value::Null);
+    if let Value::Object(o) = tz_obj {
+        let ob = o.borrow();
+        let tz = ob.get_property(b"timezone");
+        if matches!(tz, Value::Null) {
+            Ok(Value::String(PhpString::from_bytes(b"UTC")))
+        } else {
+            Ok(tz)
+        }
+    } else {
+        Ok(Value::False)
+    }
+}
+
+/// timezone_version_get()
+fn timezone_version_get_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"2024.1")))
+}
+
+/// date_offset_get($datetime)
+fn date_offset_get_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let dt_obj = args.first().unwrap_or(&Value::Null);
+    if let Value::Object(o) = dt_obj {
+        let ob = o.borrow();
+        let ts = ob.get_property(b"__timestamp").to_long();
+        let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+        let tz = if tz.is_empty() { "UTC".to_string() } else { tz };
+        drop(ob);
+        let (offset, _) = timezone_offset_and_abbrev(&tz, ts);
+        Ok(Value::Long(offset))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+/// date_sun_info($timestamp, $latitude, $longitude) - stub
+fn date_sun_info_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"sunrise")), Value::Long(0));
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"sunset")), Value::Long(0));
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"transit")), Value::Long(0));
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"civil_twilight_begin")), Value::Long(0));
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"civil_twilight_end")), Value::Long(0));
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"nautical_twilight_begin")), Value::Long(0));
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"nautical_twilight_end")), Value::Long(0));
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"astronomical_twilight_begin")), Value::Long(0));
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"astronomical_twilight_end")), Value::Long(0));
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+/// date_sunrise - stub (deprecated)
+fn date_sunrise_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    _vm.emit_deprecated("Function date_sunrise() is deprecated since 8.1");
+    Ok(Value::False)
+}
+
+/// date_sunset - stub (deprecated)
+fn date_sunset_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    _vm.emit_deprecated("Function date_sunset() is deprecated since 8.1");
+    Ok(Value::False)
 }
