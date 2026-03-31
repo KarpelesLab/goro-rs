@@ -204,6 +204,8 @@ pub struct Vm {
     pub classes: IndexMap<Vec<u8>, ClassEntry>,
     /// Next object ID
     next_object_id: u64,
+    /// Recycled object IDs (freed when object's Rc drops to 1)
+    free_object_ids: Vec<u64>,
     /// Pending class definitions (from compiler, indexed by position)
     pending_classes: Vec<ClassEntry>,
     /// Whether we're executing the top-level script (vs a function)
@@ -290,10 +292,11 @@ impl Vm {
             globals: HashMap::new(),
             classes: IndexMap::new(),
             next_object_id: 1,
+            free_object_ids: Vec::new(),
             pending_classes: Vec::new(),
             is_global_scope: true,
             current_exception: None,
-            error_reporting: 32767, // E_ALL
+            error_reporting: 30719, // E_ALL (PHP 8.4+: excludes E_STRICT)
             magic_depth: 0,
             destructible_objects: Vec::new(),
             called_class_stack: Vec::new(),
@@ -333,7 +336,7 @@ impl Vm {
                 );
                 c.insert(b"precision".to_vec(), Value::Long(14));
                 c.insert(b"serialize_precision".to_vec(), Value::Long(-1));
-                c.insert(b"error_reporting".to_vec(), Value::Long(32767));
+                c.insert(b"error_reporting".to_vec(), Value::Long(30719)); // E_ALL (PHP 8.4+)
                 c.insert(b"display_errors".to_vec(), Value::Long(1));
                 c.insert(
                     b"memory_limit".to_vec(),
@@ -441,7 +444,7 @@ impl Vm {
                 c.insert(b"E_RECOVERABLE_ERROR".to_vec(), Value::Long(4096));
                 c.insert(b"E_DEPRECATED".to_vec(), Value::Long(8192));
                 c.insert(b"E_USER_DEPRECATED".to_vec(), Value::Long(16384));
-                c.insert(b"E_ALL".to_vec(), Value::Long(32767));
+                c.insert(b"E_ALL".to_vec(), Value::Long(30719)); // PHP 8.4+: excludes E_STRICT
                 // mt_rand constants
                 c.insert(b"MT_RAND_MT19937".to_vec(), Value::Long(0));
                 c.insert(b"MT_RAND_PHP".to_vec(), Value::Long(1));
@@ -1387,7 +1390,8 @@ impl Vm {
     /// Emit a raw deprecated warning (no user error handler)
     pub fn emit_deprecated_raw(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8192 != 0 {
-            let deprec = format!("\nDeprecated: {} in {} on line {}\n", msg, self.current_file, line);
+            let effective_line = if line == 0 { self.current_line } else { line };
+            let deprec = format!("\nDeprecated: {} in {} on line {}\n", msg, self.current_file, effective_line);
             self.output.extend_from_slice(deprec.as_bytes());
         }
     }
@@ -1538,6 +1542,28 @@ impl Vm {
     /// Returns the error message for use in VmError if no exception handler is available.
     pub fn throw_type_error(&mut self, message: String) -> Value {
         self.create_exception(b"TypeError", &message, self.current_line)
+    }
+
+    /// Allocate a new object ID, reusing freed IDs if available
+    #[inline]
+    pub fn alloc_object_id(&mut self) -> u64 {
+        if let Some(id) = self.free_object_ids.pop() {
+            id
+        } else {
+            let id = self.next_object_id;
+            self.next_object_id += 1;
+            id
+        }
+    }
+
+    /// Recycle an object ID if the Rc has only one strong reference left (about to be dropped)
+    #[inline]
+    pub fn maybe_recycle_object_id(&mut self, val: &Value) {
+        if let Value::Object(rc) = val {
+            if Rc::strong_count(rc) == 1 {
+                self.free_object_ids.push(rc.borrow().object_id);
+            }
+        }
     }
 
     pub fn create_exception(&mut self, class_name: &[u8], message: &str, line: u32) -> Value {
@@ -2909,10 +2935,20 @@ impl Vm {
         let mut current: Vec<u8> = class_name.to_vec();
         for _ in 0..50 {
             // prevent infinite loops
-            let parent = match self.classes.get(&current) {
-                Some(ce) => match &ce.parent {
-                    Some(p) => p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(),
-                    None => return false,
+            let (parent, canonical_lower) = match self.classes.get(&current) {
+                Some(ce) => {
+                    // Also compute the canonical (original) name lowercased, to resolve aliases
+                    let canonical: Vec<u8> = ce.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    match &ce.parent {
+                        Some(p) => (p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(), canonical),
+                        None => {
+                            // No parent — but check if this aliased class IS the target
+                            if canonical == target_name {
+                                return true;
+                            }
+                            return false;
+                        }
+                    }
                 },
                 None => {
                     // Current class is not user-defined; check if it's a built-in
@@ -2920,8 +2956,16 @@ impl Vm {
                     return is_builtin_subclass(&current, target_name);
                 }
             };
-            if parent == target_name {
+            // Check the parent by alias key and by canonical name
+            if parent == target_name || canonical_lower == target_name {
                 return true;
+            }
+            // Also resolve the parent via canonical name (in case parent stored as alias key)
+            if let Some(parent_ce) = self.classes.get(&parent) {
+                let parent_canonical: Vec<u8> = parent_ce.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if parent_canonical == target_name {
+                    return true;
+                }
             }
             current = parent;
         }
@@ -5978,7 +6022,13 @@ impl Vm {
                 Some(if is_user { Value::True } else { Value::False })
             }
             b"isanonymous" => {
-                Some(Value::False)
+                // Anonymous class names contain a NUL byte separator
+                let is_anon = if let Some(ce) = self.classes.get(&class_lower) {
+                    ce.name.contains(&b'\x00')
+                } else {
+                    false
+                };
+                Some(if is_anon { Value::True } else { Value::False })
             }
             b"isiterable" | b"isiterateable" => {
                 // Check if class implements Iterator or IteratorAggregate
@@ -10426,101 +10476,251 @@ impl Vm {
                     }
                 }
                 OpCode::SendUnpack => {
-                    // Unpack an array/traversable into individual arguments
+                    // Unpack an array/traversable/generator into individual arguments.
+                    // Collect (is_named, name_bytes, value) tuples first so we can release
+                    // any borrows before mutating pending_calls (generator resumption calls
+                    // back into self).
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    if let Some(call) = self.pending_calls.last_mut() {
-                        // Helper: unpack from an iterator of (key, value) pairs
-                        let unpack_result: Result<(), String> = match &val {
-                            Value::Array(arr) => {
+
+                    let collected: Result<Vec<(bool, Vec<u8>, Value)>, String> = match &val {
+                        Value::Array(arr) => {
+                            let arr = arr.borrow();
+                            let mut pairs: Vec<(bool, Vec<u8>, Value)> = Vec::with_capacity(arr.len());
+                            for (k, v) in arr.iter() {
+                                match k {
+                                    ArrayKey::String(s) => {
+                                        pairs.push((true, s.as_bytes().to_vec(), v.clone()));
+                                    }
+                                    ArrayKey::Int(_) => {
+                                        pairs.push((false, Vec::new(), v.clone()));
+                                    }
+                                }
+                            }
+                            Ok(pairs)
+                        }
+                        Value::Generator(gen_rc) => {
+                            let gen_clone = gen_rc.clone();
+                            let mut pairs: Vec<(bool, Vec<u8>, Value)> = Vec::new();
+                            let mut gen_err: Option<String> = None;
+                            // Resume to first yield if not yet started
+                            {
+                                let state = gen_clone.borrow().state.clone();
+                                if state == crate::generator::GeneratorState::Created {
+                                    let mut gb = gen_clone.borrow_mut();
+                                    match gb.resume(self) {
+                                        Ok(_) => {}
+                                        Err(_) => {
+                                            // Exception already set in self.current_exception
+                                            gen_err = Some("__exception__".to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            if gen_err.is_none() {
+                                loop {
+                                    let state = gen_clone.borrow().state.clone();
+                                    if state == crate::generator::GeneratorState::Completed {
+                                        break;
+                                    }
+                                    let (key_val, yielded_val) = {
+                                        let gb = gen_clone.borrow();
+                                        (gb.current_key.clone(), gb.current_value.clone())
+                                    };
+                                    match &key_val {
+                                        Value::Long(_) => {
+                                            pairs.push((false, Vec::new(), yielded_val));
+                                        }
+                                        Value::String(s) => {
+                                            pairs.push((true, s.as_bytes().to_vec(), yielded_val));
+                                        }
+                                        _ => {
+                                            gen_err = Some("Keys must be of type int|string during argument unpacking".to_string());
+                                            break;
+                                        }
+                                    }
+                                    let mut gb = gen_clone.borrow_mut();
+                                    gb.write_send_value();
+                                    match gb.resume(self) {
+                                        Ok(_) => {}
+                                        Err(_) => {
+                                            drop(gb);
+                                            // Exception already set in self.current_exception
+                                            gen_err = Some("__exception__".to_string());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            match gen_err {
+                                Some(e) => Err(e),
+                                None => Ok(pairs),
+                            }
+                        }
+                        Value::Object(obj_rc) => {
+                            let class_lower: Vec<u8> = obj_rc.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let inner_arr = {
+                                let obj = obj_rc.borrow();
+                                let prop = obj.get_property(b"__spl_array");
+                                if matches!(prop, Value::Array(_)) { Some(prop) } else { None }
+                            };
+                            if let Some(Value::Array(arr)) = inner_arr {
+                                // SPL array-based object (ArrayIterator, etc.)
                                 let arr = arr.borrow();
-                                let mut had_named = false;
-                                let mut result = Ok(());
+                                let mut pairs: Vec<(bool, Vec<u8>, Value)> = Vec::with_capacity(arr.len());
                                 for (k, v) in arr.iter() {
                                     match k {
                                         ArrayKey::String(s) => {
-                                            had_named = true;
-                                            // Check for duplicate with existing named args
-                                            let name_bytes = s.as_bytes().to_vec();
-                                            if call.named_args.iter().any(|(n, _)| *n == name_bytes) {
-                                                result = Err(format!(
-                                                    "Named parameter ${} overwrites previous argument",
-                                                    String::from_utf8_lossy(&name_bytes)
-                                                ));
-                                                break;
-                                            }
-                                            call.named_args.push((name_bytes, v.clone()));
+                                            pairs.push((true, s.as_bytes().to_vec(), v.clone()));
                                         }
                                         ArrayKey::Int(_) => {
-                                            if had_named {
-                                                result = Err("Cannot use positional argument after named argument during unpacking".into());
-                                                break;
-                                            }
-                                            call.args.push(v.clone());
+                                            pairs.push((false, Vec::new(), v.clone()));
                                         }
                                     }
                                 }
-                                result
-                            }
-                            Value::Object(obj_rc) => {
-                                // Check if it's a Traversable (e.g. ArrayIterator)
-                                // Extract the underlying array from ArrayIterator-like objects
-                                let obj = obj_rc.borrow();
-                                let inner_arr = {
-                                    let prop = obj.get_property(b"__spl_array");
-                                    if matches!(prop, Value::Array(_)) { Some(prop) } else { None }
-                                };
-                                drop(obj);
-                                if let Some(Value::Array(arr)) = inner_arr {
-                                    let arr = arr.borrow();
-                                    let mut had_named = false;
-                                    let mut result = Ok(());
-                                    for (k, v) in arr.iter() {
-                                        match k {
-                                            ArrayKey::String(s) => {
-                                                had_named = true;
-                                                let name_bytes = s.as_bytes().to_vec();
-                                                if call.named_args.iter().any(|(n, _)| *n == name_bytes) {
-                                                    result = Err(format!(
-                                                        "Named parameter ${} overwrites previous argument",
-                                                        String::from_utf8_lossy(&name_bytes)
-                                                    ));
-                                                    break;
-                                                }
-                                                call.named_args.push((name_bytes, v.clone()));
+                                Ok(pairs)
+                            } else if self.class_implements_interface(&class_lower, b"iteratoraggregate") {
+                                // IteratorAggregate: call getIterator() first (may throw)
+                                let iter_val = self.call_object_method(&val, b"getIterator", &[]);
+                                if self.current_exception.is_some() {
+                                    Err("__exception__".to_string())
+                                } else if let Some(iter_obj) = iter_val {
+                                    let mut pairs: Vec<(bool, Vec<u8>, Value)> = Vec::new();
+                                    let mut iter_err: Option<String> = None;
+                                    self.call_object_method(&iter_obj, b"rewind", &[]);
+                                    if self.current_exception.is_some() {
+                                        Err("__exception__".to_string())
+                                    } else {
+                                        loop {
+                                            if self.current_exception.is_some() { iter_err = Some("__exception__".to_string()); break; }
+                                            let valid = self.call_object_method(&iter_obj, b"valid", &[]).unwrap_or(Value::False);
+                                            if self.current_exception.is_some() { iter_err = Some("__exception__".to_string()); break; }
+                                            if !valid.is_truthy() { break; }
+                                            let cur_val = self.call_object_method(&iter_obj, b"current", &[]).unwrap_or(Value::Null);
+                                            if self.current_exception.is_some() { iter_err = Some("__exception__".to_string()); break; }
+                                            let key_val = self.call_object_method(&iter_obj, b"key", &[]).unwrap_or(Value::Null);
+                                            if self.current_exception.is_some() { iter_err = Some("__exception__".to_string()); break; }
+                                            match &key_val {
+                                                Value::Long(_) => { pairs.push((false, Vec::new(), cur_val)); }
+                                                Value::String(s) => { pairs.push((true, s.as_bytes().to_vec(), cur_val)); }
+                                                _ => { iter_err = Some("Keys must be of type int|string during argument unpacking".to_string()); break; }
                                             }
-                                            ArrayKey::Int(_) => {
-                                                if had_named {
-                                                    result = Err("Cannot use positional argument after named argument during unpacking".into());
-                                                    break;
-                                                }
-                                                call.args.push(v.clone());
-                                            }
+                                            self.call_object_method(&iter_obj, b"next", &[]);
+                                        }
+                                        match iter_err {
+                                            Some(e) => Err(e),
+                                            None => Ok(pairs),
                                         }
                                     }
-                                    result
                                 } else {
-                                    call.args.push(val.clone());
-                                    Ok(())
+                                    Ok(Vec::new())
                                 }
+                            } else if self.class_implements_interface(&class_lower, b"traversable")
+                                || self.class_implements_interface(&class_lower, b"iterator")
+                            {
+                                // Generic Iterator: use Iterator protocol
+                                self.call_object_method(&val, b"rewind", &[]);
+                                if self.current_exception.is_some() {
+                                    Err("__exception__".to_string())
+                                } else {
+                                    let mut pairs: Vec<(bool, Vec<u8>, Value)> = Vec::new();
+                                    let mut iter_err: Option<String> = None;
+                                    loop {
+                                        if self.current_exception.is_some() { iter_err = Some("__exception__".to_string()); break; }
+                                        let valid = self.call_object_method(&val, b"valid", &[]).unwrap_or(Value::False);
+                                        if self.current_exception.is_some() { iter_err = Some("__exception__".to_string()); break; }
+                                        if !valid.is_truthy() { break; }
+                                        let cur_val = self.call_object_method(&val, b"current", &[]).unwrap_or(Value::Null);
+                                        if self.current_exception.is_some() { iter_err = Some("__exception__".to_string()); break; }
+                                        let key_val = self.call_object_method(&val, b"key", &[]).unwrap_or(Value::Null);
+                                        if self.current_exception.is_some() { iter_err = Some("__exception__".to_string()); break; }
+                                        match &key_val {
+                                            Value::Long(_) => { pairs.push((false, Vec::new(), cur_val)); }
+                                            Value::String(s) => { pairs.push((true, s.as_bytes().to_vec(), cur_val)); }
+                                            _ => { iter_err = Some("Keys must be of type int|string during argument unpacking".to_string()); break; }
+                                        }
+                                        self.call_object_method(&val, b"next", &[]);
+                                    }
+                                    match iter_err {
+                                        Some(e) => Err(e),
+                                        None => Ok(pairs),
+                                    }
+                                }
+                            } else {
+                                let type_name = Self::value_type_name(&val);
+                                Err(format!("Only arrays and Traversables can be unpacked, {} given", type_name))
                             }
-                            _ => {
-                                // Non-array, just push as single arg
-                                call.args.push(val.clone());
-                                Ok(())
-                            }
-                        };
-                        if let Err(err_msg) = unpack_result {
-                            let exc_val = self.create_exception(b"Error", &err_msg, op.line);
-                            self.current_exception = Some(exc_val);
+                        }
+                        _ => {
+                            let type_name = Self::value_type_name(&val);
+                            Err(format!("Only arrays and Traversables can be unpacked, {} given", type_name))
+                        }
+                    };
+
+                    let unpack_result: Result<(), String> = match collected {
+                        Err(ref e) if e == "__exception__" => {
+                            // Exception already set; propagate it
                             if let Some((catch_target, _, _)) = exception_handlers.pop() {
                                 ip = catch_target as usize;
                                 continue;
                             } else {
-                                return Err(VmError {
-                                    message: format!("Uncaught Error: {}", err_msg),
-                                    line: op.line,
-                                });
+                                let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                    let ob = obj.borrow();
+                                    let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                    format!("Uncaught {}: {}", class, msg)
+                                } else {
+                                    "Uncaught exception".to_string()
+                                };
+                                return Err(VmError { message: exc_msg, line: op.line });
                             }
+                        }
+                        Err(e) => Err(e),
+                        Ok(pairs) => {
+                            if let Some(call) = self.pending_calls.last_mut() {
+                                let mut had_named = false;
+                                let mut result = Ok(());
+                                for (is_named, name_bytes, v) in pairs {
+                                    if is_named {
+                                        had_named = true;
+                                        if call.named_args.iter().any(|(n, _)| *n == name_bytes) {
+                                            result = Err(format!(
+                                                "Named parameter ${} overwrites previous argument",
+                                                String::from_utf8_lossy(&name_bytes)
+                                            ));
+                                            break;
+                                        }
+                                        call.named_args.push((name_bytes, v));
+                                    } else {
+                                        if had_named {
+                                            result = Err("Cannot use positional argument after named argument during unpacking".into());
+                                            break;
+                                        }
+                                        call.args.push(v);
+                                    }
+                                }
+                                result
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    };
+
+                    if let Err(err_msg) = unpack_result {
+                        let exc_class: &[u8] = if err_msg.starts_with("Only arrays") {
+                            b"TypeError"
+                        } else {
+                            b"Error"
+                        };
+                        let exc_val = self.create_exception(exc_class, &err_msg, op.line);
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: format!("Uncaught {}: {}", String::from_utf8_lossy(exc_class), err_msg),
+                                line: op.line,
+                            });
                         }
                     }
                 }
@@ -11167,12 +11367,36 @@ impl Vm {
                                 }
                             }
                         }
+                        let had_exception_before = self.current_exception.is_some();
+
+                        // For assert(), push a call stack frame so the stack trace shows
+                        // the assert call with its arguments (PHP behavior).
+                        let is_assert_call = func_name_lower == b"assert";
+                        if is_assert_call {
+                            self.call_stack.push((
+                                "assert".to_string(),
+                                self.current_file.clone(),
+                                op.line,
+                                call.args.clone(),
+                                false,
+                            ));
+                        }
+
                         match func(self, &call.args) {
                             Ok(result) => {
-                                // Check if the builtin set an exception (e.g. TypeError)
-                                if self.current_exception.is_some() {
-                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
-                                        ip = catch_target as usize;
+                                if is_assert_call {
+                                    self.call_stack.pop();
+                                }
+                                // Check if the builtin SET a NEW exception (e.g. TypeError)
+                                // Only trigger handlers if the exception is newly set,
+                                // not if it was already present before the call (e.g. inside a finally block)
+                                if !had_exception_before && self.current_exception.is_some() {
+                                    if let Some((catch_target, finally_target, _)) = exception_handlers.pop() {
+                                        if catch_target > 0 {
+                                            ip = catch_target as usize;
+                                        } else if finally_target > 0 {
+                                            ip = finally_target as usize;
+                                        }
                                         continue;
                                     } else {
                                         // Extract exception message for uncaught error
@@ -11199,13 +11423,22 @@ impl Vm {
                                 );
                             }
                             Err(e) => {
+                                // For assert, keep the stack frame so it appears in stack traces
                                 // Check if there's a pending exception to catch
                                 if self.current_exception.is_some() {
-                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
-                                        ip = catch_target as usize;
+                                    if let Some((catch_target, finally_target, _)) = exception_handlers.pop() {
+                                        if is_assert_call {
+                                            self.call_stack.pop();
+                                        }
+                                        if catch_target > 0 {
+                                            ip = catch_target as usize;
+                                        } else if finally_target > 0 {
+                                            ip = finally_target as usize;
+                                        }
                                         continue;
                                     }
                                 }
+                                // Uncaught - keep assert frame for error display
                                 return Err(VmError {
                                     message: e.message,
                                     line: op.line,
@@ -11215,8 +11448,8 @@ impl Vm {
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
                     {
                         // Check visibility for static method calls (ClassName::method)
-                        if let Some(sep_pos) = func_name_lower.iter().position(|&b| b == b':') {
-                            if func_name_lower.get(sep_pos + 1) == Some(&b':') {
+                        if let Some(sep_pos) = func_name_lower.windows(2).position(|w| w == b"::") {
+                            {
                                 let class_part_lower = &func_name_lower[..sep_pos];
                                 let method_part_lower = &func_name_lower[sep_pos + 2..];
                                 // Skip __call, __callstatic, __construct, and other magic methods
@@ -11519,17 +11752,16 @@ impl Vm {
                         // Check parameter types before executing
                         if !user_fn.param_types.is_empty() {
                             // Push class scope temporarily for self/parent/static type checking
-                            let temp_scope_pushed = if let Some(pos) = func_name_lower.iter().position(|&b| b == b':') {
-                                if pos + 1 < func_name_lower.len() && func_name_lower[pos + 1] == b':' {
-                                    let class_part_lower = &func_name_lower[..pos];
-                                    let method_part_lower = &func_name_lower[pos + 2..];
-                                    let defining_class = self.classes.get(class_part_lower)
-                                        .and_then(|c| c.get_method(method_part_lower))
-                                        .map(|m| m.declaring_class.clone())
-                                        .unwrap_or_else(|| class_part_lower.to_vec());
-                                    self.class_scope_stack.push(defining_class);
-                                    true
-                                } else { false }
+                            // Use windows(2) to find "::" correctly even in names with embedded colons
+                            let temp_scope_pushed = if let Some(pos) = func_name_lower.windows(2).position(|w| w == b"::") {
+                                let class_part_lower = &func_name_lower[..pos];
+                                let method_part_lower = &func_name_lower[pos + 2..];
+                                let defining_class = self.classes.get(class_part_lower)
+                                    .and_then(|c| c.get_method(method_part_lower))
+                                    .map(|m| m.declaring_class.clone())
+                                    .unwrap_or_else(|| class_part_lower.to_vec());
+                                self.class_scope_stack.push(defining_class);
+                                true
                             } else if let Some(ref scope) = user_fn.scope_class {
                                 self.class_scope_stack.push(scope.clone());
                                 true
@@ -11643,37 +11875,35 @@ impl Vm {
                         self.is_global_scope = false;
 
                         // Push called class for late static binding
+                        // Use windows(2) to find "::" correctly even in names with embedded colons
+                        // (e.g. NUL-byte anonymous class names like class@anonymous\0/path:4$1::method)
                         let pushed_called_class =
-                            if let Some(pos) = func_name_lower.iter().position(|&b| b == b':') {
-                                if func_name_lower.get(pos + 1) == Some(&b':') {
-                                    // For late static binding, use the actual object class when $this is present.
-                                    // Check call.args first (explicit $this), then caller's CVs (parent:: calls).
-                                    let called_class = if let Some(Value::Object(obj)) = call.args.first() {
-                                        // Instance method call (has $this) - use object's runtime class
-                                        obj.borrow().class_name.clone()
-                                    } else if let Some(Value::Object(obj)) = cvs.first() {
-                                        // parent::method() from instance context - caller has $this
-                                        obj.borrow().class_name.clone()
-                                    } else {
-                                        // Pure static call - use the class name from the call
-                                        let orig_bytes = call.name.as_bytes();
-                                        orig_bytes[..pos].to_vec()
-                                    };
-                                    self.called_class_stack.push(called_class);
-
-                                    // Push the defining class scope for visibility checks
-                                    let class_part_lower = &func_name_lower[..pos];
-                                    let method_part_lower = &func_name_lower[pos + 2..];
-                                    let defining_class = self.classes.get(class_part_lower)
-                                        .and_then(|c| c.get_method(method_part_lower))
-                                        .map(|m| m.declaring_class.clone())
-                                        .unwrap_or_else(|| class_part_lower.to_vec());
-                                    self.class_scope_stack.push(defining_class);
-
-                                    true
+                            if let Some(pos) = func_name_lower.windows(2).position(|w| w == b"::") {
+                                // For late static binding, use the actual object class when $this is present.
+                                // Check call.args first (explicit $this), then caller's CVs (parent:: calls).
+                                let called_class = if let Some(Value::Object(obj)) = call.args.first() {
+                                    // Instance method call (has $this) - use object's runtime class
+                                    obj.borrow().class_name.clone()
+                                } else if let Some(Value::Object(obj)) = cvs.first() {
+                                    // parent::method() from instance context - caller has $this
+                                    obj.borrow().class_name.clone()
                                 } else {
-                                    false
-                                }
+                                    // Pure static call - use the class name from the call
+                                    let orig_bytes = call.name.as_bytes();
+                                    orig_bytes[..pos].to_vec()
+                                };
+                                self.called_class_stack.push(called_class);
+
+                                // Push the defining class scope for visibility checks
+                                let class_part_lower = &func_name_lower[..pos];
+                                let method_part_lower = &func_name_lower[pos + 2..];
+                                let defining_class = self.classes.get(class_part_lower)
+                                    .and_then(|c| c.get_method(method_part_lower))
+                                    .map(|m| m.declaring_class.clone())
+                                    .unwrap_or_else(|| class_part_lower.to_vec());
+                                self.class_scope_stack.push(defining_class);
+
+                                true
                             } else {
                                 false
                             };
@@ -11710,7 +11940,7 @@ impl Vm {
                             && !matches!(call.args.first(), Some(Value::Object(_)))
                         {
                             // Check if the method is static - if so, don't inject $this
-                            let method_is_static = if let Some(pos) = func_name_lower.iter().position(|&b| b == b':') {
+                            let method_is_static = if let Some(pos) = func_name_lower.windows(2).position(|w| w == b"::") {
                                 let class_part = &func_name_lower[..pos];
                                 let method_part = &func_name_lower[pos + 2..];
                                 self.classes.get(class_part)
@@ -11763,7 +11993,19 @@ impl Vm {
 
                         // Execute the function's op_array
                         // (call stack frame was already pushed before param checks)
+                        // Save and restore pending_return/pending_finally_jump:
+                        // if we're inside a finally block with a pending deferred return,
+                        // the inner function's Return opcode would otherwise clear it.
+                        let saved_pending_return = self.pending_return.take();
+                        let saved_pending_jump = self.pending_finally_jump.take();
                         let call_result = self.execute_op_array(&user_fn, func_cvs);
+                        // Restore deferred return state from the outer finally scope
+                        if self.pending_return.is_none() {
+                            self.pending_return = saved_pending_return;
+                        }
+                        if self.pending_finally_jump.is_none() {
+                            self.pending_finally_jump = saved_pending_jump;
+                        }
 
                         // Only pop call stack frame on success - keep it on error for stack trace
                         let call_failed = call_result.is_err();
@@ -12337,8 +12579,8 @@ impl Vm {
                             // Check for __callStatic/__call on ClassName::method calls
                             let name_bytes = call.name.as_bytes();
                             let mut handled = false;
-                            if let Some(pos) = name_bytes.iter().position(|&b| b == b':') {
-                                if pos + 1 < name_bytes.len() && name_bytes[pos + 1] == b':' {
+                            if let Some(pos) = name_bytes.windows(2).position(|w| w == b"::") {
+                                {
                                     let class_part = &name_bytes[..pos];
                                     let method_part = &name_bytes[pos + 2..];
                                     let class_lower: Vec<u8> =
@@ -12833,6 +13075,22 @@ impl Vm {
                                     *cv_val = new_val;
                                 }
                             }
+                        }
+                    }
+                }
+                OpCode::CompactSet => {
+                    // Like ArraySet but skip if the CV is Undef (emit warning)
+                    let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if matches!(&val, Value::Undef) {
+                        let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                        let var_name = key_val.to_php_string().to_string_lossy();
+                        self.emit_warning_at(&format!("compact(): Undefined variable ${}", var_name), op.line);
+                    } else {
+                        let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                        let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                        if let Value::Array(arr) = &arr_val {
+                            let key = Self::value_to_array_key(key_val);
+                            arr.borrow_mut().set(key, val);
                         }
                     }
                 }
@@ -13811,23 +14069,87 @@ impl Vm {
                 }
 
                 OpCode::StaticPropGet => {
-                    let class_name_raw = self
-                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
-                    let prop_name = self
-                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
+                    let op1_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // If op1 is an object, extract the class name for static access
+                    let class_name_raw = if let Value::Object(obj_ref) = &op1_val {
+                        let obj = obj_ref.borrow();
+                        PhpString::from_vec(obj.class_name.clone())
+                    } else {
+                        op1_val.to_php_string()
+                    };
+                    // Clone op2 so we can emit undefined-variable warning (requires &mut self)
+                    let op2_clone = op.op2.clone();
+                    let op_line = op.line;
+                    let prop_name_val = self
+                        .read_operand_warn(&op2_clone, &cvs, &tmps, &op_array.literals, &op_array, op_line);
+                    // Validate prop name type for all const fetches: only strings are valid
+                    if !matches!(prop_name_val, Value::String(_)) {
+                        let type_name = match &prop_name_val {
+                            Value::Null | Value::Undef => "null",
+                            Value::Long(_) => "int",
+                            Value::Double(_) => "float",
+                            Value::True | Value::False => "bool",
+                            Value::Array(_) => "array",
+                            Value::Object(_) => "object",
+                            _ => "unknown",
+                        };
+                        if type_name != "unknown" {
+                            let err_msg = format!("Cannot use value of type {} as class constant name", type_name);
+                            let exc = self.create_exception(b"TypeError", &err_msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: op.line });
+                        }
+                    }
+                    let prop_name = prop_name_val.to_php_string();
 
-                    // Resolve "static" for late static binding
-                    let resolved_class = self
-                        .resolve_static_class(class_name_raw.as_bytes())
-                        .to_vec();
+                    // Resolve "static", "self", "parent" for late static binding / scope
+                    let resolved_class = {
+                        let raw = class_name_raw.as_bytes();
+                        if raw.eq_ignore_ascii_case(b"static") {
+                            // For static::, use called_class_stack (late static binding)
+                            // Fall back to class_scope_stack for bound closures
+                            let resolved = self.resolve_static_class(raw);
+                            if resolved == b"static" {
+                                // No called class - try scope class (bound closure context)
+                                self.class_scope_stack.last()
+                                    .cloned()
+                                    .unwrap_or_else(|| b"static".to_vec())
+                            } else {
+                                resolved.to_vec()
+                            }
+                        } else if raw.eq_ignore_ascii_case(b"self") {
+                            self.class_scope_stack.last()
+                                .or_else(|| self.called_class_stack.last())
+                                .cloned()
+                                .unwrap_or_else(|| b"self".to_vec())
+                        } else if raw.eq_ignore_ascii_case(b"parent") {
+                            let scope = self.class_scope_stack.last()
+                                .or_else(|| self.called_class_stack.last())
+                                .cloned();
+                            if let Some(scope_lower) = scope {
+                                self.classes.get(&scope_lower)
+                                    .and_then(|c| c.parent.clone())
+                                    .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
+                                    .unwrap_or_else(|| b"parent".to_vec())
+                            } else {
+                                b"parent".to_vec()
+                            }
+                        } else {
+                            raw.to_vec()
+                        }
+                    };
 
-                    // Handle static::class - return the resolved class name
-                    if prop_name.as_bytes() == b"class"
-                        && class_name_raw.as_bytes().eq_ignore_ascii_case(b"static")
-                    {
-                        let val = Value::String(PhpString::from_vec(resolved_class));
+                    // Handle ::class - return the class name (works for both static::class and dynamic)
+                    if prop_name.as_bytes() == b"class" {
+                        let class_lower_lookup: Vec<u8> = resolved_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let canonical = self.classes.get(&class_lower_lookup)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| resolved_class.clone());
+                        let val = Value::String(PhpString::from_vec(canonical));
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
                         let class_lower: Vec<u8> = resolved_class
@@ -13876,7 +14198,68 @@ impl Vm {
                                 }
                             }
                             let raw_val = raw_val_opt.unwrap_or(Value::Null);
-                            // Check if this is an enum case marker
+                            // Check if this is a deferred (unresolved) constant marker
+                            if let Value::String(s) = &raw_val {
+                                if s.as_bytes().starts_with(b"__deferred_const__::") {
+                                    let rest = &s.as_bytes()[b"__deferred_const__::".len()..];
+                                    // Try to resolve it now
+                                    let resolved_val = if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                        let ref_class = &rest[..sep_pos];
+                                        let ref_const = &rest[sep_pos + 2..];
+                                        let ref_class_lower: Vec<u8> = ref_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if ref_class_lower == class_lower {
+                                            self.classes.get(&class_lower).and_then(|c| c.constants.get(ref_const).cloned())
+                                        } else {
+                                            self.classes.get(&ref_class_lower).and_then(|c| c.constants.get(ref_const).cloned())
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    if resolved_val.is_none() || matches!(resolved_val, Some(Value::String(ref rs)) if rs.as_bytes().starts_with(b"__deferred_const__::")) {
+                                        // Still unresolved - throw Undefined constant error
+                                        // Parse "ClassName::ConstName" from the marker for a clean error message
+                                        let rest_str = String::from_utf8_lossy(&s.as_bytes()[b"__deferred_const__::".len()..]).to_string();
+                                        let err_msg = format!("Undefined constant {}", rest_str);
+                                        let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                                    }
+                                    let final_val = resolved_val.unwrap();
+                                    self.write_operand(&op.result, final_val, &mut cvs, &mut tmps, &static_cv_keys);
+                                    ip += 1;
+                                    continue;
+                                }
+                            }
+                            // Check if constant is an array with unresolved deferred spread markers (circular refs)
+                            if let Value::Array(arr_rc) = &raw_val {
+                                let spread_err: Option<String> = arr_rc.borrow().iter().find_map(|(_, v)| {
+                                    if let Value::String(s) = v {
+                                        if s.as_bytes().starts_with(b"__deferred_spread__::") {
+                                            let rest = &s.as_bytes()[b"__deferred_spread__::".len()..];
+                                            if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                                let ref_const = &rest[sep_pos + 2..];
+                                                let const_display = String::from_utf8_lossy(ref_const).to_string();
+                                                return Some(format!("Cannot declare self-referencing constant self::{}", const_display));
+                                            }
+                                        }
+                                    }
+                                    None
+                                });
+                                if let Some(err_msg) = spread_err {
+                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                                }
+                            }
+                            // Re-check raw_val after deferred resolution
                             if let Value::String(s) = &raw_val {
                                 if s.as_bytes().starts_with(b"__enum_case__::") {
                                     // Extract the case name from the marker
@@ -13933,9 +14316,21 @@ impl Vm {
                                 raw_val
                             }
                         } else {
-                            // Check built-in class constants
-                            self.get_builtin_class_constant(&class_lower, prop_name.as_bytes())
-                                .unwrap_or(Value::Null)
+                            // Check built-in class constants first
+                            if let Some(builtin_val) = self.get_builtin_class_constant(&class_lower, prop_name.as_bytes()) {
+                                builtin_val
+                            } else {
+                                // Class not found - throw Error
+                                let class_display = String::from_utf8_lossy(&resolved_class);
+                                let err_msg = format!("Class \"{}\" not found", class_display);
+                                let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                            }
                         };
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     }
@@ -14002,6 +14397,13 @@ impl Vm {
                         None
                     };
                     if let Some(val) = val {
+                        // Emit deprecation for E_STRICT (deprecated since PHP 8.4)
+                        if name_bytes == b"E_STRICT" {
+                            self.emit_deprecated_at(
+                                "Constant E_STRICT is deprecated since 8.4, the error level was removed",
+                                op.line,
+                            );
+                        }
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
                         // PHP 8: undefined constants are fatal errors
@@ -14078,10 +14480,9 @@ impl Vm {
                                     self.current_file = abs_path.clone();
                                     match compiler.compile(&program) {
                                         Ok((inc_op_array, inc_classes)) => {
-                                            // Register classes from included file
-                                            for class in inc_classes {
-                                                self.pending_classes.push(class);
-                                            }
+                                            // Swap pending_classes so DeclareClass indices from this
+                                            // compilation are relative to 0 (not the global list)
+                                            let saved_pending = std::mem::replace(&mut self.pending_classes, inc_classes);
                                             // Execute included file's op_array, sharing caller's scope
                                             let mut inc_cvs =
                                                 vec![Value::Undef; inc_op_array.cv_names.len()];
@@ -14114,6 +14515,9 @@ impl Vm {
                                                 Ok(v) => v,
                                                 Err(_) => Value::False,
                                             };
+
+                                            // Restore outer pending_classes
+                                            self.pending_classes = saved_pending;
 
                                             if self.is_global_scope {
                                                 // After include, refresh caller's CVs from globals
@@ -14201,9 +14605,8 @@ impl Vm {
                                 compiler.source_file = eval_file.into_bytes();
                                 match compiler.compile(&program) {
                                     Ok((eval_op_array, eval_classes)) => {
-                                        for class in eval_classes {
-                                            self.pending_classes.push(class);
-                                        }
+                                        // Swap pending_classes so DeclareClass indices are relative to 0
+                                        let eval_saved_pending = std::mem::replace(&mut self.pending_classes, eval_classes);
                                         // Eval shares the calling scope's variables
                                         let mut eval_cvs = vec![Value::Undef; eval_op_array.cv_names.len()];
 
@@ -14231,10 +14634,15 @@ impl Vm {
                                             }
                                         }
 
+                                        // Set current file to eval's filename for correct error messages
+                                        let saved_file = self.current_file.clone();
+                                        self.current_file = format!("{} : eval()'d code", saved_file);
                                         let eval_result = match self.execute_op_array(&eval_op_array, eval_cvs) {
                                             Ok(v) => v,
                                             Err(e) => {
                                                 // Propagate errors from eval
+                                                self.current_file = saved_file;
+                                                self.pending_classes = eval_saved_pending;
                                                 if self.current_exception.is_some() {
                                                     if let Some((catch_target, _, _)) = exception_handlers.last() {
                                                         ip = *catch_target as usize;
@@ -14245,6 +14653,10 @@ impl Vm {
                                                 return Err(e);
                                             }
                                         };
+                                        self.current_file = saved_file;
+
+                                        // Restore outer pending_classes
+                                        self.pending_classes = eval_saved_pending;
 
                                         if self.is_global_scope {
                                             // After eval, refresh caller's CVs from globals
@@ -14705,7 +15117,17 @@ impl Vm {
 
                 OpCode::SaveReturn => {
                     // Save return value for deferred return (finally blocks)
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // Use raw read for CVs to preserve Reference wrapper (for by-ref returns)
+                    let val = if matches!(&op.op1, OperandType::Cv(_)) {
+                        let raw = Self::read_operand_raw(&cvs, &op.op1);
+                        if matches!(raw, Value::Undef) {
+                            Value::Null
+                        } else {
+                            raw
+                        }
+                    } else {
+                        self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                    };
                     self.pending_return = Some(val);
                     // A return inside try-with-finally discards any pending jump
                     self.pending_finally_jump = None;
@@ -14723,8 +15145,47 @@ impl Vm {
                 }
 
                 OpCode::ReturnDeferred => {
-                    // If there's a pending return, execute it now
+                    // op1 encodes the finally_start (the start offset of the finally block we just executed)
+                    let this_finally_start = if let OperandType::JmpTarget(fs) = op.op1 {
+                        fs
+                    } else {
+                        0
+                    };
+                    // If there's a pending return, chain through outer finally blocks if any
                     if let Some(val) = self.pending_return.take() {
+                        // Pop exception handlers that correspond to this finally block.
+                        // When SaveReturn+Jmp jumps to the finally, TryEnd was skipped, so
+                        // the handler for this finally's try block is still on the stack.
+                        // That handler has finally_target == this_finally_start.
+                        // Pop all handlers up to and including the one for this finally's try block.
+                        if this_finally_start > 0 {
+                            while let Some(&(_catch_target, finally_target, _)) = exception_handlers.last() {
+                                exception_handlers.pop();
+                                if finally_target == this_finally_start {
+                                    // Found and popped the handler for the current finally's try block
+                                    break;
+                                }
+                                // Popped a non-matching inner handler (e.g., catch-only nested try)
+                            }
+                        }
+                        // Now look for an outer finally block to chain through
+                        let mut outer_finally: Option<u32> = None;
+                        while let Some(&(_catch_target, finally_target, _)) = exception_handlers.last() {
+                            if finally_target > 0 {
+                                outer_finally = Some(finally_target);
+                                exception_handlers.pop();
+                                break;
+                            } else {
+                                exception_handlers.pop();
+                            }
+                        }
+                        if let Some(finally_ip) = outer_finally {
+                            // There's an outer finally - chain to it with the pending return
+                            self.pending_return = Some(val);
+                            ip = finally_ip as usize;
+                            continue;
+                        }
+                        // No outer finally - return the value now
                         return Ok(val);
                     }
                     // If there's a pending jump (deferred break/continue), execute it now
@@ -14732,7 +15193,7 @@ impl Vm {
                         ip = target as usize;
                         continue;
                     }
-                    // If there's a pending exception, re-throw it
+                    // If there's a pending exception, re-throw it through outer handlers
                     if self.current_exception.is_some() {
                         // Try to find an outer exception handler
                         if let Some((catch_target, finally_target, _exc_tmp)) = exception_handlers.pop() {
@@ -14857,25 +15318,253 @@ impl Vm {
                 }
 
                 OpCode::ArraySpread => {
-                    // Spread source array elements into target array
-                    let target_val = match &op.op1 {
-                        OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned(),
-                        OperandType::Cv(idx) => cvs.get(*idx as usize).cloned(),
-                        _ => None,
-                    };
-                    let source = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    if let (Some(Value::Array(target)), Value::Array(source_arr)) =
-                        (target_val, source)
-                    {
-                        let source_borrow = source_arr.borrow();
-                        let mut target_borrow = target.borrow_mut();
-                        for (key, val) in source_borrow.iter() {
-                            match key {
-                                ArrayKey::Int(_) => {
-                                    target_borrow.push(val.clone());
+                    // Spread source array/traversable/generator elements into target array.
+                    // Returns Err(msg) for invalid types or bad keys; sets current_exception
+                    // if a Traversable method threw.
+                    let target_op = op.op1.clone();
+                    let source = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, &op_array, op.line);
+
+                    let collected: Result<Vec<(ArrayKey, Value)>, String> = match &source {
+                        Value::Array(source_arr) => {
+                            let source_borrow = source_arr.borrow();
+                            Ok(source_borrow.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                        }
+                        Value::Generator(gen_rc) => {
+                            let gen_clone = gen_rc.clone();
+                            let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
+                            let mut spread_err: Option<String> = None;
+                            // Resume to first yield
+                            {
+                                let state = gen_clone.borrow().state.clone();
+                                if state == crate::generator::GeneratorState::Created {
+                                    let mut gb = gen_clone.borrow_mut();
+                                    if gb.resume(self).is_err() {
+                                        // Generator threw - current_exception is set
+                                        spread_err = Some(String::new()); // marker
+                                    }
                                 }
-                                ArrayKey::String(s) => {
-                                    target_borrow.set(ArrayKey::String(s.clone()), val.clone());
+                            }
+                            if spread_err.is_none() {
+                                loop {
+                                    let state = gen_clone.borrow().state.clone();
+                                    if state == crate::generator::GeneratorState::Completed {
+                                        break;
+                                    }
+                                    let (key_val, yielded_val) = {
+                                        let gb = gen_clone.borrow();
+                                        (gb.current_key.clone(), gb.current_value.clone())
+                                    };
+                                    let arr_key = match &key_val {
+                                        Value::Long(n) => ArrayKey::Int(*n),
+                                        Value::String(s) => {
+                                            // Numeric string keys become int keys
+                                            let s_str = s.to_string_lossy();
+                                            if let Ok(n) = s_str.parse::<i64>() {
+                                                ArrayKey::Int(n)
+                                            } else {
+                                                ArrayKey::String(s.clone())
+                                            }
+                                        }
+                                        _ => {
+                                            spread_err = Some("Keys must be of type int|string during array unpacking".to_string());
+                                            break;
+                                        }
+                                    };
+                                    pairs.push((arr_key, yielded_val));
+                                    let mut gb = gen_clone.borrow_mut();
+                                    gb.write_send_value();
+                                    match gb.resume(self) {
+                                        Ok(_) => {}
+                                        Err(_) => {
+                                            // Generator threw - current_exception is set
+                                            drop(gb);
+                                            spread_err = Some(String::new()); // marker
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            match spread_err {
+                                Some(e) if !e.is_empty() => Err(e),
+                                Some(_) => Err(String::new()), // exception already set
+                                None => Ok(pairs),
+                            }
+                        }
+                        Value::Object(obj_rc) => {
+                            let class_lower: Vec<u8> = obj_rc.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let inner_arr = {
+                                let obj = obj_rc.borrow();
+                                let prop = obj.get_property(b"__spl_array");
+                                if matches!(prop, Value::Array(_)) { Some(prop) } else { None }
+                            };
+                            if let Some(Value::Array(arr)) = inner_arr {
+                                let arr = arr.borrow();
+                                // Validate keys from SPL array
+                                let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
+                                let mut spread_err: Option<String> = None;
+                                for (k, v) in arr.iter() {
+                                    pairs.push((k.clone(), v.clone()));
+                                }
+                                if let Some(e) = spread_err { Err(e) } else { Ok(pairs) }
+                            } else if self.class_implements_interface(&class_lower, b"iteratoraggregate") {
+                                // IteratorAggregate: call getIterator() which may throw
+                                let iter_val = self.call_object_method(&source, b"getIterator", &[]);
+                                if self.current_exception.is_some() {
+                                    Err(String::new()) // exception already set
+                                } else if let Some(iter_obj) = iter_val {
+                                    // Use the returned iterator
+                                    self.call_object_method(&iter_obj, b"rewind", &[]);
+                                    if self.current_exception.is_some() {
+                                        Err(String::new()) // exception during rewind
+                                    } else {
+                                        let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
+                                        let mut spread_err: Option<String> = None;
+                                        loop {
+                                            if self.current_exception.is_some() { spread_err = Some(String::new()); break; }
+                                            let valid = self.call_object_method(&iter_obj, b"valid", &[]).unwrap_or(Value::False);
+                                            if self.current_exception.is_some() { spread_err = Some(String::new()); break; }
+                                            if !valid.is_truthy() { break; }
+                                            let cur_val = self.call_object_method(&iter_obj, b"current", &[]).unwrap_or(Value::Null);
+                                            if self.current_exception.is_some() { spread_err = Some(String::new()); break; }
+                                            let key_val = self.call_object_method(&iter_obj, b"key", &[]).unwrap_or(Value::Null);
+                                            if self.current_exception.is_some() { spread_err = Some(String::new()); break; }
+                                            let arr_key = match &key_val {
+                                                Value::Long(n) => ArrayKey::Int(*n),
+                                                Value::String(s) => {
+                                                    let s_str = s.to_string_lossy();
+                                                    if let Ok(n) = s_str.parse::<i64>() { ArrayKey::Int(n) } else { ArrayKey::String(s.clone()) }
+                                                }
+                                                _ => { spread_err = Some("Keys must be of type int|string during array unpacking".to_string()); break; }
+                                            };
+                                            pairs.push((arr_key, cur_val));
+                                            self.call_object_method(&iter_obj, b"next", &[]);
+                                        }
+                                        match spread_err {
+                                            Some(e) if !e.is_empty() => Err(e),
+                                            Some(_) => Err(String::new()),
+                                            None => Ok(pairs),
+                                        }
+                                    }
+                                } else {
+                                    Ok(Vec::new())
+                                }
+                            } else if self.class_implements_interface(&class_lower, b"traversable")
+                                || self.class_implements_interface(&class_lower, b"iterator")
+                            {
+                                self.call_object_method(&source, b"rewind", &[]);
+                                if self.current_exception.is_some() {
+                                    Err(String::new()) // exception during rewind
+                                } else {
+                                    let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
+                                    let mut spread_err: Option<String> = None;
+                                    loop {
+                                        if self.current_exception.is_some() { spread_err = Some(String::new()); break; }
+                                        let valid = self.call_object_method(&source, b"valid", &[]).unwrap_or(Value::False);
+                                        if self.current_exception.is_some() { spread_err = Some(String::new()); break; }
+                                        if !valid.is_truthy() { break; }
+                                        let cur_val = self.call_object_method(&source, b"current", &[]).unwrap_or(Value::Null);
+                                        if self.current_exception.is_some() { spread_err = Some(String::new()); break; }
+                                        let key_val = self.call_object_method(&source, b"key", &[]).unwrap_or(Value::Null);
+                                        if self.current_exception.is_some() { spread_err = Some(String::new()); break; }
+                                        let arr_key = match &key_val {
+                                            Value::Long(n) => ArrayKey::Int(*n),
+                                            Value::String(s) => {
+                                                let s_str = s.to_string_lossy();
+                                                if let Ok(n) = s_str.parse::<i64>() { ArrayKey::Int(n) } else { ArrayKey::String(s.clone()) }
+                                            }
+                                            _ => { spread_err = Some("Keys must be of type int|string during array unpacking".to_string()); break; }
+                                        };
+                                        pairs.push((arr_key, cur_val));
+                                        self.call_object_method(&source, b"next", &[]);
+                                    }
+                                    match spread_err {
+                                        Some(e) if !e.is_empty() => Err(e),
+                                        Some(_) => Err(String::new()),
+                                        None => Ok(pairs),
+                                    }
+                                }
+                            } else {
+                                let type_name = Self::value_type_name(&source);
+                                Err(format!("Only arrays and Traversables can be unpacked, {} given", type_name))
+                            }
+                        }
+                        _ => {
+                            let type_name = Self::value_type_name(&source);
+                            Err(format!("Only arrays and Traversables can be unpacked, {} given", type_name))
+                        }
+                    };
+
+                    match collected {
+                        Err(ref e) if e.is_empty() => {
+                            // Exception already set by a method call; propagate it
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                    let ob = obj.borrow();
+                                    let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                    format!("Uncaught {}: {}", class, msg)
+                                } else {
+                                    "Uncaught exception".to_string()
+                                };
+                                return Err(VmError { message: exc_msg, line: op.line });
+                            }
+                        }
+                        Err(e) => {
+                            let exc_class: &[u8] = if e.starts_with("Only arrays") {
+                                b"Error"
+                            } else {
+                                b"Error"
+                            };
+                            let exc_val = self.create_exception(exc_class, &e, op.line);
+                            self.current_exception = Some(exc_val);
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", e),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        Ok(pairs) => {
+                            let target_val = match &target_op {
+                                OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned(),
+                                OperandType::Cv(idx) => cvs.get(*idx as usize).cloned(),
+                                _ => None,
+                            };
+                            if let Some(Value::Array(target)) = target_val {
+                                let mut target_borrow = target.borrow_mut();
+                                let mut occupied_err: Option<String> = None;
+                                for (key, val) in pairs {
+                                    match key {
+                                        ArrayKey::Int(_) => {
+                                            if let Err(e) = target_borrow.try_push(val) {
+                                                occupied_err = Some(e.to_string());
+                                                break;
+                                            }
+                                        }
+                                        ArrayKey::String(s) => {
+                                            target_borrow.set(ArrayKey::String(s), val);
+                                        }
+                                    }
+                                }
+                                if let Some(err_msg) = occupied_err {
+                                    drop(target_borrow);
+                                    let exc_val = self.create_exception(b"Error", &err_msg, op.line);
+                                    self.current_exception = Some(exc_val);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        return Err(VmError {
+                                            message: format!("Uncaught Error: {}", err_msg),
+                                            line: op.line,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -15156,10 +15845,28 @@ impl Vm {
                                 class.properties = new_props;
                                 // Inherit constants
                                 for (const_name, const_val) in &parent.constants {
-                                    if !class.constants.contains_key(const_name) {
+                                    if class.constants.contains_key(const_name) {
+                                        // Child overrides parent constant - check if parent's is final
+                                        if let Some(meta) = parent.constants_meta.get(const_name) {
+                                            if meta.is_final {
+                                                let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                                let const_display = String::from_utf8_lossy(const_name).to_string();
+                                                return Err(VmError {
+                                                    message: format!("{}::{} cannot override final constant {}::{}",
+                                                        child_display, const_display, parent_display, const_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                    } else {
                                         class
                                             .constants
                                             .insert(const_name.clone(), const_val.clone());
+                                        // Also inherit the meta
+                                        if let Some(meta) = parent.constants_meta.get(const_name) {
+                                            class.constants_meta.insert(const_name.clone(), meta.clone());
+                                        }
                                     }
                                 }
                                 // Inherit static properties
@@ -15218,10 +15925,27 @@ impl Vm {
                                 }
                                 // Inherit interface constants
                                 for (const_name, const_val) in &iface.constants {
-                                    if !class.constants.contains_key(const_name) {
+                                    if class.constants.contains_key(const_name) {
+                                        // Child overrides interface constant - check if interface's is final
+                                        if let Some(meta) = iface.constants_meta.get(const_name) {
+                                            if meta.is_final {
+                                                let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let iface_display = String::from_utf8_lossy(iface_name).to_string();
+                                                let const_display = String::from_utf8_lossy(const_name).to_string();
+                                                return Err(VmError {
+                                                    message: format!("{}::{} cannot override final constant {}::{}",
+                                                        child_display, const_display, iface_display, const_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                    } else {
                                         class
                                             .constants
                                             .insert(const_name.clone(), const_val.clone());
+                                        if let Some(meta) = iface.constants_meta.get(const_name) {
+                                            class.constants_meta.insert(const_name.clone(), meta.clone());
+                                        }
                                     }
                                 }
                                 // Inherit interface's parent interfaces
@@ -15469,46 +16193,51 @@ impl Vm {
                                 }
                             }
                             if !abstract_methods.is_empty() {
-                                let class_name_str =
-                                    String::from_utf8_lossy(&name_val.to_php_string().as_bytes())
-                                        .to_string();
-                                let class_name_lower_str: Vec<u8> = class_name_str.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                                let class_name_raw = name_val.to_php_string().as_bytes().to_vec();
+                                // Use display name (strips NUL suffix for anonymous classes)
+                                let class_name_str = crate::value::display_class_name(&class_name_raw);
+                                let class_name_lower_str: Vec<u8> = class_name_raw.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let is_anonymous = class_name_raw.contains(&b'\x00');
                                 let count = abstract_methods.len();
                                 abstract_methods.sort();
                                 let methods_list = abstract_methods.join(", ");
                                 let method_word = if count == 1 { "method" } else { "methods" };
                                 // Check if the abstract method was declared by this class itself
                                 // (not inherited from parent/interface)
-                                let mut self_declared_abstract = Vec::new();
+                                let mut self_declared_abstract: Vec<(String, u32)> = Vec::new();
                                 for (_, method) in &class.methods {
                                     if method.is_abstract && method.declaring_class == class_name_lower_str {
-                                        self_declared_abstract.push(
-                                            String::from_utf8_lossy(&method.name).to_string()
-                                        );
+                                        self_declared_abstract.push((
+                                            String::from_utf8_lossy(&method.name).to_string(),
+                                            method.op_array.decl_line,
+                                        ));
                                     }
                                 }
                                 let kind = if class.is_enum { "Enum" } else { "Class" };
-                                let msg = if class.is_enum {
+                                let (msg, err_line) = if class.is_enum {
                                     // Enums use a different message format
-                                    format!(
+                                    (format!(
                                         "Enum {} must implement {} abstract {} ({})",
                                         class_name_str, count, method_word, methods_list
-                                    )
-                                } else if !self_declared_abstract.is_empty() && self_declared_abstract.len() == count {
-                                    // All abstract methods are self-declared
-                                    format!(
-                                        "{} {} declares abstract method {}() and must therefore be declared abstract",
-                                        kind, class_name_str, self_declared_abstract[0]
-                                    )
+                                    ), op.line)
+                                } else if is_anonymous && !self_declared_abstract.is_empty() {
+                                    // Anonymous class with explicitly declared abstract methods
+                                    // Use the line of the abstract method declaration
+                                    let method_line = self_declared_abstract[0].1;
+                                    (format!(
+                                        "Anonymous class method {}() must not be abstract",
+                                        self_declared_abstract[0].0
+                                    ), if method_line > 0 { method_line } else { op.line })
                                 } else {
-                                    format!(
-                                        "{} {} contains {} abstract {} and must therefore be declared abstract or implement the remaining {} ({})",
-                                        kind, class_name_str, count, method_word, method_word, methods_list
-                                    )
+                                    // PHP 8 format: "Class X must implement N abstract method(s) (methods)"
+                                    (format!(
+                                        "{} {} must implement {} abstract {} ({})",
+                                        kind, class_name_str, count, method_word, methods_list
+                                    ), op.line)
                                 };
                                 return Err(VmError {
                                     message: msg,
-                                    line: op.line,
+                                    line: err_line,
                                 });
                             }
                         }
@@ -15531,47 +16260,117 @@ impl Vm {
                         }
 
                         // Resolve deferred constant references (self::CONST, ClassName::CONST)
-                        // in class constants
-                        let const_keys: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
-                        for const_name in const_keys {
-                            if let Some(Value::String(s)) = class.constants.get(&const_name) {
-                                let s_bytes = s.as_bytes();
-                                if s_bytes.starts_with(b"__deferred_const__::") {
-                                    let rest = &s_bytes[b"__deferred_const__::".len()..];
-                                    // Parse ClassName::CONSTANT_NAME
-                                    if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
-                                        let ref_class_name = &rest[..sep_pos];
-                                        let ref_const_name = &rest[sep_pos + 2..];
-                                        let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        // Look up the constant in the referenced class or current class
-                                        let resolved = if ref_class_lower == name_lower.as_slice() {
-                                            // self:: reference to same class
-                                            class.constants.get(ref_const_name).cloned()
-                                        } else if let Some(ref_class) = self.classes.get(&ref_class_lower) {
-                                            ref_class.constants.get(ref_const_name).cloned()
-                                        } else {
-                                            None
-                                        };
-                                        if let Some(val) = resolved {
-                                            // If the resolved value is itself an enum case marker, resolve it
-                                            if let Value::String(s2) = &val {
-                                                if s2.as_bytes().starts_with(b"__enum_case__::") {
-                                                    let case_name = &s2.as_bytes()[15..];
-                                                    if let Some(enum_obj) = self.get_enum_case(&ref_class_lower, case_name) {
-                                                        class.constants.insert(const_name, enum_obj);
+                        // in class constants (multiple passes to handle chains)
+                        for _pass in 0..10 {
+                            let const_keys: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
+                            let mut any_resolved = false;
+                            for const_name in const_keys {
+                                if let Some(Value::String(s)) = class.constants.get(&const_name) {
+                                    let s_bytes = s.as_bytes();
+                                    if s_bytes.starts_with(b"__deferred_const__::") {
+                                        let rest = &s_bytes[b"__deferred_const__::".len()..];
+                                        // Parse ClassName::CONSTANT_NAME
+                                        if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                            let ref_class_name = &rest[..sep_pos];
+                                            let ref_const_name = &rest[sep_pos + 2..];
+                                            let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            // Look up the constant in the referenced class or current class
+                                            let resolved = if ref_class_lower == name_lower.as_slice() {
+                                                // self:: reference to same class
+                                                class.constants.get(ref_const_name).cloned()
+                                            } else if let Some(ref_class) = self.classes.get(&ref_class_lower) {
+                                                ref_class.constants.get(ref_const_name).cloned()
+                                            } else {
+                                                None
+                                            };
+                                            if let Some(val) = resolved {
+                                                // Only store if the resolved value is NOT itself a deferred marker
+                                                // (to avoid storing circular references as resolved)
+                                                let is_still_deferred = matches!(&val, Value::String(s2) if s2.as_bytes().starts_with(b"__deferred_const__::"));
+                                                if !is_still_deferred {
+                                                    // If the resolved value is itself an enum case marker, resolve it
+                                                    if let Value::String(s2) = &val {
+                                                        if s2.as_bytes().starts_with(b"__enum_case__::") {
+                                                            let case_name = &s2.as_bytes()[15..];
+                                                            if let Some(enum_obj) = self.get_enum_case(&ref_class_lower, case_name) {
+                                                                class.constants.insert(const_name, enum_obj);
+                                                            } else {
+                                                                class.constants.insert(const_name, val);
+                                                            }
+                                                        } else {
+                                                            class.constants.insert(const_name, val);
+                                                        }
                                                     } else {
                                                         class.constants.insert(const_name, val);
                                                     }
-                                                } else {
-                                                    class.constants.insert(const_name, val);
+                                                    any_resolved = true;
                                                 }
-                                            } else {
-                                                class.constants.insert(const_name, val);
                                             }
                                         }
                                     }
                                 }
                             }
+                            if !any_resolved {
+                                break;
+                            }
+                        }
+                        // After all resolution passes, check for remaining unresolved deferred constants
+                        // These are either circular references or references to undefined constants
+                        let mut deferred_error: Option<String> = None;
+                        {
+                            let const_keys: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
+                            // First, check for truly undefined constants (referenced constant doesn't exist)
+                            'deferred_check: for const_name in const_keys {
+                                if let Some(Value::String(s)) = class.constants.get(&const_name) {
+                                    let s_bytes = s.as_bytes();
+                                    if s_bytes.starts_with(b"__deferred_const__::") {
+                                        let rest = &s_bytes[b"__deferred_const__::".len()..];
+                                        // Parse ClassName::CONSTANT_NAME
+                                        if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                            let ref_class = &rest[..sep_pos];
+                                            let ref_const = &rest[sep_pos + 2..];
+                                            let ref_class_lower: Vec<u8> = ref_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            // Determine: does the referenced constant exist at all?
+                                            let ref_exists = if ref_class_lower == name_lower.as_slice() {
+                                                class.constants.contains_key(ref_const)
+                                            } else {
+                                                self.classes.get(&ref_class_lower).map(|c| c.constants.contains_key(ref_const)).unwrap_or(false)
+                                            };
+                                            // Is the referenced constant itself still a deferred marker (circular)?
+                                            let ref_still_deferred = if ref_class_lower == name_lower.as_slice() {
+                                                matches!(class.constants.get(ref_const), Some(Value::String(rs)) if rs.as_bytes().starts_with(b"__deferred_const__::"))
+                                            } else {
+                                                false
+                                            };
+                                            let err_msg = if ref_exists && ref_still_deferred {
+                                                // Circular reference: A = self::B, B = self::A
+                                                // PHP reports the name of the referenced constant
+                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let const_display = String::from_utf8_lossy(ref_const).to_string();
+                                                format!("Cannot declare self-referencing constant self::{}", const_display)
+                                            } else if !ref_exists {
+                                                // Completely undefined constant
+                                                let ref_str = String::from_utf8_lossy(rest).to_string();
+                                                format!("Undefined constant {}", ref_str)
+                                            } else {
+                                                // Reference to external class constant that is still deferred - skip for now
+                                                continue;
+                                            };
+                                            deferred_error = Some(err_msg);
+                                            break 'deferred_check;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(err_msg) = deferred_error {
+                            let exc = self.create_exception(b"Error", &err_msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
                         }
                         // Resolve deferred constant references inside array values in class constants
                         let const_keys_arr: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
@@ -15623,6 +16422,128 @@ impl Vm {
                                 }
                             }
                         }
+                        // Resolve deferred spread markers in class constant arrays.
+                        // __deferred_spread__::ClassName::CONST means: expand the referenced array at this position.
+                        {
+                            let const_keys_spread: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
+                            for const_name in const_keys_spread {
+                                if let Some(Value::Array(arr_rc)) = class.constants.get(&const_name) {
+                                    let has_spread = arr_rc.borrow().iter().any(|(_, v)| {
+                                        matches!(v, Value::String(s) if s.as_bytes().starts_with(b"__deferred_spread__::"))
+                                    });
+                                    if has_spread {
+                                        // Rebuild the array expanding any spread markers.
+                                        // For spread elements: int keys from source are re-keyed via push (auto-increment);
+                                        // string keys from source are preserved via set.
+                                        // For regular elements: preserve their original key.
+                                        let old_entries: Vec<(crate::array::ArrayKey, Value)> = arr_rc.borrow().iter()
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect();
+                                        let mut new_arr = crate::array::PhpArray::new();
+                                        for (key, val) in old_entries {
+                                            if let Value::String(ref s) = val {
+                                                let s_bytes = s.as_bytes();
+                                                if s_bytes.starts_with(b"__deferred_spread__::") {
+                                                    let rest = &s_bytes[b"__deferred_spread__::".len()..];
+                                                    if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                                        let ref_class_name = &rest[..sep_pos];
+                                                        let ref_const_name = &rest[sep_pos + 2..];
+                                                        let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                        let resolved = if ref_class_lower == name_lower.as_slice() {
+                                                            class.constants.get(ref_const_name).cloned()
+                                                        } else if let Some(ref_class) = self.classes.get(&ref_class_lower) {
+                                                            ref_class.constants.get(ref_const_name).cloned()
+                                                        } else {
+                                                            None
+                                                        };
+                                                        if let Some(Value::Array(src_arr)) = resolved {
+                                                            for (src_key, src_val) in src_arr.borrow().iter() {
+                                                                match src_key {
+                                                                    crate::array::ArrayKey::Int(_) => { new_arr.push(src_val.clone()); }
+                                                                    crate::array::ArrayKey::String(_) => { new_arr.set(src_key.clone(), src_val.clone()); }
+                                                                }
+                                                            }
+                                                            continue;
+                                                        }
+                                                    }
+                                                    // Could not resolve: keep as-is
+                                                    match key {
+                                                        crate::array::ArrayKey::Int(_) => { new_arr.push(val); }
+                                                        crate::array::ArrayKey::String(_) => { new_arr.set(key, val); }
+                                                    }
+                                                    continue;
+                                                }
+                                            }
+                                            // Regular element: use push for int keys, set for string keys
+                                            match key {
+                                                crate::array::ArrayKey::Int(_) => { new_arr.push(val); }
+                                                crate::array::ArrayKey::String(_) => { new_arr.set(key, val); }
+                                            }
+                                        }
+                                        class.constants.insert(const_name, Value::Array(std::rc::Rc::new(std::cell::RefCell::new(new_arr))));
+                                    }
+                                }
+                            }
+                        }
+                        // Also resolve deferred spreads in static properties
+                        {
+                            let static_keys_spread: Vec<Vec<u8>> = class.static_properties.keys().cloned().collect();
+                            for prop_name in static_keys_spread {
+                                if let Some(Value::Array(arr_rc)) = class.static_properties.get(&prop_name) {
+                                    let has_spread = arr_rc.borrow().iter().any(|(_, v)| {
+                                        matches!(v, Value::String(s) if s.as_bytes().starts_with(b"__deferred_spread__::"))
+                                    });
+                                    if has_spread {
+                                        let old_entries: Vec<(crate::array::ArrayKey, Value)> = arr_rc.borrow().iter()
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect();
+                                        let mut new_arr = crate::array::PhpArray::new();
+                                        for (key, val) in old_entries {
+                                            if let Value::String(ref s) = val {
+                                                let s_bytes = s.as_bytes();
+                                                if s_bytes.starts_with(b"__deferred_spread__::") {
+                                                    let rest = &s_bytes[b"__deferred_spread__::".len()..];
+                                                    if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
+                                                        let ref_class_name = &rest[..sep_pos];
+                                                        let ref_const_name = &rest[sep_pos + 2..];
+                                                        let ref_class_lower: Vec<u8> = ref_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                        let resolved = if ref_class_lower == name_lower.as_slice() {
+                                                            class.constants.get(ref_const_name).cloned()
+                                                        } else if let Some(ref_class) = self.classes.get(&ref_class_lower) {
+                                                            ref_class.constants.get(ref_const_name).cloned()
+                                                        } else {
+                                                            None
+                                                        };
+                                                        if let Some(Value::Array(src_arr)) = resolved {
+                                                            for (src_key, src_val) in src_arr.borrow().iter() {
+                                                                match src_key {
+                                                                    crate::array::ArrayKey::Int(_) => { new_arr.push(src_val.clone()); }
+                                                                    crate::array::ArrayKey::String(_) => { new_arr.set(src_key.clone(), src_val.clone()); }
+                                                                }
+                                                            }
+                                                            continue;
+                                                        }
+                                                    }
+                                                    match key {
+                                                        crate::array::ArrayKey::Int(_) => { new_arr.push(val); }
+                                                        crate::array::ArrayKey::String(_) => { new_arr.set(key, val); }
+                                                    }
+                                                    continue;
+                                                }
+                                            }
+                                            match key {
+                                                crate::array::ArrayKey::Int(_) => { new_arr.push(val); }
+                                                crate::array::ArrayKey::String(_) => { new_arr.set(key, val); }
+                                            }
+                                        }
+                                        class.static_properties.insert(prop_name, Value::Array(std::rc::Rc::new(std::cell::RefCell::new(new_arr))));
+                                    }
+                                }
+                            }
+                        }
+                        // Check for unresolved deferred spread markers in arrays (circular references)
+                        // Circular spread detection is deferred to first constant access (StaticPropGet)
+                        // so that the error can be caught by try/catch blocks around constant accesses.
                         // Resolve deferred binary operation expressions in class constants
                         let const_keys2: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
                         for const_name in const_keys2 {
@@ -15741,8 +16662,10 @@ impl Vm {
                             | b"closure" | b"arrayobject" | b"arrayiterator"
                             | b"__php_incomplete_class"
                         );
+                        // Anonymous class names contain a NUL byte separator (\0)
+                        let is_anonymous_class = class.name.contains(&b'\x00');
                         if (self.classes.contains_key(&name_lower) || is_builtin_class)
-                            && !class.name.starts_with(b"class@anonymous")
+                            && !is_anonymous_class
                         {
                             // Use the canonical (original case) name from the existing class or builtin table
                             let canonical = if let Some(existing) = self.classes.get(&name_lower) {
@@ -15863,8 +16786,15 @@ impl Vm {
                         }
                     }
 
-                    let obj_id = self.next_object_id;
-                    self.next_object_id += 1;
+                    // Recycle the old object ID from the result slot before allocating a new one
+                    // This ensures that when the same temp is reused, the previous object's ID
+                    // becomes available before we alloc a new one.
+                    if let OperandType::Tmp(idx) = &op.result {
+                        if let Some(old_val) = tmps.get(*idx as usize) {
+                            self.maybe_recycle_object_id(old_val);
+                        }
+                    }
+                    let obj_id = self.alloc_object_id();
 
                     // Use canonical class name from class table if available,
                     // or normalize well-known class names
@@ -17651,6 +18581,8 @@ impl Vm {
             }
             OperandType::Tmp(idx) => {
                 if let Some(slot) = tmps.get_mut(*idx as usize) {
+                    // Recycle object ID before overwriting (if only ref remaining)
+                    self.maybe_recycle_object_id(slot);
                     *slot = value;
                 }
             }

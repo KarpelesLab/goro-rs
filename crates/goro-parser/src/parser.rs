@@ -1945,10 +1945,11 @@ impl Parser {
                                 name: extra_name,
                                 value: extra_value,
                                 visibility,
+                                is_final,
                             });
                         }
                         self.expect_semicolon()?;
-                        return Ok(ClassMember::ClassConstant { name, value, visibility });
+                        return Ok(ClassMember::ClassConstant { name, value, visibility, is_final });
                     }
                     TokenKind::OpenParen => {
                         // DNF type hint: (A&B)|null CONST = value
@@ -2006,10 +2007,11 @@ impl Parser {
                                 name: extra_name,
                                 value: extra_value,
                                 visibility,
+                                is_final,
                             });
                         }
                         self.expect_semicolon()?;
-                        return Ok(ClassMember::ClassConstant { name, value, visibility });
+                        return Ok(ClassMember::ClassConstant { name, value, visibility, is_final });
                     }
                     _ => {
                         return Err(ParseError {
@@ -2064,6 +2066,7 @@ impl Parser {
                         name: extra_name,
                         value: extra_value,
                         visibility,
+                        is_final,
                     });
                 }
                 self.expect_semicolon()?;
@@ -2071,6 +2074,7 @@ impl Parser {
                     name,
                     value,
                     visibility,
+                    is_final,
                 })
             }
             TokenKind::Variable(_) => {
@@ -4059,10 +4063,11 @@ impl Parser {
                             },
                             span,
                         };
-                        // Wrap as an expression that includes the class decl
-                        // We'll use a special pattern: emit the class decl inline
+                        // Push the class declaration and return the New expression directly.
+                        // We must return here to bypass the outer args-parsing code below,
+                        // since ctor_args have already been consumed from the token stream.
                         self.anon_class_stmts.push(class_stmt);
-                        Expr {
+                        return Ok(Expr {
                             kind: ExprKind::New {
                                 class: Box::new(Expr {
                                     kind: ExprKind::Identifier(anon_name.into_bytes()),
@@ -4071,7 +4076,7 @@ impl Parser {
                                 args: ctor_args,
                             },
                             span,
-                        }
+                        });
                     }
                     TokenKind::Backslash => {
                         // Fully qualified: new \Foo\Bar()

@@ -283,6 +283,9 @@ pub enum OpCode {
     /// Extract: op1 = array value, op2 = flags (const), result = count of extracted vars
     /// Iterates over array keys and sets corresponding CVs in the current scope
     Extract,
+    /// compact() set: op1 = array (tmp), op2 = CV, result = key (const)
+    /// Like ArraySet but skips if CV is Undef and emits a warning
+    CompactSet,
 }
 
 /// A compiled function / script

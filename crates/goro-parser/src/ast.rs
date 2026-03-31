@@ -523,6 +523,7 @@ pub enum ClassMember {
         name: Vec<u8>,
         value: Expr,
         visibility: Visibility,
+        is_final: bool,
     },
     TraitUse {
         traits: Vec<Vec<u8>>,

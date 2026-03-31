@@ -707,6 +707,10 @@ impl PhpGenerator {
                                     continue;
                                 }
                             }
+                            // Unhandled exception from function call - generator is done
+                            self.state = GeneratorState::Completed;
+                            self.current_value = Value::Null;
+                            self.ip = ip;
                             return Err(e);
                         }
                     }
@@ -951,6 +955,7 @@ impl PhpGenerator {
                         ip = catch_target as usize;
                     } else {
                         self.state = GeneratorState::Completed;
+                        self.current_value = Value::Null;
                         self.ip = ip;
                         return Err(VmError {
                             message: "Uncaught exception in generator".to_string(),

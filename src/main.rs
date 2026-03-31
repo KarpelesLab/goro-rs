@@ -116,6 +116,8 @@ fn run_code(source: &[u8], filename: &str) {
     goro_ext_json::register(&mut vm);
     goro_ext_ctype::register(&mut vm);
     goro_ext_hash::register(&mut vm);
+    goro_ext_openssl::register(&mut vm);
+    goro_ext_xml::register(&mut vm);
     // Register compiled classes
     for class in compiled_classes {
         vm.register_class(class);
@@ -164,10 +166,18 @@ fn run_code(source: &[u8], filename: &str) {
                     };
                     handle.write_all(fatal.as_bytes()).ok();
                 } else {
-                    write!(handle, "\nFatal error: {}\n", e).ok();
+                    let fatal = format!(
+                        "\nFatal error: {} in {} on line {}\n",
+                        e.message, filename, e.line
+                    );
+                    handle.write_all(fatal.as_bytes()).ok();
                 }
             } else {
-                write!(handle, "\nFatal error: {}\n", e).ok();
+                let fatal = format!(
+                    "\nFatal error: {} in {} on line {}\n",
+                    e.message, filename, e.line
+                );
+                handle.write_all(fatal.as_bytes()).ok();
             }
             handle.flush().ok();
             process::exit(255);

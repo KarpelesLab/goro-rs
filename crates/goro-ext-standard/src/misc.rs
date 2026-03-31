@@ -471,13 +471,19 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match error_type {
         256 => {
             // E_USER_ERROR - fatal error
+            // PHP 8.4: passing E_USER_ERROR is deprecated
+            let call_line = vm.current_line;
+            vm.emit_deprecated_raw(
+                "Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead",
+                call_line,
+            );
             // Try user error handler first
-            if vm.call_user_error_handler(256, &message, 0) {
+            if vm.call_user_error_handler(256, &message, call_line) {
                 return Ok(Value::True);
             }
             return Err(VmError {
                 message: message.to_string(),
-                line: 0,
+                line: call_line,
             });
         }
         512 => {
@@ -2817,6 +2823,26 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else if let Value::String(s) = &value {
             if let Ok(p) = s.to_string_lossy().parse::<i32>() {
                 goro_core::value::set_php_serialize_precision(p);
+            }
+        }
+    }
+    // Handle zend.assertions: warn when trying to change it if currently -1 (only allowed in php.ini)
+    // Also warn when trying to set it to -1 at runtime
+    if key == b"zend.assertions" {
+        let new_val = match &value {
+            Value::Long(n) => *n,
+            Value::String(s) => s.to_string_lossy().parse::<i64>().unwrap_or(0),
+            _ => value.to_long(),
+        };
+        let cur_val = vm.constants.get(b"zend.assertions".as_ref())
+            .map(|v| v.to_long())
+            .unwrap_or(1);
+        if new_val == -1 || cur_val == -1 {
+            vm.emit_warning("zend.assertions may be completely enabled or disabled only in php.ini");
+            // When zend.assertions is -1 (set in php.ini), don't allow runtime changes.
+            // Keep the value as -1 so subsequent ini_set calls also warn.
+            if cur_val == -1 {
+                return Ok(old.unwrap_or(Value::False));
             }
         }
     }
@@ -5325,8 +5351,10 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     if let Value::Object(obj) = val {
         let obj = obj.borrow();
-        let display = goro_core::value::display_class_name(&obj.class_name);
-        Ok(Value::String(PhpString::from_vec(display.into_bytes())))
+        // Return the full class name including NUL byte for anonymous classes
+        // PHP's get_class() returns the full internal name; callers use strstr(..., "\0", true)
+        // to get the display part.
+        Ok(Value::String(PhpString::from_vec(obj.class_name.clone())))
     } else if let Value::Generator(_) = val {
         Ok(Value::String(PhpString::from_bytes(b"Generator")))
     } else if let Value::String(s) = val {

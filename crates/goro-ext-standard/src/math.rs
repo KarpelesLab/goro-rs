@@ -366,10 +366,10 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
-        return Err(VmError {
-            message: "max() expects at least 1 argument".into(),
-            line: 0,
-        });
+        let msg = "max() expects at least 1 argument, 0 given".to_string();
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
     if args.len() == 1 {
@@ -377,9 +377,9 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Value::Array(arr) = &args[0] {
             let arr = arr.borrow();
             if arr.len() == 0 {
-                // Empty array - throw ValueError
                 let msg = "max(): Argument #1 ($value) must contain at least one element".to_string();
-                vm.emit_warning_at(&msg, vm.current_line);
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
                 return Err(VmError { message: msg, line: vm.current_line });
             }
             let mut max_val = Value::Null;
@@ -392,9 +392,10 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             return Ok(max_val);
         } else {
-            // Single non-array - throw TypeError
-            let msg = "max(): Argument #1 ($value) must be of type array, int given".to_string();
-            vm.emit_warning_at(&msg, vm.current_line);
+            let type_name = args[0].type_name();
+            let msg = format!("max(): Argument #1 ($value) must be of type array, {} given", type_name);
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
         }
     }
@@ -410,10 +411,10 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
-        return Err(VmError {
-            message: "min() expects at least 1 argument".into(),
-            line: 0,
-        });
+        let msg = "min() expects at least 1 argument, 0 given".to_string();
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
 
     if args.len() == 1 {
@@ -421,7 +422,8 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let arr = arr.borrow();
             if arr.len() == 0 {
                 let msg = "min(): Argument #1 ($value) must contain at least one element".to_string();
-                vm.emit_warning_at(&msg, vm.current_line);
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
                 return Err(VmError { message: msg, line: vm.current_line });
             }
             let mut min_val = Value::Null;
@@ -434,8 +436,10 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             return Ok(min_val);
         } else {
-            let msg = "min(): Argument #1 ($value) must be of type array, int given".to_string();
-            vm.emit_warning_at(&msg, vm.current_line);
+            let type_name = args[0].type_name();
+            let msg = format!("min(): Argument #1 ($value) must be of type array, {} given", type_name);
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
         }
     }

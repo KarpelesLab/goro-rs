@@ -22,6 +22,15 @@ pub enum TraitAdaptation {
     },
 }
 
+/// Metadata for a class constant (visibility and final flag)
+#[derive(Debug, Clone)]
+pub struct ConstantMeta {
+    pub visibility: Visibility,
+    pub is_final: bool,
+    /// The class that originally declared this constant (lowercase)
+    pub declaring_class: Vec<u8>,
+}
+
 /// A PHP class entry (class definition)
 #[derive(Debug, Clone)]
 pub struct ClassEntry {
@@ -33,6 +42,8 @@ pub struct ClassEntry {
     pub properties: Vec<PropertyDef>,
     pub methods: IndexMap<Vec<u8>, MethodDef>,
     pub constants: IndexMap<Vec<u8>, Value>,
+    /// Metadata for constants (visibility, final flag, declaring class)
+    pub constants_meta: IndexMap<Vec<u8>, ConstantMeta>,
     pub static_properties: IndexMap<Vec<u8>, Value>,
     pub is_abstract: bool,
     pub is_final: bool,
@@ -99,6 +110,7 @@ impl ClassEntry {
             properties: Vec::new(),
             methods: IndexMap::new(),
             constants: IndexMap::new(),
+            constants_meta: IndexMap::new(),
             static_properties: IndexMap::new(),
             is_abstract: false,
             is_final: false,

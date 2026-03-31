@@ -65,6 +65,8 @@ pub struct Compiler {
     pub source_file: Vec<u8>,
     /// Whether the current function has a "never" return type
     has_never_return: bool,
+    /// Map from parser anonymous class names (__anonymous_class_N) to PHP NUL-byte names
+    anon_class_name_map: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 impl Default for Compiler {
@@ -103,6 +105,9 @@ impl Compiler {
                     (b"parse_str", 1) => true,
                     // is_callable($value, $syntax_only, &$callable_name)
                     (b"is_callable", 2) => true,
+                    // xml_parse_into_struct($parser, $data, &$values, &$index)
+                    (b"xml_parse_into_struct", 2) => true,
+                    (b"xml_parse_into_struct", 3) => true,
                     _ => false,
                 }
             }
@@ -126,6 +131,7 @@ impl Compiler {
             pending_gotos: HashMap::new(),
             source_file: Vec::new(),
             has_never_return: false,
+            anon_class_name_map: HashMap::new(),
         }
     }
 
@@ -332,10 +338,16 @@ impl Compiler {
                     line,
                 });
             } else {
-                // Cannot use positional argument after named argument
+                // Cannot use positional argument after named argument or after unpacking
                 if has_named {
                     return Err(CompileError {
                         message: "Cannot use positional argument after named argument".into(),
+                        line,
+                    });
+                }
+                if has_unpack {
+                    return Err(CompileError {
+                        message: "Cannot use positional argument after argument unpacking".into(),
                         line,
                     });
                 }
@@ -369,9 +381,88 @@ impl Compiler {
         }
     }
 
+    /// Build a map from parser anonymous class names (__anonymous_class_N) to PHP NUL-byte names.
+    /// Must be called before hoisting/compilation so child compilers can inherit the map.
+    fn build_anon_class_name_map(&mut self, stmts: &[Statement]) {
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::ClassDecl { name, extends, implements, .. }
+                    if name.starts_with(b"__anonymous_class_") =>
+                {
+                    let counter_part = &name[b"__anonymous_class_".len()..];
+                    let counter: u32 = std::str::from_utf8(counter_part)
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    // Base name is the fully qualified parent/interface name (as PHP uses it)
+                    let base: Vec<u8> = if let Some(p) = extends.as_ref() {
+                        // resolve_class_name uses current namespace state
+                        self.resolve_class_name(p)
+                    } else if let Some(iface) = implements.first() {
+                        self.resolve_class_name(iface)
+                    } else {
+                        b"class".to_vec()
+                    };
+                    let file = self.source_file.clone();
+                    let line = stmt.span.line;
+                    let mut anon_name = base;
+                    anon_name.extend_from_slice(b"@anonymous\x00");
+                    anon_name.extend_from_slice(&file);
+                    anon_name.push(b':');
+                    anon_name.extend_from_slice(line.to_string().as_bytes());
+                    anon_name.push(b'$');
+                    anon_name.extend_from_slice(format!("{:x}", counter).as_bytes());
+                    self.anon_class_name_map.insert(name.to_vec(), anon_name);
+                }
+                StmtKind::NamespaceDecl { name, body } => {
+                    // Track namespace state for correct class name resolution
+                    let saved_ns = self.current_namespace.clone();
+                    let saved_use_map = self.use_map.clone();
+                    if let Some(parts) = name {
+                        let mut ns = Vec::new();
+                        for (i, part) in parts.iter().enumerate() {
+                            if i > 0 { ns.push(b'\\'); }
+                            ns.extend_from_slice(part);
+                        }
+                        self.current_namespace = ns;
+                    } else {
+                        self.current_namespace = Vec::new();
+                    }
+                    self.use_map = HashMap::new();
+                    if let Some(body_stmts) = body {
+                        self.build_anon_class_name_map(body_stmts);
+                    }
+                    // Restore
+                    self.current_namespace = saved_ns;
+                    self.use_map = saved_use_map;
+                }
+                StmtKind::UseDecl(use_items) => {
+                    // Track use imports for correct name resolution
+                    for item in use_items {
+                        if item.kind == UseKind::Normal {
+                            let empty_vec: Vec<u8> = Vec::new();
+                            let alias_lower = item.alias.as_ref()
+                                .unwrap_or_else(|| item.name.last().unwrap_or(&empty_vec))
+                                .iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>();
+                            let mut qualified = Vec::new();
+                            for (i, part) in item.name.iter().enumerate() {
+                                if i > 0 { qualified.push(b'\\'); }
+                                qualified.extend_from_slice(part);
+                            }
+                            self.use_map.insert(alias_lower, qualified);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Compile a complete program
     /// Compile a program, returning the op_array and compiled classes
     pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>)> {
+        // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
+        self.build_anon_class_name_map(&program.statements);
         // First pass: process namespace/use declarations and compile function/class declarations
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
         self.compile_hoisting_pass(&program.statements)?;
@@ -1265,6 +1356,7 @@ impl Compiler {
                 func_compiler.op_array.decl_line = stmt.span.line;
                 func_compiler.op_array.strict_types = self.op_array.strict_types;
                 func_compiler.source_file = self.source_file.clone();
+                func_compiler.anon_class_name_map = self.anon_class_name_map.clone();
 
                 // Set return type
                 if let Some(hint) = return_type {
@@ -1441,6 +1533,72 @@ impl Compiler {
                         continue;
                     }
                     // This is a const declaration: const FOO = value;
+                    // Check for invalid spreads BEFORE emitting the define() call.
+                    // PHP only allows arrays (or constant arrays) to be spread in constant expressions.
+                    // A non-constant spread (e.g. `[...new ArrayObject()]`) is compiled as a runtime
+                    // Error throw (not a compile error), matching PHP's behavior.
+                    if let ExprKind::Array(elements) = &value.kind {
+                        let mut has_invalid_spread = false;
+                        for elem in elements.iter() {
+                            if elem.unpack {
+                                match Self::eval_const_expr(&elem.value) {
+                                    Some(Value::Array(_)) => {} // OK: literal array spread
+                                    Some(_) => {}               // Non-array constant; will fail at runtime
+                                    None => {
+                                        // Cannot evaluate at compile time: non-constant expression
+                                        has_invalid_spread = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if has_invalid_spread {
+                            // Emit: throw new Error("Only arrays can be unpacked in constant expression")
+                            let err_msg_bytes = b"Only arrays can be unpacked in constant expression";
+                            let err_class_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(b"Error")));
+                            let err_msg_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(err_msg_bytes)));
+                            let err_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::NewObject,
+                                op1: OperandType::Const(err_class_idx),
+                                op2: OperandType::Unused,
+                                result: OperandType::Tmp(err_tmp),
+                                line: value.span.line,
+                            });
+                            let ctor_name_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(b"__construct")));
+                            self.op_array.emit(Op {
+                                opcode: OpCode::InitMethodCall,
+                                op1: OperandType::Tmp(err_tmp),
+                                op2: OperandType::Const(ctor_name_idx),
+                                result: OperandType::Unused,
+                                line: value.span.line,
+                            });
+                            let pos0_idx = self.op_array.add_literal(Value::Long(0));
+                            self.op_array.emit(Op {
+                                opcode: OpCode::SendVal,
+                                op1: OperandType::Const(err_msg_idx),
+                                op2: OperandType::Const(pos0_idx),
+                                result: OperandType::Unused,
+                                line: value.span.line,
+                            });
+                            let call_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::DoFCall,
+                                op1: OperandType::Unused,
+                                op2: OperandType::Unused,
+                                result: OperandType::Tmp(call_tmp),
+                                line: value.span.line,
+                            });
+                            self.op_array.emit(Op {
+                                opcode: OpCode::Throw,
+                                op1: OperandType::Tmp(err_tmp),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line: value.span.line,
+                            });
+                            continue; // Skip the define() call for this const
+                        }
+                    }
                     // Emit it as a define() call
                     // Build the fully-qualified constant name
                     let fqn = self.prefix_with_namespace(name);
@@ -1825,9 +1983,10 @@ impl Compiler {
                     }
 
                     // After finally, check for deferred return
+                    // Store finally_start in op1 so ReturnDeferred knows which handler(s) to pop
                     self.op_array.emit(Op {
                         opcode: OpCode::ReturnDeferred,
-                        op1: OperandType::Unused,
+                        op1: OperandType::JmpTarget(finally_start),
                         op2: OperandType::Unused,
                         result: OperandType::Unused,
                         line: stmt.span.line,
@@ -1884,8 +2043,26 @@ impl Compiler {
                 body,
                 enum_backing_type,
             } => {
-                // Prefix class name with namespace
-                let qualified_name = self.prefix_with_namespace(name);
+                // Determine qualified name: anonymous classes use NUL-byte PHP names
+                let is_anonymous = name.starts_with(b"__anonymous_class_");
+                let qualified_name = if is_anonymous {
+                    // Look up from pre-built map (built before hoisting pass)
+                    self.anon_class_name_map.get(name.as_slice()).cloned().unwrap_or_else(|| {
+                        // Fallback: generate on the fly if map doesn't have it
+                        let counter_part = &name[b"__anonymous_class_".len()..];
+                        let counter: u32 = std::str::from_utf8(counter_part).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let mut anon_name = b"class@anonymous\x00".to_vec();
+                        anon_name.extend_from_slice(&self.source_file);
+                        anon_name.push(b':');
+                        anon_name.extend_from_slice(stmt.span.line.to_string().as_bytes());
+                        anon_name.push(b'$');
+                        anon_name.extend_from_slice(format!("{:x}", counter).as_bytes());
+                        anon_name
+                    })
+                } else {
+                    // Prefix class name with namespace
+                    self.prefix_with_namespace(name)
+                };
                 // Check for reserved class names
                 let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if name_lower == b"self" || name_lower == b"parent" || name_lower == b"static" {
@@ -2080,9 +2257,72 @@ impl Compiler {
                                         let mut arr = crate::array::PhpArray::new();
                                         let mut all_const = true;
                                         for elem in elements {
-                                            let val = Self::eval_const_expr(&elem.value);
+                                            let val = Self::eval_const_expr(&elem.value)
+                                                .or_else(|| Self::eval_class_const_expr(&elem.value, &class, &qualified_name, extends.as_deref(), self))
+                                                .or_else(|| {
+                                                    // Create deferred marker for ClassConstAccess
+                                                    if let ExprKind::ClassConstAccess { class: class_expr, constant } = &elem.value.kind {
+                                                        let cname = match &class_expr.kind {
+                                                            ExprKind::Identifier(n) => {
+                                                                let resolved = self.resolve_class_name(n);
+                                                                if resolved.eq_ignore_ascii_case(b"self") { qualified_name.clone() }
+                                                                else if resolved.eq_ignore_ascii_case(b"parent") {
+                                                                    extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                                } else { resolved }
+                                                            }
+                                                            _ => qualified_name.clone(),
+                                                        };
+                                                        if elem.unpack {
+                                                            let mut marker = b"__deferred_spread__::".to_vec();
+                                                            marker.extend_from_slice(&cname);
+                                                            marker.extend_from_slice(b"::");
+                                                            marker.extend_from_slice(constant);
+                                                            Some(Value::String(PhpString::from_vec(marker)))
+                                                        } else {
+                                                            let mut marker = b"__deferred_const__::".to_vec();
+                                                            marker.extend_from_slice(&cname);
+                                                            marker.extend_from_slice(b"::");
+                                                            marker.extend_from_slice(constant);
+                                                            Some(Value::String(PhpString::from_vec(marker)))
+                                                        }
+                                                    } else {
+                                                        None
+                                                    }
+                                                });
                                             if let Some(v) = val {
-                                                if let Some(key_expr) = &elem.key {
+                                                if elem.unpack {
+                                                    // Spread operator in static property default
+                                                    match v {
+                                                        Value::Array(src_arr) => {
+                                                            for (k, sv) in src_arr.borrow().iter() {
+                                                                match k {
+                                                                    crate::array::ArrayKey::Int(_) => { arr.push(sv.clone()); }
+                                                                    crate::array::ArrayKey::String(_) => { arr.set(k.clone(), sv.clone()); }
+                                                                }
+                                                            }
+                                                        }
+                                                        Value::String(ref s) if s.as_bytes().starts_with(b"__deferred_spread__::") => {
+                                                            // Already a spread marker, store as-is
+                                                            arr.push(v);
+                                                        }
+                                                        _ => {
+                                                            // Already has a deferred_const marker - convert to spread
+                                                            if let Value::String(ref s) = v {
+                                                                if s.as_bytes().starts_with(b"__deferred_const__::") {
+                                                                    let mut spread_marker = b"__deferred_spread__::".to_vec();
+                                                                    spread_marker.extend_from_slice(&s.as_bytes()[b"__deferred_const__::".len()..]);
+                                                                    arr.push(Value::String(PhpString::from_vec(spread_marker)));
+                                                                } else {
+                                                                    all_const = false;
+                                                                    break;
+                                                                }
+                                                            } else {
+                                                                all_const = false;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                } else if let Some(key_expr) = &elem.key {
                                                     if let Some(k) = Self::eval_const_expr(key_expr) {
                                                         let key = match k {
                                                             Value::Long(n) => crate::array::ArrayKey::Int(n),
@@ -2323,6 +2563,7 @@ impl Compiler {
                                 hook_compiler.current_class = Some(qualified_name.clone());
                                 hook_compiler.current_parent_class = class.parent.clone();
                                 hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                hook_compiler.anon_class_name_map = self.anon_class_name_map.clone();
 
                                 // $this is CV 0
                                 hook_compiler.op_array.get_or_create_cv(b"this");
@@ -2376,6 +2617,7 @@ impl Compiler {
                                 hook_compiler.current_class = Some(qualified_name.clone());
                                 hook_compiler.current_parent_class = class.parent.clone();
                                 hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                hook_compiler.anon_class_name_map = self.anon_class_name_map.clone();
 
                                 // $this is CV 0
                                 hook_compiler.op_array.get_or_create_cv(b"this");
@@ -2780,6 +3022,7 @@ impl Compiler {
                                 method_compiler.current_class = Some(qualified_name.clone());
                                 method_compiler.current_parent_class = class.parent.clone();
                                 method_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                method_compiler.anon_class_name_map = self.anon_class_name_map.clone();
 
                                 // First CV is always $this (for non-static methods)
                                 if !is_static {
@@ -2948,11 +3191,13 @@ impl Compiler {
                                 let lower_name: Vec<u8> =
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let mut abstract_op_array = OpArray::new();
+                                abstract_op_array.decl_line = *method_line;
                                 class.methods.insert(
                                     lower_name,
                                     MethodDef {
                                         name: method_name.clone(),
-                                        op_array: OpArray::new(),
+                                        op_array: abstract_op_array,
                                         param_count,
                                         is_static: *is_static,
                                         is_abstract: true,
@@ -2966,7 +3211,8 @@ impl Compiler {
                         ClassMember::ClassConstant {
                             name: const_name,
                             value: const_expr,
-                            ..
+                            visibility: const_visibility,
+                            is_final: const_is_final,
                         } => {
                             let val = if let Some(v) = Self::eval_const_expr(const_expr) {
                                 v
@@ -3151,7 +3397,31 @@ impl Compiler {
                                                     }
                                                 });
                                             if let Some(v) = val {
-                                                if let Some(key_expr) = &elem.key {
+                                                if elem.unpack {
+                                                    // Spread operator in class constant array
+                                                    match v {
+                                                        Value::Array(src_arr) => {
+                                                            // Spread literal array
+                                                            let src_borrow = src_arr.borrow();
+                                                            for (k, sv) in src_borrow.iter() {
+                                                                arr.set(k.clone(), sv.clone());
+                                                            }
+                                                        }
+                                                        Value::String(ref s) if s.as_bytes().starts_with(b"__deferred_const__::") => {
+                                                            // Deferred spread: store with special marker
+                                                            let mut spread_marker = b"__deferred_spread__::".to_vec();
+                                                            spread_marker.extend_from_slice(&s.as_bytes()[b"__deferred_const__::".len()..]);
+                                                            // Store as a special element that will be resolved/expanded at runtime
+                                                            // Use a sentinel key to mark it (runtime will need to expand these)
+                                                            arr.push(Value::String(PhpString::from_vec(spread_marker)));
+                                                        }
+                                                        _ => {
+                                                            // Non-array spread in constant expression
+                                                            ok = false;
+                                                            break;
+                                                        }
+                                                    }
+                                                } else if let Some(key_expr) = &elem.key {
                                                     let k = Self::eval_const_expr(key_expr)
                                                         .or_else(|| Self::eval_class_const_expr(key_expr, &class, &qualified_name, extends.as_deref(), self));
                                                     if let Some(k) = k {
@@ -3192,6 +3462,27 @@ impl Compiler {
                                 }
                             };
                             class.constants.insert(const_name.clone(), val);
+                            // Store constant metadata (visibility, final)
+                            let const_vis = match const_visibility {
+                                goro_parser::ast::Visibility::Public => crate::object::Visibility::Public,
+                                goro_parser::ast::Visibility::Protected => crate::object::Visibility::Protected,
+                                goro_parser::ast::Visibility::Private => crate::object::Visibility::Private,
+                            };
+                            let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            class.constants_meta.insert(const_name.clone(), crate::object::ConstantMeta {
+                                visibility: const_vis,
+                                is_final: *const_is_final,
+                                declaring_class: declaring_class_lower,
+                            });
+                            // Private constants cannot be final
+                            if *const_is_final && const_vis == crate::object::Visibility::Private {
+                                return Err(CompileError {
+                                    message: format!("Private constant {}::{} cannot be final as it is not visible to other classes",
+                                        String::from_utf8_lossy(name),
+                                        String::from_utf8_lossy(const_name)),
+                                    line: stmt.span.line,
+                                });
+                            }
                         }
                         ClassMember::EnumCase { name: case_name, value } => {
                             // 'case' can only be used in enums
@@ -3528,6 +3819,15 @@ impl Compiler {
         arr_op: OperandType,
         line: u32,
     ) -> CompileResult<()> {
+        // Spread operator is not allowed in destructuring assignments
+        for elem in elems.iter() {
+            if elem.unpack {
+                return Err(CompileError {
+                    message: "Spread operator is not supported in assignments".into(),
+                    line,
+                });
+            }
+        }
         for (i, elem) in elems.iter().enumerate() {
             let idx_op = if let Some(key_expr) = &elem.key {
                 self.compile_expr(key_expr)?
@@ -4232,7 +4532,7 @@ impl Compiler {
                                     let cv = self.op_array.get_or_create_cv(s);
                                     let key_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(s.clone())));
                                     self.op_array.emit(Op {
-                                        opcode: OpCode::ArraySet,
+                                        opcode: OpCode::CompactSet,
                                         op1: OperandType::Tmp(arr_tmp),
                                         op2: OperandType::Cv(cv),
                                         result: OperandType::Const(key_idx),
@@ -4246,7 +4546,7 @@ impl Compiler {
                                             let cv = self.op_array.get_or_create_cv(s);
                                             let key_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(s.clone())));
                                             self.op_array.emit(Op {
-                                                opcode: OpCode::ArraySet,
+                                                opcode: OpCode::CompactSet,
                                                 op1: OperandType::Tmp(arr_tmp),
                                                 op2: OperandType::Cv(cv),
                                                 result: OperandType::Const(key_idx),
@@ -4259,6 +4559,60 @@ impl Compiler {
                             }
                         }
                         return Ok(OperandType::Tmp(arr_tmp));
+                    }
+                }
+
+                // Special case: assert(expr) with one positional arg injects the source string
+                // as a second argument at compile time (PHP behavior).
+                if let ExprKind::Identifier(n) = &name.kind {
+                    let func_lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if func_lower == b"assert"
+                        && args.len() == 1
+                        && args[0].name.is_none()
+                        && !args[0].unpack
+                    {
+                        let expr_str = expr_to_source_string(&args[0].value);
+                        let assert_str = format!("assert({})", expr_str);
+                        // Emit: InitFCall("assert", 2)
+                        let assert_name_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(b"assert")));
+                        let arg_count_idx = self.op_array.add_literal(Value::Long(2));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::InitFCall,
+                            op1: OperandType::Const(assert_name_idx),
+                            op2: OperandType::Const(arg_count_idx),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        // SendVal(expr, 0)
+                        let val = self.compile_expr(&args[0].value)?;
+                        let pos0 = self.op_array.add_literal(Value::Long(0));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::SendVal,
+                            op1: val,
+                            op2: OperandType::Const(pos0),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        // SendVal(assert_str, 1)
+                        let str_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(assert_str.as_bytes())));
+                        let pos1 = self.op_array.add_literal(Value::Long(1));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::SendVal,
+                            op1: OperandType::Const(str_idx),
+                            op2: OperandType::Const(pos1),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        // DoFCall
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::DoFCall,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(tmp));
                     }
                 }
 
@@ -4649,6 +5003,26 @@ impl Compiler {
                 for elem in elements {
                     let val = self.compile_expr(&elem.value)?;
                     if elem.unpack {
+                        // Check for compile-time detectable non-array/non-traversable types
+                        if let OperandType::Const(idx) = val {
+                            if let Some(lit_val) = self.op_array.literals.get(idx as usize) {
+                                let type_name: Option<&str> = match lit_val {
+                                    Value::Long(_) => Some("int"),
+                                    Value::Double(_) => Some("float"),
+                                    Value::String(_) => Some("string"),
+                                    Value::True => Some("true"),
+                                    Value::False => Some("false"),
+                                    Value::Null => Some("null"),
+                                    _ => None,
+                                };
+                                if let Some(tname) = type_name {
+                                    return Err(CompileError {
+                                        message: format!("Only arrays and Traversables can be unpacked, {} given", tname),
+                                        line: expr.span.line,
+                                    });
+                                }
+                            }
+                        }
                         // ...$arr - spread array elements into this array
                         self.op_array.emit(Op {
                             opcode: OpCode::ArraySpread,
@@ -4967,11 +5341,12 @@ impl Compiler {
                     b"stdin" => Value::Long(1),
                     b"stdout" => Value::Long(2),
                     b"stderr" => Value::Long(3),
-                    b"e_all" => Value::Long(32767),
+                    b"e_all" => Value::Long(30719), // PHP 8.4+: E_ALL excludes E_STRICT
                     b"e_error" => Value::Long(1),
                     b"e_warning" => Value::Long(2),
                     b"e_notice" => Value::Long(8),
-                    b"e_strict" => Value::Long(2048),
+                    // e_strict is not folded at compile time - goes through runtime ConstLookup
+                    // so the deprecation warning is emitted
                     b"e_deprecated" => Value::Long(8192),
                     b"php_prefix_separator" | b"directory_separator" | b"path_separator" => {
                         Value::String(PhpString::from_bytes(if cfg!(windows) {
@@ -5092,6 +5467,9 @@ impl Compiler {
                         if name.eq_ignore_ascii_case(b"self") {
                             // Resolve self at compile time
                             self.current_class.clone().unwrap_or(name.clone())
+                        } else if name.starts_with(b"__anonymous_class_") {
+                            // Anonymous class: look up the NUL-byte PHP name from the map
+                            self.anon_class_name_map.get(name.as_slice()).cloned().unwrap_or_else(|| name.clone())
                         } else {
                             // Resolve through namespace (handles "static" correctly since
                             // resolve_class_name passes it through unchanged)
@@ -5740,6 +6118,7 @@ impl Compiler {
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
+                closure_compiler.anon_class_name_map = self.anon_class_name_map.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
                 closure_compiler.op_array.scope_class = self.op_array.scope_class.clone()
                     .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
@@ -5956,6 +6335,7 @@ impl Compiler {
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
+                closure_compiler.anon_class_name_map = self.anon_class_name_map.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
                 closure_compiler.op_array.scope_class = self.op_array.scope_class.clone()
                     .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
@@ -6232,11 +6612,11 @@ impl Compiler {
             }
 
             ExprKind::DynamicClassConstAccess { class, constant } => {
-                // Dynamic class constant fetch: Foo::{$expr}
-                let class_name = match &class.kind {
+                // Dynamic class constant fetch: Foo::{$expr} or $var::{$expr}
+                let class_op = match &class.kind {
                     ExprKind::Identifier(name) => {
                         let resolved = self.resolve_class_name(name);
-                        if resolved.eq_ignore_ascii_case(b"self") {
+                        let resolved = if resolved.eq_ignore_ascii_case(b"self") {
                             self.current_class.clone().unwrap_or(resolved)
                         } else if resolved.eq_ignore_ascii_case(b"parent") {
                             self.current_parent_class.clone().unwrap_or(resolved)
@@ -6244,23 +6624,24 @@ impl Compiler {
                             b"static".to_vec()
                         } else {
                             resolved
-                        }
+                        };
+                        let class_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(resolved)));
+                        OperandType::Const(class_idx)
                     }
                     _ => {
-                        let _ = self.compile_expr(class)?;
-                        let idx = self.op_array.add_literal(Value::Null);
-                        return Ok(OperandType::Const(idx));
+                        // Dynamic class expression: $foo::{$bar}
+                        // Compile the class expression - its result is a string with the class name
+                        self.compile_expr(class)?
                     }
                 };
 
-                let class_idx = self
-                    .op_array
-                    .add_literal(Value::String(PhpString::from_vec(class_name)));
                 let const_expr = self.compile_expr(constant)?;
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::StaticPropGet,
-                    op1: OperandType::Const(class_idx),
+                    op1: class_op,
                     op2: const_expr,
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
@@ -6386,11 +6767,11 @@ impl Compiler {
             }
 
             ExprKind::StaticPropertyAccess { class, property } => {
-                let class_name = match &class.kind {
+                let (class_operand, prop_str) = match &class.kind {
                     ExprKind::Identifier(name) => {
                         let resolved = self.resolve_class_name(name);
                         // Resolve self/parent, keep static as literal for LSB
-                        if resolved.eq_ignore_ascii_case(b"self") {
+                        let class_name = if resolved.eq_ignore_ascii_case(b"self") {
                             self.current_class.clone().unwrap_or(resolved)
                         } else if resolved.eq_ignore_ascii_case(b"static") {
                             // Late static binding: resolve at runtime
@@ -6399,24 +6780,23 @@ impl Compiler {
                             self.current_parent_class.clone().unwrap_or(resolved)
                         } else {
                             resolved
-                        }
+                        };
+                        let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                        (OperandType::Const(idx), property.clone())
                     }
                     _ => {
-                        let _ = self.compile_expr(class)?;
-                        let idx = self.op_array.add_literal(Value::Null);
-                        return Ok(OperandType::Const(idx));
+                        // Dynamic class expression (e.g. $obj::$prop) - compile and pass as operand
+                        let class_op = self.compile_expr(class)?;
+                        (class_op, property.clone())
                     }
                 };
-                let class_idx = self
-                    .op_array
-                    .add_literal(Value::String(PhpString::from_vec(class_name)));
                 let prop_idx = self
                     .op_array
-                    .add_literal(Value::String(PhpString::from_vec(property.clone())));
+                    .add_literal(Value::String(PhpString::from_vec(prop_str)));
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::StaticPropGet,
-                    op1: OperandType::Const(class_idx),
+                    op1: class_operand,
                     op2: OperandType::Const(prop_idx),
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
@@ -6732,6 +7112,7 @@ impl Compiler {
         cc.current_parent_class = self.current_parent_class.clone();
         cc.op_array.scope_class = self.op_array.scope_class.clone()
             .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
+        cc.anon_class_name_map = self.anon_class_name_map.clone();
 
         // Determine what needs to be captured.
         // - Function with Identifier: no capture needed (resolved at compile time)
@@ -6991,7 +7372,19 @@ impl Compiler {
                 let mut arr = crate::array::PhpArray::new();
                 for elem in elements {
                     let val = Self::eval_const_expr(&elem.value)?;
-                    if let Some(key_expr) = &elem.key {
+                    if elem.unpack {
+                        // Spread operator in constant expression: only arrays allowed
+                        if let Value::Array(src_arr) = val {
+                            let src_borrow = src_arr.borrow();
+                            for (k, v) in src_borrow.iter() {
+                                arr.set(k.clone(), v.clone());
+                            }
+                        } else {
+                            // Non-array in constant expression spread: return None
+                            // (will be handled at runtime with proper error)
+                            return None;
+                        }
+                    } else if let Some(key_expr) = &elem.key {
                         let k = Self::eval_const_expr(key_expr)?;
                         let key = match k {
                             Value::Long(n) => crate::array::ArrayKey::Int(n),
@@ -7124,6 +7517,26 @@ impl Compiler {
                     _ => None,
                 }
             }
+            // Array access on constant arrays: [1,2,3][0] or CONST_ARRAY[key]
+            ExprKind::ArrayAccess { array, index } => {
+                let arr_val = Self::eval_const_expr(array)?;
+                if let Value::Array(arr_rc) = arr_val {
+                    let arr = arr_rc.borrow();
+                    if let Some(idx_expr) = index {
+                        let key_val = Self::eval_const_expr(idx_expr)?;
+                        let key = match key_val {
+                            Value::Long(n) => crate::array::ArrayKey::Int(n),
+                            Value::String(s) => crate::array::ArrayKey::String(s),
+                            _ => return None,
+                        };
+                        Some(arr.get(&key).cloned().unwrap_or(Value::Null))
+                    } else {
+                        None // append access [] not valid in const expr
+                    }
+                } else {
+                    Some(Value::Null) // accessing array offset on non-array
+                }
+            }
             _ => None,
         }
     }
@@ -7154,6 +7567,45 @@ impl Compiler {
                     // Look up the constant in the class being compiled
                     if let Some(val) = class.constants.get(constant) {
                         // Make sure the value isn't a deferred marker
+                        if let Value::String(s) = val {
+                            if s.as_bytes().starts_with(b"__deferred_const__::") {
+                                return None;
+                            }
+                        }
+                        return Some(val.clone());
+                    }
+                }
+                None
+            }
+            ExprKind::DynamicClassConstAccess { class: class_expr, constant: const_expr } => {
+                // Dynamic class constant access in constant expression context: self::{'BAR'}
+                // Only evaluatable if the class is self/static and the key is a string literal
+                let target_class = match &class_expr.kind {
+                    ExprKind::Identifier(name) => {
+                        let resolved = compiler.resolve_class_name(name);
+                        let lower: Vec<u8> = resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if lower == b"self" || lower == b"static" {
+                            qualified_name.to_vec()
+                        } else if lower == b"parent" {
+                            extends.map(|p| compiler.resolve_class_name(p)).unwrap_or(resolved)
+                        } else {
+                            resolved
+                        }
+                    }
+                    _ => return None,
+                };
+                // Evaluate the constant name expression
+                let const_name_val = Self::eval_const_expr(const_expr)
+                    .or_else(|| Self::eval_class_const_expr(const_expr, class, qualified_name, extends, compiler))?;
+                let const_name_str = match const_name_val {
+                    Value::String(s) => s.as_bytes().to_vec(),
+                    _ => return None,
+                };
+                // Check if this references the same class
+                let target_lower: Vec<u8> = target_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let self_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if target_lower == self_lower {
+                    if let Some(val) = class.constants.get(&const_name_str) {
                         if let Value::String(s) = val {
                             if s.as_bytes().starts_with(b"__deferred_const__::") {
                                 return None;
@@ -7580,4 +8032,204 @@ fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
         }
         _ => false,
     }
+}
+
+/// Convert an expression back to a PHP source string representation.
+/// Used by the compiler to inject the source string as assert()'s 2nd argument.
+fn expr_to_source_string(expr: &Expr) -> String {
+    match &expr.kind {
+        ExprKind::True => "true".to_string(),
+        ExprKind::False => "false".to_string(),
+        ExprKind::Null => "null".to_string(),
+        ExprKind::Int(n) => n.to_string(),
+        ExprKind::Float(f) => {
+            // Format float like PHP does
+            if f.fract() == 0.0 && f.is_finite() {
+                format!("{}", f)
+            } else {
+                format!("{}", f)
+            }
+        }
+        ExprKind::String(s) => {
+            // Escape the string content
+            let escaped = String::from_utf8_lossy(s)
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'");
+            format!("'{}'", escaped)
+        }
+        ExprKind::Variable(name) => {
+            format!("${}", String::from_utf8_lossy(name))
+        }
+        ExprKind::Identifier(parts) => {
+            String::from_utf8_lossy(parts).to_string()
+        }
+        ExprKind::ConstantAccess(parts) => {
+            parts.iter()
+                .map(|p| String::from_utf8_lossy(p).to_string())
+                .collect::<Vec<_>>()
+                .join("\\")
+        }
+        ExprKind::BinaryOp { op, left, right } => {
+            let op_str = match op {
+                BinaryOp::Add => "+",
+                BinaryOp::Sub => "-",
+                BinaryOp::Mul => "*",
+                BinaryOp::Div => "/",
+                BinaryOp::Mod => "%",
+                BinaryOp::Pow => "**",
+                BinaryOp::Concat => ".",
+                BinaryOp::BitwiseAnd => "&",
+                BinaryOp::BitwiseOr => "|",
+                BinaryOp::BitwiseXor => "^",
+                BinaryOp::ShiftLeft => "<<",
+                BinaryOp::ShiftRight => ">>",
+                BinaryOp::BooleanAnd => "&&",
+                BinaryOp::BooleanOr => "||",
+                BinaryOp::LogicalAnd => "and",
+                BinaryOp::LogicalOr => "or",
+                BinaryOp::LogicalXor => "xor",
+                BinaryOp::Equal => "==",
+                BinaryOp::Identical => "===",
+                BinaryOp::NotEqual => "!=",
+                BinaryOp::NotIdentical => "!==",
+                BinaryOp::Less => "<",
+                BinaryOp::Greater => ">",
+                BinaryOp::LessEqual => "<=",
+                BinaryOp::GreaterEqual => ">=",
+                BinaryOp::Spaceship => "<=>",
+            };
+            format!("{} {} {}", expr_to_source_string(left), op_str, expr_to_source_string(right))
+        }
+        ExprKind::UnaryOp { op, operand, prefix } => {
+            let op_str = match op {
+                UnaryOp::Negate => "-",
+                UnaryOp::Plus => "+",
+                UnaryOp::BitwiseNot => "~",
+                UnaryOp::BooleanNot => "!",
+                UnaryOp::PreIncrement => "++",
+                UnaryOp::PreDecrement => "--",
+                UnaryOp::PostIncrement => "++",
+                UnaryOp::PostDecrement => "--",
+            };
+            let operand_str = expr_to_source_string(operand);
+            if *prefix {
+                format!("{}{}", op_str, operand_str)
+            } else {
+                format!("{}{}", operand_str, op_str)
+            }
+        }
+        ExprKind::FunctionCall { name, args } => {
+            let name_str = expr_to_source_string(name);
+            let args_str = args_to_source_string(args);
+            format!("{}({})", name_str, args_str)
+        }
+        ExprKind::MethodCall { object, method, args, .. } => {
+            let obj_str = expr_to_source_string(object);
+            let method_str = expr_to_source_string(method);
+            let args_str = args_to_source_string(args);
+            format!("{}->{}({})", obj_str, method_str, args_str)
+        }
+        ExprKind::StaticMethodCall { class, method, args } => {
+            let class_str = expr_to_source_string(class);
+            let method_str = String::from_utf8_lossy(method).to_string();
+            let args_str = args_to_source_string(args);
+            format!("{}::{}({})", class_str, method_str, args_str)
+        }
+        ExprKind::ArrayAccess { array, index } => {
+            let arr_str = expr_to_source_string(array);
+            match index {
+                Some(idx) => format!("{}[{}]", arr_str, expr_to_source_string(idx)),
+                None => format!("{}[]", arr_str),
+            }
+        }
+        ExprKind::PropertyAccess { object, property, .. } => {
+            format!("{}->{}",
+                expr_to_source_string(object),
+                expr_to_source_string(property))
+        }
+        ExprKind::StaticPropertyAccess { class, property } => {
+            format!("{}::${}",
+                expr_to_source_string(class),
+                String::from_utf8_lossy(property))
+        }
+        ExprKind::ClassConstAccess { class, constant } => {
+            format!("{}::{}",
+                expr_to_source_string(class),
+                String::from_utf8_lossy(constant))
+        }
+        ExprKind::Instanceof { expr, class } => {
+            format!("{} instanceof {}",
+                expr_to_source_string(expr),
+                expr_to_source_string(class))
+        }
+        ExprKind::Cast(cast_type, inner) => {
+            let cast_str = match cast_type {
+                CastType::Int => "(int)",
+                CastType::Float => "(float)",
+                CastType::String => "(string)",
+                CastType::Bool => "(bool)",
+                CastType::Array => "(array)",
+                CastType::Object => "(object)",
+                CastType::Unset => "(unset)",
+            };
+            format!("{}{}", cast_str, expr_to_source_string(inner))
+        }
+        ExprKind::Assign { target, value } => {
+            format!("{} = {}", expr_to_source_string(target), expr_to_source_string(value))
+        }
+        ExprKind::Ternary { condition, if_true, if_false } => {
+            match if_true {
+                Some(t) => format!("{} ? {} : {}",
+                    expr_to_source_string(condition),
+                    expr_to_source_string(t),
+                    expr_to_source_string(if_false)),
+                None => format!("{} ?: {}",
+                    expr_to_source_string(condition),
+                    expr_to_source_string(if_false)),
+            }
+        }
+        ExprKind::NullCoalesce { left, right } => {
+            format!("{} ?? {}", expr_to_source_string(left), expr_to_source_string(right))
+        }
+        ExprKind::New { class, args } => {
+            let class_str = expr_to_source_string(class);
+            let args_str = args_to_source_string(args);
+            format!("new {}({})", class_str, args_str)
+        }
+        ExprKind::Clone(inner) => {
+            format!("clone {}", expr_to_source_string(inner))
+        }
+        ExprKind::Print(inner) => {
+            format!("print {}", expr_to_source_string(inner))
+        }
+        ExprKind::Isset(exprs) => {
+            let args_str = exprs.iter()
+                .map(expr_to_source_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("isset({})", args_str)
+        }
+        ExprKind::Empty(inner) => {
+            format!("empty({})", expr_to_source_string(inner))
+        }
+        ExprKind::ThrowExpr(inner) => {
+            format!("throw {}", expr_to_source_string(inner))
+        }
+        ExprKind::Suppress(inner) => {
+            format!("@{}", expr_to_source_string(inner))
+        }
+        // For complex expressions we can't easily represent, use a placeholder
+        _ => "...".to_string(),
+    }
+}
+
+/// Convert a list of function call arguments to source string.
+fn args_to_source_string(args: &[Argument]) -> String {
+    args.iter().map(|arg| {
+        let prefix = if arg.unpack { "..." } else { "" };
+        let name_prefix = arg.name.as_ref()
+            .map(|n| format!("{}: ", String::from_utf8_lossy(n)))
+            .unwrap_or_default();
+        format!("{}{}{}", name_prefix, prefix, expr_to_source_string(&arg.value))
+    }).collect::<Vec<_>>().join(", ")
 }

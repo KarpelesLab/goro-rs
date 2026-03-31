@@ -14,5 +14,7 @@ goro-ext-date = { path = "../goro-ext-date" }
 goro-ext-json = { path = "../goro-ext-json" }
 goro-ext-ctype = { path = "../goro-ext-ctype" }
 goro-ext-hash = { path = "../goro-ext-hash" }
+goro-ext-openssl = { path = "../goro-ext-openssl" }
+goro-ext-xml = { path = "../goro-ext-xml" }
 libc = "0.2"
 regex = "1"

@@ -269,7 +269,7 @@ fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
             "E_RECOVERABLE_ERROR" => Some(4096),
             "E_DEPRECATED" => Some(8192),
             "E_USER_DEPRECATED" => Some(16384),
-            "E_ALL" => Some(32767),
+            "E_ALL" => Some(30719), // PHP 8.4+: excludes E_STRICT
             _ => name.trim().parse::<i64>().ok(),
         }
     }
@@ -619,9 +619,22 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     goro_ext_json::register(&mut vm);
     goro_ext_ctype::register(&mut vm);
     goro_ext_hash::register(&mut vm);
+    goro_ext_openssl::register(&mut vm);
+    goro_ext_xml::register(&mut vm);
 
     // Apply all INI settings to the VM constants
     for (key, value) in ini_settings {
+        // Handle disable_functions: remove those functions from the VM
+        if key == "disable_functions" {
+            for func_name in value.split(',') {
+                let func_name = func_name.trim();
+                if !func_name.is_empty() {
+                    let lower: Vec<u8> = func_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                    vm.functions.remove(&lower);
+                }
+            }
+            continue;
+        }
         let val = if let Ok(n) = value.parse::<i64>() {
             Value::Long(n)
         } else if let Some(resolved) = parse_error_reporting_expr(value) {

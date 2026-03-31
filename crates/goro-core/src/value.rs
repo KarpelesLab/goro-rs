@@ -8,22 +8,26 @@ use crate::object::PhpObject;
 use crate::string::PhpString;
 
 /// Convert an internal class name to a display name.
-/// Transforms `__anonymous_class_N` to `class@anonymous` for display purposes.
+/// For anonymous classes (which contain a NUL byte separator): returns the part before the NUL.
+/// For regular classes: returns the name as-is.
 pub fn display_class_name(name: &[u8]) -> String {
-    let s = String::from_utf8_lossy(name);
-    if s.contains("__anonymous_class_") {
-        // Replace the __anonymous_class_N part with class@anonymous
-        // Handle namespaced anon classes like "Foo\__anonymous_class_1"
-        let result = s.as_ref().to_string();
-        // Find and replace the __anonymous_class_N pattern
-        if let Some(pos) = result.find("__anonymous_class_") {
-            let prefix = &result[..pos];
-            format!("{}class@anonymous", prefix)
-        } else {
-            result
-        }
+    // Anonymous class names are formatted as "{Base}@anonymous\0{file}:{line}${counter}"
+    // Display only the part before the NUL byte.
+    if let Some(nul_pos) = name.iter().position(|&b| b == b'\x00') {
+        String::from_utf8_lossy(&name[..nul_pos]).into_owned()
     } else {
-        s.into_owned()
+        // Also handle legacy __anonymous_class_N names (for backward compatibility)
+        let s = String::from_utf8_lossy(name);
+        if s.contains("__anonymous_class_") {
+            if let Some(pos) = s.find("__anonymous_class_") {
+                let prefix = &s[..pos];
+                format!("{}class@anonymous", prefix)
+            } else {
+                s.into_owned()
+            }
+        } else {
+            s.into_owned()
+        }
     }
 }
 

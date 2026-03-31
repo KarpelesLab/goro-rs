@@ -146,23 +146,41 @@ impl PhpArray {
         if !memory_alloc(Self::ENTRY_SIZE) {
             return; // Memory limit exceeded
         }
-        // Track next_int_key
+        // Track next_int_key (don't overflow: if n is i64::MAX, keep next_int_key at i64::MAX)
         if let ArrayKey::Int(n) = &key
             && *n >= self.next_int_key
         {
-            self.next_int_key = n + 1;
+            self.next_int_key = n.saturating_add(1);
         }
         self.entries.push((key, value));
     }
 
-    /// Append a value with the next integer key ($arr[] = value)
+    /// Append a value with the next integer key ($arr[] = value).
+    /// Silently ignores if memory limit is exceeded. Ignores key conflicts.
     pub fn push(&mut self, value: Value) {
+        let key = self.next_int_key;
         if !memory_alloc(Self::ENTRY_SIZE) {
             return; // Memory limit exceeded
         }
-        let key = self.next_int_key;
-        self.next_int_key = key + 1;
+        self.next_int_key = key.saturating_add(1);
         self.entries.push((ArrayKey::Int(key), value));
+    }
+
+    /// Append a value with the next integer key ($arr[] = value).
+    /// Returns Err("Cannot add element...") if the key is already occupied (PHP_INT_MAX overflow).
+    pub fn try_push(&mut self, value: Value) -> Result<(), &'static str> {
+        // Check if next_int_key is already occupied (happens after PHP_INT_MAX was used)
+        let key = self.next_int_key;
+        let already_occupied = self.entries.iter().any(|(k, _)| k == &ArrayKey::Int(key));
+        if already_occupied {
+            return Err("Cannot add element to the array as the next element is already occupied");
+        }
+        if !memory_alloc(Self::ENTRY_SIZE) {
+            return Ok(()); // Memory limit exceeded - silently ignore
+        }
+        self.next_int_key = key.saturating_add(1);
+        self.entries.push((ArrayKey::Int(key), value));
+        Ok(())
     }
 
     /// Remove and return the last element (like array_pop)

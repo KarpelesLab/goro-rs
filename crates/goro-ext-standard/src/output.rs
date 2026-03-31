@@ -296,7 +296,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                         format!("\"{}\":protected", name_str)
                     }
                     Some(goro_core::object::Visibility::Private) => {
-                        let class_name = String::from_utf8_lossy(&obj_class_name);
+                        let class_name = goro_core::value::display_class_name(&obj_class_name);
                         format!("\"{}\":\"{}\":private", name_str, class_name)
                     }
                     _ => format!("\"{}\"", name_str),
