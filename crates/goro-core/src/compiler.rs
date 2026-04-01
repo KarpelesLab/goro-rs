@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use goro_parser::ast::*;
@@ -6,6 +7,25 @@ use crate::object::{ClassEntry, MethodDef, PropertyDef, Visibility as ObjVisibil
 use crate::opcode::{Op, OpArray, OpCode, OperandType, ParamType, ParamTypeInfo};
 use crate::string::PhpString;
 use crate::value::Value;
+
+thread_local! {
+    /// Global counter for generating unique closure names across all compilation units
+    static CLOSURE_COUNTER: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Get the next globally unique closure ID
+fn next_closure_id() -> u64 {
+    CLOSURE_COUNTER.with(|c| {
+        let id = c.get();
+        c.set(id + 1);
+        id
+    })
+}
+
+/// Reset the global closure counter (e.g., for test isolation)
+pub fn reset_closure_counter() {
+    CLOSURE_COUNTER.with(|c| c.set(0));
+}
 
 /// Compilation error
 #[derive(Debug)]
@@ -4083,7 +4103,12 @@ impl Compiler {
                         Some(
                             args.iter()
                                 .map(|a| ArrayElement {
-                                    key: None,
+                                    key: a.name.as_ref().map(|n| {
+                                        Expr {
+                                            kind: ExprKind::String(n.clone()),
+                                            span: a.value.span.clone(),
+                                        }
+                                    }),
                                     value: a.value.clone(),
                                     unpack: false,
                                 })
@@ -4103,6 +4128,112 @@ impl Compiler {
                         line,
                     });
                     self.compile_list_destructure(&nested, OperandType::Tmp(sub_arr), line)?;
+                } else if !matches!(&elem.value.kind, ExprKind::Null) {
+                    // Handle complex lvalues: $arr[0], $obj->prop, etc.
+                    let tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ListGet,
+                        op1: arr_op,
+                        op2: idx_op,
+                        result: OperandType::Tmp(tmp),
+                        line,
+                    });
+                    // Compile the assignment to the complex target
+                    match &elem.value.kind {
+                        ExprKind::ArrayAccess { array, index } => {
+                            // $arr[idx] = value or $arr[] = value
+                            let arr_target = self.compile_expr(array)?;
+                            if let Some(idx_expr) = index {
+                                let key_op = self.compile_expr(idx_expr)?;
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArraySet,
+                                    op1: arr_target,
+                                    op2: OperandType::Tmp(tmp),
+                                    result: key_op,
+                                    line,
+                                });
+                            } else {
+                                // $arr[] = value (append)
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArrayAppend,
+                                    op1: arr_target,
+                                    op2: OperandType::Tmp(tmp),
+                                    result: OperandType::Unused,
+                                    line,
+                                });
+                            }
+                        }
+                        ExprKind::PropertyAccess { object, property, .. } => {
+                            // $obj->prop = value
+                            let obj_op = self.compile_expr(object)?;
+                            let prop_op = match &property.kind {
+                                ExprKind::Identifier(name) => {
+                                    let name_idx = self.op_array.add_literal(
+                                        Value::String(PhpString::from_vec(name.clone()))
+                                    );
+                                    OperandType::Const(name_idx)
+                                }
+                                _ => self.compile_expr(property)?,
+                            };
+                            self.op_array.emit(Op {
+                                opcode: OpCode::PropertySet,
+                                op1: obj_op,
+                                op2: OperandType::Tmp(tmp),
+                                result: prop_op,
+                                line,
+                            });
+                        }
+                        ExprKind::StaticPropertyAccess { class, property } => {
+                            // ClassName::$prop = value
+                            let class_name = match &class.kind {
+                                ExprKind::Identifier(name) => {
+                                    let resolved = self.resolve_class_name(name);
+                                    if resolved.eq_ignore_ascii_case(b"self") {
+                                        self.current_class.clone().unwrap_or(resolved)
+                                    } else if resolved.eq_ignore_ascii_case(b"static") {
+                                        b"static".to_vec()
+                                    } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                        self.current_parent_class.clone().unwrap_or(resolved)
+                                    } else {
+                                        resolved
+                                    }
+                                }
+                                _ => {
+                                    return Err(CompileError {
+                                        message: "Cannot use dynamic class in list destructuring".into(),
+                                        line,
+                                    });
+                                }
+                            };
+                            let class_idx = self.op_array.add_literal(
+                                Value::String(PhpString::from_vec(class_name))
+                            );
+                            let prop_idx = self.op_array.add_literal(
+                                Value::String(PhpString::from_vec(property.clone()))
+                            );
+                            self.op_array.emit(Op {
+                                opcode: OpCode::StaticPropSet,
+                                op1: OperandType::Const(class_idx),
+                                op2: OperandType::Tmp(tmp),
+                                result: OperandType::Const(prop_idx),
+                                line,
+                            });
+                        }
+                        ExprKind::DynamicVariable(inner) => {
+                            // $$var = value
+                            let name_op = self.compile_expr(inner)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::VarVarSet,
+                                op1: name_op,
+                                op2: OperandType::Tmp(tmp),
+                                result: OperandType::Unused,
+                                line,
+                            });
+                        }
+                        _ => {
+                            // Unsupported target - silently skip for now
+                        }
+                    }
                 }
             }
         }
@@ -6330,7 +6461,8 @@ impl Compiler {
             } => {
                 // Compile closure body as a child function
                 let closure_id = self.op_array.child_functions.len();
-                let closure_name = format!("__closure_{}", closure_id).into_bytes();
+                let global_id = next_closure_id();
+                let closure_name = format!("__closure_{}", global_id).into_bytes();
 
                 // Check if closure body contains yield
                 let is_generator = stmts_contain_yield(body);
@@ -6552,7 +6684,8 @@ impl Compiler {
                     .collect();
 
                 let closure_id = self.op_array.child_functions.len();
-                let closure_name = format!("__arrow_{}", closure_id).into_bytes();
+                let global_id = next_closure_id();
+                let closure_name = format!("__arrow_{}", global_id).into_bytes();
 
                 let mut closure_compiler = Compiler::new();
                 closure_compiler.op_array.name = closure_name.clone();
@@ -6890,46 +7023,38 @@ impl Compiler {
                 method,
                 args,
             } => {
+                // Check if the class expression is in a nullsafe chain
+                let chain_nullsafe = expr_is_in_nullsafe_chain(class);
+                let tmp = self.op_array.alloc_temp();
+
                 // Handle ClassName::method() and parent::method()
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => Some(self.resolve_class_name(name)),
                     _ => None, // Dynamic class expression - resolve at runtime
                 };
 
-                if let Some(class_name) = class_name {
-                    // Static class name known at compile time
-                    // Resolve self:: and parent:: to actual class names
-                    // static:: is kept as literal "static" for late static binding
-                    let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
-                        self.current_class.clone().unwrap_or(class_name.clone())
-                    } else if class_name.eq_ignore_ascii_case(b"static") {
-                        b"static".to_vec()
-                    } else if class_name.eq_ignore_ascii_case(b"parent") {
-                        self.current_parent_class
-                            .clone()
-                            .unwrap_or(class_name.clone())
-                    } else {
-                        class_name.clone()
-                    };
-
-                    let mut func_name = resolved_class;
-                    func_name.extend_from_slice(b"::");
-                    func_name.extend_from_slice(method);
-                    let name_idx = self
-                        .op_array
-                        .add_literal(Value::String(PhpString::from_vec(func_name)));
-                    let arg_count = self.op_array.add_literal(Value::Long(args.len() as i64));
+                // For nullsafe chains with dynamic class, we need to pre-compile the class
+                // and check for null before setting up the call
+                let jmp_null = if chain_nullsafe && class_name.is_none() {
+                    let class_operand = self.compile_expr(class)?;
+                    let null_idx = self.op_array.add_literal(Value::Null);
+                    let is_null_tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
-                        opcode: OpCode::InitFCall,
-                        op1: OperandType::Const(name_idx),
-                        op2: OperandType::Const(arg_count),
+                        opcode: OpCode::Identical,
+                        op1: class_operand,
+                        op2: OperandType::Const(null_idx),
+                        result: OperandType::Tmp(is_null_tmp),
+                        line: expr.span.line,
+                    });
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::JmpNz,
+                        op1: OperandType::Tmp(is_null_tmp),
+                        op2: OperandType::JmpTarget(0),
                         result: OperandType::Unused,
                         line: expr.span.line,
                     });
-                } else {
-                    // Dynamic class expression: $obj::method() or expr::method()
-                    // Compile the class expression, then use DynamicStaticCall opcode
-                    let class_operand = self.compile_expr(class)?;
+
+                    // Emit the call setup with pre-compiled class operand
                     let method_idx = self
                         .op_array
                         .add_literal(Value::String(PhpString::from_vec(method.to_vec())));
@@ -6941,18 +7066,97 @@ impl Compiler {
                         result: OperandType::Const(arg_count),
                         line: expr.span.line,
                     });
+
+                    self.compile_send_args(args, expr.span.line)?;
+
+                    self.op_array.emit(Op {
+                        opcode: OpCode::DoFCall,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(tmp),
+                        line: expr.span.line,
+                    });
+
+                    Some(jmp)
+                } else {
+                    if let Some(class_name) = class_name {
+                        // Static class name known at compile time
+                        let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
+                            self.current_class.clone().unwrap_or(class_name.clone())
+                        } else if class_name.eq_ignore_ascii_case(b"static") {
+                            b"static".to_vec()
+                        } else if class_name.eq_ignore_ascii_case(b"parent") {
+                            self.current_parent_class
+                                .clone()
+                                .unwrap_or(class_name.clone())
+                        } else {
+                            class_name.clone()
+                        };
+
+                        let mut func_name = resolved_class;
+                        func_name.extend_from_slice(b"::");
+                        func_name.extend_from_slice(method);
+                        let name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(func_name)));
+                        let arg_count = self.op_array.add_literal(Value::Long(args.len() as i64));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::InitFCall,
+                            op1: OperandType::Const(name_idx),
+                            op2: OperandType::Const(arg_count),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                    } else {
+                        // Dynamic class expression: $obj::method() or expr::method()
+                        let class_operand = self.compile_expr(class)?;
+                        let method_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(method.to_vec())));
+                        let arg_count = self.op_array.add_literal(Value::Long(args.len() as i64));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::InitDynamicStaticCall,
+                            op1: class_operand,
+                            op2: OperandType::Const(method_idx),
+                            result: OperandType::Const(arg_count),
+                            line: expr.span.line,
+                        });
+                    }
+
+                    self.compile_send_args(args, expr.span.line)?;
+
+                    self.op_array.emit(Op {
+                        opcode: OpCode::DoFCall,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(tmp),
+                        line: expr.span.line,
+                    });
+
+                    None
+                };
+
+                if let Some(jmp) = jmp_null {
+                    let skip_null = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let null_assign_pos = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp, null_assign_pos);
+                    let null_idx = self.op_array.add_literal(Value::Null);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(tmp),
+                        op2: OperandType::Const(null_idx),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(skip_null, end);
                 }
-
-                self.compile_send_args(args, expr.span.line)?;
-
-                let tmp = self.op_array.alloc_temp();
-                self.op_array.emit(Op {
-                    opcode: OpCode::DoFCall,
-                    op1: OperandType::Unused,
-                    op2: OperandType::Unused,
-                    result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
-                });
 
                 Ok(OperandType::Tmp(tmp))
             }
@@ -7003,6 +7207,8 @@ impl Compiler {
             }
 
             ExprKind::StaticPropertyAccess { class, property } => {
+                // Check if the class expression is in a nullsafe chain
+                let chain_nullsafe = expr_is_in_nullsafe_chain(class);
                 let (class_operand, prop_str) = match &class.kind {
                     ExprKind::Identifier(name) => {
                         let resolved = self.resolve_class_name(name);
@@ -7035,6 +7241,30 @@ impl Compiler {
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(prop_str)));
                 let tmp = self.op_array.alloc_temp();
+
+                // Nullsafe chain: if class expression could be null, short-circuit
+                let jmp_null = if chain_nullsafe {
+                    let null_idx = self.op_array.add_literal(Value::Null);
+                    let is_null_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Identical,
+                        op1: class_operand,
+                        op2: OperandType::Const(null_idx),
+                        result: OperandType::Tmp(is_null_tmp),
+                        line: expr.span.line,
+                    });
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::JmpNz,
+                        op1: OperandType::Tmp(is_null_tmp),
+                        op2: OperandType::JmpTarget(0),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    Some(jmp)
+                } else {
+                    None
+                };
+
                 self.op_array.emit(Op {
                     opcode: OpCode::StaticPropGet,
                     op1: class_operand,
@@ -7042,6 +7272,29 @@ impl Compiler {
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
                 });
+
+                if let Some(jmp) = jmp_null {
+                    let skip_null = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let null_assign_pos = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp, null_assign_pos);
+                    let null_idx = self.op_array.add_literal(Value::Null);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(tmp),
+                        op2: OperandType::Const(null_idx),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(skip_null, end);
+                }
+
                 Ok(OperandType::Tmp(tmp))
             }
 
@@ -7050,6 +7303,9 @@ impl Compiler {
                 property,
                 nullsafe,
             } => {
+                // Check if this is in a nullsafe chain (e.g., $obj?->foo->bar
+                // where ->bar should also short-circuit)
+                let effective_nullsafe = *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
                 let obj = self.compile_expr(object)?;
                 let prop_operand = match &property.kind {
                     ExprKind::Identifier(name) => {
@@ -7067,7 +7323,7 @@ impl Compiler {
                 let tmp = self.op_array.alloc_temp();
 
                 // Nullsafe: check if object is null, skip if so
-                let jmp_null = if *nullsafe {
+                let jmp_null = if effective_nullsafe {
                     let null_idx = self.op_array.add_literal(Value::Null);
                     let is_null_tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
@@ -7131,11 +7387,14 @@ impl Compiler {
                 nullsafe,
                 ..
             } => {
+                // Check if this is in a nullsafe chain (e.g., $obj?->foo()->bar()
+                // where ->bar() should also short-circuit)
+                let effective_nullsafe = *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
                 let obj = self.compile_expr(object)?;
                 let tmp = self.op_array.alloc_temp();
 
                 // Nullsafe: check if object is null, skip if so
-                let jmp_null = if *nullsafe {
+                let jmp_null = if effective_nullsafe {
                     let null_idx = self.op_array.add_literal(Value::Null);
                     let is_null_tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
@@ -7344,7 +7603,8 @@ impl Compiler {
         }
 
         let closure_id = self.op_array.child_functions.len();
-        let closure_name = format!("__closure_fcc_{}", closure_id).into_bytes();
+        let global_id = next_closure_id();
+        let closure_name = format!("__closure_fcc_{}", global_id).into_bytes();
 
         let mut cc = Compiler::new();
         cc.op_array.name = closure_name.clone();
@@ -8273,6 +8533,27 @@ fn check_parent_type_without_parent(hint: &TypeHint) -> Option<String> {
             }
             None
         }
+    }
+}
+
+/// Check if an expression's object chain contains a nullsafe operator.
+/// This is used to determine whether chained property/method accesses should
+/// automatically short-circuit to null (PHP nullsafe chain semantics).
+///
+/// For example, in `$obj?->foo()->bar()`, the `->bar()` call is chained from
+/// a nullsafe method call `?->foo()`. If `$obj` is null, the entire chain
+/// should evaluate to null rather than throwing "call on null".
+fn expr_is_in_nullsafe_chain(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::MethodCall { nullsafe: true, .. } => true,
+        ExprKind::PropertyAccess { nullsafe: true, .. } => true,
+        ExprKind::MethodCall { object, nullsafe: false, .. } => expr_is_in_nullsafe_chain(object),
+        ExprKind::PropertyAccess { object, nullsafe: false, .. } => expr_is_in_nullsafe_chain(object),
+        ExprKind::ArrayAccess { array, .. } => expr_is_in_nullsafe_chain(array),
+        ExprKind::StaticPropertyAccess { class, .. } => expr_is_in_nullsafe_chain(class),
+        ExprKind::StaticMethodCall { class, .. } => expr_is_in_nullsafe_chain(class),
+        ExprKind::DynamicStaticMethodCall { class, .. } => expr_is_in_nullsafe_chain(class),
+        _ => false,
     }
 }
 

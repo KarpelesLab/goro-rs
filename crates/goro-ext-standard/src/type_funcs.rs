@@ -305,8 +305,20 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Value::Reference(r) = var_ref {
         let current = r.borrow().clone();
         let new_val = match type_str.to_ascii_lowercase().as_str() {
-            "int" | "integer" => Value::Long(current.to_long()),
-            "float" | "double" => Value::Double(current.to_double()),
+            "int" | "integer" => {
+                if let Value::Object(obj) = &current {
+                    let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+                    _vm.emit_warning(&format!("Object of class {} could not be converted to int", class_name));
+                }
+                Value::Long(current.to_long())
+            }
+            "float" | "double" => {
+                if let Value::Object(obj) = &current {
+                    let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+                    _vm.emit_warning(&format!("Object of class {} could not be converted to float", class_name));
+                }
+                Value::Double(current.to_double())
+            }
             "string" => Value::String(current.to_php_string()),
             "bool" | "boolean" => {
                 if current.is_truthy() {

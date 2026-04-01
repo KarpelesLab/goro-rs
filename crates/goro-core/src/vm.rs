@@ -239,6 +239,8 @@ pub struct Vm {
     pub error_handler: Option<Value>,
     /// User exception handler callback (from set_exception_handler)
     pub exception_handler: Option<Value>,
+    /// Stack of previous exception handlers (for restore_exception_handler)
+    pub exception_handler_stack: Vec<Option<Value>>,
     /// Next ID for bound closure names
     next_bound_closure_id: u64,
     /// JSON last error code (0 = no error)
@@ -327,6 +329,7 @@ impl Vm {
             pending_finally_jump: None,
             error_handler: None,
             exception_handler: None,
+            exception_handler_stack: Vec::new(),
             next_bound_closure_id: 0,
             json_last_error: 0,
             preg_last_error: 0,
@@ -1244,6 +1247,97 @@ impl Vm {
             }
         }
         false
+    }
+
+    /// Call a user callback (string function name, array [class/obj, method], or closure object).
+    pub fn call_callback(&mut self, callback: &Value, args: &[Value]) -> Result<Value, VmError> {
+        match callback {
+            Value::String(s) => {
+                let func_name = s.as_bytes().to_vec();
+                let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                    return self.execute_fn_with_named_args(&user_fn, args.to_vec(), vec![], None);
+                }
+                if let Some(builtin) = self.functions.get(&func_lower).copied() {
+                    return builtin(self, args);
+                }
+                // Try "Class::method" syntax
+                if let Some(pos) = func_lower.iter().position(|&b| b == b':') {
+                    if pos + 1 < func_lower.len() && func_lower[pos + 1] == b':' {
+                        let class_lower = &func_lower[..pos];
+                        let method_lower = &func_lower[pos + 2..];
+                        if let Some(class) = self.classes.get(class_lower).cloned() {
+                            if let Some(method) = class.methods.get(method_lower) {
+                                let op = method.op_array.clone();
+                                return self.execute_fn_with_named_args(&op, args.to_vec(), vec![], None);
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
+            Value::Array(arr) => {
+                let arr_borrow = arr.borrow();
+                let vals: Vec<Value> = arr_borrow.values().cloned().collect();
+                drop(arr_borrow);
+                if vals.len() >= 2 {
+                    let method_name = vals[1].to_php_string();
+                    let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    match &vals[0] {
+                        Value::Object(obj) => {
+                            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(class) = self.classes.get(&class_lower).cloned() {
+                                if let Some(method) = class.methods.get(&method_lower) {
+                                    let op = method.op_array.clone();
+                                    return self.execute_fn_with_named_args(&op, args.to_vec(), vec![], Some(Value::Object(obj.clone())));
+                                }
+                            }
+                        }
+                        Value::String(class_name) => {
+                            let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if class_lower.starts_with(b"__closure_") || class_lower.starts_with(b"__arrow_") {
+                                if let Some(user_fn) = self.user_functions.get(&class_lower).cloned() {
+                                    let mut combined = vals[1..].to_vec();
+                                    combined.extend_from_slice(args);
+                                    return self.execute_fn_with_named_args(&user_fn, combined, vec![], None);
+                                }
+                            }
+                            if let Some(class) = self.classes.get(&class_lower).cloned() {
+                                if let Some(method) = class.methods.get(&method_lower) {
+                                    let op = method.op_array.clone();
+                                    return self.execute_fn_with_named_args(&op, args.to_vec(), vec![], None);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !vals.is_empty() {
+                    let name = vals[0].to_php_string().as_bytes().to_vec();
+                    let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                        let mut combined = vals[1..].to_vec();
+                        combined.extend_from_slice(args);
+                        return self.execute_fn_with_named_args(&user_fn, combined, vec![], None);
+                    }
+                    if let Some(builtin) = self.functions.get(&func_lower).copied() {
+                        return builtin(self, args);
+                    }
+                }
+                Ok(Value::Null)
+            }
+            Value::Object(obj) => {
+                let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(class) = self.classes.get(&class_lower).cloned() {
+                    if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
+                        let op = method.op_array.clone();
+                        return self.execute_fn_with_named_args(&op, args.to_vec(), vec![], Some(Value::Object(obj.clone())));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            _ => Ok(Value::Null),
+        }
     }
 
     /// Try to autoload a class by calling registered autoload functions
@@ -2507,6 +2601,163 @@ impl Vm {
     pub fn register_user_function(&mut self, name: &[u8], op_array: OpArray) {
         self.user_functions
             .insert(name.to_ascii_lowercase(), op_array);
+    }
+
+    /// Convert a callable to a Closure value.
+    /// Handles string callables ("func", "Class::method"), array callables ([$obj, "method"],
+    /// ["Class", "method"]), and closures (returned as-is).
+    pub fn callable_to_closure(&mut self, callable: Value, line: u32) -> Value {
+        match &callable {
+            // Already a closure (string starting with __closure_ etc.)
+            Value::String(s) if Self::is_closure_value(&callable) => callable,
+            // Already a closure (array starting with __closure_ etc.)
+            Value::Array(_) if Self::is_closure_value(&callable) => callable,
+            // String callable: "function_name" or "Class::method"
+            Value::String(s) => {
+                let name = s.as_bytes();
+                if let Some(pos) = name.windows(2).position(|w| w == b"::") {
+                    // "Class::method" -> resolve to a function call
+                    let class_part = &name[..pos];
+                    let method_part = &name[pos + 2..];
+                    let mut func_name = class_part.to_vec();
+                    func_name.extend_from_slice(b"::");
+                    func_name.extend_from_slice(method_part);
+                    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if self.user_functions.contains_key(&func_lower) || self.functions.contains_key(&func_lower) {
+                        // Wrap as a simple callable string - the VM's function call dispatch handles this
+                        Value::String(PhpString::from_vec(func_name))
+                    } else {
+                        // Try to find and register the method
+                        let class_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(class_def) = self.classes.get(&class_lower) {
+                            let method_lower: Vec<u8> = method_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(method_def) = class_def.get_method(&method_lower) {
+                                let op_array = method_def.op_array.clone();
+                                self.user_functions.insert(func_lower, op_array);
+                                Value::String(PhpString::from_vec(func_name))
+                            } else {
+                                let msg = format!("Failed to create closure from callable: class method not found");
+                                let exc = self.create_exception(b"TypeError", &msg, line);
+                                self.current_exception = Some(exc);
+                                Value::Null
+                            }
+                        } else {
+                            let msg = format!("Failed to create closure from callable: class not found");
+                            let exc = self.create_exception(b"TypeError", &msg, line);
+                            self.current_exception = Some(exc);
+                            Value::Null
+                        }
+                    }
+                } else {
+                    // Simple function name
+                    let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if self.user_functions.contains_key(&func_lower) || self.functions.contains_key(&func_lower) {
+                        callable
+                    } else {
+                        let msg = format!("Failed to create closure from callable: function \"{}\" not found", s.to_string_lossy());
+                        let exc = self.create_exception(b"TypeError", &msg, line);
+                        self.current_exception = Some(exc);
+                        Value::Null
+                    }
+                }
+            }
+            // Array callable: [$obj, "method"] or ["Class", "method"]
+            Value::Array(arr) => {
+                let arr_borrow = arr.borrow();
+                let values: Vec<Value> = arr_borrow.values().cloned().collect();
+                if values.len() != 2 {
+                    let msg = "Failed to create closure from callable: array callable must have exactly 2 elements";
+                    let exc = self.create_exception(b"TypeError", msg, line);
+                    self.current_exception = Some(exc);
+                    return Value::Null;
+                }
+                let target = &values[0];
+                let method_name = values[1].to_php_string();
+                let method_bytes = method_name.as_bytes();
+
+                match target {
+                    Value::Object(obj) => {
+                        // [$obj, "method"] -> create closure with $this bound
+                        let class_name = obj.borrow().class_name.clone();
+                        let mut func_name = class_name.clone();
+                        func_name.extend_from_slice(b"::");
+                        func_name.extend_from_slice(method_bytes);
+                        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                        // Register the method if not already registered
+                        if !self.user_functions.contains_key(&func_lower) {
+                            if let Some(class_def) = self.classes.get(&class_lower) {
+                                let method_lower: Vec<u8> = method_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(method_def) = class_def.get_method(&method_lower) {
+                                    let op_array = method_def.op_array.clone();
+                                    self.user_functions.insert(func_lower.clone(), op_array);
+                                }
+                            }
+                        }
+
+                        if self.user_functions.contains_key(&func_lower) || self.functions.contains_key(&func_lower) {
+                            // Create closure array: [func_name, $this]
+                            let mut closure_arr = crate::array::PhpArray::new();
+                            closure_arr.push(Value::String(PhpString::from_vec(func_name)));
+                            closure_arr.push(target.clone());
+                            drop(arr_borrow);
+                            Value::Array(Rc::new(RefCell::new(closure_arr)))
+                        } else {
+                            drop(arr_borrow);
+                            let msg = format!("Failed to create closure from callable: method not found");
+                            let exc = self.create_exception(b"TypeError", &msg, line);
+                            self.current_exception = Some(exc);
+                            Value::Null
+                        }
+                    }
+                    Value::String(class_str) => {
+                        // ["Class", "method"] -> static method call
+                        let class_bytes = class_str.as_bytes();
+                        let mut func_name = class_bytes.to_vec();
+                        func_name.extend_from_slice(b"::");
+                        func_name.extend_from_slice(method_bytes);
+                        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_lower: Vec<u8> = class_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                        // Register the method if not already registered
+                        if !self.user_functions.contains_key(&func_lower) {
+                            if let Some(class_def) = self.classes.get(&class_lower) {
+                                let method_lower: Vec<u8> = method_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(method_def) = class_def.get_method(&method_lower) {
+                                    let op_array = method_def.op_array.clone();
+                                    self.user_functions.insert(func_lower.clone(), op_array);
+                                }
+                            }
+                        }
+
+                        if self.user_functions.contains_key(&func_lower) || self.functions.contains_key(&func_lower) {
+                            drop(arr_borrow);
+                            Value::String(PhpString::from_vec(func_name))
+                        } else {
+                            drop(arr_borrow);
+                            let msg = format!("Failed to create closure from callable: method not found");
+                            let exc = self.create_exception(b"TypeError", &msg, line);
+                            self.current_exception = Some(exc);
+                            Value::Null
+                        }
+                    }
+                    _ => {
+                        drop(arr_borrow);
+                        let msg = "Failed to create closure from callable: first array element must be an object or string";
+                        let exc = self.create_exception(b"TypeError", msg, line);
+                        self.current_exception = Some(exc);
+                        Value::Null
+                    }
+                }
+            }
+            _ => {
+                let msg = "Failed to create closure from callable";
+                let exc = self.create_exception(b"TypeError", msg, line);
+                self.current_exception = Some(exc);
+                Value::Null
+            }
+        }
     }
 
     /// Bind a closure to a new $this and/or scope class.
@@ -8715,46 +8966,28 @@ impl Vm {
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
         let result = self.execute_op_array(op_array, cvs);
 
+        // If there's an uncaught exception and a user exception handler is set, call it
+        let result = match result {
+            Err(ref _e) if self.exception_handler.is_some() && self.current_exception.is_some() => {
+                let handler = self.exception_handler.take().unwrap();
+                let exc = self.current_exception.take().unwrap();
+                let handler_result = self.call_callback(&handler, &[exc.clone()]);
+                match handler_result {
+                    Ok(_) => Ok(Value::Null),
+                    Err(new_err) => Err(new_err),
+                }
+            }
+            other => other,
+        };
+
         // Call shutdown functions (before destructors, like PHP does)
         let shutdown_fns = std::mem::take(&mut self.shutdown_functions);
         for (callback, extra_args) in shutdown_fns {
-            match &callback {
-                Value::String(s) => {
-                    let func_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
-                        let _ = self.execute_fn(&user_fn, extra_args);
-                    } else if let Some(builtin) = self.functions.get(&func_lower).copied() {
-                        let _ = builtin(self, &extra_args);
-                    }
-                }
-                Value::Array(arr) => {
-                    let arr_borrow = arr.borrow();
-                    let vals: Vec<Value> = arr_borrow.values().cloned().collect();
-                    drop(arr_borrow);
-                    if vals.len() >= 2 {
-                        let name = vals[0].to_php_string().as_bytes().to_vec();
-                        let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
-                            let captured: Vec<Value> = vals[1..].to_vec();
-                            let mut combined_args = captured;
-                            combined_args.extend(extra_args);
-                            let _ = self.execute_fn(&user_fn, combined_args);
-                        }
-                    }
-                }
-                Value::Object(obj) => {
-                    let class_lower_cb: Vec<u8> = {
-                        let obj_borrow = obj.borrow();
-                        obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect()
-                    };
-                    if let Some(class) = self.classes.get(&class_lower_cb).cloned() {
-                        if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
-                            let op = method.op_array.clone();
-                            let _ = self.execute_fn_with_named_args(&op, extra_args, vec![], Some(Value::Object(obj.clone())));
-                        }
-                    }
-                }
-                _ => {}
+            let shutdown_result = self.call_callback(&callback, &extra_args);
+            if shutdown_result.is_err() && self.exception_handler.is_some() && self.current_exception.is_some() {
+                let handler = self.exception_handler.take().unwrap();
+                let exc = self.current_exception.take().unwrap();
+                let _ = self.call_callback(&handler, &[exc]);
             }
         }
 
@@ -11052,12 +11285,23 @@ impl Vm {
                             }
                         }
                     } else if func_name_lower == b"closure::fromcallable" {
-                        // Closure::fromCallable($callable) - return the callable as-is
-                        // For string callables and closures, this is basically identity
+                        // Closure::fromCallable($callable) - convert callable to a Closure
                         let callable = call.args.first().cloned().unwrap_or(Value::Null);
+                        let result = self.callable_to_closure(callable, op.line);
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError {
+                                    message: "Uncaught TypeError".into(),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         self.write_operand(
                             &op.result,
-                            callable,
+                            result,
                             &mut cvs,
                             &mut tmps,
                             &static_cv_keys,
