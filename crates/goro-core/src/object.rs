@@ -183,4 +183,8 @@ impl PhpObject {
     pub fn has_property(&self, name: &[u8]) -> bool {
         self.properties.iter().any(|(k, _)| k == name)
     }
+
+    pub fn remove_property(&mut self, name: &[u8]) {
+        self.properties.retain(|(k, _)| k != name);
+    }
 }

@@ -9,6 +9,13 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"var_export", var_export);
 }
 
+fn is_internal_property(name: &[u8]) -> bool {
+    name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+        || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
+        || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
+        || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+}
+
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut seen = HashSet::new();
     for arg in args {
@@ -127,7 +134,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let class_name_owned = class_name.to_string();
                 // Count visible properties (non-internal)
                 let extra_props: Vec<_> = obj_borrow.properties.iter()
-                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !name.starts_with(b"__fiber_") && !name.starts_with(b"__ctor_") && !matches!(val, Value::Undef))
+                    .filter(|(name, val)| !is_internal_property(name) && !matches!(val, Value::Undef))
                     .map(|(n, v)| (n.clone(), v.clone()))
                     .collect();
                 let prop_count = 1 + extra_props.len(); // storage + any extra properties
@@ -302,7 +309,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
 
             // Don't count uninitialized (Undef) properties or internal __spl_/__reflection_ properties
             let prop_count = obj_borrow.properties.iter()
-                .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !name.starts_with(b"__fiber_") && !name.starts_with(b"__ctor_") && !matches!(val, Value::Undef))
+                .filter(|(name, val)| !is_internal_property(name) && !matches!(val, Value::Undef))
                 .count();
             vm.write_output(
                 format!(
@@ -329,7 +336,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             drop(obj_borrow);
             for (name, value) in &props {
                 // Skip internal SPL/Reflection properties and uninitialized (Undef) properties
-                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_") || matches!(value, Value::Undef) {
+                if is_internal_property(name) || matches!(value, Value::Undef) {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);
@@ -580,7 +587,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
                 let spl_arr = obj_borrow.get_property(b"__spl_array");
                 // Show extra props first
                 let extra_props: Vec<_> = obj_borrow.properties.iter()
-                    .filter(|(name, val)| !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_") && !name.starts_with(b"__fiber_") && !name.starts_with(b"__ctor_") && !matches!(val, Value::Undef))
+                    .filter(|(name, val)| !is_internal_property(name) && !matches!(val, Value::Undef))
                     .map(|(n, v)| (n.clone(), v.clone()))
                     .collect();
                 drop(obj_borrow);
@@ -632,7 +639,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (name, value) in &obj_borrow.properties {
                 // Skip internal SPL/Reflection properties and uninitialized properties
-                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_") || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_") || matches!(value, Value::Undef) {
+                if is_internal_property(name) || matches!(value, Value::Undef) {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);

@@ -9920,7 +9920,9 @@ fn get_mangled_object_vars_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
         let obj = obj.borrow();
         let mut arr = PhpArray::new();
         for (name, val) in &obj.properties {
-            if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__enum_") {
+            if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__enum_")
+                || name.starts_with(b"__ctor_") || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+                || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp") {
                 continue;
             }
             arr.set(

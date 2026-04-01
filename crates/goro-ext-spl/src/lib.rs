@@ -389,6 +389,14 @@ fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
     }
 
+    // Check for implicit Stringable (class or any parent has __tostring)
+    if vm.class_implements_interface(&class_lower, b"stringable") {
+        let iface_str = PhpString::from_vec(b"Stringable".to_vec());
+        if !result.iter().any(|(k, _)| matches!(k, ArrayKey::String(s) if s.as_bytes().eq_ignore_ascii_case(b"Stringable"))) {
+            result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
+        }
+    }
+
     // Walk parent chain for inherited interfaces
     let mut current = class_lower.clone();
     for _ in 0..50 {

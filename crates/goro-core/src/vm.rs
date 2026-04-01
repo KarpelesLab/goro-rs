@@ -2357,6 +2357,51 @@ impl Vm {
         self.execute_op_array(op_array, cvs)
     }
 
+    /// Run destructors for objects that are only held by the destructible_objects list.
+    /// In PHP, __destruct is called eagerly when the last user reference is dropped.
+    /// Since destructible_objects keeps an Rc, we check for strong_count == 1.
+    fn run_pending_destructors(&mut self) {
+        loop {
+            let len = self.destructible_objects.len();
+            let scan_limit = len.min(64);
+            let mut found_idx = None;
+            for i in (len - scan_limit..len).rev() {
+                if let Value::Object(rc) = &self.destructible_objects[i] {
+                    if Rc::strong_count(rc) == 1 {
+                        let ob = rc.borrow();
+                        if !matches!(ob.get_property(b"__ctor_pending"), Value::True)
+                            && !matches!(ob.get_property(b"__destructed"), Value::True)
+                        {
+                            found_idx = Some(i);
+                            break;
+                        }
+                    }
+                }
+            }
+            let idx = match found_idx {
+                Some(i) => i,
+                None => break,
+            };
+            let obj_val = self.destructible_objects.remove(idx);
+            if let Value::Object(ref obj_rc) = obj_val {
+                obj_rc.borrow_mut().set_property(b"__destructed".to_vec(), Value::True);
+                let class_lower: Vec<u8> = obj_rc.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(destruct_op) = self.classes.get(&class_lower)
+                    .and_then(|c| c.get_method(b"__destruct"))
+                    .map(|m| m.op_array.clone())
+                {
+                    let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
+                    if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
+                    self.called_class_stack.push(obj_rc.borrow().class_name.clone());
+                    self.class_scope_stack.push(class_lower.clone());
+                    let _ = self.execute_op_array(&destruct_op, fn_cvs);
+                    self.class_scope_stack.pop();
+                    self.called_class_stack.pop();
+                }
+            }
+        }
+    }
+
     /// Execute a user function with named argument resolution.
     /// Takes positional args and named args, resolves them against the function's parameters,
     /// then calls the function.
@@ -3238,6 +3283,19 @@ impl Vm {
     /// Check if a class (by lowercase name) implements a given interface (by lowercase name).
     /// Walks up the parent chain and checks each class's interfaces list.
     pub fn class_implements_interface(&self, class_name: &[u8], iface_name: &[u8]) -> bool {
+        // Stringable: any class with __toString() automatically implements Stringable
+        if iface_name == b"stringable" {
+            let mut cur: Vec<u8> = class_name.to_vec();
+            for _ in 0..50 {
+                if let Some(ce) = self.classes.get(&cur) {
+                    if ce.methods.contains_key(&b"__tostring".to_vec()) { return true; }
+                    match &ce.parent {
+                        Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
+                        None => break,
+                    }
+                } else { break; }
+            }
+        }
         let mut current: Vec<u8> = class_name.to_vec();
         for _ in 0..50 {
             if let Some(ce) = self.classes.get(&current) {
@@ -8689,14 +8747,17 @@ impl Vm {
         let result = result?;
 
         // Call __destruct on all tracked objects in reverse creation order
-        // Skip objects whose constructor threw (marked with __ctor_pending)
+        // Skip objects whose constructor threw or already destructed eagerly
         let destructibles = std::mem::take(&mut self.destructible_objects);
         for obj_val in destructibles.iter().rev() {
             if let Value::Object(obj_rc) = obj_val {
-                // Skip objects whose constructor did not complete
                 if matches!(obj_rc.borrow().get_property(b"__ctor_pending"), Value::True) {
                     continue;
                 }
+                if matches!(obj_rc.borrow().get_property(b"__destructed"), Value::True) {
+                    continue;
+                }
+                obj_rc.borrow_mut().set_property(b"__destructed".to_vec(), Value::True);
                 let class_lower: Vec<u8> = obj_rc
                     .borrow()
                     .class_name
@@ -8741,6 +8802,7 @@ impl Vm {
         }
         let result = self.execute_op_array_inner(op_array, cvs);
         self.call_depth -= 1;
+        self.run_pending_destructors();
 
         // Check return type if declared
         // Detect implicit return: the compiler emits `Return Null` with line=0 for implicit returns
@@ -8911,7 +8973,22 @@ impl Vm {
 
                 OpCode::Assign => {
                     let val = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, &op_array, op.line);
-                    self.write_operand(&op.op1, val, &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(&op.op1, val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                    if let OperandType::Tmp(idx) = op.op2 {
+                        if let Some(slot) = tmps.get_mut(idx as usize) { *slot = Value::Undef; }
+                    }
+                    if self.is_global_scope {
+                        if let OperandType::Cv(idx) = op.op1 {
+                            if let Some(name) = op_array.cv_names.get(idx as usize) {
+                                if matches!(val, Value::Undef | Value::Null) {
+                                    self.globals.remove(name);
+                                } else {
+                                    self.globals.insert(name.clone(), val);
+                                }
+                            }
+                        }
+                    }
+                    self.run_pending_destructors();
                 }
 
                 OpCode::AssignRef => {
@@ -14732,6 +14809,9 @@ impl Vm {
                                     }
                                 }
                             }
+                            if !found {
+                                found = self.class_implements_interface(&obj_class_lower, &class_lower);
+                            }
                             if found { Value::True } else { Value::False }
                         }
                     } else {
@@ -15591,7 +15671,31 @@ impl Vm {
                             drop(obj_borrow);
                             if let Some(class_def) = self.classes.get(&class_lower) {
                                 if class_def.get_method(b"__clone").is_some() {
+                                    if let Value::Object(ref rc) = new_obj_val {
+                                        rc.borrow_mut().set_property(b"__clone_window".to_vec(), Value::True);
+                                    }
                                     self.call_object_method(&new_obj_val, b"__clone", &[]);
+                                    if let Value::Object(ref rc) = new_obj_val {
+                                        let mut ob = rc.borrow_mut();
+                                        ob.remove_property(b"__clone_window");
+                                        ob.properties.retain(|(k, _)| !k.starts_with(b"__clone_modified_"));
+                                    }
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        let exc = self.current_exception.clone().unwrap();
+                                        let msg = if let Value::Object(e) = &exc {
+                                            let e_borrow = e.borrow();
+                                            let class_name = String::from_utf8_lossy(&e_borrow.class_name).to_string();
+                                            let message = e_borrow.get_property(b"message").to_php_string().to_string_lossy();
+                                            format!("Uncaught {}: {}", class_name, message)
+                                        } else {
+                                            "Uncaught Error".to_string()
+                                        };
+                                        return Err(VmError { message: msg, line: op.line });
+                                    }
                                 }
                             }
                             new_obj_val
@@ -15719,7 +15823,6 @@ impl Vm {
                     // Directly replace the CV slot with Undef (breaks reference links)
                     if let OperandType::Cv(idx) = op.op1 {
                         if let Some(slot) = cvs.get_mut(idx as usize) {
-                            // If the CV holds a generator, close it (run finally blocks)
                             if let Value::Generator(gen_rc) = slot {
                                 let gen_clone = gen_rc.clone();
                                 *slot = Value::Undef;
@@ -15729,7 +15832,11 @@ impl Vm {
                                 *slot = Value::Undef;
                             }
                         }
+                        if let Some(name) = op_array.cv_names.get(idx as usize) {
+                            self.globals.remove(name);
+                        }
                     }
+                    self.run_pending_destructors();
                 }
 
                 OpCode::ArrayUnset => {
@@ -15810,11 +15917,26 @@ impl Vm {
                             }
                         }
                         let has_prop = obj.borrow().has_property(prop_name.as_bytes());
-                        // Check asymmetric visibility for unset (same as set) - check against class def, not instance
                         let class_name_orig_u = obj.borrow().class_name.clone();
                         let class_lower_u: Vec<u8> = class_name_orig_u.iter().map(|b| b.to_ascii_lowercase()).collect();
                         let caller_scope_u = self.current_class_scope()
                             .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        // Check readonly property unset protection
+                        if let Some((_vis, _dc, prop_is_readonly, _pt, _sv)) = self.find_property_def_for_scope(&class_lower_u, prop_name.as_bytes(), caller_scope_u.as_deref()) {
+                            if prop_is_readonly && !matches!(obj.borrow().get_property(b"__clone_window"), Value::True) {
+                                let class_display = String::from_utf8_lossy(&class_name_orig_u).to_string();
+                                let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                let msg = format!("Cannot unset readonly property {}::${}", class_display, prop_str);
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                            }
+                        }
+                        // Check asymmetric visibility for unset (same as set) - check against class def, not instance
                         let mut avis_error: Option<String> = None;
                         if let Some((_vis, declaring_class, _ro, _pt, set_vis)) = self.find_property_def_for_scope(&class_lower_u, prop_name.as_bytes(), caller_scope_u.as_deref()) {
                             if let Some(sv) = set_vis {
@@ -18726,6 +18848,24 @@ impl Vm {
                             return Err(VmError { message: msg, line: op.line });
                         }
 
+                        // Check if readonly class trying to create dynamic property
+                        if let Some(class_def) = self.classes.get(&class_lower) {
+                            if class_def.is_readonly {
+                                let prop_exists_in_def = class_def.properties.iter().any(|p| p.name == prop_name.as_bytes());
+                                if !prop_exists_in_def {
+                                    let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
+                                    let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                    let msg = format!("Cannot create dynamic property {}::${}", class_display, prop_str);
+                                    let exc = self.create_exception(b"Error", &msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                }
+                            }
+                        }
                         // Check visibility, readonly, and type before setting the property
                         let mut visibility_error: Option<String> = None;
                         let mut is_avis_error = false; // true if error is from asymmetric visibility
@@ -18774,14 +18914,23 @@ impl Vm {
                                 }
                             }
                             // Enforce readonly: if property is readonly and already initialized (not Undef), reject
+                            // Exception: during __clone(), readonly properties can be modified once
                             if prop_is_readonly {
                                 let current_val = obj.borrow().get_property(prop_name.as_bytes());
-                                // A readonly property can be set once (from Undef/Null initial state)
-                                // but cannot be modified after initialization
                                 if obj.borrow().has_property(prop_name.as_bytes()) && !matches!(current_val, Value::Undef) {
-                                    let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
-                                    let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
-                                    readonly_error = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_display));
+                                    let in_clone_window = matches!(obj.borrow().get_property(b"__clone_window"), Value::True);
+                                    if in_clone_window {
+                                        let modified_key = format!("__clone_modified_{}", String::from_utf8_lossy(prop_name.as_bytes()));
+                                        if matches!(obj.borrow().get_property(modified_key.as_bytes()), Value::True) {
+                                            let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
+                                            let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                            readonly_error = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_display));
+                                        }
+                                    } else {
+                                        let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
+                                        let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                        readonly_error = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_display));
+                                    }
                                 }
                             }
                             // Enforce typed properties (only if no readonly error, since readonly takes precedence)
@@ -18937,6 +19086,10 @@ impl Vm {
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
                             } else {
+                                if matches!(obj.borrow().get_property(b"__clone_window"), Value::True) {
+                                    let modified_key = format!("__clone_modified_{}", String::from_utf8_lossy(prop_name.as_bytes()));
+                                    obj.borrow_mut().set_property(modified_key.into_bytes(), Value::True);
+                                }
                                 obj.borrow_mut()
                                     .set_property(prop_name.as_bytes().to_vec(), value);
                             }

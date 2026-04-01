@@ -294,7 +294,7 @@ impl Parser {
             TokenKind::Readonly => {
                 // readonly can be a class modifier (readonly class Foo {}) or a function call
                 // Check if followed by class/enum/abstract/final/function
-                if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function) {
+                if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface) {
                     self.parse_class_decl()
                 } else {
                     // Treat 'readonly' as identifier for function call etc.
@@ -1442,14 +1442,23 @@ impl Parser {
         // Accept class, interface, trait, or enum
         match self.peek() {
             TokenKind::Interface => {
+                if modifiers.is_readonly {
+                    return Err(ParseError { message: "Cannot use the readonly modifier on an interface".into(), span: self.span() });
+                }
                 modifiers.is_interface = true;
                 self.advance();
             }
             TokenKind::Trait => {
+                if modifiers.is_readonly {
+                    return Err(ParseError { message: "Cannot use the readonly modifier on a trait".into(), span: self.span() });
+                }
                 modifiers.is_trait = true;
                 self.advance();
             }
             TokenKind::Enum => {
+                if modifiers.is_readonly {
+                    return Err(ParseError { message: "Cannot use the readonly modifier on an enum".into(), span: self.span() });
+                }
                 modifiers.is_enum = true;
                 self.advance();
             }
@@ -1838,6 +1847,9 @@ impl Parser {
                 })
             }
             TokenKind::Function => {
+                if is_readonly {
+                    return Err(ParseError { message: "Cannot use the readonly modifier on a method".into(), span: self.span() });
+                }
                 let method_line = self.span().line;
                 self.advance();
                 // Optional & for return-by-reference
@@ -1902,6 +1914,9 @@ impl Parser {
                 })
             }
             TokenKind::Const => {
+                if is_readonly {
+                    return Err(ParseError { message: "Cannot use the readonly modifier on a class constant".into(), span: self.span() });
+                }
                 self.advance();
                 // Try to parse an identifier - it might be a type hint or the constant name
                 let first_name = match self.peek().clone() {
