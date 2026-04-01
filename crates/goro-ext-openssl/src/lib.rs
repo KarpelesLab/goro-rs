@@ -16,6 +16,7 @@ const OPENSSL_ZERO_PADDING: i64 = 2;
 
 /// Register all openssl extension functions and constants
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"openssl");
     // Functions
     vm.register_function(b"openssl_encrypt", openssl_encrypt);
     vm.register_function(b"openssl_decrypt", openssl_decrypt);

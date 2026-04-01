@@ -3,6 +3,7 @@ use goro_core::vm::{Vm, VmError};
 
 /// Register all ctype extension functions
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"ctype");
     vm.register_function(b"ctype_alpha", ctype_alpha);
     vm.register_function(b"ctype_digit", ctype_digit);
     vm.register_function(b"ctype_alnum", ctype_alnum);

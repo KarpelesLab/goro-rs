@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 /// Register all hash extension functions
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"hash");
     vm.register_function(b"crc32", crc32_fn);
     vm.register_function(b"md5", md5_fn);
     vm.register_function(b"sha1", sha1_fn);

@@ -9,6 +9,7 @@ use goro_core::vm::Vm;
 
 /// Register all standard extension functions
 pub fn register_standard_functions(vm: &mut Vm) {
+    vm.register_extension(b"standard");
     output::register(vm);
     strings::register(vm);
     type_funcs::register(vm);

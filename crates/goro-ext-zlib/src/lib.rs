@@ -12,6 +12,7 @@ use std::io::{Read, Write, Cursor};
 use std::rc::Rc;
 
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"zlib");
     vm.register_function(b"gzcompress", gzcompress);
     vm.register_function(b"gzuncompress", gzuncompress);
     vm.register_function(b"gzdeflate", gzdeflate);

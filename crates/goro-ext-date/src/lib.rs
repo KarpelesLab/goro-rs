@@ -85,6 +85,7 @@ fn parse_iso8601_duration_impl(spec: &str) -> (i64, i64, i64, i64, i64, i64) {
 
 /// Register all date/time extension functions
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"date");
     vm.register_function(b"date_default_timezone_set", date_default_timezone_set);
     vm.register_function(b"date_default_timezone_get", date_default_timezone_get);
     vm.register_function(b"time", time_fn);

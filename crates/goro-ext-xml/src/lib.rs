@@ -694,6 +694,7 @@ fn dispatch_callback(
 // ── Public registration ─────────────────────────────────────────────────────
 
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"xml");
     // Functions
     vm.register_function(b"xml_parser_create", xml_parser_create);
     vm.register_function(b"xml_parser_create_ns", xml_parser_create_ns);

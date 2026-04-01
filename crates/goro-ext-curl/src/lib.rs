@@ -45,6 +45,7 @@ const CURLINFO_HEADER_SIZE: i64 = 2097163;
 
 /// Register all curl extension functions and constants
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"curl");
     // Register functions
     vm.register_function(b"curl_init", curl_init);
     vm.register_function(b"curl_setopt", curl_setopt);

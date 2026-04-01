@@ -294,6 +294,8 @@ pub struct Vm {
     pub object_to_double: Option<fn(&Value) -> Option<f64>>,
     /// Object type checker (e.g., is GMP?)
     pub object_is_operator_type: Option<fn(&Value) -> bool>,
+    /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
+    pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
 }
 
 impl Vm {
@@ -950,7 +952,19 @@ impl Vm {
             object_to_long: None,
             object_to_double: None,
             object_is_operator_type: None,
+            loaded_extensions: {
+                let mut s = std::collections::HashSet::new();
+                // Core extensions always available
+                s.insert(b"core".to_vec());
+                s.insert(b"standard".to_vec());
+                s
+            },
         }
+    }
+
+    /// Register an extension as loaded (called by extension crates in their register() function)
+    pub fn register_extension(&mut self, name: &[u8]) {
+        self.loaded_extensions.insert(name.to_ascii_lowercase());
     }
 
     /// Resolve "static" to the actual called class name (for late static binding).

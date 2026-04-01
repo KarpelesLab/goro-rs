@@ -19,6 +19,7 @@ thread_local! {
 
 /// Register all GMP extension functions and constants
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"gmp");
     // Functions
     vm.register_function(b"gmp_init", gmp_init);
     vm.register_function(b"gmp_strval", gmp_strval);

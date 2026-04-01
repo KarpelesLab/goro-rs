@@ -371,6 +371,7 @@ fn set_session_global(vm: &mut Vm) {
 
 /// Register all session extension functions and constants
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"session");
     // Reset session state for this VM instance
     SESSION_STATE.with(|state| {
         *state.borrow_mut() = SessionState::default();

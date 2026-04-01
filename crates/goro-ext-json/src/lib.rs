@@ -17,6 +17,7 @@ fn create_json_exception(vm: &mut Vm, class: &[u8], message: &str, code: i64) ->
 
 /// Register all JSON extension functions
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"json");
     vm.register_function(b"json_encode", json_encode);
     vm.register_function(b"json_decode", json_decode);
     vm.register_function(b"json_last_error", json_last_error);

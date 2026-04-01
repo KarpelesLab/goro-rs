@@ -51,6 +51,7 @@ const PHP_BINARY_READ: i64 = 2;
 
 /// Register all socket extension functions and constants
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"sockets");
     // Functions
     vm.register_function(b"socket_create", socket_create);
     vm.register_function(b"socket_connect", socket_connect);

@@ -9,6 +9,7 @@ use goro_core::vm::{Vm, VmError};
 
 /// Register all bz2 extension functions
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"bz2");
     vm.register_function(b"bzcompress", php_bzcompress);
     vm.register_function(b"bzdecompress", php_bzdecompress);
 

@@ -6,6 +6,7 @@ use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"mbstring");
     vm.register_function(b"mb_detect_encoding", mb_detect_encoding);
     vm.register_function(b"mb_internal_encoding", mb_internal_encoding);
     vm.register_function(b"mb_strlen", mb_strlen);

@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 /// Register all SPL extension functions
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"spl");
     // Autoload functions
     vm.register_function(b"spl_autoload_register", spl_autoload_register_fn);
     vm.register_function(b"spl_autoload_unregister", spl_autoload_unregister_fn);

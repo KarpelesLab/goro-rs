@@ -7,7 +7,8 @@ use goro_core::vm::Vm;
 /// other goro-ext-* crates, and registers any top-level reflection
 /// functions (currently none -- all reflection functionality is accessed
 /// through Reflection class method dispatch in the VM).
-pub fn register(_vm: &mut Vm) {
+pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"reflection");
     // Reflection classes are handled internally by the VM's class dispatch.
     // Class constants (e.g. ReflectionMethod::IS_PUBLIC) are resolved via
     // Vm::get_builtin_class_constant().

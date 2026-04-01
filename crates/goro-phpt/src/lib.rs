@@ -137,18 +137,49 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     let ini_settings = parse_ini_settings(test.ini_section());
 
     // Handle EXTENSIONS section - skip tests requiring unsupported extensions
+    // Uses a thread_local VM to check loaded_extensions dynamically
     if let Some(extensions) = test.sections.get("EXTENSIONS") {
-        let supported = [
-            "ctype", "date", "json", "hash", "pcre", "spl", "standard",
-            "mbstring", "reflection", "core", "tokenizer",
-            "openssl", "zlib", "xml", "gmp", "bz2", "curl", "simplexml", "mysqli",
-            "session", "sockets",
-        ];
-        for ext in extensions.lines() {
-            let ext = ext.trim().to_lowercase();
-            if !ext.is_empty() && !supported.contains(&ext.as_str()) {
-                return TestResult::Skip(format!("Required extension {} not available", ext));
+        thread_local! {
+            static LOADED_EXTS: std::cell::RefCell<Option<std::collections::HashSet<Vec<u8>>>> = const { std::cell::RefCell::new(None) };
+        }
+        let skip = LOADED_EXTS.with(|exts| {
+            let mut exts = exts.borrow_mut();
+            if exts.is_none() {
+                // Build the set once by registering all extensions
+                let mut vm = goro_core::vm::Vm::new();
+                goro_ext_standard::register_standard_functions(&mut vm);
+                goro_ext_date::register(&mut vm);
+                goro_ext_json::register(&mut vm);
+                goro_ext_ctype::register(&mut vm);
+                goro_ext_hash::register(&mut vm);
+                goro_ext_openssl::register(&mut vm);
+                goro_ext_zlib::register(&mut vm);
+                goro_ext_gmp::register(&mut vm);
+                goro_ext_bz2::register(&mut vm);
+                goro_ext_curl::register(&mut vm);
+                goro_ext_xml::register(&mut vm);
+                goro_ext_session::register(&mut vm);
+                goro_ext_mysqli::register(&mut vm);
+                goro_ext_sockets::register(&mut vm);
+                goro_ext_mbstring::register(&mut vm);
+                goro_ext_spl::register(&mut vm);
+                goro_ext_reflection::register(&mut vm);
+                vm.register_extension(b"simplexml");
+                vm.register_extension(b"tokenizer");
+                vm.register_extension(b"pcre");
+                *exts = Some(vm.loaded_extensions);
             }
+            let loaded = exts.as_ref().unwrap();
+            for ext in extensions.lines() {
+                let ext = ext.trim().to_lowercase();
+                if !ext.is_empty() && !loaded.contains(ext.as_bytes()) {
+                    return Some(format!("Required extension {} not available", ext));
+                }
+            }
+            None
+        });
+        if let Some(reason) = skip {
+            return TestResult::Skip(reason);
         }
     }
 
@@ -632,6 +663,10 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     goro_ext_mbstring::register(&mut vm);
     goro_ext_spl::register(&mut vm);
     goro_ext_reflection::register(&mut vm);
+    // Also register aliases that PHP tests may use
+    vm.register_extension(b"simplexml");
+    vm.register_extension(b"tokenizer");
+    vm.register_extension(b"pcre");
 
     // Apply all INI settings to the VM constants
     for (key, value) in ini_settings {

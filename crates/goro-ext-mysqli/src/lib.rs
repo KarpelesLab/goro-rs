@@ -123,6 +123,7 @@ type QueryResult = Result<(Option<(RowData, usize)>, u64, u64), mysql_async::Err
 // ── Registration ──────────────────────────────────────────────────────
 
 pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"mysqli");
     vm.register_function(b"mysqli_connect", mysqli_connect);
     vm.register_function(b"mysqli_close", mysqli_close);
     vm.register_function(b"mysqli_query", mysqli_query);
