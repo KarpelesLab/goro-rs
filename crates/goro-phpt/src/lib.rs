@@ -142,6 +142,7 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
             "ctype", "date", "json", "hash", "pcre", "spl", "standard",
             "mbstring", "reflection", "core", "tokenizer",
             "openssl", "zlib", "xml", "gmp", "bz2", "curl", "simplexml", "mysqli",
+            "session", "sockets",
         ];
         for ext in extensions.lines() {
             let ext = ext.trim().to_lowercase();
