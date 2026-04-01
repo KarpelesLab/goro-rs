@@ -61,6 +61,13 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_ereg_replace", mb_ereg_replace_fn);
     vm.register_function(b"mb_eregi_replace", mb_eregi_replace_fn);
     vm.register_function(b"mb_ereg_match", mb_ereg_match_fn);
+    vm.register_function(b"mb_ereg_search_init", mb_ereg_search_init_fn);
+    vm.register_function(b"mb_ereg_search", mb_ereg_search_fn);
+    vm.register_function(b"mb_ereg_search_pos", mb_ereg_search_pos_fn);
+    vm.register_function(b"mb_ereg_search_regs", mb_ereg_search_regs_fn);
+    vm.register_function(b"mb_ereg_search_getregs", mb_ereg_search_getregs_fn);
+    vm.register_function(b"mb_ereg_search_getpos", mb_ereg_search_getpos_fn);
+    vm.register_function(b"mb_ereg_search_setpos", mb_ereg_search_setpos_fn);
     vm.register_function(b"mb_send_mail", mb_send_mail_fn);
 
     // Register parameter names for named argument support
@@ -404,13 +411,21 @@ fn mb_strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn mb_strtolower(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    // Validate encoding parameter if provided
+    if let Some(enc_arg) = args.get(1) {
+        let enc = enc_arg.to_php_string().to_string_lossy();
+        if enc.is_empty() {
+            let msg = "mb_strtolower(): Argument #2 ($encoding) must be a valid encoding, \"\" given";
+            let exc = _vm.create_exception(b"ValueError", msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.to_string(), line: _vm.current_line });
+        }
+    }
     let bytes = s.as_bytes();
-    // Use Unicode-aware lowercasing via Rust's str::to_lowercase
     if let Ok(s) = std::str::from_utf8(bytes) {
         let lower = s.to_lowercase();
         Ok(Value::String(PhpString::from_vec(lower.into_bytes())))
     } else {
-        // Fallback to ASCII lowercasing for non-UTF-8
         let lower: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
         Ok(Value::String(PhpString::from_vec(lower)))
     }
@@ -418,8 +433,16 @@ fn mb_strtolower(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn mb_strtoupper(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(enc_arg) = args.get(1) {
+        let enc = enc_arg.to_php_string().to_string_lossy();
+        if enc.is_empty() {
+            let msg = "mb_strtoupper(): Argument #2 ($encoding) must be a valid encoding, \"\" given";
+            let exc = _vm.create_exception(b"ValueError", msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.to_string(), line: _vm.current_line });
+        }
+    }
     let bytes = s.as_bytes();
-    // Use Unicode-aware uppercasing via Rust's str::to_uppercase
     if let Ok(s) = std::str::from_utf8(bytes) {
         let upper = s.to_uppercase();
         Ok(Value::String(PhpString::from_vec(upper.into_bytes())))
@@ -473,8 +496,18 @@ fn mb_strpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let h = haystack.as_bytes();
     let n = needle.as_bytes();
+    // PHP 8.0+: empty needle returns offset position
     if n.is_empty() {
-        return Ok(Value::False);
+        let chars: Vec<usize> = utf8_char_positions(h);
+        let char_count = chars.len() as i64;
+        let pos = if offset < 0 { char_count + offset } else { offset };
+        if pos < 0 || pos > char_count {
+            let msg = "mb_strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        }
+        return Ok(Value::Long(pos));
     }
     let chars: Vec<usize> = utf8_char_positions(h);
     let char_count = chars.len() as i64;
@@ -520,44 +553,64 @@ fn mb_strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let h = haystack.as_bytes();
     let n = needle.as_bytes();
-    if n.is_empty() { return Ok(Value::False); }
-
-    let chars: Vec<usize> = utf8_char_positions(h);
-    let char_count = chars.len() as i64;
-
-    // Validate offset
-    let start_char = if offset < 0 {
-        let from = char_count + offset;
-        if from < 0 {
+    if n.is_empty() {
+        let chars: Vec<usize> = utf8_char_positions(h);
+        let char_count = chars.len() as i64;
+        let pos = if offset < 0 { char_count + offset } else { offset };
+        if pos < 0 || pos > char_count {
             let msg = "mb_strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.to_string(), line: vm.current_line });
         }
-        from as usize
+        return Ok(Value::Long(pos));
+    }
+
+    let chars: Vec<usize> = utf8_char_positions(h);
+    let char_count = chars.len() as i64;
+
+    if offset < 0 {
+        // Negative offset: search from start but only up to (char_count + offset) chars from end
+        let end_char = char_count + offset;
+        if end_char < 0 {
+            let msg = "mb_strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        }
+        // Search in h[0..end_byte] for the last occurrence
+        let end_byte = if (end_char as usize) < chars.len() { chars[end_char as usize] } else { h.len() };
+        // Need enough bytes for needle
+        if end_byte < n.len() {
+            return Ok(Value::False);
+        }
+        match h[..end_byte].windows(n.len()).rposition(|w| w == n) {
+            Some(byte_pos) => {
+                let char_pos = chars.iter().position(|&p| p == byte_pos).unwrap_or(byte_pos);
+                Ok(Value::Long(char_pos as i64))
+            }
+            None => Ok(Value::False),
+        }
     } else {
+        // Positive offset: search from offset char position to end
         if offset > char_count {
             let msg = "mb_strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.to_string(), line: vm.current_line });
         }
-        offset as usize
-    };
-    let _ = vm;
-
-    let start_byte = if start_char < chars.len() { chars[start_char] } else { h.len() };
-    if start_byte >= h.len() {
-        return Ok(Value::False);
-    }
-
-    match h[start_byte..].windows(n.len()).rposition(|w| w == n) {
-        Some(byte_pos) => {
-            let abs_byte_pos = start_byte + byte_pos;
-            let char_pos = chars.iter().position(|&p| p == abs_byte_pos).unwrap_or(abs_byte_pos);
-            Ok(Value::Long(char_pos as i64))
+        let start_byte = if (offset as usize) < chars.len() { chars[offset as usize] } else { h.len() };
+        if start_byte >= h.len() {
+            return Ok(Value::False);
         }
-        None => Ok(Value::False),
+        match h[start_byte..].windows(n.len()).rposition(|w| w == n) {
+            Some(byte_pos) => {
+                let abs_byte_pos = start_byte + byte_pos;
+                let char_pos = chars.iter().position(|&p| p == abs_byte_pos).unwrap_or(abs_byte_pos);
+                Ok(Value::Long(char_pos as i64))
+            }
+            None => Ok(Value::False),
+        }
     }
 }
 
@@ -570,7 +623,18 @@ fn mb_stripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let h_str = String::from_utf8_lossy(haystack.as_bytes()).to_lowercase();
     let n_str = String::from_utf8_lossy(needle.as_bytes()).to_lowercase();
 
-    if n_str.is_empty() { return Ok(Value::False); }
+    if n_str.is_empty() {
+        let chars: Vec<usize> = utf8_char_positions(h_str.as_bytes());
+        let char_count = chars.len() as i64;
+        let pos = if offset < 0 { char_count + offset } else { offset };
+        if pos < 0 || pos > char_count {
+            let msg = "mb_stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        }
+        return Ok(Value::Long(pos));
+    }
 
     let h = h_str.as_bytes();
     let n = n_str.as_bytes();
@@ -620,22 +684,43 @@ fn mb_strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let h_str = String::from_utf8_lossy(haystack.as_bytes()).to_lowercase();
     let n_str = String::from_utf8_lossy(needle.as_bytes()).to_lowercase();
 
-    if n_str.is_empty() { return Ok(Value::False); }
+    if n_str.is_empty() {
+        let chars: Vec<usize> = utf8_char_positions(h_str.as_bytes());
+        let char_count = chars.len() as i64;
+        let pos = if offset < 0 { char_count + offset } else { offset };
+        if pos < 0 || pos > char_count {
+            let msg = "mb_strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let exc = vm.create_exception(b"ValueError", msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        }
+        return Ok(Value::Long(pos));
+    }
 
     let h = h_str.as_bytes();
     let n = n_str.as_bytes();
     let chars = utf8_char_positions(h);
     let char_count = chars.len() as i64;
 
-    let start_char = if offset < 0 {
-        let from = char_count + offset;
-        if from < 0 {
+    if offset < 0 {
+        let end_char = char_count + offset;
+        if end_char < 0 {
             let msg = "mb_strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.to_string(), line: vm.current_line });
         }
-        from as usize
+        let end_byte = if (end_char as usize) < chars.len() { chars[end_char as usize] } else { h.len() };
+        if end_byte < n.len() {
+            return Ok(Value::False);
+        }
+        match h[..end_byte].windows(n.len()).rposition(|w| w == n) {
+            Some(byte_pos) => {
+                let char_pos = chars.iter().position(|&p| p == byte_pos).unwrap_or(byte_pos);
+                Ok(Value::Long(char_pos as i64))
+            }
+            None => Ok(Value::False),
+        }
     } else {
         if offset > char_count {
             let msg = "mb_strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
@@ -643,28 +728,35 @@ fn mb_strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.to_string(), line: vm.current_line });
         }
-        offset as usize
-    };
-    let _ = vm;
-
-    let start_byte = if start_char < chars.len() { chars[start_char] } else { h.len() };
-    if start_byte >= h.len() {
-        return Ok(Value::False);
-    }
-
-    match h[start_byte..].windows(n.len()).rposition(|w| w == n) {
-        Some(byte_pos) => {
-            let abs = start_byte + byte_pos;
-            let char_pos = chars.iter().position(|&p| p == abs).unwrap_or(abs);
-            Ok(Value::Long(char_pos as i64))
+        let start_byte = if (offset as usize) < chars.len() { chars[offset as usize] } else { h.len() };
+        if start_byte >= h.len() {
+            return Ok(Value::False);
         }
-        None => Ok(Value::False),
+        match h[start_byte..].windows(n.len()).rposition(|w| w == n) {
+            Some(byte_pos) => {
+                let abs = start_byte + byte_pos;
+                let char_pos = chars.iter().position(|&p| p == abs).unwrap_or(abs);
+                Ok(Value::Long(char_pos as i64))
+            }
+            None => Ok(Value::False),
+        }
     }
 }
 
 fn mb_convert_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null);
     let to_enc = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "UTF-8".to_string());
+    let from = get_from_encoding(args);
+
+    // Emit deprecation for Base64 and HTML-ENTITIES
+    let to_lower = to_enc.to_ascii_lowercase();
+    let from_lower = from.to_ascii_lowercase();
+    if to_lower == "base64" || from_lower == "base64" {
+        _vm.emit_deprecated("mb_convert_encoding(): Handling Base64 via mbstring is deprecated; use base64_encode/base64_decode instead");
+    }
+    if to_lower == "html-entities" || to_lower == "html" || from_lower == "html-entities" || from_lower == "html" {
+        _vm.emit_deprecated("mb_convert_encoding(): Handling HTML entities via mbstring is deprecated; use htmlspecialchars, htmlentities, or mb_encode_numericentity/mb_decode_numericentity instead");
+    }
 
     // Handle array input
     if let Value::Array(arr) = input {
@@ -672,7 +764,6 @@ fn mb_convert_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
         for (key, val) in arr.iter() {
             let s = val.to_php_string();
-            let from = get_from_encoding(args);
             if let Some(converted) = convert_encoding(s.as_bytes(), &to_enc, &from) {
                 result.set(key.clone(), Value::String(PhpString::from_vec(converted)));
             } else {
@@ -683,7 +774,6 @@ fn mb_convert_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let s = input.to_php_string();
-    let from = get_from_encoding(args);
 
     if let Some(converted) = convert_encoding(s.as_bytes(), &to_enc, &from) {
         Ok(Value::String(PhpString::from_vec(converted)))
@@ -739,6 +829,11 @@ fn mb_check_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let encoding = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "UTF-8".to_string());
     let enc_lower = encoding.to_ascii_lowercase();
+
+    // Emit deprecation for HTML-ENTITIES
+    if enc_lower == "html-entities" || enc_lower == "html" {
+        _vm.emit_deprecated("mb_check_encoding(): Handling HTML entities via mbstring is deprecated; use htmlspecialchars, htmlentities, or mb_encode_numericentity/mb_decode_numericentity instead");
+    }
 
     if enc_lower == "utf-8" || enc_lower == "utf8" {
         let is_valid = std::str::from_utf8(s.as_bytes()).is_ok();
@@ -1450,7 +1545,23 @@ fn mb_decode_numericentity_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let text = String::from_utf8_lossy(s.as_bytes()).to_string();
 
-    // Parse numeric entities (&#xHH; and &#DD;)
+    // Parse the convmap: array of [start, end, offset, mask] quadruples
+    let convmap = if let Some(Value::Array(arr)) = args.get(1) {
+        let arr_borrow = arr.borrow();
+        let values: Vec<i64> = arr_borrow.iter().map(|(_, v)| v.to_long()).collect();
+        // Group into quadruples
+        let mut quads: Vec<(i64, i64, i64, i64)> = Vec::new();
+        let mut i = 0;
+        while i + 3 < values.len() {
+            quads.push((values[i], values[i+1], values[i+2], values[i+3]));
+            i += 4;
+        }
+        quads
+    } else {
+        vec![(0, 0x10ffff, 0, 0xffffff)] // default: decode all
+    };
+
+    // Parse numeric entities (&#xHH; and &#DD;) with convmap
     let mut result = String::new();
     let mut i = 0;
     let chars: Vec<char> = text.chars().collect();
@@ -1460,12 +1571,20 @@ fn mb_decode_numericentity_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
             i += 2;
             let is_hex = i < chars.len() && (chars[i] == 'x' || chars[i] == 'X');
             if is_hex { i += 1; }
+            let num_start = i;
             let mut num = String::new();
+            let mut valid_digits = true;
             while i < chars.len() && chars[i] != ';' {
-                num.push(chars[i]);
+                let c = chars[i];
+                if is_hex {
+                    if !c.is_ascii_hexdigit() { valid_digits = false; }
+                } else {
+                    if !c.is_ascii_digit() { valid_digits = false; }
+                }
+                num.push(c);
                 i += 1;
             }
-            if i < chars.len() && chars[i] == ';' {
+            if i < chars.len() && chars[i] == ';' && valid_digits && !num.is_empty() {
                 i += 1;
                 let codepoint = if is_hex {
                     u32::from_str_radix(&num, 16).ok()
@@ -1473,13 +1592,23 @@ fn mb_decode_numericentity_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
                     num.parse::<u32>().ok()
                 };
                 if let Some(cp) = codepoint {
-                    if let Some(c) = char::from_u32(cp) {
-                        result.push(c);
-                        continue;
+                    // Apply convmap: find matching range and apply offset
+                    let mut decoded = false;
+                    for &(range_start, range_end, offset, mask) in &convmap {
+                        let actual_cp = (cp as i64) - offset;
+                        if actual_cp >= range_start && actual_cp <= range_end {
+                            let final_cp = actual_cp & mask;
+                            if let Some(c) = char::from_u32(final_cp as u32) {
+                                result.push(c);
+                                decoded = true;
+                                break;
+                            }
+                        }
                     }
+                    if decoded { continue; }
                 }
             }
-            // Invalid entity - output as-is
+            // Invalid entity or not in convmap - output as-is
             for c in &chars[start..i] {
                 result.push(*c);
             }
@@ -1760,32 +1889,316 @@ fn mb_lcfirst_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result.into_bytes())))
 }
 
-fn mb_ereg_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Stub - mb_ereg requires a regex engine
-    Ok(Value::False)
+fn mb_ereg_impl(_vm: &mut Vm, args: &[Value], case_insensitive: bool) -> Result<Value, VmError> {
+    let pattern = args.first().unwrap_or(&Value::Null);
+    let pattern_str = if let Value::Long(n) = pattern {
+        if let Some(c) = char::from_u32(*n as u32) {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            regex::escape(s)
+        } else {
+            return Ok(Value::False);
+        }
+    } else {
+        let ps = pattern.to_php_string().to_string_lossy();
+        if ps.is_empty() {
+            let fn_name = if case_insensitive { "mb_eregi" } else { "mb_ereg" };
+            _vm.emit_warning_at(&format!("{}(): Argument #1 ($pattern) must not be empty", fn_name), _vm.current_line);
+            return Ok(Value::False);
+        }
+        ps
+    };
+    let string = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+
+    let full_pattern = if case_insensitive {
+        format!("(?i){}", pattern_str)
+    } else {
+        pattern_str
+    };
+    let re = match regex::Regex::new(&full_pattern) {
+        Ok(r) => r,
+        Err(_) => return Ok(Value::False),
+    };
+
+    if let Some(captures) = re.captures(&string) {
+        if args.len() >= 3 {
+            let mut arr = PhpArray::new();
+            for (i, m) in captures.iter().enumerate() {
+                if let Some(mat) = m {
+                    arr.set(ArrayKey::Int(i as i64), Value::String(PhpString::from_string(mat.as_str().to_string())));
+                } else {
+                    arr.set(ArrayKey::Int(i as i64), Value::False);
+                }
+            }
+            if let Some(var_ref) = args.get(2) {
+                if let Value::Reference(r) = var_ref {
+                    *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(arr)));
+                }
+            }
+        }
+        let matched_len = captures.get(0).map(|m| m.as_str().len()).unwrap_or(0);
+        Ok(Value::Long(matched_len as i64))
+    } else {
+        Ok(Value::False)
+    }
 }
 
-fn mb_eregi_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn mb_ereg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    mb_ereg_impl(_vm, args, false)
+}
+
+fn mb_eregi_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    mb_ereg_impl(_vm, args, true)
+}
+
+fn mb_ereg_replace_impl(_vm: &mut Vm, args: &[Value], case_insensitive: bool) -> Result<Value, VmError> {
+    let pattern = args.first().unwrap_or(&Value::Null);
+    let pattern_str = if let Value::Long(n) = pattern {
+        if let Some(c) = char::from_u32(*n as u32) {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            regex::escape(s)
+        } else {
+            return Ok(Value::String(args.get(2).unwrap_or(&Value::Null).to_php_string()));
+        }
+    } else {
+        pattern.to_php_string().to_string_lossy()
+    };
+    let replacement = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let string = args.get(2).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let options = args.get(3).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+
+    let ci = case_insensitive || options.contains('i');
+    let full_pattern = if ci {
+        format!("(?i){}", pattern_str)
+    } else {
+        pattern_str
+    };
+    let re = match regex::Regex::new(&full_pattern) {
+        Ok(r) => r,
+        Err(_) => return Ok(Value::String(PhpString::from_string(string))),
+    };
+
+    // Convert PHP backrefs (\1) to Rust ($1)
+    let rust_replacement = {
+        let mut out = String::new();
+        let bytes = replacement.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i+1].is_ascii_digit() {
+                out.push('$');
+                out.push(bytes[i+1] as char);
+                i += 2;
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
+    };
+    let result = re.replace_all(&string, rust_replacement.as_str());
+    Ok(Value::String(PhpString::from_string(result.to_string())))
 }
 
 fn mb_ereg_replace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let _pattern = args.first().unwrap_or(&Value::Null).to_php_string();
-    let _replacement = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let string = args.get(2).unwrap_or(&Value::Null).to_php_string();
-    // Stub - return string as-is
-    Ok(Value::String(string))
+    mb_ereg_replace_impl(_vm, args, false)
 }
 
 fn mb_eregi_replace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let _pattern = args.first().unwrap_or(&Value::Null).to_php_string();
-    let _replacement = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let string = args.get(2).unwrap_or(&Value::Null).to_php_string();
-    Ok(Value::String(string))
+    mb_ereg_replace_impl(_vm, args, true)
 }
 
-fn mb_ereg_match_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn mb_ereg_match_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let pattern = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let string = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let options = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+
+    let mut flags = String::new();
+    if options.contains('i') {
+        flags.push_str("(?i)");
+    }
+    let full_pattern = format!("^{}{}", flags, pattern);
+    match regex::Regex::new(&full_pattern) {
+        Ok(re) => {
+            if re.is_match(&string) {
+                Ok(Value::True)
+            } else {
+                Ok(Value::False)
+            }
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+// ========== mb_ereg_search functions ==========
+// These use global state stored in VM constants for the search state
+
+fn get_ereg_search_state(vm: &Vm) -> (String, String, usize) {
+    let string = vm.constants.get(b"__mb_ereg_search_string".as_ref())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    let pattern = vm.constants.get(b"__mb_ereg_search_pattern".as_ref())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    let pos = vm.constants.get(b"__mb_ereg_search_pos".as_ref())
+        .map(|v| v.to_long() as usize)
+        .unwrap_or(0);
+    (string, pattern, pos)
+}
+
+fn set_ereg_search_pos(vm: &mut Vm, pos: usize) {
+    vm.constants.insert(b"__mb_ereg_search_pos".to_vec(), Value::Long(pos as i64));
+}
+
+fn set_ereg_search_regs(vm: &mut Vm, regs: Value) {
+    vm.constants.insert(b"__mb_ereg_search_regs".to_vec(), regs);
+}
+
+fn mb_ereg_search_init_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let string = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let pattern = args.get(1).map(|v| v.to_php_string().to_string_lossy());
+
+    _vm.constants.insert(b"__mb_ereg_search_string".to_vec(), Value::String(PhpString::from_string(string)));
+    if let Some(pat) = pattern {
+        _vm.constants.insert(b"__mb_ereg_search_pattern".to_vec(), Value::String(PhpString::from_string(pat)));
+    }
+    _vm.constants.insert(b"__mb_ereg_search_pos".to_vec(), Value::Long(0));
+    Ok(Value::True)
+}
+
+fn mb_ereg_search_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let (string, mut pattern, pos) = get_ereg_search_state(_vm);
+    if let Some(pat) = args.first() {
+        pattern = pat.to_php_string().to_string_lossy();
+        _vm.constants.insert(b"__mb_ereg_search_pattern".to_vec(), Value::String(PhpString::from_string(pattern.clone())));
+    }
+    if pattern.is_empty() || string.is_empty() {
+        return Ok(Value::False);
+    }
+
+    let re = match regex::Regex::new(&pattern) {
+        Ok(r) => r,
+        Err(_) => return Ok(Value::False),
+    };
+
+    if pos > string.len() {
+        return Ok(Value::False);
+    }
+    if let Some(m) = re.find(&string[pos..]) {
+        let new_pos = pos + m.end();
+        // If zero-width match, advance by one byte to avoid infinite loop
+        let new_pos = if m.start() == m.end() { (new_pos + 1).min(string.len()) } else { new_pos };
+        set_ereg_search_pos(_vm, new_pos);
+
+        // Store match info for getregs
+        let captures = re.captures(&string[pos..]).unwrap();
+        let mut arr = PhpArray::new();
+        for (i, cap) in captures.iter().enumerate() {
+            if let Some(c) = cap {
+                arr.set(ArrayKey::Int(i as i64), Value::String(PhpString::from_string(c.as_str().to_string())));
+            }
+        }
+        set_ereg_search_regs(_vm, Value::Array(Rc::new(RefCell::new(arr))));
+
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn mb_ereg_search_pos_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let (string, mut pattern, pos) = get_ereg_search_state(_vm);
+    if let Some(pat) = args.first() {
+        pattern = pat.to_php_string().to_string_lossy();
+    }
+    if pattern.is_empty() || string.is_empty() {
+        return Ok(Value::False);
+    }
+
+    let re = match regex::Regex::new(&pattern) {
+        Ok(r) => r,
+        Err(_) => return Ok(Value::False),
+    };
+
+    if pos > string.len() {
+        return Ok(Value::False);
+    }
+    if let Some(m) = re.find(&string[pos..]) {
+        let match_start = pos + m.start();
+        let match_len = m.len();
+        let new_pos = pos + m.end();
+        let new_pos = if m.start() == m.end() { (new_pos + 1).min(string.len()) } else { new_pos };
+        set_ereg_search_pos(_vm, new_pos);
+
+        let mut arr = PhpArray::new();
+        arr.push(Value::Long(match_start as i64));
+        arr.push(Value::Long(match_len as i64));
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn mb_ereg_search_regs_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let (string, mut pattern, pos) = get_ereg_search_state(_vm);
+    if let Some(pat) = args.first() {
+        pattern = pat.to_php_string().to_string_lossy();
+    }
+    if pattern.is_empty() || string.is_empty() {
+        return Ok(Value::False);
+    }
+
+    let re = match regex::Regex::new(&pattern) {
+        Ok(r) => r,
+        Err(_) => return Ok(Value::False),
+    };
+
+    if pos > string.len() {
+        return Ok(Value::False);
+    }
+    if let Some(captures) = re.captures(&string[pos..]) {
+        let m = captures.get(0).unwrap();
+        let new_pos = pos + m.end();
+        let new_pos = if m.start() == m.end() { (new_pos + 1).min(string.len()) } else { new_pos };
+        set_ereg_search_pos(_vm, new_pos);
+
+        let mut arr = PhpArray::new();
+        for (i, cap) in captures.iter().enumerate() {
+            if let Some(c) = cap {
+                arr.set(ArrayKey::Int(i as i64), Value::String(PhpString::from_string(c.as_str().to_string())));
+            } else {
+                arr.set(ArrayKey::Int(i as i64), Value::False);
+            }
+        }
+        set_ereg_search_regs(_vm, Value::Array(Rc::new(RefCell::new(arr.clone()))));
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn mb_ereg_search_getregs_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let regs = _vm.constants.get(b"__mb_ereg_search_regs".as_ref()).cloned();
+    match regs {
+        Some(v) if !matches!(v, Value::Null) => Ok(v),
+        _ => Ok(Value::False),
+    }
+}
+
+fn mb_ereg_search_getpos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let pos = _vm.constants.get(b"__mb_ereg_search_pos".as_ref())
+        .map(|v| v.to_long())
+        .unwrap_or(0);
+    Ok(Value::Long(pos))
+}
+
+fn mb_ereg_search_setpos_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let pos = args.first().map(|v| v.to_long()).unwrap_or(0);
+    if pos < 0 {
+        return Ok(Value::False);
+    }
+    set_ereg_search_pos(_vm, pos as usize);
+    Ok(Value::True)
 }
 
 fn mb_send_mail_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
