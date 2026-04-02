@@ -131,21 +131,10 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'#' => {
-                    // # comment (but not #[)
+                    // # comment (but not #[ which is an attribute)
                     if self.peek_at(1) == Some(b'[') {
-                        // PHP 8 attribute - skip #[...] entirely
-                        self.advance(); // #
-                        self.advance(); // [
-                        let mut depth = 1;
-                        while depth > 0 {
-                            match self.advance() {
-                                Some(b'[') => depth += 1,
-                                Some(b']') => depth -= 1,
-                                None => break,
-                                _ => {}
-                            }
-                        }
-                        continue;
+                        // PHP 8 attribute - break out so scan_scripting can emit AttributeOpen
+                        break;
                     }
                     self.advance();
                     while let Some(ch) = self.peek() {
@@ -1319,6 +1308,12 @@ impl<'a> Lexer<'a> {
             b'\\' => {
                 self.advance();
                 TokenKind::Backslash
+            }
+
+            b'#' if self.peek_at(1) == Some(b'[') => {
+                self.advance(); // skip #
+                self.advance(); // skip [
+                TokenKind::AttributeOpen
             }
 
             _ => {

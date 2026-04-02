@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
-use crate::object::{PhpObject, Visibility};
+use crate::object::{PhpObject, RuntimeAttribute, Visibility};
 use crate::opcode::{OpArray, ParamType};
 use crate::string::PhpString;
 use crate::value::Value;
@@ -696,9 +696,6 @@ pub fn reflection_class_method(
         b"getextensionname" => {
             Some(Value::False)
         }
-        b"getattributes" => {
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-        }
         b"innamespace" => {
             Some(if target.contains('\\') { Value::True } else { Value::False })
         }
@@ -1215,6 +1212,14 @@ pub fn reflection_class_docall(
                     Some(Value::Null)
                 }
             }
+            b"getattributes" => {
+                let attrs = vm.classes.get(&class_lower)
+                    .map(|c| c.attributes.clone())
+                    .unwrap_or_default();
+                let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
+                let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                Some(create_reflection_attributes(vm, &attrs, filter_name.as_deref(), filter_flags, 1))
+            }
             _ => None,
         }
     } else {
@@ -1400,9 +1405,6 @@ pub fn reflection_method_method(
         }
         b"setaccessible" => {
             Some(Value::Null)
-        }
-        b"getattributes" => {
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
         }
         b"getprototype" => {
             // Look for the method in parent classes/interfaces
@@ -1599,6 +1601,14 @@ pub fn reflection_method_docall(
                     Some(Value::Null)
                 }
             }
+            b"getattributes" => {
+                let attrs = vm.classes.get(&class_lower)
+                    .and_then(|c| c.get_method(method_lower_bytes.as_bytes()).map(|m| m.attributes.clone()))
+                    .unwrap_or_default();
+                let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
+                let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                Some(create_reflection_attributes(vm, &attrs, filter_name.as_deref(), filter_flags, 4))
+            }
             _ => None,
         }
     } else {
@@ -1744,9 +1754,6 @@ pub fn reflection_function_method(
                 Some(Value::False)
             }
         }
-        b"getattributes" => {
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-        }
         b"__tostring" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
@@ -1827,6 +1834,14 @@ pub fn reflection_function_docall(
                 } else {
                     Some(Value::Null)
                 }
+            }
+            b"getattributes" => {
+                let attrs = vm.user_functions.get(func_lower.as_slice())
+                    .map(|op| op.attributes.clone())
+                    .unwrap_or_default();
+                let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
+                let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                Some(create_reflection_attributes(vm, &attrs, filter_name.as_deref(), filter_flags, 2))
             }
             _ => None,
         }
@@ -1944,9 +1959,6 @@ pub fn reflection_property_method(
         b"setaccessible" => {
             Some(Value::Null)
         }
-        b"getattributes" => {
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-        }
         _ => None,
     }
 }
@@ -2011,6 +2023,14 @@ pub fn reflection_property_docall(
                     }
                 }
                 Some(Value::Null)
+            }
+            b"getattributes" => {
+                let attrs = vm.classes.get(&class_lower)
+                    .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.attributes.clone()))
+                    .unwrap_or_default();
+                let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
+                let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                Some(create_reflection_attributes(vm, &attrs, filter_name.as_deref(), filter_flags, 8))
             }
             _ => None,
         }
@@ -2139,9 +2159,6 @@ pub fn reflection_parameter_method(
         }
         b"canbepassedbyvalue" => {
             Some(Value::True)
-        }
-        b"getattributes" => {
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
         }
         b"__tostring" => {
             let ob = obj.borrow();
@@ -2405,10 +2422,6 @@ pub fn reflection_class_constant_method(
         b"isdeprecated" => Some(Value::False),
         b"hastype" => Some(Value::False),
         b"gettype" => Some(Value::Null),
-        b"getattributes" => {
-            drop(ob);
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-        }
         // ReflectionEnumUnitCase/BackedCase methods
         b"getenum" => {
             drop(ob);
@@ -2449,6 +2462,96 @@ pub fn reflection_class_constant_method(
             Some(Value::String(PhpString::from_string(format!("Constant [ {}{} {} ] {{ {} }}\n", final_str, vis_str, name, val_str))))
         }
         _ => None,
+    }
+}
+
+/// ReflectionParameter methods with args
+pub fn reflection_parameter_docall(
+    vm: &mut Vm,
+    method: &[u8],
+    args: &[Value],
+) -> Option<Value> {
+    let this = args.first()?;
+    if let Value::Object(obj) = this {
+        let ob = obj.borrow();
+        let func_target = ob.get_property(b"__reflection_func").to_php_string();
+        let param_idx = ob.get_property(b"__reflection_param_idx").to_long() as usize;
+        let param_class = ob.get_property(b"__reflection_param_class");
+        let param_method = ob.get_property(b"__reflection_param_method");
+        let position = ob.get_property(b"__reflection_param_position").to_long() as usize;
+        drop(ob);
+
+        match method {
+            b"getattributes" => {
+                let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
+                let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+
+                if !matches!(&param_class, Value::Null) {
+                    let class_lower = param_class.to_php_string().as_bytes().to_vec();
+                    let method_lower = param_method.to_php_string().as_bytes().to_vec();
+                    let attrs = vm.classes.get(&class_lower)
+                        .and_then(|c| c.get_method(&method_lower))
+                        .and_then(|m| m.op_array.param_attributes.get(position))
+                        .cloned()
+                        .unwrap_or_default();
+                    Some(create_reflection_attributes(vm, &attrs, filter_name.as_deref(), filter_flags, 32))
+                } else {
+                    let attrs = vm.user_functions.get(func_target.as_bytes())
+                        .and_then(|op| op.param_attributes.get(param_idx))
+                        .cloned()
+                        .unwrap_or_default();
+                    Some(create_reflection_attributes(vm, &attrs, filter_name.as_deref(), filter_flags, 32))
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// ReflectionClassConstant methods with args
+pub fn reflection_class_constant_docall(
+    vm: &mut Vm,
+    method: &[u8],
+    args: &[Value],
+) -> Option<Value> {
+    let this = args.first()?;
+    if let Value::Object(obj) = this {
+        let ob = obj.borrow();
+        let const_name = ob.get_property(b"name").to_php_string().to_string_lossy();
+        let class_name = ob.get_property(b"class").to_php_string().to_string_lossy();
+        let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        drop(ob);
+
+        match method {
+            b"getattributes" => {
+                let meta = vm.classes.get(&class_lower)
+                    .and_then(|ce| ce.constants_meta.get(const_name.as_bytes()).cloned());
+                let attrs = meta.as_ref().map(|m| m.attributes.clone()).unwrap_or_default();
+                let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
+                let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                Some(create_reflection_attributes(vm, &attrs, filter_name.as_deref(), filter_flags, 16))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// ReflectionAttribute methods with args
+pub fn reflection_attribute_docall(
+    vm: &mut Vm,
+    method: &[u8],
+    args: &[Value],
+) -> Option<Value> {
+    let this = args.first()?;
+    if let Value::Object(obj) = this {
+        // Delegate to the no-arg handler, which handles newInstance
+        reflection_attribute_method(vm, method, obj)
+    } else {
+        None
     }
 }
 
@@ -2596,6 +2699,8 @@ pub fn create_reflection_class_constant(vm: &mut Vm, class_name: &str, const_nam
 /// Create ReflectionParameter objects for a function's parameters
 pub fn create_reflection_parameters(vm: &mut Vm, op_array: &OpArray) -> Value {
     let mut result = PhpArray::new();
+    let func_name = String::from_utf8_lossy(&op_array.name).to_string();
+    let func_lower: Vec<u8> = op_array.name.iter().map(|b| b.to_ascii_lowercase()).collect();
     for i in 0..op_array.param_count as usize {
         let param_name = if i < op_array.cv_names.len() {
             String::from_utf8_lossy(&op_array.cv_names[i]).to_string()
@@ -2605,6 +2710,8 @@ pub fn create_reflection_parameters(vm: &mut Vm, op_array: &OpArray) -> Value {
         let obj_id = vm.next_object_id();
         let mut obj = PhpObject::new(b"ReflectionParameter".to_vec(), obj_id);
         obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(param_name)));
+        obj.set_property(b"__reflection_func".to_vec(), Value::String(PhpString::from_vec(func_lower.clone())));
+        obj.set_property(b"__reflection_param_idx".to_vec(), Value::Long(i as i64));
         result.push(Value::Object(Rc::new(RefCell::new(obj))));
     }
     Value::Array(Rc::new(RefCell::new(result)))
@@ -2626,6 +2733,13 @@ pub fn create_reflection_parameters_method(vm: &mut Vm, op_array: &OpArray, is_s
         let mut obj = PhpObject::new(b"ReflectionParameter".to_vec(), obj_id);
         obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(param_name)));
         obj.set_property(b"__reflection_param_idx".to_vec(), Value::Long(cv_idx as i64));
+        // Store class and method info for attribute lookup
+        if let Some(ref scope) = op_array.scope_class {
+            obj.set_property(b"__reflection_param_class".to_vec(), Value::String(PhpString::from_vec(scope.clone())));
+            obj.set_property(b"__reflection_param_method".to_vec(), Value::String(PhpString::from_vec(op_array.name.iter().map(|b| b.to_ascii_lowercase()).collect())));
+        }
+        // Store param position (0-based, adjusted for $this skip)
+        obj.set_property(b"__reflection_param_position".to_vec(), Value::Long(i as i64));
         result.push(Value::Object(Rc::new(RefCell::new(obj))));
     }
     Value::Array(Rc::new(RefCell::new(result)))
@@ -3055,5 +3169,201 @@ fn reflection_value_repr(val: &Value) -> String {
             }
         }
         _ => String::new(),
+    }
+}
+
+/// Create a PHP array of ReflectionAttribute objects from a slice of RuntimeAttributes.
+/// Optionally filter by attribute name and flags.
+pub fn create_reflection_attributes(
+    vm: &mut Vm,
+    attrs: &[RuntimeAttribute],
+    filter_name: Option<&[u8]>,
+    filter_flags: i64,
+    target: i64,
+) -> Value {
+    let mut result = PhpArray::new();
+    for attr in attrs {
+        // If a filter name is specified, check it
+        if let Some(fname) = filter_name {
+            if filter_flags == 0 {
+                // Exact match (default)
+                if !attr.name.eq_ignore_ascii_case(fname) {
+                    continue;
+                }
+            } else {
+                // IS_INSTANCEOF = 2: check if attribute class is the given class or subclass
+                // For now, just do case-insensitive match (we can refine later)
+                if !attr.name.eq_ignore_ascii_case(fname) {
+                    // Check if class inherits from filter_name
+                    let attr_lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let filter_lower: Vec<u8> = fname.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let is_subclass = vm.classes.get(&attr_lower)
+                        .map(|ce| {
+                            // Walk parent chain
+                            let mut current = ce.parent.clone();
+                            while let Some(ref p) = current {
+                                let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if p_lower == filter_lower {
+                                    return true;
+                                }
+                                current = vm.classes.get(&p_lower).and_then(|c| c.parent.clone());
+                            }
+                            // Check interfaces
+                            for iface in &ce.interfaces {
+                                let i_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if i_lower == filter_lower {
+                                    return true;
+                                }
+                            }
+                            false
+                        })
+                        .unwrap_or(false);
+                    if !is_subclass {
+                        continue;
+                    }
+                }
+            }
+        }
+        let obj_id = vm.next_object_id();
+        let mut obj = PhpObject::new(b"ReflectionAttribute".to_vec(), obj_id);
+        obj.set_property(b"__attr_name".to_vec(), Value::String(PhpString::from_vec(attr.name.clone())));
+        // Store the op_array for lazy argument evaluation
+        obj.set_property(b"__attr_args_evaluated".to_vec(), Value::False);
+        obj.set_property(b"__attr_target".to_vec(), Value::Long(target));
+        // Store args_op_array reference as a serialized form
+        // We'll evaluate it lazily when getArguments() is called
+        // For now, eagerly evaluate it
+        // Push class scope if the attribute was defined in a class context
+        let pushed_scope = if let Some(ref scope) = attr.args_op_array.scope_class {
+            vm.push_class_scope(scope.clone());
+            vm.called_class_stack.push(scope.clone());
+            true
+        } else {
+            false
+        };
+        let args_val = match vm.execute_op_array_pub(&attr.args_op_array, vec![]) {
+            Ok(v) => v,
+            Err(_) => Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+        };
+        if pushed_scope {
+            vm.pop_class_scope();
+            vm.called_class_stack.pop();
+        }
+        obj.set_property(b"__attr_args".to_vec(), args_val);
+        // Check if the attribute is repeated (count how many times this name appears)
+        let repeat_count = attrs.iter().filter(|a| a.name.eq_ignore_ascii_case(&attr.name)).count();
+        obj.set_property(b"__attr_repeated".to_vec(), if repeat_count > 1 { Value::True } else { Value::False });
+        result.push(Value::Object(Rc::new(RefCell::new(obj))));
+    }
+    Value::Array(Rc::new(RefCell::new(result)))
+}
+
+/// Handle method calls on ReflectionAttribute objects
+pub fn reflection_attribute_method(
+    vm: &mut Vm,
+    method: &[u8],
+    obj: &Rc<RefCell<PhpObject>>,
+) -> Option<Value> {
+    let ob = obj.borrow();
+    match method {
+        b"getname" => {
+            let name = ob.get_property(b"__attr_name");
+            Some(name)
+        }
+        b"getarguments" => {
+            let args = ob.get_property(b"__attr_args");
+            // Return the arguments array directly
+            match &args {
+                Value::Array(arr) => {
+                    let borrowed = arr.borrow();
+                    let mut result = PhpArray::new();
+                    for (key, val) in borrowed.iter() {
+                        result.set(key.clone(), val.clone());
+                    }
+                    Some(Value::Array(Rc::new(RefCell::new(result))))
+                }
+                _ => Some(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+            }
+        }
+        b"gettarget" => {
+            let target = ob.get_property(b"__attr_target");
+            Some(target)
+        }
+        b"isrepeated" => {
+            let repeated = ob.get_property(b"__attr_repeated");
+            Some(repeated)
+        }
+        b"newinstance" => {
+            let attr_name = ob.get_property(b"__attr_name").to_php_string().to_string_lossy();
+            let args = ob.get_property(b"__attr_args");
+            drop(ob);
+            // Create a new instance of the attribute class
+            let class_lower: Vec<u8> = attr_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            if !vm.classes.contains_key(&class_lower) {
+                let err_msg = format!("Attribute class \"{}\" not found", attr_name);
+                let exc = vm.create_exception(b"Error", &err_msg, 0);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
+            // Build argument list from args array
+            let mut call_args = Vec::new();
+            let mut named_args = Vec::new();
+            if let Value::Array(arr) = &args {
+                for (key, val) in arr.borrow().iter() {
+                    match key {
+                        ArrayKey::String(name) => {
+                            named_args.push((name.as_bytes().to_vec(), val.clone()));
+                        }
+                        ArrayKey::Int(_) => {
+                            call_args.push(val.clone());
+                        }
+                    }
+                }
+            }
+            // Create the object and call its constructor
+            let obj_id = vm.next_object_id();
+            let ce = vm.classes.get(&class_lower).unwrap().clone();
+            let mut new_obj = PhpObject::new(ce.name.clone(), obj_id);
+            // Initialize properties from class definition
+            for prop in &ce.properties {
+                if !prop.is_static {
+                    new_obj.set_property(prop.name.clone(), prop.default.clone());
+                }
+            }
+            let instance = Value::Object(Rc::new(RefCell::new(new_obj)));
+            // Call __construct if it exists
+            let construct_lower = b"__construct".to_vec();
+            if let Some(constructor) = ce.get_method(&construct_lower) {
+                let op = constructor.op_array.clone();
+                let mut cvs = vec![Value::Undef; op.cv_names.len()];
+                if !constructor.is_static && !cvs.is_empty() {
+                    cvs[0] = instance.clone();
+                }
+                let skip = if !constructor.is_static { 1 } else { 0 };
+                for (i, arg) in call_args.iter().enumerate() {
+                    if i + skip < cvs.len() {
+                        cvs[i + skip] = arg.clone();
+                    }
+                }
+                // Resolve named args
+                for (name, val) in &named_args {
+                    for (ci, cv_name) in op.cv_names.iter().enumerate() {
+                        if cv_name == name {
+                            if ci < cvs.len() {
+                                cvs[ci] = val.clone();
+                            }
+                            break;
+                        }
+                    }
+                }
+                let _ = vm.execute_op_array_pub(&op, cvs);
+            }
+            Some(instance)
+        }
+        b"__tostring" => {
+            let name = ob.get_property(b"__attr_name").to_php_string().to_string_lossy();
+            Some(Value::String(PhpString::from_string(format!("Attribute [ {} ]", name))))
+        }
+        _ => None,
     }
 }

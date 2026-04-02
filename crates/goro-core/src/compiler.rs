@@ -253,7 +253,10 @@ impl Compiler {
             ac.use_const_map = self.use_const_map.clone();
             ac.source_file = self.source_file.clone();
             ac.op_array.strict_types = self.op_array.strict_types;
-            if let Some(cls) = &self.current_class { ac.current_class = Some(cls.clone()); }
+            if let Some(cls) = &self.current_class {
+                ac.current_class = Some(cls.clone());
+                ac.op_array.scope_class = Some(cls.iter().map(|b| b.to_ascii_lowercase()).collect());
+            }
             if let Some(p) = &self.current_parent_class { ac.current_parent_class = Some(p.clone()); }
             let arr_tmp = ac.op_array.alloc_temp();
             ac.op_array.emit(Op { opcode: OpCode::ArrayNew, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(arr_tmp), line: 0 });
@@ -1526,6 +1529,8 @@ impl Compiler {
                     .iter()
                     .filter(|p| p.default.is_none() && !p.variadic)
                     .count() as u32;
+                // Compile parameter attributes
+                func_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                 for param in params {
                     let cv = func_compiler.op_array.get_or_create_cv(&param.name);
                     if param.variadic {
@@ -2237,6 +2242,13 @@ impl Compiler {
                 class.is_trait = modifiers.is_trait;
                 class.is_enum = modifiers.is_enum;
                 class.enum_backing_type = enum_backing_type.clone();
+                // Set current_class so self:: is resolved in class attributes and members
+                let saved_class = self.current_class.take();
+                let saved_parent = self.current_parent_class.take();
+                self.current_class = Some(qualified_name.clone());
+                if let Some(ext) = extends {
+                    self.current_parent_class = Some(self.resolve_class_name(ext));
+                }
                 class.attributes = self.compile_attributes(class_attributes);
 
                 // Enums automatically implement UnitEnum (and BackedEnum if backed)
@@ -3252,6 +3264,8 @@ impl Compiler {
                                     .iter()
                                     .filter(|p| p.default.is_none() && !p.variadic)
                                     .count() as u32;
+                                // Compile parameter attributes
+                                method_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
 
                                 for param in params {
                                     // Validate parameter type hint
@@ -3442,6 +3456,7 @@ impl Compiler {
                                     .iter()
                                     .filter(|p| p.default.is_none() && !p.variadic)
                                     .count() as u32;
+                                abstract_op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                                 for param in params {
                                     let cv = abstract_op_array.get_or_create_cv(&param.name);
                                     if param.variadic {
@@ -3947,6 +3962,10 @@ impl Compiler {
                         }
                     }
                 }
+
+                // Restore outer class scope
+                self.current_class = saved_class;
+                self.current_parent_class = saved_parent;
 
                 // Store the class and emit a DeclareClass opcode
                 let class_idx = self.compiled_classes.len();
@@ -6557,6 +6576,8 @@ impl Compiler {
                     .iter()
                     .filter(|p| p.default.is_none() && !p.variadic)
                     .count() as u32;
+                // Compile parameter attributes
+                closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
 
                 // Set up parameter CVs
                 for param in params {
@@ -6722,7 +6743,7 @@ impl Compiler {
                 }
             }
 
-            ExprKind::ArrowFunction { params, body, .. } => {
+            ExprKind::ArrowFunction { params, body, attributes, .. } => {
                 // Arrow function: fn($x) => $x * 2
                 // Arrow functions implicitly capture outer variables by value
 
@@ -6745,6 +6766,8 @@ impl Compiler {
                 closure_compiler.op_array.name = closure_name.clone();
                 closure_compiler.op_array.decl_line = expr.span.line;
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
+                closure_compiler.op_array.attributes = self.compile_attributes(attributes);
+                closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();

@@ -1986,7 +1986,7 @@ impl Parser {
                                 value: extra_value,
                                 visibility,
                                 is_final,
-                                    attributes: Vec::new(),
+                                    attributes: member_attributes.clone(),
                             });
                         }
                         self.expect_semicolon()?;
@@ -2049,7 +2049,7 @@ impl Parser {
                                 value: extra_value,
                                 visibility,
                                 is_final,
-                                    attributes: Vec::new(),
+                                    attributes: member_attributes.clone(),
                             });
                         }
                         self.expect_semicolon()?;
@@ -2109,7 +2109,7 @@ impl Parser {
                         value: extra_value,
                         visibility,
                         is_final,
-                                    attributes: Vec::new(),
+                                    attributes: member_attributes.clone(),
                     });
                 }
                 self.expect_semicolon()?;

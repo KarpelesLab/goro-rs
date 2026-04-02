@@ -3877,6 +3877,9 @@ impl Vm {
             b"reflectionconstant" => {
                 crate::reflection::reflection_constant_method(self, method_lower, obj)
             }
+            b"reflectionattribute" => {
+                crate::reflection::reflection_attribute_method(self, method_lower, obj)
+            }
             b"splfileinfo" => {
                 self.spl_file_info_method(method_lower, obj)
             }
@@ -5896,6 +5899,7 @@ impl Vm {
                     | b"getmethods" | b"getproperties"
                     | b"getreflectionconstant" | b"getreflectionconstants"
                     | b"getconstants"
+                    | b"getattributes"
             ),
             b"reflectionmethod" => matches!(
                 method,
@@ -5903,14 +5907,29 @@ impl Vm {
                     | b"getmethod" | b"getproperty" | b"getconstant" | b"hasconstant"
                     | b"hasmethod" | b"hasproperty" | b"issubclassof"
                     | b"implementsinterface"
+                    | b"getattributes"
             ),
             b"reflectionfunction" | b"reflectionfunctionabstract" => matches!(
                 method,
                 b"invoke" | b"invokeargs"
+                    | b"getattributes"
             ),
             b"reflectionproperty" => matches!(
                 method,
                 b"getvalue" | b"setvalue"
+                    | b"getattributes"
+            ),
+            b"reflectionparameter" => matches!(
+                method,
+                b"getattributes"
+            ),
+            b"reflectionclassconstant" | b"reflectionenumunitcase" | b"reflectionenumbackedcase" => matches!(
+                method,
+                b"getattributes"
+            ),
+            b"reflectionattribute" => matches!(
+                method,
+                b"newinstance"
             ),
             _ => false,
         }
@@ -7551,6 +7570,15 @@ impl Vm {
                 b"reflectionproperty" => {
                     crate::reflection::reflection_property_docall(self, method, args)
                 }
+                b"reflectionparameter" => {
+                    crate::reflection::reflection_parameter_docall(self, method, args)
+                }
+                b"reflectionclassconstant" | b"reflectionenumunitcase" | b"reflectionenumbackedcase" => {
+                    crate::reflection::reflection_class_constant_docall(self, method, args)
+                }
+                b"reflectionattribute" => {
+                    crate::reflection::reflection_attribute_docall(self, method, args)
+                }
                 b"splfileobject" | b"spltempfileobject" => {
                     match method {
                         b"seek" => {
@@ -7830,6 +7858,7 @@ impl Vm {
                 | b"splobserver" | b"splsubject"
                 | b"reflectiontype" | b"reflectionreference" | b"reflectionconstant"
                 | b"fiber" | b"fibererror"
+                | b"attribute"
         )
     }
 
@@ -7881,6 +7910,7 @@ impl Vm {
             b"reflectionclassconstant" => "ReflectionClassConstant",
             b"reflectiongenerator" => "ReflectionGenerator",
             b"reflectionattribute" => "ReflectionAttribute",
+            b"attribute" => "Attribute",
             b"fiber" => "Fiber",
             b"fibererror" => "FiberError",
             b"arrayobject" => "ArrayObject",
@@ -7975,6 +8005,20 @@ impl Vm {
             b"reflectionattribute" => {
                 match const_name {
                     b"IS_INSTANCEOF" => Some(Value::Long(2)),
+                    _ => None,
+                }
+            }
+            b"attribute" => {
+                match const_name {
+                    b"TARGET_CLASS" => Some(Value::Long(1)),
+                    b"TARGET_FUNCTION" => Some(Value::Long(2)),
+                    b"TARGET_METHOD" => Some(Value::Long(4)),
+                    b"TARGET_PROPERTY" => Some(Value::Long(8)),
+                    b"TARGET_CLASS_CONSTANT" => Some(Value::Long(16)),
+                    b"TARGET_PARAMETER" => Some(Value::Long(32)),
+                    b"TARGET_CONSTANT" => Some(Value::Long(64)),
+                    b"TARGET_ALL" => Some(Value::Long(127)),
+                    b"IS_REPEATABLE" => Some(Value::Long(128)),
                     _ => None,
                 }
             }
