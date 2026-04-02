@@ -18565,6 +18565,36 @@ impl Vm {
                             let msg = format!("Cannot redeclare class {}", canonical);
                             return Err(VmError { message: msg, line: op.line });
                         }
+                        // Validate #[Attribute] usage
+                        let class_display = String::from_utf8_lossy(&class.name).to_string();
+                        for attr in &class.attributes {
+                            let attr_lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if attr_lower == b"attribute" {
+                                if class.is_abstract {
+                                    return Err(VmError { message: format!("Cannot apply #[\\Attribute] to abstract class {}", class_display), line: op.line });
+                                }
+                                if class.is_interface {
+                                    return Err(VmError { message: format!("Cannot apply #[\\Attribute] to interface {}", class_display), line: op.line });
+                                }
+                                if class.is_enum {
+                                    return Err(VmError { message: format!("Cannot apply #[\\Attribute] to enum {}", class_display), line: op.line });
+                                }
+                                if class.is_trait {
+                                    return Err(VmError { message: format!("Cannot apply #[\\Attribute] to trait {}", class_display), line: op.line });
+                                }
+                            }
+                            if attr_lower == b"allowdynamicproperties" {
+                                if class.is_enum {
+                                    return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to enum {}", class_display), line: op.line });
+                                }
+                                if class.is_interface {
+                                    return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to interface {}", class_display), line: op.line });
+                                }
+                                if class.is_trait {
+                                    return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to trait {}", class_display), line: op.line });
+                                }
+                            }
+                        }
                         // Set filename if not already set
                         if class.filename.is_none() {
                             class.filename = Some(self.current_file.clone());
