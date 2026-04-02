@@ -475,7 +475,7 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_core::vm::ClassMap) {
-    if indent > 20 {
+    if indent > 128 {
         buf.extend_from_slice(b" *RECURSION*");
         return;
     }

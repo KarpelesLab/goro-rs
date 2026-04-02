@@ -3445,12 +3445,27 @@ impl Vm {
                 }
             }
             Value::String(s) => {
-                let lossy = s.to_string_lossy();
-                // PHP truncates to 15 chars with "..." suffix by default
-                if lossy.len() > 15 {
-                    format!("'{:.15}...'", lossy)
+                let bytes = s.as_bytes();
+                // PHP escapes non-printable and non-ASCII bytes as \xHH
+                let mut escaped = String::new();
+                let mut char_count = 0;
+                let mut truncated = false;
+                for &b in bytes {
+                    if char_count >= 15 {
+                        truncated = true;
+                        break;
+                    }
+                    if b >= 0x20 && b < 0x7f {
+                        escaped.push(b as char);
+                    } else {
+                        escaped.push_str(&format!("\\x{:02X}", b));
+                    }
+                    char_count += 1;
+                }
+                if truncated {
+                    format!("'{}...'", escaped)
                 } else {
-                    format!("'{}'", lossy)
+                    format!("'{}'", escaped)
                 }
             }
             Value::Array(_) => "Array".to_string(),
@@ -19548,12 +19563,26 @@ impl Vm {
                                                 let type_str = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"type")))
                                                     .map(|v| v.to_php_string().to_string_lossy())
                                                     .unwrap_or_default();
+                                                // Format args
+                                                let args_str = if let Some(args_val) = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"args"))) {
+                                                    if let Value::Array(args_arr) = args_val {
+                                                        let args_arr = args_arr.borrow();
+                                                        let formatted: Vec<String> = args_arr.iter().map(|(_k, v)| {
+                                                            Self::format_trace_arg(v)
+                                                        }).collect();
+                                                        formatted.join(", ")
+                                                    } else {
+                                                        String::new()
+                                                    }
+                                                } else {
+                                                    String::new()
+                                                };
                                                 let loc = if file.is_empty() {
                                                     "[internal function]".to_string()
                                                 } else {
                                                     format!("{}({})", file, line)
                                                 };
-                                                lines.push(format!("#{} {}: {}{}{}()", idx, loc, class, type_str, function));
+                                                lines.push(format!("#{} {}: {}{}{}({})", idx, loc, class, type_str, function, args_str));
                                             }
                                             idx += 1;
                                         }
@@ -20231,10 +20260,61 @@ impl Vm {
                 let file = obj_borrow.get_property(b"file").to_php_string().to_string_lossy();
                 let line = obj_borrow.get_property(b"line").to_long();
                 let file_str = if file.is_empty() { self.current_file.clone() } else { file };
-                let result = if message.is_empty() {
-                    format!("{} in {}:{}\nStack trace:\n#0 {{main}}", class_display, file_str, line)
+                // Build trace string from stored trace data
+                let trace = obj_borrow.get_property(b"trace");
+                let trace_str = if let Value::Array(arr) = &trace {
+                    let arr = arr.borrow();
+                    let mut trace_lines = Vec::new();
+                    let mut tidx = 0;
+                    for (_key, frame_val) in arr.iter() {
+                        if let Value::Array(frame) = frame_val {
+                            let frame = frame.borrow();
+                            let ff = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"file")))
+                                .map(|v| v.to_php_string().to_string_lossy())
+                                .unwrap_or_default();
+                            let fl = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"line")))
+                                .map(|v| v.to_long())
+                                .unwrap_or(0);
+                            let func = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"function")))
+                                .map(|v| v.to_php_string().to_string_lossy())
+                                .unwrap_or_default();
+                            let cls = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"class")))
+                                .map(|v| v.to_php_string().to_string_lossy())
+                                .unwrap_or_default();
+                            let typ = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"type")))
+                                .map(|v| v.to_php_string().to_string_lossy())
+                                .unwrap_or_default();
+                            let args_str = if let Some(args_val) = frame.get(&crate::array::ArrayKey::String(PhpString::from_bytes(b"args"))) {
+                                if let Value::Array(args_arr) = args_val {
+                                    let args_arr = args_arr.borrow();
+                                    let formatted: Vec<String> = args_arr.iter().map(|(_k, v)| {
+                                        Self::format_trace_arg(v)
+                                    }).collect();
+                                    formatted.join(", ")
+                                } else {
+                                    String::new()
+                                }
+                            } else {
+                                String::new()
+                            };
+                            let loc = if ff.is_empty() {
+                                "[internal function]".to_string()
+                            } else {
+                                format!("{}({})", ff, fl)
+                            };
+                            trace_lines.push(format!("#{} {}: {}{}{}({})", tidx, loc, cls, typ, func, args_str));
+                        }
+                        tidx += 1;
+                    }
+                    trace_lines.push(format!("#{} {{main}}", tidx));
+                    trace_lines.join("\n")
                 } else {
-                    format!("{}: {} in {}:{}\nStack trace:\n#0 {{main}}", class_display, message, file_str, line)
+                    "#0 {main}".to_string()
+                };
+                let result = if message.is_empty() {
+                    format!("{} in {}:{}\nStack trace:\n{}", class_display, file_str, line, trace_str)
+                } else {
+                    format!("{}: {} in {}:{}\nStack trace:\n{}", class_display, message, file_str, line, trace_str)
                 };
                 return PhpString::from_string(result);
             }

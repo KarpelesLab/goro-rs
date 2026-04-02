@@ -7866,11 +7866,125 @@ fn readlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn debug_backtrace_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let options = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2
+    let _provide_object = (options & 1) != 0; // DEBUG_BACKTRACE_PROVIDE_OBJECT = 1
+
+    let mut trace_arr = PhpArray::new();
+    // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
+    // Ordered outermost to innermost. Reversed for backtrace output.
+    let stack_len = vm.call_stack.len();
+    let max_frames = if limit > 0 { limit as usize } else { stack_len };
+
+    for (idx, (func_name, file, line, frame_args, is_method)) in vm.call_stack.iter().rev().enumerate() {
+        if idx >= max_frames {
+            break;
+        }
+        let mut frame = PhpArray::new();
+        if !file.is_empty() {
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"file")),
+                Value::String(PhpString::from_string(file.clone())),
+            );
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"line")),
+                Value::Long(*line as i64),
+            );
+        }
+        // Parse class::method or class->method from func_name
+        if let Some(sep) = func_name.find("::") {
+            let class_name = &func_name[..sep];
+            let method_name = &func_name[sep+2..];
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"function")),
+                Value::String(PhpString::from_string(method_name.to_string())),
+            );
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"class")),
+                Value::String(PhpString::from_string(class_name.to_string())),
+            );
+            // Use -> for instance methods, :: for static methods
+            let type_str = if *is_method { b"->" as &[u8] } else { b"::" };
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"type")),
+                Value::String(PhpString::from_bytes(type_str)),
+            );
+        } else if let Some(sep) = func_name.find("->") {
+            let class_name = &func_name[..sep];
+            let method_name = &func_name[sep+2..];
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"function")),
+                Value::String(PhpString::from_string(method_name.to_string())),
+            );
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"class")),
+                Value::String(PhpString::from_string(class_name.to_string())),
+            );
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"type")),
+                Value::String(PhpString::from_bytes(b"->")),
+            );
+        } else {
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"function")),
+                Value::String(PhpString::from_string(func_name.clone())),
+            );
+        }
+        // Add args array unless DEBUG_BACKTRACE_IGNORE_ARGS is set
+        if !ignore_args {
+            let mut args_arr = PhpArray::new();
+            for arg in frame_args {
+                args_arr.push(arg.clone());
+            }
+            frame.set(
+                ArrayKey::String(PhpString::from_bytes(b"args")),
+                Value::Array(Rc::new(RefCell::new(args_arr))),
+            );
+        }
+        trace_arr.set(ArrayKey::Int(idx as i64), Value::Array(Rc::new(RefCell::new(frame))));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(trace_arr))))
 }
 
-fn debug_print_backtrace_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let options = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2
+
+    let stack_len = vm.call_stack.len();
+    let max_frames = if limit > 0 { limit as usize } else { stack_len };
+
+    let mut lines = Vec::new();
+    for (i, (func_name, file, line, frame_args, is_instance)) in vm.call_stack.iter().rev().enumerate() {
+        if i >= max_frames {
+            break;
+        }
+        let file_display = if file == "Unknown.php" || file.is_empty() {
+            &vm.current_file
+        } else {
+            file
+        };
+        let args_str = if ignore_args {
+            String::new()
+        } else {
+            goro_core::vm::format_trace_args(frame_args)
+        };
+        // For instance methods, replace :: with ->
+        let display_name = if *is_instance {
+            func_name.replacen("::", "->", 1)
+        } else {
+            func_name.clone()
+        };
+        lines.push(format!("#{} {}({}): {}({})", i, file_display, line, display_name, args_str));
+    }
+
+    let mut output = lines.join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    vm.write_output(output.as_bytes());
     Ok(Value::Null)
 }
 
