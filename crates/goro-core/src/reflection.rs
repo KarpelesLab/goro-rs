@@ -3305,6 +3305,16 @@ pub fn reflection_attribute_method(
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
+            // Check if the class has #[Attribute] -- only attribute classes can be instantiated via newInstance
+            let is_attribute_class = vm.classes.get(&class_lower)
+                .map(|ce| ce.attributes.iter().any(|a| a.name.eq_ignore_ascii_case(b"attribute")))
+                .unwrap_or(false);
+            if !is_attribute_class && class_lower != b"attribute" {
+                let err_msg = format!("Attempting to use non-attribute class \"{}\" as attribute", attr_name);
+                let exc = vm.create_exception(b"Error", &err_msg, 0);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
             // Build argument list from args array
             let mut call_args = Vec::new();
             let mut named_args = Vec::new();
@@ -3326,7 +3336,7 @@ pub fn reflection_attribute_method(
             let mut new_obj = PhpObject::new(ce.name.clone(), obj_id);
             // Initialize properties from class definition
             for prop in &ce.properties {
-                if !prop.is_static {
+                if !prop.is_static && !matches!(prop.default, Value::Undef) {
                     new_obj.set_property(prop.name.clone(), prop.default.clone());
                 }
             }
