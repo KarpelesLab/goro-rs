@@ -34,6 +34,8 @@ pub struct Parser {
     first_class_callable_flag: bool,
     /// Pending extra constants from comma-separated const declarations
     pending_extra_constants: Vec<ClassMember>,
+    /// Pending extra properties from comma-separated property declarations
+    pending_extra_properties: Vec<ClassMember>,
 }
 
 const MAX_PARSE_DEPTH: u32 = 512;
@@ -48,6 +50,7 @@ impl Parser {
             anon_counter: 0,
             first_class_callable_flag: false,
             pending_extra_constants: Vec::new(),
+            pending_extra_properties: Vec::new(),
         }
     }
 
@@ -1607,6 +1610,8 @@ impl Parser {
         let mut members = vec![member];
         // Drain any extra constants from comma-separated declarations
         members.append(&mut self.pending_extra_constants);
+        // Drain any extra properties from comma-separated declarations
+        members.append(&mut self.pending_extra_properties);
         Ok(members)
     }
 
@@ -2139,13 +2144,28 @@ impl Parser {
                 let (get_hook, set_hook) = if matches!(self.peek(), TokenKind::OpenBrace) {
                     self.parse_property_hooks(&name)?
                 } else {
-                    // Skip comma-separated additional properties
+                    // Parse comma-separated additional properties
+                    self.pending_extra_properties.clear();
                     while self.eat(&TokenKind::Comma) {
-                        if let TokenKind::Variable(_) = self.peek().clone() {
+                        if let TokenKind::Variable(extra_name) = self.peek().clone() {
                             self.advance();
-                            if self.eat(&TokenKind::Assign) {
-                                let _ = self.parse_expression()?;
-                            }
+                            let extra_default = if self.eat(&TokenKind::Assign) {
+                                Some(self.parse_expression()?)
+                            } else {
+                                None
+                            };
+                            self.pending_extra_properties.push(ClassMember::Property {
+                                name: extra_name,
+                                type_hint: None,
+                                default: extra_default,
+                                visibility,
+                                set_visibility,
+                                is_static,
+                                is_readonly,
+                                get_hook: None,
+                                set_hook: None,
+                                attributes: member_attributes.clone(),
+                            });
                         } else {
                             break;
                         }
@@ -2197,15 +2217,27 @@ impl Parser {
                 let (get_hook, set_hook) = if matches!(self.peek(), TokenKind::OpenBrace) {
                     self.parse_property_hooks(&name)?
                 } else {
-                    // Check for comma-separated additional properties
-                    // For now, just skip the comma and additional names
+                    // Parse comma-separated additional properties (they share the same type)
                     while self.eat(&TokenKind::Comma) {
-                        // Parse and discard additional property names (they share the same type)
-                        if let TokenKind::Variable(_) = self.peek().clone() {
-                            self.advance(); // skip variable name
-                            if self.eat(&TokenKind::Assign) {
-                                let _ = self.parse_expression()?; // skip default value
-                            }
+                        if let TokenKind::Variable(extra_name) = self.peek().clone() {
+                            self.advance();
+                            let extra_default = if self.eat(&TokenKind::Assign) {
+                                Some(self.parse_expression()?)
+                            } else {
+                                None
+                            };
+                            self.pending_extra_properties.push(ClassMember::Property {
+                                name: extra_name,
+                                type_hint: Some(type_hint.clone()),
+                                default: extra_default,
+                                visibility,
+                                set_visibility,
+                                is_static,
+                                is_readonly,
+                                get_hook: None,
+                                set_hook: None,
+                                attributes: member_attributes.clone(),
+                            });
                         } else {
                             break;
                         }
