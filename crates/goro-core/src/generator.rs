@@ -79,6 +79,8 @@ pub struct PhpGenerator {
     pub force_closed: bool,
     /// Whether this generator completed with an explicit return (vs exception/abort)
     pub has_returned: bool,
+    /// Whether the generator has been advanced past the first yield (for rewind check)
+    pub advanced_past_first: bool,
 }
 
 impl PhpGenerator {
@@ -111,6 +113,7 @@ impl PhpGenerator {
             pending_finally_jump: None,
             force_closed: false,
             has_returned: false,
+            advanced_past_first: false,
         }
     }
 
@@ -419,12 +422,75 @@ impl PhpGenerator {
                                 self.yield_from_source = Some(iterable);
                                 ip -= 1; // Re-execute to start yielding
                             }
+                            Value::Object(obj) => {
+                                // Check if the object is iterable (Iterator or IteratorAggregate)
+                                let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let is_iterator = vm.class_implements_interface(&class_lower, b"iterator");
+                                let is_iterator_aggregate = !is_iterator && vm.class_implements_interface(&class_lower, b"iteratoraggregate");
+                                let is_traversable = !is_iterator && !is_iterator_aggregate && vm.class_implements_interface(&class_lower, b"traversable");
+
+                                if is_iterator {
+                                    // Iterator object - convert to array for simplicity
+                                    let arr = vm.iterator_to_array(&iterable);
+                                    self.yield_from_source = Some(Value::Array(Rc::new(RefCell::new(arr))));
+                                    self.yield_from_pos = 0;
+                                    ip -= 1;
+                                } else if is_iterator_aggregate || is_traversable {
+                                    // Call getIterator() to get the underlying iterator
+                                    if let Some(iter_val) = vm.call_object_method(&iterable, b"getIterator", &[]) {
+                                        match iter_val {
+                                            Value::Generator(inner_gen) => {
+                                                let mut inner = inner_gen.borrow_mut();
+                                                if inner.state == GeneratorState::Created {
+                                                    let _ = inner.resume(vm);
+                                                }
+                                                drop(inner);
+                                                self.yield_from_source = Some(Value::Generator(inner_gen));
+                                                ip -= 1;
+                                            }
+                                            _ => {
+                                                // Got an iterator object - convert to array for simplicity
+                                                let arr = vm.iterator_to_array(&iter_val);
+                                                self.yield_from_source = Some(Value::Array(Rc::new(RefCell::new(arr))));
+                                                self.yield_from_pos = 0;
+                                                ip -= 1;
+                                            }
+                                        }
+                                    } else {
+                                        self.write_operand(&op.result, Value::Null);
+                                    }
+                                } else {
+                                    // Non-iterable object - create Error exception
+                                    let msg = "Can use \"yield from\" only with arrays and Traversables";
+                                    let exc = vm.create_exception(b"Error", msg, op.line);
+                                    vm.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    self.state = GeneratorState::Completed;
+                                    self.current_value = Value::Null;
+                                    self.ip = ip;
+                                    return Err(crate::vm::VmError {
+                                        message: format!("Uncaught Error: {}", msg),
+                                        line: op.line,
+                                    });
+                                }
+                            }
                             _ => {
-                                // Non-iterable - throw error
+                                // Non-iterable - create Error exception
+                                let msg = "Can use \"yield from\" only with arrays and Traversables";
+                                let exc = vm.create_exception(b"Error", msg, op.line);
+                                vm.current_exception = Some(exc);
+                                if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                self.state = GeneratorState::Completed;
+                                self.current_value = Value::Null;
+                                self.ip = ip;
                                 return Err(crate::vm::VmError {
-                                    message:
-                                        "Can use \"yield from\" only with arrays and Traversables"
-                                            .to_string(),
+                                    message: format!("Uncaught Error: {}", msg),
                                     line: op.line,
                                 });
                             }
@@ -1509,27 +1575,13 @@ impl PhpGenerator {
                             vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
                             vm.generator_send_val(obj_val.clone());
                         } else {
-                            // Check for __call magic method
-                            let has_call = vm.classes.get(&class_name_lower)
-                                .map(|c| c.get_method(b"__call").is_some())
-                                .unwrap_or(false);
-                            if has_call {
-                                let mut func_name = class_name_lower.clone();
-                                func_name.extend_from_slice(b"::__call");
-                                vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
-                                vm.generator_send_val(obj_val.clone());
-                                // __call receives (method_name, args_array) - will need special handling
-                            } else {
-                                let class_name_vec = obj.borrow().class_name.clone();
-                                let class_name_str = String::from_utf8_lossy(&class_name_vec);
-                                let method_str = method_name.to_string_lossy();
-                                self.state = GeneratorState::Completed;
-                                self.ip = ip;
-                                return Err(VmError {
-                                    message: format!("Call to undefined method {}::{}()", class_name_str, method_str),
-                                    line: op.line,
-                                });
-                            }
+                            // Try calling built-in/SPL methods via the VM
+                            // Set up as a generic method call that the VM's DoFCall handler will dispatch
+                            let mut func_name = class_name_lower.clone();
+                            func_name.extend_from_slice(b"::");
+                            func_name.extend_from_slice(&method_lower);
+                            vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
+                            vm.generator_send_val(obj_val.clone());
                         }
                     } else if let Value::Generator(inner_gen_rc) = &obj_val {
                         // Calling a method on another generator from within this generator
@@ -1577,6 +1629,7 @@ impl PhpGenerator {
                                     if inner.state == GeneratorState::Created {
                                         let _ = inner.resume(vm);
                                     }
+                                    inner.advanced_past_first = true;
                                     inner.write_send_value();
                                     let _ = inner.resume(vm);
                                 }
