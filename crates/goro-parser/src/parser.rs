@@ -155,6 +155,24 @@ impl Parser {
         Ok(Program { statements })
     }
 
+    fn parse_attributes(&mut self) -> ParseResult<Vec<Attribute>> {
+        let mut attrs = Vec::new();
+        while matches!(self.peek(), TokenKind::AttributeOpen) {
+            self.advance();
+            loop {
+                let mut parts = Vec::new();
+                if matches!(self.peek(), TokenKind::Backslash) { self.advance(); }
+                match self.peek().clone() { TokenKind::Identifier(n) => { parts.push(n); self.advance(); } _ if self.is_semi_reserved_keyword() => { parts.push(self.keyword_to_identifier()); self.advance(); } _ => { return Err(ParseError { message: "expected attribute name".into(), span: self.span() }); } }
+                while matches!(self.peek(), TokenKind::Backslash) { self.advance(); match self.peek().clone() { TokenKind::Identifier(n) => { parts.push(n); self.advance(); } _ if self.is_semi_reserved_keyword() => { parts.push(self.keyword_to_identifier()); self.advance(); } _ => break, } }
+                let args = if matches!(self.peek(), TokenKind::OpenParen) { self.advance(); let a = self.parse_arguments()?; self.expect(&TokenKind::CloseParen)?; a } else { Vec::new() };
+                attrs.push(Attribute { name: parts, args });
+                if !self.eat(&TokenKind::Comma) { break; }
+                if matches!(self.peek(), TokenKind::CloseBracket) { break; }
+            }
+            self.expect(&TokenKind::CloseBracket)?;
+        }
+        Ok(attrs)
+    }
     fn parse_statement(&mut self) -> ParseResult<Statement> {
         let span = self.span();
         match self.peek().clone() {
@@ -284,18 +302,19 @@ impl Parser {
                     span,
                 })
             }
-            TokenKind::Function => self.parse_function_decl(),
+            TokenKind::AttributeOpen => { let attributes = self.parse_attributes()?; match self.peek() { TokenKind::Function => self.parse_function_decl_with_attrs(attributes), TokenKind::Class | TokenKind::Abstract | TokenKind::Final | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => self.parse_class_decl_with_attrs(attributes), TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface) => self.parse_class_decl_with_attrs(attributes), _ => self.parse_statement(), } }
+            TokenKind::Function => self.parse_function_decl_with_attrs(Vec::new()),
             TokenKind::Class
             | TokenKind::Abstract
             | TokenKind::Final
             | TokenKind::Interface
             | TokenKind::Trait
-            | TokenKind::Enum => self.parse_class_decl(),
+            | TokenKind::Enum => self.parse_class_decl_with_attrs(Vec::new()),
             TokenKind::Readonly => {
                 // readonly can be a class modifier (readonly class Foo {}) or a function call
                 // Check if followed by class/enum/abstract/final/function
                 if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface) {
-                    self.parse_class_decl()
+                    self.parse_class_decl_with_attrs(Vec::new())
                 } else {
                     // Treat 'readonly' as identifier for function call etc.
                     self.advance();
@@ -1036,7 +1055,7 @@ impl Parser {
         })
     }
 
-    fn parse_function_decl(&mut self) -> ParseResult<Statement> {
+    fn parse_function_decl_with_attrs(&mut self, attributes: Vec<Attribute>) -> ParseResult<Statement> {
         let span = self.span();
         self.advance(); // function
         // Optional & for return-by-reference
@@ -1078,6 +1097,7 @@ impl Parser {
                 return_type,
                 body,
                 is_static: false,
+                attributes,
             },
             span,
         })
@@ -1090,6 +1110,7 @@ impl Parser {
         }
 
         loop {
+            let param_attributes = self.parse_attributes()?;
             let mut visibility = None;
             let mut set_visibility = None;
             let mut readonly = false;
@@ -1163,6 +1184,7 @@ impl Parser {
                 visibility,
                 set_visibility,
                 readonly,
+                attributes: param_attributes,
             });
 
             if !self.eat(&TokenKind::Comma) {
@@ -1397,7 +1419,7 @@ impl Parser {
         }
     }
 
-    fn parse_class_decl(&mut self) -> ParseResult<Statement> {
+    fn parse_class_decl_with_attrs(&mut self, attributes: Vec<Attribute>) -> ParseResult<Statement> {
         let span = self.span();
         let mut modifiers = ClassModifiers::default();
 
@@ -1564,6 +1586,7 @@ impl Parser {
                 implements,
                 body,
                 enum_backing_type,
+                attributes,
             },
             span,
         })
@@ -1588,6 +1611,7 @@ impl Parser {
     }
 
     fn parse_class_member(&mut self) -> ParseResult<ClassMember> {
+        let member_attributes = self.parse_attributes()?;
         let mut visibility = Visibility::Public;
         let mut is_static = false;
         let mut is_abstract = false;
@@ -1711,7 +1735,7 @@ impl Parser {
                     None
                 };
                 self.expect(&TokenKind::Semicolon)?;
-                return Ok(ClassMember::EnumCase { name, value });
+                return Ok(ClassMember::EnumCase { name, value, attributes: member_attributes });
             }
             TokenKind::Use => {
                 // trait use
@@ -1911,6 +1935,7 @@ impl Parser {
                     is_abstract,
                     is_final,
                     line: method_line,
+                    attributes: member_attributes,
                 })
             }
             TokenKind::Const => {
@@ -1961,10 +1986,11 @@ impl Parser {
                                 value: extra_value,
                                 visibility,
                                 is_final,
+                                    attributes: Vec::new(),
                             });
                         }
                         self.expect_semicolon()?;
-                        return Ok(ClassMember::ClassConstant { name, value, visibility, is_final });
+                        return Ok(ClassMember::ClassConstant { name, value, visibility, is_final, attributes: member_attributes.clone() });
                     }
                     TokenKind::OpenParen => {
                         // DNF type hint: (A&B)|null CONST = value
@@ -2023,10 +2049,11 @@ impl Parser {
                                 value: extra_value,
                                 visibility,
                                 is_final,
+                                    attributes: Vec::new(),
                             });
                         }
                         self.expect_semicolon()?;
-                        return Ok(ClassMember::ClassConstant { name, value, visibility, is_final });
+                        return Ok(ClassMember::ClassConstant { name, value, visibility, is_final, attributes: member_attributes.clone() });
                     }
                     _ => {
                         return Err(ParseError {
@@ -2082,6 +2109,7 @@ impl Parser {
                         value: extra_value,
                         visibility,
                         is_final,
+                                    attributes: Vec::new(),
                     });
                 }
                 self.expect_semicolon()?;
@@ -2090,6 +2118,7 @@ impl Parser {
                     value,
                     visibility,
                     is_final,
+                    attributes: member_attributes,
                 })
             }
             TokenKind::Variable(_) => {
@@ -2141,6 +2170,7 @@ impl Parser {
                     is_readonly,
                     get_hook,
                     set_hook,
+                    attributes: member_attributes.clone(),
                 })
             }
             _ => {
@@ -2200,6 +2230,7 @@ impl Parser {
                     is_readonly,
                     get_hook,
                     set_hook,
+                    attributes: member_attributes,
                 })
             }
         }
@@ -3607,6 +3638,28 @@ impl Parser {
     fn parse_primary(&mut self) -> ParseResult<Expr> {
         let span = self.span();
         match self.peek().clone() {
+            TokenKind::AttributeOpen => {
+                let attributes = self.parse_attributes()?;
+                let span = self.span();
+                match self.peek() {
+                    TokenKind::Function => {
+                        self.advance(); self.eat(&TokenKind::Ampersand);
+                        self.expect(&TokenKind::OpenParen)?; let params = self.parse_params()?; self.expect(&TokenKind::CloseParen)?;
+                        let use_vars = if matches!(self.peek(), TokenKind::Use) { self.advance(); self.expect(&TokenKind::OpenParen)?; let mut v = Vec::new(); loop { let br = self.eat(&TokenKind::Ampersand); match self.peek().clone() { TokenKind::Variable(n) => { self.advance(); v.push(ClosureUse{variable:n,by_ref:br}); } _ => break }; if !self.eat(&TokenKind::Comma) { break; } } self.expect(&TokenKind::CloseParen)?; v } else { Vec::new() };
+                        let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
+                        let body = self.parse_block()?;
+                        Ok(Expr { span, kind: ExprKind::Closure { is_static: false, params, use_vars, return_type, body, attributes } })
+                    }
+                    TokenKind::Fn => {
+                        self.advance(); self.eat(&TokenKind::Ampersand);
+                        self.expect(&TokenKind::OpenParen)?; let params = self.parse_params()?; self.expect(&TokenKind::CloseParen)?;
+                        let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
+                        self.expect(&TokenKind::DoubleArrow)?; let body = self.parse_expression()?;
+                        Ok(Expr { span, kind: ExprKind::ArrowFunction { is_static: false, params, return_type, body: Box::new(body), attributes } })
+                    }
+                    _ => Err(ParseError { message: "expected function or fn after attribute".into(), span: self.span() })
+                }
+            }
             TokenKind::LongNumber(n) => {
                 self.advance();
                 Ok(Expr {
@@ -3912,6 +3965,7 @@ impl Parser {
             }
             TokenKind::New => {
                 self.advance();
+                let _anon_attrs = if matches!(self.peek(), TokenKind::AttributeOpen) { self.parse_attributes()? } else { Vec::new() };
                 // Parse class name (not a full primary expression - don't consume parens)
                 let class_span = self.span();
                 let class = match self.peek().clone() {
@@ -4089,6 +4143,7 @@ impl Parser {
                                 implements,
                                 body,
                                 enum_backing_type: None,
+                                attributes: Vec::new(),
                             },
                             span,
                         };
@@ -4259,6 +4314,7 @@ impl Parser {
                         use_vars,
                         return_type,
                         body,
+                        attributes: Vec::new(),
                     },
                 })
             }
@@ -4288,6 +4344,7 @@ impl Parser {
                         params,
                         return_type,
                         body: Box::new(body),
+                        attributes: Vec::new(),
                     },
                 })
             }
@@ -4318,6 +4375,7 @@ impl Parser {
                             params,
                             return_type,
                             body: Box::new(body),
+                            attributes: Vec::new(),
                         },
                     })
                 } else {
@@ -4368,6 +4426,7 @@ impl Parser {
                             use_vars,
                             return_type,
                             body,
+                            attributes: Vec::new(),
                         },
                     })
                 }

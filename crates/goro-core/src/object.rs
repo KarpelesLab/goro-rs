@@ -22,6 +22,12 @@ pub enum TraitAdaptation {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimeAttribute {
+    pub name: Vec<u8>,
+    pub args_op_array: OpArray,
+}
+
 /// Metadata for a class constant (visibility and final flag)
 #[derive(Debug, Clone)]
 pub struct ConstantMeta {
@@ -29,6 +35,7 @@ pub struct ConstantMeta {
     pub is_final: bool,
     /// The class that originally declared this constant (lowercase)
     pub declaring_class: Vec<u8>,
+    pub attributes: Vec<RuntimeAttribute>,
 }
 
 /// A PHP class entry (class definition)
@@ -64,6 +71,7 @@ pub struct ClassEntry {
     pub filename: Option<String>,
     /// Doc comment for the class (if any)
     pub doc_comment: Option<String>,
+    pub attributes: Vec<RuntimeAttribute>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +93,7 @@ pub struct PropertyDef {
     pub has_set_hook: bool,
     /// Whether this property is virtual (hooks don't access the backing store)
     pub is_virtual: bool,
+    pub attributes: Vec<RuntimeAttribute>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +109,7 @@ pub struct MethodDef {
     pub declaring_class: Vec<u8>,
     /// Doc comment for the method (if any)
     pub doc_comment: Option<String>,
+    pub attributes: Vec<RuntimeAttribute>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +144,7 @@ impl ClassEntry {
             end_line: 0,
             filename: None,
             doc_comment: None,
+            attributes: Vec::new(),
         }
     }
 

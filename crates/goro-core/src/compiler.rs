@@ -234,6 +234,44 @@ impl Compiler {
         }
     }
 
+    fn compile_attributes(&mut self, attrs: &[goro_parser::ast::Attribute]) -> Vec<crate::object::RuntimeAttribute> {
+        attrs.iter().map(|attr| {
+            let name = if attr.name.len() == 1 {
+                self.resolve_class_name(&attr.name[0])
+            } else {
+                let mut f = Vec::new();
+                for (i, p) in attr.name.iter().enumerate() {
+                    if i > 0 { f.push(b'\\'); }
+                    f.extend_from_slice(p);
+                }
+                self.resolve_class_name(&f)
+            };
+            let mut ac = Compiler::new();
+            ac.current_namespace = self.current_namespace.clone();
+            ac.use_map = self.use_map.clone();
+            ac.use_function_map = self.use_function_map.clone();
+            ac.use_const_map = self.use_const_map.clone();
+            ac.source_file = self.source_file.clone();
+            ac.op_array.strict_types = self.op_array.strict_types;
+            if let Some(cls) = &self.current_class { ac.current_class = Some(cls.clone()); }
+            if let Some(p) = &self.current_parent_class { ac.current_parent_class = Some(p.clone()); }
+            let arr_tmp = ac.op_array.alloc_temp();
+            ac.op_array.emit(Op { opcode: OpCode::ArrayNew, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(arr_tmp), line: 0 });
+            for arg in &attr.args {
+                if let Ok(val) = ac.compile_expr(&arg.value) {
+                    if let Some(an) = &arg.name {
+                        let kl = ac.op_array.add_literal(Value::String(PhpString::from_vec(an.clone())));
+                        ac.op_array.emit(Op { opcode: OpCode::ArraySet, op1: OperandType::Tmp(arr_tmp), op2: val, result: OperandType::Const(kl), line: 0 });
+                    } else {
+                        ac.op_array.emit(Op { opcode: OpCode::ArrayAppend, op1: OperandType::Tmp(arr_tmp), op2: val, result: OperandType::Unused, line: 0 });
+                    }
+                }
+            }
+            ac.op_array.emit(Op { opcode: OpCode::Return, op1: OperandType::Tmp(arr_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: 0 });
+            crate::object::RuntimeAttribute { name, args_op_array: ac.op_array }
+        }).collect()
+    }
+
     fn resolve_class_name(&self, name: &[u8]) -> Vec<u8> {
         // Special names are never resolved
         if name.eq_ignore_ascii_case(b"self")
@@ -1377,7 +1415,7 @@ impl Compiler {
             }
 
             StmtKind::FunctionDecl {
-                name, params, body, return_type, ..
+                name, params, body, return_type, attributes: func_attributes, ..
             } => {
                 // Check for promoted properties in free functions
                 for param in params {
@@ -1405,6 +1443,7 @@ impl Compiler {
                 func_compiler.op_array.is_generator = is_generator;
                 func_compiler.op_array.decl_line = stmt.span.line;
                 func_compiler.op_array.strict_types = self.op_array.strict_types;
+                func_compiler.op_array.attributes = self.compile_attributes(func_attributes);
                 func_compiler.source_file = self.source_file.clone();
                 func_compiler.anon_class_name_map = self.anon_class_name_map.clone();
 
@@ -2106,6 +2145,7 @@ impl Compiler {
                 implements,
                 body,
                 enum_backing_type,
+                attributes: class_attributes,
             } => {
                 // Determine qualified name: anonymous classes use NUL-byte PHP names
                 let is_anonymous = name.starts_with(b"__anonymous_class_");
@@ -2197,6 +2237,7 @@ impl Compiler {
                 class.is_trait = modifiers.is_trait;
                 class.is_enum = modifiers.is_enum;
                 class.enum_backing_type = enum_backing_type.clone();
+                class.attributes = self.compile_attributes(class_attributes);
 
                 // Enums automatically implement UnitEnum (and BackedEnum if backed)
                 if modifiers.is_enum {
@@ -2229,6 +2270,7 @@ impl Compiler {
                             is_readonly,
                             get_hook,
                             set_hook,
+                            attributes,
                         } => {
                             // Enums cannot include properties
                             if modifiers.is_enum {
@@ -2652,6 +2694,7 @@ impl Compiler {
                                 has_get_hook: get_hook.is_some(),
                                 has_set_hook: set_hook.is_some(),
                                 is_virtual: prop_is_virtual,
+                                attributes: self.compile_attributes(attributes),
                             });
 
                             // Compile property get hook as a method: __property_get_$propname
@@ -2705,10 +2748,10 @@ impl Compiler {
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower.clone(),
                                         doc_comment: None,
+                                        attributes: Vec::new(),
                                     },
                                 );
                             }
-
                             // Compile property set hook as a method: __property_set_$propname
                             if let Some((param_name, hook_body)) = set_hook {
                                 let hook_method_name = format!("__property_set_{}", String::from_utf8_lossy(prop_name));
@@ -2762,6 +2805,7 @@ impl Compiler {
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower,
                                         doc_comment: None,
+                                        attributes: Vec::new(),
                                     },
                                 );
                             }
@@ -2776,6 +2820,7 @@ impl Compiler {
                             is_abstract,
                             is_final: method_is_final,
                             line: method_line,
+                            attributes: method_attributes,
                         } => {
                             // Check: a method cannot be both abstract and final
                             if *is_abstract && *method_is_final {
@@ -3086,6 +3131,7 @@ impl Compiler {
                                                     line: *method_line,
                                                 });
                                             }
+                                            let pa = self.compile_attributes(&param.attributes);
                                             class.properties.push(PropertyDef {
                                                 name: param.name.clone(),
                                                 default: Value::Null,
@@ -3098,6 +3144,7 @@ impl Compiler {
                                                 has_get_hook: false,
                                                 has_set_hook: false,
                                                 is_virtual: false,
+                                                attributes: pa,
                                             });
                                         }
                                     }
@@ -3358,6 +3405,7 @@ impl Compiler {
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
                                         doc_comment: None,
+                                        attributes: self.compile_attributes(method_attributes),
                                     },
                                 );
                             } else {
@@ -3434,6 +3482,7 @@ impl Compiler {
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
                                         doc_comment: None,
+                                        attributes: self.compile_attributes(method_attributes),
                                     },
                                 );
                             }
@@ -3443,6 +3492,7 @@ impl Compiler {
                             value: const_expr,
                             visibility: const_visibility,
                             is_final: const_is_final,
+                            attributes: const_attributes,
                         } => {
                             let val = if let Some(v) = Self::eval_const_expr(const_expr) {
                                 v
@@ -3699,10 +3749,12 @@ impl Compiler {
                                 goro_parser::ast::Visibility::Private => crate::object::Visibility::Private,
                             };
                             let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let const_attrs = self.compile_attributes(const_attributes);
                             class.constants_meta.insert(const_name.clone(), crate::object::ConstantMeta {
                                 visibility: const_vis,
                                 is_final: *const_is_final,
                                 declaring_class: declaring_class_lower,
+                                attributes: const_attrs,
                             });
                             // Private constants cannot be final
                             if *const_is_final && const_vis == crate::object::Visibility::Private {
@@ -3714,7 +3766,7 @@ impl Compiler {
                                 });
                             }
                         }
-                        ClassMember::EnumCase { name: case_name, value } => {
+                        ClassMember::EnumCase { name: case_name, value, .. } => {
                             // 'case' can only be used in enums
                             if !modifiers.is_enum {
                                 return Err(CompileError {
@@ -6457,6 +6509,7 @@ impl Compiler {
                 body,
                 use_vars,
                 is_static,
+                attributes: closure_attributes,
                 ..
             } => {
                 // Compile closure body as a child function
@@ -6473,6 +6526,7 @@ impl Compiler {
                 closure_compiler.op_array.is_static_closure = *is_static;
                 closure_compiler.op_array.decl_line = expr.span.line;
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
+                closure_compiler.op_array.attributes = self.compile_attributes(closure_attributes);
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();

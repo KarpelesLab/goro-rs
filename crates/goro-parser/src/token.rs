@@ -162,6 +162,7 @@ pub enum TokenKind {
     DoubleColon,        // ::
     Ellipsis,           // ...
     At,                 // @
+    AttributeOpen,      // #[
     PipeGreater,        // |> (pipe operator, PHP 8.5)
 
     // Delimiters

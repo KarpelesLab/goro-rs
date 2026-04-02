@@ -1,3 +1,4 @@
+use goro_core::opcode::ParamType;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
@@ -91,6 +92,51 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"fpow", fpow_fn);
     vm.register_function(b"srand", srand_fn);
     vm.register_function(b"mt_srand", srand_fn);
+
+    // Register parameter types for strict_types enforcement on builtins
+    let num = || Some(ParamType::Union(vec![
+        ParamType::Simple(b"int".to_vec()),
+        ParamType::Simple(b"float".to_vec()),
+    ]));
+    let i = || Some(ParamType::Simple(b"int".to_vec()));
+    let f = || Some(ParamType::Simple(b"float".to_vec()));
+    let s = || Some(ParamType::Simple(b"string".to_vec()));
+    vm.register_builtin_param_types(b"abs", vec![num()]);
+    vm.register_builtin_param_types(b"ceil", vec![num()]);
+    vm.register_builtin_param_types(b"floor", vec![num()]);
+    vm.register_builtin_param_types(b"round", vec![num(), i(), i()]);
+    vm.register_builtin_param_types(b"sqrt", vec![f()]);
+    vm.register_builtin_param_types(b"intdiv", vec![i(), i()]);
+    vm.register_builtin_param_types(b"fmod", vec![f(), f()]);
+    vm.register_builtin_param_types(b"rand", vec![i(), i()]);
+    vm.register_builtin_param_types(b"mt_rand", vec![i(), i()]);
+    vm.register_builtin_param_types(b"random_int", vec![i(), i()]);
+    vm.register_builtin_param_types(b"sin", vec![f()]);
+    vm.register_builtin_param_types(b"cos", vec![f()]);
+    vm.register_builtin_param_types(b"tan", vec![f()]);
+    vm.register_builtin_param_types(b"asin", vec![f()]);
+    vm.register_builtin_param_types(b"acos", vec![f()]);
+    vm.register_builtin_param_types(b"atan", vec![f()]);
+    vm.register_builtin_param_types(b"atan2", vec![f(), f()]);
+    vm.register_builtin_param_types(b"log", vec![f(), f()]);
+    vm.register_builtin_param_types(b"log10", vec![f()]);
+    vm.register_builtin_param_types(b"log2", vec![f()]);
+    vm.register_builtin_param_types(b"exp", vec![f()]);
+    vm.register_builtin_param_types(b"hypot", vec![f(), f()]);
+    vm.register_builtin_param_types(b"deg2rad", vec![f()]);
+    vm.register_builtin_param_types(b"rad2deg", vec![f()]);
+    vm.register_builtin_param_types(b"base_convert", vec![s(), i(), i()]);
+    vm.register_builtin_param_types(b"bindec", vec![s()]);
+    vm.register_builtin_param_types(b"octdec", vec![s()]);
+    vm.register_builtin_param_types(b"hexdec", vec![s()]);
+    vm.register_builtin_param_types(b"decbin", vec![i()]);
+    vm.register_builtin_param_types(b"decoct", vec![i()]);
+    vm.register_builtin_param_types(b"dechex", vec![i()]);
+    vm.register_builtin_param_types(b"is_nan", vec![f()]);
+    vm.register_builtin_param_types(b"is_infinite", vec![f()]);
+    vm.register_builtin_param_types(b"is_finite", vec![f()]);
+    vm.register_builtin_param_types(b"number_format", vec![f(), i(), s(), s()]);
+    vm.register_builtin_param_types(b"fdiv", vec![f(), f()]);
 }
 
 /// Throw a TypeError for a math function argument and set the current exception

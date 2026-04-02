@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use goro_core::array::{ArrayKey, PhpArray};
+use goro_core::opcode::ParamType;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
@@ -102,6 +103,61 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"strcoll", strcoll_fn);
     vm.register_function(b"money_format", money_format_fn);
     vm.register_function(b"settype", settype_fn);
+
+    // Register parameter types for strict_types enforcement on builtins
+    let s = || Some(ParamType::Simple(b"string".to_vec()));
+    let i = || Some(ParamType::Simple(b"int".to_vec()));
+    vm.register_builtin_param_types(b"strlen", vec![s()]);
+    vm.register_builtin_param_types(b"ord", vec![s()]);
+    vm.register_builtin_param_types(b"chr", vec![i()]);
+    vm.register_builtin_param_types(b"strtolower", vec![s()]);
+    vm.register_builtin_param_types(b"strtoupper", vec![s()]);
+    vm.register_builtin_param_types(b"trim", vec![s(), s()]);
+    vm.register_builtin_param_types(b"ltrim", vec![s(), s()]);
+    vm.register_builtin_param_types(b"rtrim", vec![s(), s()]);
+    vm.register_builtin_param_types(b"chop", vec![s(), s()]);
+    vm.register_builtin_param_types(b"substr", vec![s(), i(), i()]);
+    vm.register_builtin_param_types(b"strpos", vec![s(), s(), i()]);
+    vm.register_builtin_param_types(b"str_contains", vec![s(), s()]);
+    vm.register_builtin_param_types(b"str_starts_with", vec![s(), s()]);
+    vm.register_builtin_param_types(b"str_ends_with", vec![s(), s()]);
+    vm.register_builtin_param_types(b"str_repeat", vec![s(), i()]);
+    vm.register_builtin_param_types(b"explode", vec![s(), s(), i()]);
+    vm.register_builtin_param_types(b"implode", vec![s(), None]);
+    vm.register_builtin_param_types(b"join", vec![s(), None]);
+    vm.register_builtin_param_types(b"nl2br", vec![s(), None]);
+    vm.register_builtin_param_types(b"str_pad", vec![s(), i(), s(), i()]);
+    vm.register_builtin_param_types(b"ucfirst", vec![s()]);
+    vm.register_builtin_param_types(b"lcfirst", vec![s()]);
+    vm.register_builtin_param_types(b"ucwords", vec![s(), s()]);
+    vm.register_builtin_param_types(b"strrev", vec![s()]);
+    vm.register_builtin_param_types(b"addslashes", vec![s()]);
+    vm.register_builtin_param_types(b"stripslashes", vec![s()]);
+    vm.register_builtin_param_types(b"addcslashes", vec![s(), s()]);
+    vm.register_builtin_param_types(b"stripcslashes", vec![s()]);
+    vm.register_builtin_param_types(b"str_rot13", vec![s()]);
+    vm.register_builtin_param_types(b"str_word_count", vec![s(), i(), s()]);
+    vm.register_builtin_param_types(b"strcmp", vec![s(), s()]);
+    vm.register_builtin_param_types(b"strncmp", vec![s(), s(), i()]);
+    vm.register_builtin_param_types(b"strcasecmp", vec![s(), s()]);
+    vm.register_builtin_param_types(b"strncasecmp", vec![s(), s(), i()]);
+    vm.register_builtin_param_types(b"substr_count", vec![s(), s(), i(), i()]);
+    vm.register_builtin_param_types(b"substr_compare", vec![s(), s(), i(), i(), None]);
+    vm.register_builtin_param_types(b"strstr", vec![s(), s(), None]);
+    vm.register_builtin_param_types(b"stristr", vec![s(), s(), None]);
+    vm.register_builtin_param_types(b"strrchr", vec![s(), s()]);
+    vm.register_builtin_param_types(b"strrpos", vec![s(), s(), i()]);
+    vm.register_builtin_param_types(b"stripos", vec![s(), s(), i()]);
+    vm.register_builtin_param_types(b"strripos", vec![s(), s(), i()]);
+    vm.register_builtin_param_types(b"hex2bin", vec![s()]);
+    vm.register_builtin_param_types(b"bin2hex", vec![s()]);
+    vm.register_builtin_param_types(b"str_split", vec![s(), i()]);
+    vm.register_builtin_param_types(b"str_shuffle", vec![s()]);
+    vm.register_builtin_param_types(b"soundex", vec![s()]);
+    vm.register_builtin_param_types(b"metaphone", vec![s(), i()]);
+    vm.register_builtin_param_types(b"quotemeta", vec![s()]);
+    vm.register_builtin_param_types(b"str_increment", vec![s()]);
+    vm.register_builtin_param_types(b"str_decrement", vec![s()]);
 }
 
 fn strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

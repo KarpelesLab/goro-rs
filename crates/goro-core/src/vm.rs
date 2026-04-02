@@ -298,6 +298,11 @@ pub struct Vm {
     pub object_is_operator_type: Option<fn(&Value) -> bool>,
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
+    /// Parameter types for built-in functions (for strict_types enforcement)
+    pub builtin_param_types: HashMap<Vec<u8>, Vec<Option<ParamType>>>,
+    /// Whether the current caller has strict_types=1 (set before calling builtins)
+    pub caller_strict_types: bool,
+    pub stored_attr_op_arrays: Vec<OpArray>,
 }
 
 impl Vm {
@@ -962,6 +967,9 @@ impl Vm {
                 s.insert(b"standard".to_vec());
                 s
             },
+            builtin_param_types: HashMap::new(),
+            caller_strict_types: false,
+            stored_attr_op_arrays: Vec::new(),
         }
     }
 
@@ -1782,26 +1790,25 @@ impl Vm {
         Value::Array(Rc::new(RefCell::new(trace_arr)))
     }
 
-    /// Check if a return value matches the declared return type
-    fn value_matches_return_type(&self, value: &Value, ret_type: &ParamType) -> bool {
-        // Return type checking always uses strict matching in PHP
-        // (the function's declared return type is always enforced strictly)
+    /// Check if a return value matches the declared return type.
+    /// In strict mode, use exact type matching. In weak mode (after coercion), use coercive matching.
+    fn value_matches_return_type(&self, value: &Value, ret_type: &ParamType, strict: bool) -> bool {
         match ret_type {
             ParamType::Simple(name) => {
                 match name.as_slice() {
                     b"void" => matches!(value, Value::Null | Value::Undef),
-                    b"never" => false, // never type means function should never return
+                    b"never" => false,
                     b"mixed" => true,
-                    _ => self.value_matches_type(value, ret_type),
+                    _ => self.value_matches_type_mode(value, ret_type, strict),
                 }
             }
             ParamType::Nullable(_) => {
                 if matches!(value, Value::Null | Value::Undef) {
                     return true;
                 }
-                self.value_matches_type(value, ret_type)
+                self.value_matches_type_mode(value, ret_type, strict)
             }
-            _ => self.value_matches_type(value, ret_type),
+            _ => self.value_matches_type_mode(value, ret_type, strict),
         }
     }
 
@@ -2977,6 +2984,12 @@ impl Vm {
         self.builtin_param_names.insert(lower, params.iter().map(|p| p.to_vec()).collect());
     }
 
+    /// Register parameter types for a built-in function (for strict_types enforcement).
+    pub fn register_builtin_param_types(&mut self, name: &[u8], types: Vec<Option<ParamType>>) {
+        let lower = name.to_ascii_lowercase();
+        self.builtin_param_types.insert(lower, types);
+    }
+
     // ---- Accessors for reflection module ----
 
     /// Allocate and return the next object ID
@@ -3441,7 +3454,13 @@ impl Vm {
                 } else if f.is_nan() {
                     "NAN".to_string()
                 } else {
-                    crate::value::format_php_float(*f)
+                    let s = crate::value::format_php_float(*f);
+                    // Ensure float values always have a decimal point in stack traces
+                    if !s.contains('.') && !s.contains('E') && !s.contains('e') {
+                        format!("{}.0", s)
+                    } else {
+                        s
+                    }
                 }
             }
             Value::String(s) => {
@@ -9083,7 +9102,7 @@ impl Vm {
                 // For mixed return type, implicit return (no explicit return statement) is an error
                 // because mixed means "must return a value" even though it accepts any type
                 let mixed_implicit_mismatch = implicit_return && matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"mixed"));
-                if mixed_implicit_mismatch || !self.value_matches_return_type(val, ret_type) {
+                if mixed_implicit_mismatch || !self.value_matches_return_type(val, ret_type, op_array.strict_types) {
                     let raw_name = String::from_utf8_lossy(&op_array.name);
                     // Include class name in the function display name for methods
                     let func_name = if let Some(ref scope) = op_array.scope_class {
@@ -11968,6 +11987,46 @@ impl Vm {
                                 }
                             }
                         }
+                        // Strict type checking for builtin function parameters
+                        if op_array.strict_types {
+                            if let Some(param_types) = self.builtin_param_types.get(&func_name_lower).cloned() {
+                                for (i, arg) in call.args.iter().enumerate() {
+                                    if i >= param_types.len() {
+                                        break;
+                                    }
+                                    if let Some(ref pt) = param_types[i] {
+                                        let val = arg.deref();
+                                        if !self.value_matches_type_mode(&val, pt, true) {
+                                            let expected = self.param_type_display(pt);
+                                            let given = Self::value_type_name(&val);
+                                            let display_name = call.name.to_string_lossy();
+                                            let param_name = self.builtin_param_names.get(&func_name_lower)
+                                                .and_then(|names| names.get(i))
+                                                .map(|n| String::from_utf8_lossy(n).to_string())
+                                                .unwrap_or_else(|| format!("arg{}", i + 1));
+                                            let err_msg = format!(
+                                                "{}(): Argument #{} (${}) must be of type {}, {} given",
+                                                display_name, i + 1, param_name, expected, given
+                                            );
+                                            let exc_val = self.create_exception(b"TypeError", &err_msg, op.line);
+                                            self.current_exception = Some(exc_val);
+                                            if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                                ip = catch_target as usize;
+                                                continue;
+                                            } else {
+                                                return Err(VmError {
+                                                    message: format!("Uncaught TypeError: {}", err_msg),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        self.caller_strict_types = op_array.strict_types;
+
                         let had_exception_before = self.current_exception.is_some();
 
                         // For assert(), push a call stack frame so the stack trace shows
@@ -15667,7 +15726,19 @@ impl Vm {
 
                                             let result = match self.execute_op_array(&inc_op_array, inc_cvs) {
                                                 Ok(v) => v,
-                                                Err(_) => Value::False,
+                                                Err(e) => {
+                                                    // Propagate uncaught exceptions from included files
+                                                    if self.current_exception.is_some() {
+                                                        self.pending_classes = saved_pending;
+                                                        self.current_file = old_file;
+                                                        if let Some((catch_target, _, _)) = exception_handlers.pop() {
+                                                            ip = catch_target as usize;
+                                                            continue;
+                                                        }
+                                                        return Err(e);
+                                                    }
+                                                    Value::False
+                                                },
                                             };
 
                                             // Restore outer pending_classes

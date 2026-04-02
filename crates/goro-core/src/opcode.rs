@@ -326,6 +326,8 @@ pub struct OpArray {
     pub class_const_literals: Vec<u32>,
     /// Whether this file/function was declared with declare(strict_types=1)
     pub strict_types: bool,
+    pub attributes: Vec<crate::object::RuntimeAttribute>,
+    pub param_attributes: Vec<Vec<crate::object::RuntimeAttribute>>,
 }
 
 impl OpArray {
@@ -348,6 +350,8 @@ impl OpArray {
             decl_line: 0,
             class_const_literals: Vec::new(),
             strict_types: false,
+            attributes: Vec::new(),
+            param_attributes: Vec::new(),
         }
     }
 
