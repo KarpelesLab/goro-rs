@@ -1,0 +1,74 @@
+name: PHP Test Suite
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Clone PHP test suite
+        run: git clone --depth 1 --branch php-8.5.4 https://github.com/php/php-src.git /tmp/php-src
+
+      - name: Run PHPT tests
+        run: |
+          ./target/release/goro --test /tmp/php-src/ 2>&1 | tee /tmp/test_results.txt
+          # Extract summary
+          tail -6 /tmp/test_results.txt
+
+      - name: Generate failure report
+        if: always()
+        run: |
+          # Extract all FAIL lines with expected/actual
+          grep -A 2 "^FAIL:" /tmp/test_results.txt > /tmp/test_failures.txt || true
+          # Count
+          PASS=$(grep "^Pass:" /tmp/test_results.txt | awk '{print $2}')
+          FAIL=$(grep "^Fail:" /tmp/test_results.txt | awk '{print $2}')
+          TOTAL=$(grep "^Total:" /tmp/test_results.txt | awk '{print $2}')
+          echo "## Test Results: ${PASS}/${TOTAL} passing" > /tmp/test_summary.md
+          echo "" >> /tmp/test_summary.md
+          echo "| Metric | Count |" >> /tmp/test_summary.md
+          echo "|--------|-------|" >> /tmp/test_summary.md
+          grep -E "^(Pass|Fail|Skip|Error|Total):" /tmp/test_results.txt | while read line; do
+            key=$(echo "$line" | cut -d: -f1)
+            val=$(echo "$line" | awk '{print $2}')
+            echo "| $key | $val |" >> /tmp/test_summary.md
+          done
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            /tmp/test_results.txt
+            /tmp/test_failures.txt
+            /tmp/test_summary.md
+          retention-days: 30
+
+      - name: Post summary
+        if: always()
+        run: cat /tmp/test_summary.md >> $GITHUB_STEP_SUMMARY
