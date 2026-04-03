@@ -187,14 +187,53 @@ fn strtoupper(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// Expand PHP charlist ranges like "A..Z" → all chars A-Z
 fn expand_charlist(charlist: &[u8]) -> Vec<u8> {
+    expand_charlist_inner(charlist, None, "")
+}
+
+/// Expand PHP charlist ranges with optional warning emission
+fn expand_charlist_warn(charlist: &[u8], vm: &mut Vm, func_name: &str) -> Vec<u8> {
+    let vm_ptr = vm as *mut Vm;
+    expand_charlist_inner(charlist, Some(vm_ptr), func_name)
+}
+
+fn expand_charlist_inner(charlist: &[u8], vm_ptr: Option<*mut Vm>, func_name: &str) -> Vec<u8> {
     let mut result = Vec::new();
     let mut i = 0;
     while i < charlist.len() {
+        if i + 1 < charlist.len()
+            && charlist[i] == b'.'
+            && i + 2 < charlist.len()
+            && charlist[i + 1] == b'.'
+        {
+            // ".." at start - no character to the left
+            if i == 0 {
+                if let Some(vm_ptr) = vm_ptr {
+                    let vm = unsafe { &mut *vm_ptr };
+                    vm.emit_warning(&format!("{}(): Invalid '..'-range, no character to the left of '..'", func_name));
+                }
+                // Skip the ".." and the character after
+                if i + 2 < charlist.len() {
+                    i += 3;
+                } else {
+                    i += 2;
+                }
+                continue;
+            }
+        }
         if i + 2 < charlist.len()
             && charlist[i + 1] == b'.'
-            && i + 3 < charlist.len()
             && charlist[i + 2] == b'.'
         {
+            if i + 3 >= charlist.len() {
+                // ".." at end - no character to the right
+                if let Some(vm_ptr) = vm_ptr {
+                    let vm = unsafe { &mut *vm_ptr };
+                    vm.emit_warning(&format!("{}(): Invalid '..'-range, no character to the right of '..'", func_name));
+                }
+                result.push(charlist[i]);
+                i += 3;
+                continue;
+            }
             // Range: X..Y
             let from = charlist[i];
             let to = charlist[i + 3];
@@ -203,11 +242,30 @@ fn expand_charlist(charlist: &[u8]) -> Vec<u8> {
                     result.push(c);
                 }
             } else {
-                for c in (to..=from).rev() {
-                    result.push(c);
+                // Invalid range - from > to
+                if let Some(vm_ptr) = vm_ptr {
+                    let vm = unsafe { &mut *vm_ptr };
+                    vm.emit_warning(&format!("{}(): Invalid '..'-range, '..'-range needs to be incrementing", func_name));
                 }
+                result.push(from);
             }
             i += 4;
+            // Check if this is followed by another ".." immediately (like "a..b..c")
+            if i < charlist.len() && i + 1 < charlist.len()
+                && charlist[i] == b'.'
+                && i + 1 < charlist.len()
+                && charlist[i + 1] == b'.'
+            {
+                if let Some(vm_ptr) = vm_ptr {
+                    let vm = unsafe { &mut *vm_ptr };
+                    vm.emit_warning(&format!("{}(): Invalid '..'-range", func_name));
+                }
+                // Skip the extra ".." and any trailing char
+                i += 2;
+                if i < charlist.len() {
+                    i += 1;
+                }
+            }
         } else {
             result.push(charlist[i]);
             i += 1;
@@ -216,14 +274,14 @@ fn expand_charlist(charlist: &[u8]) -> Vec<u8> {
     result
 }
 
-fn trim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn trim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
     let chars = args
         .get(1)
         .map(|v| {
             let s = v.to_php_string();
-            expand_charlist(s.as_bytes())
+            expand_charlist_warn(s.as_bytes(), vm, "trim")
         })
         .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
 
@@ -241,14 +299,14 @@ fn trim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     )))
 }
 
-fn ltrim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn ltrim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
     let chars = args
         .get(1)
         .map(|v| {
             let s = v.to_php_string();
-            expand_charlist(s.as_bytes())
+            expand_charlist_warn(s.as_bytes(), vm, "ltrim")
         })
         .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
     let start = bytes
@@ -258,14 +316,14 @@ fn ltrim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(bytes[start..].to_vec())))
 }
 
-fn rtrim(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn rtrim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
     let chars = args
         .get(1)
         .map(|v| {
             let s = v.to_php_string();
-            expand_charlist(s.as_bytes())
+            expand_charlist_warn(s.as_bytes(), vm, "rtrim")
         })
         .unwrap_or_else(|| b" \t\n\r\0\x0B".to_vec());
     let end = bytes

@@ -274,7 +274,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"chmod", chmod_fn);
     vm.register_function(b"chown", chown_fn);
     vm.register_function(b"clearstatcache", clearstatcache_fn);
-    vm.register_function(b"fputcsv", fputcsv_fn);
+    vm.register_function_with_params(b"fputcsv", fputcsv_fn, &[b"stream", b"fields", b"separator", b"enclosure", b"escape", b"eol"]);
     vm.register_function_with_params(b"fgetcsv", fgetcsv_fn, &[b"stream", b"length", b"separator", b"enclosure", b"escape"]);
     vm.register_function(b"fpassthru", fpassthru_fn);
     vm.register_function(b"fgetc", fgetc_fn);
@@ -418,6 +418,16 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"hrtime", hrtime_fn);
     vm.register_function(b"gethostname", gethostname_fn);
     vm.register_function(b"umask", umask_fn);
+    vm.register_function(b"getopt", getopt_fn);
+    vm.register_function(b"gethostbyname", gethostbyname_fn);
+    vm.register_function(b"gethostbynamel", gethostbynamel_fn);
+    vm.register_function(b"gethostbyaddr", gethostbyaddr_fn);
+    vm.register_function(b"proc_open", proc_open_fn);
+    vm.register_function(b"proc_close", proc_close_fn);
+    vm.register_function(b"proc_get_status", proc_get_status_fn);
+    vm.register_function(b"proc_terminate", proc_terminate_fn);
+    vm.register_function(b"inet_pton", inet_pton_fn);
+    vm.register_function(b"inet_ntop", inet_ntop_fn);
 
     // Regex functions are now in the regex module (regex.rs)
 }
@@ -6371,16 +6381,28 @@ fn sleep_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn usleep_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
-fn uniqid_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn uniqid_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use std::time::SystemTime;
+    let prefix = args.first().map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    let more_entropy = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let t = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    Ok(Value::String(PhpString::from_string(format!(
-        "{:x}{:05x}",
-        t.as_secs(),
+    let base = format!(
+        "{}{:08x}{:05x}",
+        prefix,
+        t.as_secs() as u32,
         t.subsec_micros()
-    ))))
+    );
+    if more_entropy {
+        // PHP uses %.8F format which produces "N.XXXXXXXX" (10 chars for the random part)
+        // e.g. "0.12345678" making total length = prefix_len + 13 + 10 = prefix_len + 23
+        let random_part: u32 = (t.subsec_nanos() ^ 0xDEADBEEF) % 100_000_000;
+        let random_val = random_part as f64 / 100_000_000.0;
+        Ok(Value::String(PhpString::from_string(format!("{}{:.8}", base, random_val))))
+    } else {
+        Ok(Value::String(PhpString::from_string(base)))
+    }
 }
 fn sys_get_temp_dir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_bytes(b"/tmp")))
@@ -10374,3 +10396,109 @@ fn escapeshellcmd(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
+fn getopt_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // getopt() parses CLI options - return empty array as stub since we're not a real CLI
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+
+fn gethostbyname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let host = args.first().unwrap_or(&Value::Null).to_php_string();
+    let host_str = host.to_string_lossy();
+    // Try DNS resolution
+    use std::net::ToSocketAddrs;
+    let addr_str = format!("{}:0", host_str);
+    match addr_str.to_socket_addrs() {
+        Ok(mut addrs) => {
+            // Return first IPv4 address found
+            for addr in &mut addrs {
+                if addr.is_ipv4() {
+                    return Ok(Value::String(PhpString::from_string(addr.ip().to_string())));
+                }
+            }
+            // No IPv4 found, return hostname unchanged (PHP behavior)
+            Ok(Value::String(host))
+        }
+        Err(_) => {
+            // On failure, PHP returns the hostname unchanged
+            Ok(Value::String(host))
+        }
+    }
+}
+
+fn gethostbynamel_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let host = args.first().unwrap_or(&Value::Null).to_php_string();
+    let host_str = host.to_string_lossy();
+    use std::net::ToSocketAddrs;
+    let addr_str = format!("{}:0", host_str);
+    match addr_str.to_socket_addrs() {
+        Ok(addrs) => {
+            let mut result = PhpArray::new();
+            for addr in addrs {
+                if addr.is_ipv4() {
+                    result.push(Value::String(PhpString::from_string(addr.ip().to_string())));
+                }
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(result))))
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn gethostbyaddr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ip = args.first().unwrap_or(&Value::Null).to_php_string();
+    // Reverse DNS is complex; stub returning the IP itself
+    Ok(Value::String(ip))
+}
+
+fn proc_open_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // proc_open is complex to implement fully - return false as stub
+    Ok(Value::False)
+}
+
+fn proc_close_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(-1))
+}
+
+fn proc_get_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn proc_terminate_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn inet_pton_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let addr_str = args.first().unwrap_or(&Value::Null).to_php_string();
+    let addr_s = addr_str.to_string_lossy();
+    // Try parsing as IPv4
+    if let Ok(ipv4) = addr_s.parse::<std::net::Ipv4Addr>() {
+        return Ok(Value::String(PhpString::from_vec(ipv4.octets().to_vec())));
+    }
+    // Try parsing as IPv6
+    if let Ok(ipv6) = addr_s.parse::<std::net::Ipv6Addr>() {
+        return Ok(Value::String(PhpString::from_vec(ipv6.octets().to_vec())));
+    }
+    // PHP 8.1+: no warning, just return false
+    Ok(Value::False)
+}
+
+fn inet_ntop_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let packed = args.first().unwrap_or(&Value::Null).to_php_string();
+    let bytes = packed.as_bytes();
+    match bytes.len() {
+        4 => {
+            let addr = std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
+            Ok(Value::String(PhpString::from_string(addr.to_string())))
+        }
+        16 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(bytes);
+            let addr = std::net::Ipv6Addr::from(octets);
+            Ok(Value::String(PhpString::from_string(addr.to_string())))
+        }
+        _ => {
+            // PHP 8.1+: no warning for invalid length
+            Ok(Value::False)
+        }
+    }
+}

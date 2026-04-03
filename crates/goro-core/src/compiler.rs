@@ -4290,6 +4290,40 @@ impl Compiler {
                                 line,
                             });
                         }
+                        ExprKind::DynamicStaticPropertyAccess { class, property } => {
+                            // Test::$$bar = value (list destructuring)
+                            let class_name = match &class.kind {
+                                ExprKind::Identifier(name) => {
+                                    let resolved = self.resolve_class_name(name);
+                                    if resolved.eq_ignore_ascii_case(b"self") {
+                                        self.current_class.clone().unwrap_or(resolved)
+                                    } else if resolved.eq_ignore_ascii_case(b"static") {
+                                        b"static".to_vec()
+                                    } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                        self.current_parent_class.clone().unwrap_or(resolved)
+                                    } else {
+                                        resolved
+                                    }
+                                }
+                                _ => {
+                                    return Err(CompileError {
+                                        message: "Cannot use dynamic class in list destructuring".into(),
+                                        line,
+                                    });
+                                }
+                            };
+                            let class_idx = self.op_array.add_literal(
+                                Value::String(PhpString::from_vec(class_name))
+                            );
+                            let prop_op = self.compile_expr(property)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::StaticPropSet,
+                                op1: OperandType::Const(class_idx),
+                                op2: OperandType::Tmp(tmp),
+                                result: prop_op,
+                                line,
+                            });
+                        }
                         ExprKind::DynamicVariable(inner) => {
                             // $$var = value
                             let name_op = self.compile_expr(inner)?;
@@ -4440,6 +4474,35 @@ impl Compiler {
                             op1: OperandType::Const(class_idx),
                             op2: val,
                             result: OperandType::Const(prop_idx),
+                            line: expr.span.line,
+                        });
+                        Ok(val)
+                    }
+                    ExprKind::DynamicStaticPropertyAccess { class, property } => {
+                        // Test::$$bar = value
+                        let class_operand = match &class.kind {
+                            ExprKind::Identifier(name) => {
+                                let resolved = self.resolve_class_name(name);
+                                let class_name = if resolved.eq_ignore_ascii_case(b"self") {
+                                    self.current_class.clone().unwrap_or(resolved)
+                                } else if resolved.eq_ignore_ascii_case(b"static") {
+                                    b"static".to_vec()
+                                } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                    self.current_parent_class.clone().unwrap_or(resolved)
+                                } else {
+                                    resolved
+                                };
+                                let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                                OperandType::Const(idx)
+                            }
+                            _ => self.compile_expr(class)?,
+                        };
+                        let prop_op = self.compile_expr(property)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropSet,
+                            op1: class_operand,
+                            op2: val,
+                            result: prop_op,
                             line: expr.span.line,
                         });
                         Ok(val)
@@ -7400,6 +7463,42 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
+            ExprKind::DynamicStaticPropertyAccess { class, property } => {
+                // Test::$$bar - compile class and property expression, then StaticPropGet
+                let class_operand = match &class.kind {
+                    ExprKind::Identifier(name) => {
+                        let resolved = self.resolve_class_name(name);
+                        let is_self = resolved.eq_ignore_ascii_case(b"self");
+                        let class_name = if is_self {
+                            self.current_class.clone().unwrap_or(resolved)
+                        } else if resolved.eq_ignore_ascii_case(b"static") {
+                            b"static".to_vec()
+                        } else if resolved.eq_ignore_ascii_case(b"parent") {
+                            self.current_parent_class.clone().unwrap_or(resolved)
+                        } else {
+                            resolved
+                        };
+                        let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                        if is_self && self.is_in_trait {
+                            self.op_array.class_const_literals.push(idx);
+                        }
+                        OperandType::Const(idx)
+                    }
+                    _ => self.compile_expr(class)?,
+                };
+                // Compile the property expression (e.g., $bar which holds the property name)
+                let prop_op = self.compile_expr(property)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::StaticPropGet,
+                    op1: class_operand,
+                    op2: prop_op,
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
+            }
+
             ExprKind::PropertyAccess {
                 object,
                 property,
@@ -8653,6 +8752,7 @@ fn expr_is_in_nullsafe_chain(expr: &Expr) -> bool {
         ExprKind::PropertyAccess { object, nullsafe: false, .. } => expr_is_in_nullsafe_chain(object),
         ExprKind::ArrayAccess { array, .. } => expr_is_in_nullsafe_chain(array),
         ExprKind::StaticPropertyAccess { class, .. } => expr_is_in_nullsafe_chain(class),
+        ExprKind::DynamicStaticPropertyAccess { class, .. } => expr_is_in_nullsafe_chain(class),
         ExprKind::StaticMethodCall { class, .. } => expr_is_in_nullsafe_chain(class),
         ExprKind::DynamicStaticMethodCall { class, .. } => expr_is_in_nullsafe_chain(class),
         _ => false,
@@ -9099,6 +9199,11 @@ fn expr_to_source_string(expr: &Expr) -> String {
             format!("{}::${}",
                 expr_to_source_string(class),
                 String::from_utf8_lossy(property))
+        }
+        ExprKind::DynamicStaticPropertyAccess { class, property } => {
+            format!("{}::${}",
+                expr_to_source_string(class),
+                expr_to_source_string(property))
         }
         ExprKind::ClassConstAccess { class, constant } => {
             format!("{}::{}",

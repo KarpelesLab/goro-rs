@@ -29,7 +29,7 @@ pub enum ExprKind {
     Variable(Vec<u8>), DynamicVariable(Box<Expr>),
     BinaryOp { op: BinaryOp, left: Box<Expr>, right: Box<Expr> }, UnaryOp { op: UnaryOp, operand: Box<Expr>, prefix: bool },
     Assign { target: Box<Expr>, value: Box<Expr> }, CompoundAssign { op: BinaryOp, target: Box<Expr>, value: Box<Expr> }, AssignRef { target: Box<Expr>, value: Box<Expr> },
-    PropertyAccess { object: Box<Expr>, property: Box<Expr>, nullsafe: bool }, StaticPropertyAccess { class: Box<Expr>, property: Vec<u8> },
+    PropertyAccess { object: Box<Expr>, property: Box<Expr>, nullsafe: bool }, StaticPropertyAccess { class: Box<Expr>, property: Vec<u8> }, DynamicStaticPropertyAccess { class: Box<Expr>, property: Box<Expr> },
     MethodCall { object: Box<Expr>, method: Box<Expr>, args: Vec<Argument>, nullsafe: bool }, StaticMethodCall { class: Box<Expr>, method: Vec<u8>, args: Vec<Argument> },
     DynamicStaticMethodCall { class: Box<Expr>, method: Box<Expr>, args: Vec<Argument> }, ArrayAccess { array: Box<Expr>, index: Option<Box<Expr>> },
     FunctionCall { name: Box<Expr>, args: Vec<Argument> }, Ternary { condition: Box<Expr>, if_true: Option<Box<Expr>>, if_false: Box<Expr> },

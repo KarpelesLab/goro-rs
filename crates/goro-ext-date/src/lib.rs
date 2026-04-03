@@ -262,11 +262,34 @@ fn mktime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let timestamp = days * 86400 + hour * 3600 + minute * 60 + second;
     Ok(Value::Long(timestamp))
 }
-fn strtotime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn strtotime(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let datetime_str = args
         .first()
         .map(|v| v.to_php_string().to_string_lossy())
         .unwrap_or_default();
+    // Check if 2nd argument is a non-null, non-int type (e.g. an object)
+    if let Some(base_val) = args.get(1) {
+        match base_val {
+            Value::Null | Value::Long(_) => {}
+            Value::Object(obj) => {
+                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                let msg = format!(
+                    "strtotime(): Argument #2 ($baseTimestamp) must be of type ?int, {} given",
+                    class_name
+                );
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            Value::String(_) => {
+                let msg = "strtotime(): Argument #2 ($baseTimestamp) must be of type ?int, string given".to_string();
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            _ => {}
+        }
+    }
     let base_time = args.get(1).map(|v| v.to_long());
 
     let now_secs = base_time.unwrap_or_else(|| {

@@ -3618,6 +3618,21 @@ impl Parser {
                                 };
                             }
                         }
+                        TokenKind::VariableVariable(name) => {
+                            // Test::$$bar - access static property whose name is in $bar
+                            self.advance();
+                            let var_expr = Expr {
+                                kind: ExprKind::Variable(name),
+                                span: member_span,
+                            };
+                            expr = Expr {
+                                span: expr.span.merge(member_span),
+                                kind: ExprKind::DynamicStaticPropertyAccess {
+                                    class: Box::new(expr),
+                                    property: Box::new(var_expr),
+                                },
+                            };
+                        }
                         _ if self.is_semi_reserved_keyword() => {
                             let name = self.keyword_to_identifier();
                             self.advance();
