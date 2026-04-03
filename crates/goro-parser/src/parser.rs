@@ -948,9 +948,30 @@ impl Parser {
         if std::mem::discriminant(self.peek()) == std::mem::discriminant(terminator) {
             return Ok(exprs);
         }
-        exprs.push(self.parse_expression()?);
-        while self.eat(&TokenKind::Comma) {
+        // Handle (void)expr in expression lists (e.g., for loop update)
+        if matches!(self.peek(), TokenKind::VoidCast) {
+            let span = self.span();
+            self.advance();
+            let operand = self.parse_expression()?;
+            exprs.push(Expr {
+                span: span.merge(operand.span),
+                kind: ExprKind::Cast(CastType::Void, Box::new(operand)),
+            });
+        } else {
             exprs.push(self.parse_expression()?);
+        }
+        while self.eat(&TokenKind::Comma) {
+            if matches!(self.peek(), TokenKind::VoidCast) {
+                let span = self.span();
+                self.advance();
+                let operand = self.parse_expression()?;
+                exprs.push(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Cast(CastType::Void, Box::new(operand)),
+                });
+            } else {
+                exprs.push(self.parse_expression()?);
+            }
         }
         Ok(exprs)
     }

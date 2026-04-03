@@ -615,7 +615,9 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                     "\nFatal error: {} in {} on line {}\n",
                     err_msg, filename, e.span.line
                 )
-            } else if err_msg.starts_with("syntax error") {
+            } else if err_msg.starts_with("syntax error")
+                || err_msg.starts_with("The (real) cast")
+            {
                 format!(
                     "\nParse error: {} in {} on line {}\n",
                     err_msg, filename, e.span.line
