@@ -9383,7 +9383,10 @@ impl Vm {
                         if let Value::Object(key_rc) = &key_obj {
                             let key_oid = key_rc.borrow().object_id;
                             let exists = if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                                entries.iter().any(|(oid, weak, _)| *oid == key_oid && weak.upgrade().is_some())
+                                // WeakMap's offsetExists returns false for NULL values (like isset() behavior)
+                                entries.iter().any(|(oid, weak, val)| {
+                                    *oid == key_oid && weak.upgrade().is_some() && !matches!(val, Value::Null)
+                                })
                             } else {
                                 false
                             };
@@ -9881,6 +9884,18 @@ impl Vm {
 
                 OpCode::Assign => {
                     let val = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, &op_array, op.line);
+                    // Recycle old object ID before overwriting
+                    if let OperandType::Cv(idx) = op.op1 {
+                        if let Some(old_val) = cvs.get(idx as usize) {
+                            if let Value::Object(rc) = old_val {
+                                // In global scope, the value may also be in self.globals (strong_count +1)
+                                let threshold = if self.is_global_scope { 2 } else { 1 };
+                                if Rc::strong_count(rc) <= threshold {
+                                    self.free_object_ids.push(rc.borrow().object_id);
+                                }
+                            }
+                        }
+                    }
                     self.write_operand(&op.op1, val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
                     if let OperandType::Tmp(idx) = op.op2 {
                         if let Some(slot) = tmps.get_mut(idx as usize) { *slot = Value::Undef; }
@@ -12089,7 +12104,9 @@ impl Vm {
                                 if let Value::Object(key_rc) = &key_obj {
                                     let key_oid = key_rc.borrow().object_id;
                                     let exists = if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                                        entries.iter().any(|(oid, weak, _)| *oid == key_oid && weak.upgrade().is_some())
+                                        entries.iter().any(|(oid, weak, val)| {
+                                            *oid == key_oid && weak.upgrade().is_some() && !matches!(val, Value::Null)
+                                        })
                                     } else {
                                         false
                                     };
@@ -17075,6 +17092,12 @@ impl Vm {
                                     let obj = obj_rc.borrow();
                                     obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>() == b"fiber"
                                 };
+                                // Recycle object ID if this is the last user reference
+                                // (strong_count == 2: one for this slot, one for destructible_objects)
+                                let sc = Rc::strong_count(obj_rc);
+                                if sc <= 2 {
+                                    self.free_object_ids.push(obj_rc.borrow().object_id);
+                                }
                                 if is_fiber {
                                     let fiber_id = obj_rc.borrow().object_id;
                                     let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
@@ -17520,22 +17543,12 @@ impl Vm {
                             .unwrap_or(false);
                         if is_spl_array || has_user_offset {
                             let args = vec![arr_val.clone(), key_val.clone()];
-                            let key_val_clone = key_val.clone();
                             let exists_result = self.handle_spl_docall(&class_lower, b"offsetexists", &args)
                                 .unwrap_or_else(|| {
                                     self.call_object_method(&arr_val, b"offsetexists", &[key_val])
                                         .unwrap_or(Value::False)
                                 });
-                            if exists_result.is_truthy() {
-                                // PHP isset() also checks the value: if offsetGet returns NULL, isset returns false
-                                let get_result = self.call_object_method(&arr_val, b"offsetget", &[key_val_clone])
-                                    .unwrap_or(Value::Null);
-                                if matches!(get_result, Value::Null) {
-                                    Value::False
-                                } else {
-                                    Value::True
-                                }
-                            } else { Value::False }
+                            if exists_result.is_truthy() { Value::True } else { Value::False }
                         } else {
                             Value::False
                         }
@@ -18330,6 +18343,14 @@ impl Vm {
                                             });
                                         }
                                     }
+                                    b"throwable" => {
+                                        // Throwable cannot be implemented by user classes/enums
+                                        let kind = if class.is_enum { "Enum" } else { "Class" };
+                                        return Err(VmError {
+                                            message: format!("{} {} cannot implement interface Throwable", kind, class_display),
+                                            line: op.line,
+                                        });
+                                    }
                                     b"traversable" => {
                                         // Traversable cannot be implemented directly;
                                         // must use Iterator or IteratorAggregate
@@ -18953,6 +18974,13 @@ impl Vm {
                                         "Anonymous class method {}() must not be abstract",
                                         self_declared_abstract[0].0
                                     ), if method_line > 0 { method_line } else { op.line })
+                                } else if is_anonymous {
+                                    // Anonymous class inheriting abstract methods
+                                    // PHP format: "Class ClassName@anonymous must implement N abstract method(s) (methods)"
+                                    (format!(
+                                        "{} {} must implement {} abstract {} ({})",
+                                        kind, class_name_str, count, method_word, methods_list
+                                    ), op.line)
                                 } else {
                                     // PHP format: "Class X contains N abstract method(s) and must therefore be declared abstract or implement the remaining method(s) (methods)"
                                     let remain_word = if count == 1 { "method" } else { "methods" };

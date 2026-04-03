@@ -5123,6 +5123,13 @@ impl Compiler {
             }
 
             ExprKind::Cast(cast_type, inner) => {
+                if matches!(cast_type, CastType::Void) {
+                    // (void) cast: evaluate inner expression for side effects, discard result
+                    let _val = self.compile_expr(inner)?;
+                    // Just return a Null literal - the expression was already evaluated
+                    let null_idx = self.op_array.add_literal(Value::Null);
+                    return Ok(OperandType::Const(null_idx));
+                }
                 let val = self.compile_expr(inner)?;
                 let tmp = self.op_array.alloc_temp();
                 let opcode = match cast_type {
@@ -5133,6 +5140,7 @@ impl Compiler {
                     CastType::Array => OpCode::CastArray,
                     CastType::Object => OpCode::CastObject,
                     CastType::Unset => OpCode::Nop, // (unset) is deprecated
+                    CastType::Void => unreachable!(), // handled above
                 };
                 self.op_array.emit(Op {
                     opcode,
@@ -9094,6 +9102,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
                 CastType::Array => "(array)",
                 CastType::Object => "(object)",
                 CastType::Unset => "(unset)",
+                CastType::Void => "(void)",
             };
             format!("{}{}", cast_str, expr_to_source_string(inner))
         }

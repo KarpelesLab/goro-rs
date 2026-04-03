@@ -3168,6 +3168,9 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             | b"reflectionclassconstant"
             | b"reflectiongenerator"
             | b"reflectionattribute"
+            | b"weakreference"
+            | b"weakmap"
+            | b"fiber"
     );
     if is_builtin {
         return Ok(Value::True);
@@ -7719,16 +7722,32 @@ fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
     let mut result = PhpArray::new();
+    // Get the current scope class for visibility checks (lowercase)
+    let scope_class: Option<Vec<u8>> = vm.current_class_scope()
+        .map(|name| name.iter().map(|b| b.to_ascii_lowercase()).collect());
     if let Some(class) = vm.classes.get(&class_lower) {
         // Collect methods with original names, filter by visibility from current scope
         let mut methods: Vec<_> = class
             .methods
             .values()
             .filter(|m| {
-                matches!(
-                    m.visibility,
-                    goro_core::object::Visibility::Public
-                )
+                match m.visibility {
+                    goro_core::object::Visibility::Public => true,
+                    goro_core::object::Visibility::Protected => {
+                        // Accessible if calling class is same or a subclass
+                        if let Some(ref scope) = scope_class {
+                            scope.as_slice() == class_lower.as_slice()
+                                || vm.class_extends(scope, &class_lower)
+                                || vm.class_extends(&class_lower, scope)
+                        } else { false }
+                    }
+                    goro_core::object::Visibility::Private => {
+                        // Accessible only from same class
+                        if let Some(ref scope) = scope_class {
+                            scope.as_slice() == class_lower.as_slice()
+                        } else { false }
+                    }
+                }
             })
             .collect();
         // Sort by name for consistent output

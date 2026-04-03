@@ -760,12 +760,16 @@ impl<'a> Lexer<'a> {
         let lower: Vec<u8> = ident.iter().map(|b| b.to_ascii_lowercase()).collect();
         let kind = match lower.as_slice() {
             b"int" | b"integer" => TokenKind::IntCast,
-            b"float" | b"double" | b"real" => TokenKind::FloatCast,
+            b"float" | b"double" => TokenKind::FloatCast,
+            b"real" => TokenKind::RealCast,
             b"string" | b"binary" => TokenKind::StringCast,
             b"bool" | b"boolean" => TokenKind::BoolCast,
             b"array" => TokenKind::ArrayCast,
             b"object" => TokenKind::ObjectCast,
             b"unset" => TokenKind::UnsetCast,
+            // In PHP 8.5, (void) is a valid cast used as a statement:
+            // (void)expr; - evaluates and discards the expression
+            // Using it as a value (e.g., $x = (void)$y) is a parse error
             b"void" => TokenKind::VoidCast,
             _ => {
                 self.pos = saved_pos;

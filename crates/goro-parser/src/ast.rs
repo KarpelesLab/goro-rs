@@ -54,7 +54,7 @@ pub enum BinaryOp { Add, Sub, Mul, Div, Mod, Pow, Concat, BitwiseAnd, BitwiseOr,
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp { Negate, Plus, BitwiseNot, BooleanNot, PreIncrement, PreDecrement, PostIncrement, PostDecrement }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CastType { Int, Float, String, Bool, Array, Object, Unset }
+pub enum CastType { Int, Float, String, Bool, Array, Object, Unset, Void }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncludeKind { Include, IncludeOnce, Require, RequireOnce }
 #[derive(Debug, Clone)]

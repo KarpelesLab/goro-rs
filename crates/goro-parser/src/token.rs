@@ -187,6 +187,7 @@ pub enum TokenKind {
     ObjectCast, // (object)
     UnsetCast,  // (unset)
     VoidCast,   // (void) - not a valid cast, but recognized for error reporting
+    RealCast,   // (real) - removed in PHP 8.0, gives parse error
 
     // Special
     OpenTag,      // <?php
@@ -334,6 +335,7 @@ impl TokenKind {
             TokenKind::ObjectCast => "\"(object)\"".into(),
             TokenKind::UnsetCast => "\"(unset)\"".into(),
             TokenKind::VoidCast => "\"(void)\"".into(),
+            TokenKind::RealCast => "\"(real)\"".into(),
             TokenKind::Eof => "end of file".into(),
             _ => format!("{:?}", self),
         }

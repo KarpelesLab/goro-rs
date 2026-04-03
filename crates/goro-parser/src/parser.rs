@@ -730,6 +730,19 @@ impl Parser {
                         });
                     }
                 }
+                // (void) cast as statement (PHP 8.5): evaluates and discards the expression
+                if matches!(self.peek(), TokenKind::VoidCast) {
+                    self.advance();
+                    let operand = self.parse_expression()?;
+                    self.expect_semicolon()?;
+                    return Ok(Statement {
+                        kind: StmtKind::Expression(Expr {
+                            span: span.merge(operand.span),
+                            kind: ExprKind::Cast(CastType::Void, Box::new(operand)),
+                        }),
+                        span,
+                    });
+                }
                 // Expression statement
                 let expr = self.parse_expression()?;
                 self.expect_semicolon()?;
@@ -3185,6 +3198,12 @@ impl Parser {
                     span: span.merge(operand.span),
                     kind: ExprKind::Cast(CastType::Object, Box::new(operand)),
                 })
+            }
+            TokenKind::RealCast => {
+                return Err(ParseError {
+                    message: "The (real) cast has been removed, use (float) instead".to_string(),
+                    span,
+                });
             }
             TokenKind::At => {
                 self.advance();
