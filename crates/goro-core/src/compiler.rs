@@ -7166,14 +7166,31 @@ impl Compiler {
                 } else {
                     if let Some(class_name) = class_name {
                         // Static class name known at compile time
+                        // Keep parent:: and self:: as markers for late static binding forwarding.
+                        // The VM will resolve them at runtime while preserving the called class.
+                        // static:: is also kept as-is (already handled).
+                        // Only explicit class names are resolved here.
                         let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
-                            self.current_class.clone().unwrap_or(class_name.clone())
+                            if self.is_in_trait {
+                                // In traits, self:: must be resolved to the trait name now
+                                // (trait patching will replace it later with the using class)
+                                self.current_class.clone().unwrap_or(class_name.clone())
+                            } else {
+                                // Keep "self" as marker for LSB forwarding
+                                b"self".to_vec()
+                            }
                         } else if class_name.eq_ignore_ascii_case(b"static") {
                             b"static".to_vec()
                         } else if class_name.eq_ignore_ascii_case(b"parent") {
-                            self.current_parent_class
-                                .clone()
-                                .unwrap_or(class_name.clone())
+                            if self.is_in_trait {
+                                // In traits, parent:: must be resolved to the parent name now
+                                self.current_parent_class
+                                    .clone()
+                                    .unwrap_or(class_name.clone())
+                            } else {
+                                // Keep "parent" as marker for LSB forwarding
+                                b"parent".to_vec()
+                            }
                         } else {
                             class_name.clone()
                         };

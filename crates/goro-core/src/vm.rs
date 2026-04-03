@@ -11842,19 +11842,62 @@ impl Vm {
                         line: op.line,
                     })?;
 
-                    // Resolve "static::" in function names for late static binding
+                    // Resolve "static::", "self::", and "parent::" in function names
+                    // for late static binding. parent:: and self:: are "forwarding calls"
+                    // that preserve the current called class for static:: resolution.
                     let call_name_bytes = call.name.as_bytes().to_vec();
-                    if call_name_bytes.len() >= 8 {
-                        let prefix: Vec<u8> = call_name_bytes[..8]
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        if prefix == b"static::" {
+                    let mut is_forwarding_call = false;
+                    if call_name_bytes.len() >= 6 {
+                        let call_name_lower: Vec<u8> = call_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if call_name_lower.starts_with(b"static::") {
                             if let Some(called_class) = self.called_class_stack.last() {
                                 let mut resolved_name = called_class.clone();
                                 resolved_name.extend_from_slice(&call_name_bytes[6..]); // keep "::" and rest
                                 call.name = PhpString::from_vec(resolved_name);
                             }
+                            is_forwarding_call = true;
+                        } else if call_name_lower.starts_with(b"self::") {
+                            // self:: resolves to the current class scope (lexical class)
+                            // but forwards the called class for LSB
+                            if let Some(scope) = self.class_scope_stack.last().cloned() {
+                                // Look up original-case name
+                                let resolved_class = self.classes.get(&scope)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or(scope);
+                                let mut resolved_name = resolved_class;
+                                resolved_name.extend_from_slice(&call_name_bytes[4..]); // keep "::" and rest
+                                call.name = PhpString::from_vec(resolved_name);
+                            } else if let Some(called) = self.called_class_stack.last().cloned() {
+                                let mut resolved_name = called;
+                                resolved_name.extend_from_slice(&call_name_bytes[4..]); // keep "::" and rest
+                                call.name = PhpString::from_vec(resolved_name);
+                            }
+                            is_forwarding_call = true;
+                        } else if call_name_lower.starts_with(b"parent::") {
+                            // parent:: resolves to the parent of the current class scope
+                            // but forwards the called class for LSB
+                            let parent_class = self.class_scope_stack.last()
+                                .and_then(|scope| self.classes.get(scope))
+                                .and_then(|c| c.parent.clone())
+                                .or_else(|| {
+                                    self.called_class_stack.last()
+                                        .and_then(|called| {
+                                            let called_lower: Vec<u8> = called.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            self.classes.get(&called_lower)
+                                        })
+                                        .and_then(|c| c.parent.clone())
+                                });
+                            if let Some(parent) = parent_class {
+                                // Use original-case parent name
+                                let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let resolved_class = self.classes.get(&parent_lower)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or(parent);
+                                let mut resolved_name = resolved_class;
+                                resolved_name.extend_from_slice(&call_name_bytes[6..]); // keep "::" and rest
+                                call.name = PhpString::from_vec(resolved_name);
+                            }
+                            is_forwarding_call = true;
                         }
                     }
 
@@ -13377,7 +13420,19 @@ impl Vm {
                             // Capture class context for get_class() / get_called_class() inside generator
                             if let Some(sep_pos) = func_name_lower.windows(2).position(|w| w == b"::") {
                                 // For late static binding, use the actual object class when $this is present.
-                                let called_class = if let Some(Value::Object(obj)) = call.args.first() {
+                                // For forwarding calls (parent::, self::, static::), preserve the current called class.
+                                let called_class = if is_forwarding_call {
+                                    if let Some(Value::Object(obj)) = call.args.first() {
+                                        obj.borrow().class_name.clone()
+                                    } else if let Some(Value::Object(obj)) = cvs.first() {
+                                        obj.borrow().class_name.clone()
+                                    } else if let Some(current) = self.called_class_stack.last() {
+                                        current.clone()
+                                    } else {
+                                        let orig_bytes = call.name.as_bytes();
+                                        orig_bytes[..sep_pos].to_vec()
+                                    }
+                                } else if let Some(Value::Object(obj)) = call.args.first() {
                                     obj.borrow().class_name.clone()
                                 } else if let Some(Value::Object(obj)) = cvs.first() {
                                     obj.borrow().class_name.clone()
@@ -13428,15 +13483,26 @@ impl Vm {
                         let pushed_called_class =
                             if let Some(pos) = func_name_lower.windows(2).position(|w| w == b"::") {
                                 // For late static binding, use the actual object class when $this is present.
-                                // Check call.args first (explicit $this), then caller's CVs (parent:: calls).
-                                let called_class = if let Some(Value::Object(obj)) = call.args.first() {
-                                    // Instance method call (has $this) - use object's runtime class
-                                    obj.borrow().class_name.clone()
-                                } else if let Some(Value::Object(obj)) = cvs.first() {
-                                    // parent::method() from instance context - caller has $this
+                                // For forwarding calls (parent::, self::, static::), preserve the current
+                                // called class so that static:: in the called method resolves correctly.
+                                let called_class = if is_forwarding_call {
+                                    // Forwarding call: preserve the current called_class
+                                    if let Some(Value::Object(obj)) = call.args.first() {
+                                        obj.borrow().class_name.clone()
+                                    } else if let Some(Value::Object(obj)) = cvs.first() {
+                                        obj.borrow().class_name.clone()
+                                    } else if let Some(current) = self.called_class_stack.last() {
+                                        current.clone()
+                                    } else {
+                                        let orig_bytes = call.name.as_bytes();
+                                        orig_bytes[..pos].to_vec()
+                                    }
+                                } else if let Some(Value::Object(obj)) = call.args.first() {
+                                    // Instance method call (has $this via InitMethodCall) - use object's runtime class
                                     obj.borrow().class_name.clone()
                                 } else {
-                                    // Pure static call - use the class name from the call
+                                    // Explicit ClassName::method() call - use the class name from the call.
+                                    // Do NOT use the caller's $this; explicit class names reset the called class.
                                     let orig_bytes = call.name.as_bytes();
                                     orig_bytes[..pos].to_vec()
                                 };
@@ -14401,10 +14467,31 @@ impl Vm {
                                     let method_part = &name_bytes[pos + 2..];
                                     let class_lower: Vec<u8> =
                                         class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    // Extract magic method op_arrays upfront to avoid borrow conflicts
-                                    let magic_call = self.classes.get(&class_lower).and_then(|cd| {
-                                        cd.get_method(b"__call").map(|m| (m.op_array.clone(), m.declaring_class.clone()))
-                                    });
+
+                                    // When in instance context, PHP uses the CURRENT SCOPE's __call,
+                                    // not the explicitly named class's __call. For example, if B extends A
+                                    // and both have __call, calling A::test1() from B uses B::__call.
+                                    let scope_class_for_call = if matches!(cvs.first(), Some(Value::Object(_))) {
+                                        // Get the current $this object's class
+                                        if let Some(Value::Object(obj)) = cvs.first() {
+                                            let obj_class: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            Some(obj_class)
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    // Extract magic method op_arrays: prefer current scope's __call over target class's
+                                    let magic_call = scope_class_for_call.as_ref()
+                                        .and_then(|scope| self.classes.get(scope))
+                                        .and_then(|cd| cd.get_method(b"__call").map(|m| (m.op_array.clone(), m.declaring_class.clone())))
+                                        .or_else(|| {
+                                            self.classes.get(&class_lower).and_then(|cd| {
+                                                cd.get_method(b"__call").map(|m| (m.op_array.clone(), m.declaring_class.clone()))
+                                            })
+                                        });
                                     let magic_callstatic = self.classes.get(&class_lower).and_then(|cd| {
                                         cd.get_method(b"__callstatic").map(|m| (m.op_array.clone(), m.declaring_class.clone()))
                                     });
@@ -14992,6 +15079,31 @@ impl Vm {
                         }
                     } else if let Value::String(s) = &arr_val {
                         // String offset access (supports negative indices)
+                        // Check for illegal string offset: non-numeric string keys
+                        if let Value::String(key_str) = &key_val {
+                            let key_bytes = key_str.as_bytes();
+                            let trimmed = key_str.to_string_lossy();
+                            let trimmed = trimmed.trim();
+                            // Check if the string is a valid numeric value
+                            let is_numeric = if trimmed.is_empty() {
+                                false
+                            } else {
+                                let start = if trimmed.starts_with('-') || trimmed.starts_with('+') { 1 } else { 0 };
+                                let rest = &trimmed[start..];
+                                if rest.is_empty() {
+                                    false
+                                } else {
+                                    rest.chars().all(|c| c.is_ascii_digit())
+                                        || rest.parse::<f64>().is_ok()
+                                }
+                            };
+                            if !is_numeric && !key_bytes.is_empty() {
+                                self.emit_warning_at(
+                                    &format!("Illegal string offset \"{}\"", key_str.to_string_lossy()),
+                                    op.line,
+                                );
+                            }
+                        }
                         let idx = key_val.to_long();
                         let bytes = s.as_bytes();
                         let actual_idx = if idx < 0 {
@@ -17554,14 +17666,34 @@ impl Vm {
                         }
                     } else if let Value::String(s) = &arr_val {
                         // String offset: isset($str[$idx])
-                        let idx = key_val.to_long();
-                        let len = s.as_bytes().len() as i64;
-                        if idx >= 0 && idx < len {
-                            Value::True
-                        } else if idx < 0 && (-idx) <= len {
-                            Value::True
-                        } else {
+                        // Non-numeric string keys should return false
+                        let is_valid_offset = match &key_val {
+                            Value::Long(_) | Value::Double(_) | Value::True | Value::False | Value::Null => true,
+                            Value::String(key_str) => {
+                                let trimmed = key_str.to_string_lossy();
+                                let trimmed = trimmed.trim();
+                                if trimmed.is_empty() {
+                                    false
+                                } else {
+                                    let start = if trimmed.starts_with('-') || trimmed.starts_with('+') { 1 } else { 0 };
+                                    let rest = &trimmed[start..];
+                                    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+                                }
+                            }
+                            _ => false,
+                        };
+                        if !is_valid_offset {
                             Value::False
+                        } else {
+                            let idx = key_val.to_long();
+                            let len = s.as_bytes().len() as i64;
+                            if idx >= 0 && idx < len {
+                                Value::True
+                            } else if idx < 0 && (-idx) <= len {
+                                Value::True
+                            } else {
+                                Value::False
+                            }
                         }
                     } else {
                         Value::False

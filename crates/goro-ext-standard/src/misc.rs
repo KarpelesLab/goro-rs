@@ -980,16 +980,52 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 if let Some(class) = vm.classes.get(real_class).cloned() {
                                     if let Some(method) = class.methods.get(real_method) {
                                         let op = method.op_array.clone();
-                                        return vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                                        let declaring = method.declaring_class.clone();
+                                        let class_name_orig = class.name.clone();
+                                        vm.called_class_stack.push(class_name_orig);
+                                        vm.push_class_scope(declaring);
+                                        let result = vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                                        vm.pop_class_scope();
+                                        vm.called_class_stack.pop();
+                                        return result;
                                     }
                                 }
                                 return Ok(Value::Null);
                             }
                         }
-                        if let Some(class) = vm.classes.get(&class_lower).cloned() {
+
+                        // Check for forwarding calls (parent::, self:: in array syntax)
+                        let is_forwarding = class_lower == b"parent" || class_lower == b"self";
+                        let resolved_class_lower = if class_lower == b"parent" {
+                            vm.get_current_class_name().as_ref()
+                                .and_then(|scope| vm.classes.get(scope))
+                                .and_then(|c| c.parent.clone())
+                                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>())
+                                .unwrap_or(class_lower.clone())
+                        } else if class_lower == b"self" {
+                            vm.get_current_class_name().as_ref().cloned()
+                                .or_else(|| vm.called_class_stack.last().map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect()))
+                                .unwrap_or(class_lower.clone())
+                        } else {
+                            class_lower.clone()
+                        };
+
+                        if let Some(class) = vm.classes.get(&resolved_class_lower).cloned() {
                             if let Some(method) = class.methods.get(&method_lower) {
                                 let op = method.op_array.clone();
-                                return vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                                let declaring = method.declaring_class.clone();
+                                if is_forwarding {
+                                    // Forward: keep current called_class
+                                } else {
+                                    vm.called_class_stack.push(class.name.clone());
+                                }
+                                vm.push_class_scope(declaring);
+                                let result = vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                                vm.pop_class_scope();
+                                if !is_forwarding {
+                                    vm.called_class_stack.pop();
+                                }
+                                return result;
                             }
                             // Method not found - check for __callStatic magic method
                             if let Some(call_static) = class.get_method(b"__callstatic") {
@@ -1090,20 +1126,58 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return builtin(vm, &call_args);
         }
 
-        // Try user function
-        if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-            return vm.execute_fn_with_named_args(&user_fn, call_args, named_args, None);
+        // Try user function (but not "Class::method" strings - those need proper LSB handling below)
+        let looks_like_class_method = func_lower.windows(2).any(|w| w == b"::");
+        if !looks_like_class_method {
+            if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                return vm.execute_fn_with_named_args(&user_fn, call_args, named_args, None);
+            }
         }
 
         // Try "Class::method" syntax
         if let Some(pos) = func_lower.iter().position(|&b| b == b':') {
             if pos + 1 < func_lower.len() && func_lower[pos + 1] == b':' {
-                let class_lower = &func_lower[..pos];
+                let class_part_lower = func_lower[..pos].to_vec();
                 let method_lower = &func_lower[pos + 2..];
-                if let Some(class) = vm.classes.get(class_lower).cloned() {
+
+                // Check for forwarding calls (parent::, self::)
+                let is_forwarding = class_part_lower == b"parent" || class_part_lower == b"self";
+
+                // Resolve parent/self to actual class names
+                let resolved_class_lower = if class_part_lower == b"parent" {
+                    vm.get_current_class_name().as_ref()
+                        .and_then(|scope| vm.classes.get(scope))
+                        .and_then(|c| c.parent.clone())
+                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>())
+                        .unwrap_or(class_part_lower.clone())
+                } else if class_part_lower == b"self" {
+                    vm.get_current_class_name().as_ref().cloned()
+                        .or_else(|| vm.called_class_stack.last().map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect()))
+                        .unwrap_or(class_part_lower.clone())
+                } else {
+                    class_part_lower.clone()
+                };
+
+                if let Some(class) = vm.classes.get(&resolved_class_lower).cloned() {
                     if let Some(method) = class.methods.get(method_lower) {
                         let op = method.op_array.clone();
-                        return vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                        let declaring = method.declaring_class.clone();
+                        // Push called_class and class_scope for proper LSB
+                        if is_forwarding {
+                            // Forward: keep current called_class
+                            // (don't push anything extra - let the current stack value persist)
+                        } else {
+                            // Non-forwarding: push explicit class name
+                            let class_name_orig = class.name.clone();
+                            vm.called_class_stack.push(class_name_orig);
+                        }
+                        vm.push_class_scope(declaring);
+                        let result = vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                        vm.pop_class_scope();
+                        if !is_forwarding {
+                            vm.called_class_stack.pop();
+                        }
+                        return result;
                     }
                     // Check __callStatic
                     if let Some(call_static) = class.get_method(b"__callstatic") {
