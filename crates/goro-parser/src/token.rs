@@ -186,6 +186,7 @@ pub enum TokenKind {
     ArrayCast,  // (array)
     ObjectCast, // (object)
     UnsetCast,  // (unset)
+    VoidCast,   // (void) - not a valid cast, but recognized for error reporting
 
     // Special
     OpenTag,      // <?php
@@ -332,6 +333,7 @@ impl TokenKind {
             TokenKind::ArrayCast => "\"(array)\"".into(),
             TokenKind::ObjectCast => "\"(object)\"".into(),
             TokenKind::UnsetCast => "\"(unset)\"".into(),
+            TokenKind::VoidCast => "\"(void)\"".into(),
             TokenKind::Eof => "end of file".into(),
             _ => format!("{:?}", self),
         }

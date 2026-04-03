@@ -406,10 +406,85 @@ pub fn register(vm: &mut Vm) {
         .insert(b"PHP_SESSION_NONE".to_vec(), Value::Long(PHP_SESSION_NONE));
     vm.constants
         .insert(b"PHP_SESSION_ACTIVE".to_vec(), Value::Long(PHP_SESSION_ACTIVE));
+
+    // Register default session INI values (can be overridden by --INI-- section)
+    vm.constants.entry(b"session.save_path".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"")));
+    vm.constants.entry(b"session.name".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"PHPSESSID")));
+    vm.constants.entry(b"session.save_handler".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"files")));
+    vm.constants.entry(b"session.use_cookies".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"1")));
+    vm.constants.entry(b"session.use_only_cookies".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"1")));
+    vm.constants.entry(b"session.use_strict_mode".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"0")));
+    vm.constants.entry(b"session.auto_start".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"0")));
+    vm.constants.entry(b"session.gc_probability".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"1")));
+    vm.constants.entry(b"session.gc_divisor".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"100")));
+    vm.constants.entry(b"session.gc_maxlifetime".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"1440")));
+    vm.constants.entry(b"session.serialize_handler".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"php")));
+    vm.constants.entry(b"session.cookie_lifetime".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"0")));
+    vm.constants.entry(b"session.cookie_path".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"/")));
+    vm.constants.entry(b"session.cookie_domain".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"")));
+    vm.constants.entry(b"session.cookie_secure".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"0")));
+    vm.constants.entry(b"session.cookie_httponly".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"")));
+    vm.constants.entry(b"session.cookie_samesite".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"")));
+    vm.constants.entry(b"session.cache_limiter".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"nocache")));
+    vm.constants.entry(b"session.cache_expire".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"180")));
+    vm.constants.entry(b"session.use_trans_sid".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"0")));
+    vm.constants.entry(b"session.sid_length".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"32")));
+    vm.constants.entry(b"session.sid_bits_per_character".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"4")));
+    vm.constants.entry(b"session.lazy_write".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"1")));
+}
+
+/// Apply INI settings from vm.constants to session state.
+/// Called before session_start() to pick up settings like session.save_path.
+fn apply_ini_from_constants(vm: &Vm) {
+    SESSION_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(val) = vm.constants.get(b"session.save_path".as_slice()) {
+            let s = val.to_php_string().to_string_lossy();
+            if !s.is_empty() {
+                state.save_path = s;
+            }
+        }
+        if let Some(val) = vm.constants.get(b"session.name".as_slice()) {
+            let s = val.to_php_string().to_string_lossy();
+            if !s.is_empty() {
+                state.name = s;
+            }
+        }
+        if let Some(val) = vm.constants.get(b"session.gc_maxlifetime".as_slice()) {
+            state.gc_maxlifetime = val.to_long();
+        }
+        if let Some(val) = vm.constants.get(b"session.cache_expire".as_slice()) {
+            state.cache_expire = val.to_long();
+        }
+        if let Some(val) = vm.constants.get(b"session.cache_limiter".as_slice()) {
+            state.cache_limiter = val.to_php_string().to_string_lossy();
+        }
+        if let Some(val) = vm.constants.get(b"session.cookie_lifetime".as_slice()) {
+            state.cookie_params.lifetime = val.to_long();
+        }
+        if let Some(val) = vm.constants.get(b"session.cookie_path".as_slice()) {
+            state.cookie_params.path = val.to_php_string().to_string_lossy();
+        }
+        if let Some(val) = vm.constants.get(b"session.cookie_domain".as_slice()) {
+            state.cookie_params.domain = val.to_php_string().to_string_lossy();
+        }
+        if let Some(val) = vm.constants.get(b"session.cookie_secure".as_slice()) {
+            state.cookie_params.secure = val.is_truthy();
+        }
+        if let Some(val) = vm.constants.get(b"session.cookie_httponly".as_slice()) {
+            state.cookie_params.httponly = val.is_truthy();
+        }
+        if let Some(val) = vm.constants.get(b"session.cookie_samesite".as_slice()) {
+            state.cookie_params.samesite = val.to_php_string().to_string_lossy();
+        }
+    });
 }
 
 /// session_start(array $options = []): bool
 fn session_start(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Apply INI settings before starting
+    apply_ini_from_constants(vm);
+
     let already_started = SESSION_STATE.with(|state| state.borrow().started);
     if already_started {
         vm.emit_warning("Ignoring session_start() because a session is already active");

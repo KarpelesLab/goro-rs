@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use indexmap::IndexMap;
 
 use crate::array::{ArrayKey, PhpArray};
@@ -305,6 +305,16 @@ pub struct Vm {
     /// Whether the current caller has strict_types=1 (set before calling builtins)
     pub caller_strict_types: bool,
     pub stored_attr_op_arrays: Vec<OpArray>,
+    /// Weak reference storage: maps a unique ID to a Weak<RefCell<PhpObject>>
+    /// Used by WeakReference objects (store the weak_ref_id as an internal property)
+    pub weak_refs: HashMap<u64, Weak<RefCell<PhpObject>>>,
+    /// Next weak reference ID
+    pub next_weak_ref_id: u64,
+    /// WeakReference singleton cache: maps target object_id to (weak_ref_id, WeakReference Value)
+    weak_ref_cache: HashMap<u64, (u64, Value)>,
+    /// WeakMap entries: keyed by (weakmap_object_id, target_object_id) -> (Weak<RefCell<PhpObject>>, Value)
+    /// The Weak is used to detect when the key object has been freed
+    pub weak_map_entries: HashMap<u64, Vec<(u64, Weak<RefCell<PhpObject>>, Value)>>,
 }
 
 impl Vm {
@@ -973,6 +983,10 @@ impl Vm {
             builtin_param_types: HashMap::new(),
             caller_strict_types: false,
             stored_attr_op_arrays: Vec::new(),
+            weak_refs: HashMap::new(),
+            next_weak_ref_id: 1,
+            weak_ref_cache: HashMap::new(),
+            weak_map_entries: HashMap::new(),
         }
     }
 
@@ -3657,8 +3671,9 @@ impl Vm {
                     | b"splobjectstorage"
                     | b"directoryiterator" | b"filesystemiterator" | b"recursivedirectoryiterator"
                     | b"globiterator" | b"splfileobject" | b"spltempfileobject"
+                    | b"simplexmlelement"
             ),
-            b"iteratoraggregate" => matches!(class_lower, b"arrayobject"),
+            b"iteratoraggregate" => matches!(class_lower, b"arrayobject" | b"weakmap"),
             b"traversable" => matches!(
                 class_lower,
                 b"arrayiterator" | b"recursivearrayiterator" | b"splfixedarray"
@@ -3675,6 +3690,8 @@ impl Vm {
                     | b"arrayobject"
                     | b"directoryiterator" | b"filesystemiterator" | b"recursivedirectoryiterator"
                     | b"globiterator" | b"splfileobject" | b"spltempfileobject"
+                    | b"simplexmlelement"
+                    | b"weakmap"
             ),
             b"countable" => matches!(
                 class_lower,
@@ -3683,12 +3700,15 @@ impl Vm {
                     | b"splpriorityqueue" | b"splobjectstorage"
                     | b"splheap" | b"splminheap" | b"splmaxheap"
                     | b"cachingiterator" | b"recursivecachingiterator"
+                    | b"simplexmlelement"
+                    | b"weakmap"
             ),
             b"arrayaccess" => matches!(
                 class_lower,
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
                     | b"splfixedarray" | b"spldoublylinkedlist" | b"splstack" | b"splqueue"
                     | b"splobjectstorage"
+                    | b"weakmap"
             ),
             b"outeriterator" => matches!(
                 class_lower,
@@ -3893,8 +3913,107 @@ impl Vm {
             b"recursivetreeiterator" => {
                 self.spl_outer_iterator_method(method_lower, obj)
             }
+            b"simplexmlelement" => {
+                self.simplexml_method(method_lower, obj)
+            }
             _ => None,
         }
+    }
+
+    fn simplexml_method(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        match method {
+            b"getname" => {
+                let ob = obj.borrow();
+                let name = ob.get_property(b"__sxml_name");
+                if matches!(name, Value::Null | Value::Undef) {
+                    Some(Value::String(PhpString::from_bytes(b"")))
+                } else {
+                    Some(name)
+                }
+            }
+            b"__tostring" => {
+                let ob = obj.borrow();
+                // Text content is stored as "0" property
+                let text = ob.get_property(b"0");
+                if matches!(text, Value::Null | Value::Undef) {
+                    Some(Value::String(PhpString::from_bytes(b"")))
+                } else {
+                    Some(Value::String(text.to_php_string()))
+                }
+            }
+            b"count" => {
+                let ob = obj.borrow();
+                let mut count = 0i64;
+                for (name, val) in ob.properties.iter() {
+                    if !name.starts_with(b"@") && !name.starts_with(b"__sxml_") && name != b"0" {
+                        if let Value::Array(arr) = val {
+                            count += arr.borrow().len() as i64;
+                        } else {
+                            count += 1;
+                        }
+                    }
+                }
+                Some(Value::Long(count))
+            }
+            b"valid" => {
+                let flat = Self::simplexml_flatten_children(obj);
+                let ob = obj.borrow();
+                let pos = ob.get_property(b"__sxml_iter_pos");
+                let pos_val = if matches!(pos, Value::Null | Value::Undef) { 0usize } else { pos.to_long() as usize };
+                Some(if pos_val < flat.len() { Value::True } else { Value::False })
+            }
+            b"rewind" => {
+                obj.borrow_mut().set_property(b"__sxml_iter_pos".to_vec(), Value::Long(0));
+                Some(Value::Null)
+            }
+            b"current" => {
+                let flat = Self::simplexml_flatten_children(obj);
+                let ob = obj.borrow();
+                let pos = ob.get_property(b"__sxml_iter_pos");
+                let pos_val = if matches!(pos, Value::Null | Value::Undef) { 0usize } else { pos.to_long() as usize };
+                Some(flat.get(pos_val).map(|(_, v)| v.clone()).unwrap_or(Value::Null))
+            }
+            b"key" => {
+                let flat = Self::simplexml_flatten_children(obj);
+                let ob = obj.borrow();
+                let pos = ob.get_property(b"__sxml_iter_pos");
+                let pos_val = if matches!(pos, Value::Null | Value::Undef) { 0usize } else { pos.to_long() as usize };
+                Some(flat.get(pos_val).map(|(k, _)| Value::String(PhpString::from_vec(k.clone()))).unwrap_or(Value::Null))
+            }
+            b"next" => {
+                let ob = obj.borrow();
+                let pos = ob.get_property(b"__sxml_iter_pos");
+                let pos_val = if matches!(pos, Value::Null | Value::Undef) { 0i64 } else { pos.to_long() };
+                drop(ob);
+                obj.borrow_mut().set_property(b"__sxml_iter_pos".to_vec(), Value::Long(pos_val + 1));
+                Some(Value::Null)
+            }
+            _ => None,
+        }
+    }
+
+    /// Flatten SimpleXMLElement children: expand Array properties into individual (name, value) pairs
+    fn simplexml_flatten_children(obj: &Rc<RefCell<PhpObject>>) -> Vec<(Vec<u8>, Value)> {
+        let ob = obj.borrow();
+        let mut result = Vec::new();
+        for (name, val) in ob.properties.iter() {
+            if name.starts_with(b"@") || name.starts_with(b"__sxml_") || name == b"0" {
+                continue;
+            }
+            if let Value::Array(arr) = val {
+                let arr_borrow = arr.borrow();
+                for (_k, v) in arr_borrow.iter() {
+                    result.push((name.clone(), v.clone()));
+                }
+            } else {
+                result.push((name.clone(), val.clone()));
+            }
+        }
+        result
     }
 
     fn spl_array_method(
@@ -5931,6 +6050,11 @@ impl Vm {
                 method,
                 b"newinstance"
             ),
+            b"simplexmlelement" => matches!(
+                method,
+                b"children" | b"attributes" | b"asxml" | b"xpath"
+                    | b"addchild" | b"addattribute"
+            ),
             _ => false,
         }
     }
@@ -7775,10 +7899,345 @@ impl Vm {
                         _ => None,
                     }
                 }
+                b"simplexmlelement" => {
+                    self.simplexml_docall(method, obj, args)
+                }
                 _ => None,
             }
         } else {
             None
+        }
+    }
+
+
+    fn simplexml_docall(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+        args: &[Value],
+    ) -> Option<Value> {
+        match method {
+            b"children" => {
+                // children(?string $namespaceOrPrefix = null, bool $isPrefix = false): SimpleXMLElement
+                let ob = obj.borrow();
+                let obj_id = self.next_object_id();
+                let mut result_obj = PhpObject::new(b"SimpleXMLElement".to_vec(), obj_id);
+                result_obj.set_property(b"__sxml_name".to_vec(), ob.get_property(b"__sxml_name"));
+                for (name, val) in ob.properties.iter() {
+                    if !name.starts_with(b"@") && !name.starts_with(b"__sxml_") && name != b"0" {
+                        result_obj.set_property(name.to_vec(), val.clone());
+                    }
+                }
+                Some(Value::Object(Rc::new(RefCell::new(result_obj))))
+            }
+            b"attributes" => {
+                // attributes(?string $namespaceOrPrefix = null, bool $isPrefix = false): ?SimpleXMLElement
+                let ob = obj.borrow();
+                let attrs = ob.get_property(b"@attributes");
+                if let Value::Array(attrs_arr) = &attrs {
+                    let obj_id = self.next_object_id();
+                    let mut attr_obj = PhpObject::new(b"SimpleXMLElement".to_vec(), obj_id);
+                    attr_obj.set_property(b"__sxml_name".to_vec(), Value::String(PhpString::from_bytes(b"@attributes")));
+                    attr_obj.set_property(b"@attributes".to_vec(), Value::Array(attrs_arr.clone()));
+                    Some(Value::Object(Rc::new(RefCell::new(attr_obj))))
+                } else {
+                    Some(Value::Null)
+                }
+            }
+            b"asxml" => {
+                // asXML(?string $filename = null): string|bool
+                let filename = args.get(1);
+                let xml = self.simplexml_to_xml_string(obj);
+                if let Some(fname_val) = filename {
+                    if !matches!(fname_val, Value::Null | Value::Undef) {
+                        let fname = fname_val.to_php_string().to_string_lossy();
+                        match std::fs::write(&fname, &xml) {
+                            Ok(_) => Some(Value::True),
+                            Err(_) => Some(Value::False),
+                        }
+                    } else {
+                        Some(Value::String(PhpString::from_string(xml)))
+                    }
+                } else {
+                    Some(Value::String(PhpString::from_string(xml)))
+                }
+            }
+            b"xpath" => {
+                // xpath(string $expression): array|null|false
+                let expr = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                let results = self.simplexml_xpath(obj, &expr);
+                Some(results)
+            }
+            b"addchild" => {
+                // addChild(string $qualifiedName, ?string $value = null, ?string $namespace = null): ?SimpleXMLElement
+                let name = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                let value = args.get(2).and_then(|v| {
+                    if matches!(v, Value::Null | Value::Undef) { None }
+                    else { Some(v.to_php_string().to_string_lossy()) }
+                });
+                if name.is_empty() {
+                    return Some(Value::Null);
+                }
+                let child_id = self.next_object_id();
+                let mut child_obj = PhpObject::new(b"SimpleXMLElement".to_vec(), child_id);
+                child_obj.set_property(b"__sxml_name".to_vec(), Value::String(PhpString::from_string(name.clone())));
+                if let Some(val) = value {
+                    child_obj.set_property(b"0".to_vec(), Value::String(PhpString::from_string(val)));
+                }
+                let child_val = Value::Object(Rc::new(RefCell::new(child_obj)));
+                // Add to parent
+                let mut ob = obj.borrow_mut();
+                let name_bytes = name.as_bytes().to_vec();
+                let existing = ob.get_property(&name_bytes);
+                if matches!(existing, Value::Null | Value::Undef) {
+                    ob.set_property(name_bytes, child_val.clone());
+                } else if let Value::Array(arr) = &existing {
+                    arr.borrow_mut().push(child_val.clone());
+                } else {
+                    // Convert single to array
+                    let mut arr = PhpArray::new();
+                    arr.push(existing);
+                    arr.push(child_val.clone());
+                    ob.set_property(name_bytes, Value::Array(Rc::new(RefCell::new(arr))));
+                }
+                Some(child_val)
+            }
+            b"addattribute" => {
+                // addAttribute(string $qualifiedName, string $value, ?string $namespace = null): void
+                let name = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                let value = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                if name.is_empty() {
+                    return Some(Value::Null);
+                }
+                let mut ob = obj.borrow_mut();
+                let attrs = ob.get_property(b"@attributes");
+                if let Value::Array(attrs_arr) = &attrs {
+                    attrs_arr.borrow_mut().set(
+                        ArrayKey::String(PhpString::from_string(name)),
+                        Value::String(PhpString::from_string(value)),
+                    );
+                } else {
+                    let mut attrs_arr = PhpArray::new();
+                    attrs_arr.set(
+                        ArrayKey::String(PhpString::from_string(name)),
+                        Value::String(PhpString::from_string(value)),
+                    );
+                    ob.set_property(b"@attributes".to_vec(), Value::Array(Rc::new(RefCell::new(attrs_arr))));
+                }
+                Some(Value::Null)
+            }
+            _ => None,
+        }
+    }
+
+    fn simplexml_to_xml_string(&self, obj: &Rc<RefCell<PhpObject>>) -> String {
+        let ob = obj.borrow();
+        let tag_name = {
+            let name = ob.get_property(b"__sxml_name");
+            if matches!(name, Value::Null | Value::Undef) {
+                String::new()
+            } else {
+                name.to_php_string().to_string_lossy()
+            }
+        };
+
+        let mut xml = String::new();
+        xml.push('<');
+        xml.push_str(&tag_name);
+
+        // Add attributes
+        let attrs = ob.get_property(b"@attributes");
+        if let Value::Array(attrs_arr) = &attrs {
+            let attrs_borrow = attrs_arr.borrow();
+            for (key, val) in attrs_borrow.iter() {
+                if let ArrayKey::String(k) = key {
+                    xml.push(' ');
+                    xml.push_str(&k.to_string_lossy());
+                    xml.push_str("=\"");
+                    let v = val.to_php_string().to_string_lossy();
+                    for c in v.chars() {
+                        match c {
+                            '&' => xml.push_str("&amp;"),
+                            '"' => xml.push_str("&quot;"),
+                            '<' => xml.push_str("&lt;"),
+                            '>' => xml.push_str("&gt;"),
+                            _ => xml.push(c),
+                        }
+                    }
+                    xml.push('"');
+                }
+            }
+        }
+
+        let text = ob.get_property(b"0");
+        let has_children = ob.properties.iter().any(|(name, _)| {
+            !name.starts_with(b"@") && !name.starts_with(b"__sxml_") && name != b"0"
+        });
+
+        if !has_children && matches!(text, Value::Null | Value::Undef) {
+            xml.push_str("/>");
+        } else {
+            xml.push('>');
+            if !matches!(text, Value::Null | Value::Undef) {
+                let text_str = text.to_php_string().to_string_lossy();
+                for c in text_str.chars() {
+                    match c {
+                        '&' => xml.push_str("&amp;"),
+                        '<' => xml.push_str("&lt;"),
+                        '>' => xml.push_str("&gt;"),
+                        _ => xml.push(c),
+                    }
+                }
+            }
+            let props: Vec<(Vec<u8>, Value)> = ob.properties.iter()
+                .filter(|(name, _)| !name.starts_with(b"@") && !name.starts_with(b"__sxml_") && name != b"0")
+                .map(|(name, val)| (name.to_vec(), val.clone()))
+                .collect();
+            drop(ob);
+            for (_name, val) in props {
+                match &val {
+                    Value::Object(child_obj) => {
+                        xml.push_str(&self.simplexml_to_xml_string(child_obj));
+                    }
+                    Value::Array(arr) => {
+                        let arr_borrow = arr.borrow();
+                        for (_k, child_val) in arr_borrow.iter() {
+                            if let Value::Object(child_obj) = child_val {
+                                xml.push_str(&self.simplexml_to_xml_string(child_obj));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            xml.push_str("</");
+            xml.push_str(&tag_name);
+            xml.push('>');
+        }
+        xml
+    }
+
+    fn simplexml_xpath(&mut self, obj: &Rc<RefCell<PhpObject>>, expr: &str) -> Value {
+        let mut results = PhpArray::new();
+        let path = expr.trim_start_matches('/');
+        if path.is_empty() {
+            return Value::Array(Rc::new(RefCell::new(results)));
+        }
+        let parts: Vec<&str> = path.split('/').collect();
+        let mut current_nodes: Vec<Value> = vec![Value::Object(obj.clone())];
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() {
+                let mut all_descendants = Vec::new();
+                for node in &current_nodes {
+                    self.simplexml_collect_descendants(node, &mut all_descendants);
+                }
+                current_nodes = all_descendants;
+                continue;
+            }
+            let mut next_nodes = Vec::new();
+            for node in &current_nodes {
+                if let Value::Object(node_obj) = node {
+                    let node_borrow = node_obj.borrow();
+                    if *part == "." {
+                        next_nodes.push(Value::Object(node_obj.clone()));
+                    } else if part.starts_with('@') {
+                        let attr_name = &part[1..];
+                        let attrs = node_borrow.get_property(b"@attributes");
+                        if let Value::Array(attrs_arr) = &attrs {
+                            let attrs_borrow = attrs_arr.borrow();
+                            if let Some(val) = attrs_borrow.get(&ArrayKey::String(PhpString::from_string(attr_name.to_string()))) {
+                                next_nodes.push(val.clone());
+                            }
+                        }
+                    } else {
+                        let child = node_borrow.get_property(part.as_bytes());
+                        match &child {
+                            Value::Object(_) => {
+                                next_nodes.push(child);
+                            }
+                            Value::Array(arr) => {
+                                let arr_borrow = arr.borrow();
+                                for (_k, v) in arr_borrow.iter() {
+                                    next_nodes.push(v.clone());
+                                }
+                            }
+                            _ => {
+                                if i > 0 && parts.get(i - 1).map(|p| p.is_empty()).unwrap_or(false) {
+                                    let mut desc = Vec::new();
+                                    self.simplexml_find_by_name(&Value::Object(node_obj.clone()), part, &mut desc);
+                                    next_nodes.extend(desc);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            current_nodes = next_nodes;
+        }
+        for node in current_nodes {
+            results.push(node);
+        }
+        Value::Array(Rc::new(RefCell::new(results)))
+    }
+
+    fn simplexml_collect_descendants(&self, node: &Value, results: &mut Vec<Value>) {
+        if let Value::Object(obj) = node {
+            let ob = obj.borrow();
+            for (name, val) in ob.properties.iter() {
+                if !name.starts_with(b"@") && !name.starts_with(b"__sxml_") && name != b"0" {
+                    match val {
+                        Value::Object(_) => {
+                            results.push(val.clone());
+                            self.simplexml_collect_descendants(&val, results);
+                        }
+                        Value::Array(arr) => {
+                            let arr_borrow = arr.borrow();
+                            for (_k, v) in arr_borrow.iter() {
+                                if let Value::Object(_) = v {
+                                    results.push(v.clone());
+                                    self.simplexml_collect_descendants(&v, results);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn simplexml_find_by_name(&self, node: &Value, name: &str, results: &mut Vec<Value>) {
+        if let Value::Object(obj) = node {
+            let ob = obj.borrow();
+            let child = ob.get_property(name.as_bytes());
+            match &child {
+                Value::Object(_) => {
+                    results.push(child.clone());
+                }
+                Value::Array(arr) => {
+                    let arr_borrow = arr.borrow();
+                    for (_k, v) in arr_borrow.iter() {
+                        results.push(v.clone());
+                    }
+                }
+                _ => {}
+            }
+            for (prop_name, val) in ob.properties.iter() {
+                if !prop_name.starts_with(b"@") && !prop_name.starts_with(b"__sxml_") && prop_name != b"0" {
+                    match val {
+                        Value::Object(_) => {
+                            self.simplexml_find_by_name(val, name, results);
+                        }
+                        Value::Array(arr) => {
+                            let arr_borrow = arr.borrow();
+                            for (_k, v) in arr_borrow.iter() {
+                                self.simplexml_find_by_name(v, name, results);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
@@ -8871,6 +9330,96 @@ impl Vm {
                 }
             }
 
+            // Handle WeakMap method calls
+            if class_lower == b"weakmap" {
+                let wm_id = obj.borrow().object_id;
+                match method_lower.as_slice() {
+                    b"offsetget" => {
+                        let key_obj = args.first().cloned().unwrap_or(Value::Null);
+                        if let Value::Object(key_rc) = &key_obj {
+                            let key_oid = key_rc.borrow().object_id;
+                            if let Some(entries) = self.weak_map_entries.get(&wm_id) {
+                                if let Some((_, _, v)) = entries.iter().find(|(oid, weak, _)| *oid == key_oid && weak.upgrade().is_some()) {
+                                    return Some(v.clone());
+                                }
+                            }
+                            let class_display = crate::value::display_class_name(&key_rc.borrow().class_name);
+                            let msg = format!("Object {}#{} not contained in WeakMap", class_display, key_oid);
+                            let exc = self.create_exception(b"Error", &msg, 0);
+                            self.current_exception = Some(exc);
+                            return None;
+                        } else {
+                            let exc = self.create_exception(b"TypeError", "WeakMap key must be an object", 0);
+                            self.current_exception = Some(exc);
+                            return None;
+                        }
+                    }
+                    b"offsetset" => {
+                        let key_obj = args.first().cloned().unwrap_or(Value::Null);
+                        let val = args.get(1).cloned().unwrap_or(Value::Null);
+                        if let Value::Object(key_rc) = &key_obj {
+                            let key_oid = key_rc.borrow().object_id;
+                            let weak = Rc::downgrade(key_rc);
+                            let entries = self.weak_map_entries.entry(wm_id).or_insert_with(Vec::new);
+                            if let Some(entry) = entries.iter_mut().find(|(oid, _, _)| *oid == key_oid) {
+                                entry.2 = val;
+                            } else {
+                                entries.push((key_oid, weak, val));
+                            }
+                            return Some(Value::Null);
+                        } else if matches!(&key_obj, Value::Null) {
+                            // offsetSet(null, $val) -> Cannot append to WeakMap
+                            let exc = self.create_exception(b"Error", "Cannot append to WeakMap", 0);
+                            self.current_exception = Some(exc);
+                            return None;
+                        } else {
+                            let exc = self.create_exception(b"TypeError", "WeakMap key must be an object", 0);
+                            self.current_exception = Some(exc);
+                            return None;
+                        }
+                    }
+                    b"offsetexists" => {
+                        let key_obj = args.first().cloned().unwrap_or(Value::Null);
+                        if let Value::Object(key_rc) = &key_obj {
+                            let key_oid = key_rc.borrow().object_id;
+                            let exists = if let Some(entries) = self.weak_map_entries.get(&wm_id) {
+                                entries.iter().any(|(oid, weak, _)| *oid == key_oid && weak.upgrade().is_some())
+                            } else {
+                                false
+                            };
+                            return Some(if exists { Value::True } else { Value::False });
+                        } else {
+                            let exc = self.create_exception(b"TypeError", "WeakMap key must be an object", 0);
+                            self.current_exception = Some(exc);
+                            return None;
+                        }
+                    }
+                    b"offsetunset" => {
+                        let key_obj = args.first().cloned().unwrap_or(Value::Null);
+                        if let Value::Object(key_rc) = &key_obj {
+                            let key_oid = key_rc.borrow().object_id;
+                            if let Some(entries) = self.weak_map_entries.get_mut(&wm_id) {
+                                entries.retain(|(oid, _, _)| *oid != key_oid);
+                            }
+                            return Some(Value::Null);
+                        } else {
+                            let exc = self.create_exception(b"TypeError", "WeakMap key must be an object", 0);
+                            self.current_exception = Some(exc);
+                            return None;
+                        }
+                    }
+                    b"count" => {
+                        let count = if let Some(entries) = self.weak_map_entries.get(&wm_id) {
+                            entries.iter().filter(|(_, weak, _)| weak.upgrade().is_some()).count()
+                        } else {
+                            0
+                        };
+                        return Some(Value::Long(count as i64));
+                    }
+                    _ => {}
+                }
+            }
+
             // Try SPL built-in method dispatch
             // First try no-arg dispatch
             let result = self.dispatch_spl_method(&class_lower, &method_lower, obj);
@@ -9233,6 +9782,8 @@ impl Vm {
         let mut foreach_keys: HashMap<u32, Vec<ArrayKey>> = HashMap::new();
         // Generator key storage for foreach (saved before advancing to next yield)
         let mut foreach_gen_keys: HashMap<u32, Value> = HashMap::new();
+        // WeakMap iteration: maps iterator index to key objects
+        let mut weakmap_iter_keys: HashMap<u32, Vec<Value>> = HashMap::new();
         // Track which foreach iterators are by-reference (stores the source array Rc)
         let mut foreach_ref_arrays: HashMap<u32, Rc<RefCell<PhpArray>>> = HashMap::new();
         // Maps CV index -> static var key (for saving back on write)
@@ -10985,6 +11536,12 @@ impl Vm {
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.args.push(val);
                     }
+                    // Free tmp after consuming it (important for WeakReference/WeakMap correctness)
+                    if let OperandType::Tmp(idx) = op.op1 {
+                        if let Some(slot) = tmps.get_mut(idx as usize) {
+                            *slot = Value::Undef;
+                        }
+                    }
                 }
                 OpCode::SendNamedVal => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
@@ -11404,6 +11961,178 @@ impl Vm {
                                 }
                                 return Err(e);
                             }
+                        }
+                    } else if func_name_lower == b"weakreference::create" {
+                        // WeakReference::create($object) - create a weak reference
+                        let arg = call.args.first().cloned().unwrap_or(Value::Null);
+                        if let Value::Object(obj_rc) = &arg {
+                            let target_oid = obj_rc.borrow().object_id;
+                            // Check for existing WeakReference (singleton pattern)
+                            let existing = self.weak_ref_cache.get(&target_oid)
+                                .and_then(|(wid, wr_val)| {
+                                    // Verify the WeakReference itself is still alive
+                                    if let Value::Object(wr_rc) = wr_val {
+                                        if Rc::strong_count(wr_rc) > 0 {
+                                            Some((*wid, wr_val.clone()))
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some((_wid, wr_val)) = existing {
+                                self.write_operand(&op.result, wr_val, &mut cvs, &mut tmps, &static_cv_keys);
+                            } else {
+                                // Create a Weak pointer and store it in the VM's weak_refs table
+                                let weak = Rc::downgrade(obj_rc);
+                                let weak_id = self.next_weak_ref_id;
+                                self.next_weak_ref_id += 1;
+                                self.weak_refs.insert(weak_id, weak);
+
+                                // Create the WeakReference object
+                                let wr_id = self.alloc_object_id();
+                                let mut wr_obj = PhpObject::new(b"WeakReference".to_vec(), wr_id);
+                                wr_obj.set_property(b"__weak_ref_id".to_vec(), Value::Long(weak_id as i64));
+                                let wr_val = Value::Object(Rc::new(RefCell::new(wr_obj)));
+                                self.weak_ref_cache.insert(target_oid, (weak_id, wr_val.clone()));
+                                self.write_operand(&op.result, wr_val, &mut cvs, &mut tmps, &static_cv_keys);
+                            }
+                        } else {
+                            let msg = "WeakReference::create(): Argument #1 ($object) must be of type object, {} given";
+                            let type_name = match &arg {
+                                Value::Null => "null",
+                                Value::Long(_) => "int",
+                                Value::Double(_) => "float",
+                                Value::String(_) => "string",
+                                Value::True | Value::False => "bool",
+                                Value::Array(_) => "array",
+                                _ => "unknown",
+                            };
+                            let err_msg = msg.replace("{}", type_name);
+                            let exc = self.create_exception(b"TypeError", &err_msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: op.line });
+                        }
+                    } else if func_name_lower.starts_with(b"__weakmap::") {
+                        // WeakMap instance method calls
+                        let method = &func_name_lower[11..]; // skip "__weakmap::"
+                        let wm_obj = call.args.first().cloned().unwrap_or(Value::Null);
+                        let extra_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+                        let wm_id = if let Value::Object(ref rc) = wm_obj { rc.borrow().object_id } else { 0 };
+                        match method {
+                            b"offsetget" => {
+                                let key_obj = extra_args.first().cloned().unwrap_or(Value::Null);
+                                if let Value::Object(key_rc) = &key_obj {
+                                    let key_oid = key_rc.borrow().object_id;
+                                    let result = if let Some(entries) = self.weak_map_entries.get(&wm_id) {
+                                        entries.iter()
+                                            .find(|(oid, weak, _)| *oid == key_oid && weak.upgrade().is_some())
+                                            .map(|(_, _, v)| v.clone())
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(val) = result {
+                                        self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                                    } else {
+                                        let class_display = crate::value::display_class_name(&key_rc.borrow().class_name);
+                                        let msg = format!("Object {}#{} not contained in WeakMap", class_display, key_oid);
+                                        let exc = self.create_exception(b"Error", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                    }
+                                } else {
+                                    let msg = "WeakMap key must be an object";
+                                    let exc = self.create_exception(b"TypeError", msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
+                                }
+                            }
+                            b"offsetset" => {
+                                let key_obj = extra_args.first().cloned().unwrap_or(Value::Null);
+                                let val = extra_args.get(1).cloned().unwrap_or(Value::Null);
+                                if let Value::Object(key_rc) = &key_obj {
+                                    let key_oid = key_rc.borrow().object_id;
+                                    let weak = Rc::downgrade(key_rc);
+                                    let entries = self.weak_map_entries.entry(wm_id).or_insert_with(Vec::new);
+                                    if let Some(entry) = entries.iter_mut().find(|(oid, _, _)| *oid == key_oid) {
+                                        entry.2 = val;
+                                    } else {
+                                        entries.push((key_oid, weak, val));
+                                    }
+                                    self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                                } else {
+                                    let msg = "WeakMap key must be an object";
+                                    let exc = self.create_exception(b"TypeError", msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
+                                }
+                            }
+                            b"offsetexists" => {
+                                let key_obj = extra_args.first().cloned().unwrap_or(Value::Null);
+                                if let Value::Object(key_rc) = &key_obj {
+                                    let key_oid = key_rc.borrow().object_id;
+                                    let exists = if let Some(entries) = self.weak_map_entries.get(&wm_id) {
+                                        entries.iter().any(|(oid, weak, _)| *oid == key_oid && weak.upgrade().is_some())
+                                    } else {
+                                        false
+                                    };
+                                    self.write_operand(&op.result, if exists { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                                } else {
+                                    let msg = "WeakMap key must be an object";
+                                    let exc = self.create_exception(b"TypeError", msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
+                                }
+                            }
+                            b"offsetunset" => {
+                                let key_obj = extra_args.first().cloned().unwrap_or(Value::Null);
+                                if let Value::Object(key_rc) = &key_obj {
+                                    let key_oid = key_rc.borrow().object_id;
+                                    if let Some(entries) = self.weak_map_entries.get_mut(&wm_id) {
+                                        entries.retain(|(oid, _, _)| *oid != key_oid);
+                                    }
+                                    self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                                } else {
+                                    let msg = "WeakMap key must be an object";
+                                    let exc = self.create_exception(b"TypeError", msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
+                                }
+                            }
+                            b"count" => {
+                                let count = if let Some(entries) = self.weak_map_entries.get(&wm_id) {
+                                    entries.iter().filter(|(_, weak, _)| weak.upgrade().is_some()).count()
+                                } else {
+                                    0
+                                };
+                                self.write_operand(&op.result, Value::Long(count as i64), &mut cvs, &mut tmps, &static_cv_keys);
+                            }
+                            _ => {}
                         }
                     } else if func_name_lower == b"closure::fromcallable" {
                         // Closure::fromCallable($callable) - convert callable to a Closure
@@ -14271,7 +15000,8 @@ impl Vm {
                         let is_spl_array = matches!(class_lower.as_slice(),
                             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
                             b"splfixedarray" | b"splobjectstorage" |
-                            b"spldoublylinkedlist" | b"splstack" | b"splqueue")
+                            b"spldoublylinkedlist" | b"splstack" | b"splqueue" |
+                            b"weakmap")
                             || {
                                 // Check parent chain for ArrayAccess support
                                 let mut found = false;
@@ -14384,7 +15114,8 @@ impl Vm {
                         let is_spl_array = matches!(class_lower.as_slice(),
                             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
                             b"splfixedarray" | b"splobjectstorage" |
-                            b"spldoublylinkedlist" | b"splstack" | b"splqueue")
+                            b"spldoublylinkedlist" | b"splstack" | b"splqueue" |
+                            b"weakmap")
                             || {
                                 // Check parent chain for ArrayAccess support
                                 let mut found = false;
@@ -14510,7 +15241,34 @@ impl Vm {
                             matches!(ob.get_property(b"__spl_array"), Value::Array(_))
                         };
 
-                        if has_spl_array && !self.class_implements_interface(&class_lower, b"iterator") {
+                        // WeakMap: build parallel arrays for iteration (values + key objects)
+                        if class_lower == b"weakmap" {
+                            let wm_id = obj.borrow().object_id;
+                            let iter_idx = match op.result {
+                                OperandType::Tmp(idx) => idx,
+                                _ => 0,
+                            };
+                            let mut iter_arr = PhpArray::new();
+                            let mut key_objs: Vec<Value> = Vec::new();
+                            if let Some(entries) = self.weak_map_entries.get(&wm_id) {
+                                for (i, (_, weak, val)) in entries.iter().enumerate() {
+                                    if let Some(strong) = weak.upgrade() {
+                                        iter_arr.set(ArrayKey::Int(i as i64), val.clone());
+                                        key_objs.push(Value::Object(strong));
+                                    }
+                                }
+                            }
+                            // Store key objects for ForeachKey to use
+                            // We'll use the weakmap_iter_keys map
+                            weakmap_iter_keys.insert(iter_idx, key_objs);
+                            self.write_operand(
+                                &op.result,
+                                Value::Array(Rc::new(RefCell::new(iter_arr))),
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                        } else if has_spl_array && !self.class_implements_interface(&class_lower, b"iterator") {
                             // SPL class with internal array - iterate the array directly
                             let obj_borrow = obj.borrow();
                             let spl_arr = obj_borrow.get_property(b"__spl_array");
@@ -14844,7 +15602,15 @@ impl Vm {
                     } else if let Value::Array(_) = &arr_val {
                         // pos was already incremented by ForeachNext, so use pos - 1
                         let actual_pos = pos.saturating_sub(1);
-                        let key_val = if let Some(keys) = foreach_keys.get(&iter_idx) {
+                        // Check for WeakMap iteration keys
+                        let key_val = if let Some(wm_keys) = weakmap_iter_keys.get(&iter_idx) {
+                            // WeakMap: use the stored object key
+                            if actual_pos < wm_keys.len() {
+                                wm_keys[actual_pos].clone()
+                            } else {
+                                Value::Null
+                            }
+                        } else if let Some(keys) = foreach_keys.get(&iter_idx) {
                             if actual_pos < keys.len() {
                                 match &keys[actual_pos] {
                                     ArrayKey::Int(n) => Value::Long(*n),
@@ -16716,7 +17482,8 @@ impl Vm {
                         let is_spl_array = matches!(class_lower.as_slice(),
                             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
                             b"splfixedarray" | b"splobjectstorage" |
-                            b"spldoublylinkedlist" | b"splstack" | b"splqueue")
+                            b"spldoublylinkedlist" | b"splstack" | b"splqueue" |
+                            b"weakmap")
                             || {
                                 // Check parent chain for ArrayAccess support
                                 let mut found = false;
@@ -16753,12 +17520,22 @@ impl Vm {
                             .unwrap_or(false);
                         if is_spl_array || has_user_offset {
                             let args = vec![arr_val.clone(), key_val.clone()];
+                            let key_val_clone = key_val.clone();
                             let exists_result = self.handle_spl_docall(&class_lower, b"offsetexists", &args)
                                 .unwrap_or_else(|| {
                                     self.call_object_method(&arr_val, b"offsetexists", &[key_val])
                                         .unwrap_or(Value::False)
                                 });
-                            if exists_result.is_truthy() { Value::True } else { Value::False }
+                            if exists_result.is_truthy() {
+                                // PHP isset() also checks the value: if offsetGet returns NULL, isset returns false
+                                let get_result = self.call_object_method(&arr_val, b"offsetget", &[key_val_clone])
+                                    .unwrap_or(Value::Null);
+                                if matches!(get_result, Value::Null) {
+                                    Value::False
+                                } else {
+                                    Value::True
+                                }
+                            } else { Value::False }
                         } else {
                             Value::False
                         }
@@ -17176,7 +17953,8 @@ impl Vm {
                             let parent_lower: Vec<u8> =
                                 parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             // Check for extending reserved internal classes
-                            if parent_lower == b"generator" || parent_lower == b"closure" {
+                            if parent_lower == b"generator" || parent_lower == b"closure"
+                                || parent_lower == b"weakreference" || parent_lower == b"weakmap" {
                                 let child_display = String::from_utf8_lossy(&class.name).to_string();
                                 let parent_display = String::from_utf8_lossy(parent_name).to_string();
                                 return Err(VmError {
@@ -17552,7 +18330,70 @@ impl Vm {
                                             });
                                         }
                                     }
+                                    b"traversable" => {
+                                        // Traversable cannot be implemented directly;
+                                        // must use Iterator or IteratorAggregate
+                                        let has_iterator_or_aggregate = iface_names.iter().any(|n| {
+                                            let nl: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            nl == b"iterator" || nl == b"iteratoraggregate"
+                                        });
+                                        // Also check if parent class already implements Iterator/IteratorAggregate
+                                        let parent_has_it = if let Some(parent_name) = &class.parent {
+                                            let pl: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            if let Some(pc) = self.classes.get(&pl) {
+                                                pc.interfaces.iter().any(|n| {
+                                                    let nl: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                    nl == b"iterator" || nl == b"iteratoraggregate"
+                                                })
+                                            } else { false }
+                                        } else { false };
+                                        if !has_iterator_or_aggregate && !parent_has_it && !class.is_abstract && !class.is_interface {
+                                            let kind = if class.is_enum { "Enum" } else { "Class" };
+                                            return Err(VmError {
+                                                message: format!("{} {} must implement interface Traversable as part of either Iterator or IteratorAggregate", kind, class_display),
+                                                line: 0,
+                                            });
+                                        }
+                                    }
                                     _ => {}
+                                }
+                            }
+                        }
+
+                        // Check Traversable inherited from parent class
+                        // A non-abstract class whose parent implements Traversable must
+                        // also implement Iterator or IteratorAggregate
+                        if !class.is_abstract && !class.is_interface {
+                            let parent_has_traversable = if let Some(parent_name) = &class.parent {
+                                let pl: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(pc) = self.classes.get(&pl) {
+                                    pc.interfaces.iter().any(|n| {
+                                        let nl: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        nl == b"traversable"
+                                    })
+                                } else { false }
+                            } else { false };
+                            if parent_has_traversable {
+                                let has_iterator_or_aggregate = iface_names.iter().any(|n| {
+                                    let nl: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    nl == b"iterator" || nl == b"iteratoraggregate"
+                                });
+                                let parent_has_it = if let Some(parent_name) = &class.parent {
+                                    let pl: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if let Some(pc) = self.classes.get(&pl) {
+                                        pc.interfaces.iter().any(|n| {
+                                            let nl: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            nl == b"iterator" || nl == b"iteratoraggregate"
+                                        })
+                                    } else { false }
+                                } else { false };
+                                if !has_iterator_or_aggregate && !parent_has_it {
+                                    let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                    let kind = if class.is_enum { "Enum" } else { "Class" };
+                                    return Err(VmError {
+                                        message: format!("{} {} must implement interface Traversable as part of either Iterator or IteratorAggregate", kind, class_display),
+                                        line: 0,
+                                    });
                                 }
                             }
                         }
@@ -18595,6 +19436,210 @@ impl Vm {
                                 }
                             }
                         }
+                        // Validate #[\Override] attribute on methods
+                        if !class.is_trait {
+                            // Collect parent method names (non-private, and constructors only if abstract)
+                            let parent_lower = class.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                            let parent_class = parent_lower.as_ref().and_then(|pl| self.classes.get(pl));
+
+                            // Collect interface method names (all interfaces, including transitive)
+                            let mut interface_method_names: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+                            for iface_name in &iface_names {
+                                let il: Vec<u8> = iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(iface) = self.classes.get(&il) {
+                                    for (mn, _) in &iface.methods {
+                                        interface_method_names.insert(mn.clone());
+                                    }
+                                    // Also check parent interfaces
+                                    for pi in &iface.interfaces {
+                                        let pil: Vec<u8> = pi.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if let Some(pi_def) = self.classes.get(&pil) {
+                                            for (mn, _) in &pi_def.methods {
+                                                interface_method_names.insert(mn.clone());
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Known built-in interfaces - add their known methods
+                                    match il.as_slice() {
+                                        b"iterator" => {
+                                            for m in &[b"current" as &[u8], b"key", b"next", b"rewind", b"valid"] {
+                                                interface_method_names.insert(m.to_vec());
+                                            }
+                                        }
+                                        b"iteratoraggregate" => {
+                                            interface_method_names.insert(b"getiterator".to_vec());
+                                        }
+                                        b"arrayaccess" => {
+                                            for m in &[b"offsetexists" as &[u8], b"offsetget", b"offsetset", b"offsetunset"] {
+                                                interface_method_names.insert(m.to_vec());
+                                            }
+                                        }
+                                        b"countable" => {
+                                            interface_method_names.insert(b"count".to_vec());
+                                        }
+                                        b"serializable" => {
+                                            for m in &[b"serialize" as &[u8], b"unserialize"] {
+                                                interface_method_names.insert(m.to_vec());
+                                            }
+                                        }
+                                        b"stringable" => {
+                                            interface_method_names.insert(b"__tostring".to_vec());
+                                        }
+                                        b"jsonserializable" => {
+                                            interface_method_names.insert(b"jsonserialize".to_vec());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+
+                            // Collect interface property names for property override checks
+                            let mut interface_prop_names: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+                            for iface_name in &iface_names {
+                                let il: Vec<u8> = iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(iface) = self.classes.get(&il) {
+                                    for prop in &iface.properties {
+                                        let pn_lower: Vec<u8> = prop.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        interface_prop_names.insert(pn_lower);
+                                    }
+                                    for pi in &iface.interfaces {
+                                        let pil: Vec<u8> = pi.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if let Some(pi_def) = self.classes.get(&pil) {
+                                            for prop in &pi_def.properties {
+                                                let pn_lower: Vec<u8> = prop.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                interface_prop_names.insert(pn_lower);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Collect trait abstract method names for override check
+                            // (a class method implementing a trait abstract method counts as override)
+                            let mut trait_abstract_method_names: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+                            for tn in &trait_names {
+                                let tl: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(td) = self.classes.get(&tl) {
+                                    for (mn, m) in &td.methods {
+                                        if m.is_abstract {
+                                            trait_abstract_method_names.insert(mn.clone());
+                                        }
+                                    }
+                                }
+                            }
+
+                            for (method_name, method) in &class.methods {
+                                let has_override = method.attributes.iter().any(|a| {
+                                    a.name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>() == b"override"
+                                });
+                                if !has_override {
+                                    continue;
+                                }
+
+                                // Check if this method overrides something
+                                let mut found_parent = false;
+
+                                if class.is_interface {
+                                    // Interface: check parent interfaces only
+                                    // Parent interfaces are in class.interfaces (the extends list for interfaces)
+                                    if let Some(pc) = parent_class {
+                                        if pc.methods.contains_key(method_name) {
+                                            found_parent = true;
+                                        }
+                                    }
+                                    // Also check extended interfaces
+                                    if !found_parent {
+                                        found_parent = interface_method_names.contains(method_name);
+                                    }
+                                } else {
+                                    // Class/enum: check parent class methods (non-private, constructors only if abstract)
+                                    if let Some(pc) = parent_class {
+                                        if let Some(pm) = pc.methods.get(method_name) {
+                                            if pm.visibility != Visibility::Private {
+                                                // Constructors don't count unless the parent method is abstract
+                                                if method_name.as_slice() == b"__construct" {
+                                                    if pm.is_abstract {
+                                                        found_parent = true;
+                                                    }
+                                                } else {
+                                                    found_parent = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Check interfaces
+                                    if !found_parent {
+                                        if method_name.as_slice() != b"__construct" {
+                                            found_parent = interface_method_names.contains(method_name);
+                                        }
+                                    }
+                                    // Check if this is a class-defined method implementing a trait abstract method
+                                    if !found_parent && own_method_names.contains(method_name) {
+                                        if trait_abstract_method_names.contains(method_name) {
+                                            found_parent = true;
+                                        }
+                                    }
+                                }
+
+                                if !found_parent {
+                                    let class_display_name = crate::value::display_class_name(&class.name);
+                                    let method_display = String::from_utf8_lossy(&method.name).to_string();
+                                    return Err(VmError {
+                                        message: format!("{}::{}() has #[\\Override] attribute, but no matching parent method exists", class_display_name, method_display),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+
+                            // Validate #[\Override] attribute on properties
+                            for prop in &class.properties {
+                                let has_override = prop.attributes.iter().any(|a| {
+                                    a.name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>() == b"override"
+                                });
+                                if !has_override {
+                                    continue;
+                                }
+
+                                let prop_name_lower: Vec<u8> = prop.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let mut found_parent = false;
+
+                                if class.is_interface {
+                                    // Interface: check parent interfaces
+                                    if let Some(pc) = parent_class {
+                                        if pc.properties.iter().any(|p| p.name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>() == prop_name_lower) {
+                                            found_parent = true;
+                                        }
+                                    }
+                                    if !found_parent {
+                                        found_parent = interface_prop_names.contains(&prop_name_lower);
+                                    }
+                                } else {
+                                    // Class/enum: check parent class properties (non-private)
+                                    if let Some(pc) = parent_class {
+                                        if let Some(pp) = pc.properties.iter().find(|p| p.name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>() == prop_name_lower) {
+                                            if pp.visibility != Visibility::Private {
+                                                found_parent = true;
+                                            }
+                                        }
+                                    }
+                                    // Check interfaces
+                                    if !found_parent {
+                                        found_parent = interface_prop_names.contains(&prop_name_lower);
+                                    }
+                                }
+
+                                if !found_parent {
+                                    let class_display_name = crate::value::display_class_name(&class.name);
+                                    let prop_display = String::from_utf8_lossy(&prop.name).to_string();
+                                    return Err(VmError {
+                                        message: format!("{}::${} has #[\\Override] attribute, but no matching parent property exists", class_display_name, prop_display),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                        }
+
                         // Set filename if not already set
                         if class.filename.is_none() {
                             class.filename = Some(self.current_file.clone());
@@ -18813,6 +19858,8 @@ impl Vm {
                             b"fiber" => b"Fiber".to_vec(),
                             b"fibererror" => b"FiberError".to_vec(),
                             b"reflectionfunctionabstract" => b"ReflectionFunctionAbstract".to_vec(),
+                            b"weakreference" => b"WeakReference".to_vec(),
+                            b"weakmap" => b"WeakMap".to_vec(),
                             _ => class_name.as_bytes().to_vec(),
                         }
                     };
@@ -19213,9 +20260,11 @@ impl Vm {
                                     // Emit "Undefined property" warning, but only for user-defined classes
                                     // that have declared properties in the class table.
                                     // Internal classes (Reflection*, Exception, etc.) use dynamic properties.
-                                    let has_declared_props = self.classes.get(&class_lower)
-                                        .map(|c| !c.properties.is_empty() || !c.methods.is_empty())
-                                        .unwrap_or(false);
+                                    // WeakReference/WeakMap always emit this warning for undefined properties.
+                                    let has_declared_props = matches!(class_lower.as_slice(), b"weakreference" | b"weakmap")
+                                        || self.classes.get(&class_lower)
+                                            .map(|c| !c.properties.is_empty() || !c.methods.is_empty())
+                                            .unwrap_or(false);
                                     if has_declared_props {
                                         let class_display = String::from_utf8_lossy(&class_name_orig);
                                         let prop_display = prop_name.to_string_lossy();
@@ -19340,10 +20389,11 @@ impl Vm {
                             continue;
                         }
 
-                        // Closures cannot have dynamic properties
-                        if class_lower == b"closure" {
+                        // Closures/WeakReference/WeakMap cannot have dynamic properties
+                        if class_lower == b"closure" || class_lower == b"weakreference" || class_lower == b"weakmap" {
                             let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
-                            let msg = format!("Cannot create dynamic property Closure::${}", prop_str);
+                            let class_display = crate::value::display_class_name(&class_name_orig);
+                            let msg = format!("Cannot create dynamic property {}::${}", class_display, prop_str);
                             let exc = self.create_exception(b"Error", &msg, op.line);
                             self.current_exception = Some(exc);
                             if let Some((catch_target, _, _)) = exception_handlers.pop() {
@@ -19775,6 +20825,58 @@ impl Vm {
                                     fiber_name.extend_from_slice(&method_name_lower);
                                     self.pending_calls.push(PendingCall {
                                         name: PhpString::from_vec(fiber_name),
+                                        args: vec![obj_val.clone()],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Handle WeakReference instance methods
+                        if class_name_lower == b"weakreference" && !has_user_method {
+                            match method_name_lower.as_slice() {
+                                b"get" => {
+                                    let weak_id = obj.borrow().get_property(b"__weak_ref_id").to_long() as u64;
+                                    let result = if let Some(weak) = self.weak_refs.get(&weak_id) {
+                                        if let Some(strong) = weak.upgrade() {
+                                            Value::Object(strong)
+                                        } else {
+                                            Value::Null
+                                        }
+                                    } else {
+                                        Value::Null
+                                    };
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        args: vec![result],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                b"__construct" => {
+                                    let msg = "Direct instantiation of WeakReference is not allowed, use WeakReference::create instead";
+                                    let exc = self.create_exception(b"Error", msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _)) = exception_handlers.last() {
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Handle WeakMap instance methods
+                        if class_name_lower == b"weakmap" && !has_user_method {
+                            match method_name_lower.as_slice() {
+                                b"offsetget" | b"offsetset" | b"offsetexists" | b"offsetunset" | b"count" => {
+                                    let mut wm_name = b"__weakmap::".to_vec();
+                                    wm_name.extend_from_slice(&method_name_lower);
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_vec(wm_name),
                                         args: vec![obj_val.clone()],
                                         named_args: Vec::new(),
                                     });
@@ -20384,28 +21486,44 @@ impl Vm {
                             }
                             b"__invoke" => {
                                 // Closure::__invoke(...$args) - call the closure directly
-                                // Extract the function name from the closure value
-                                let closure_name = match &obj_val {
-                                    Value::String(s) => Some(s.clone()),
-                                    Value::Array(arr) => {
-                                        let arr_borrow = arr.borrow();
-                                        arr_borrow.get(&crate::array::ArrayKey::Int(0))
-                                            .map(|v| v.to_php_string())
+                                // Extract the function name and captured variables from the closure value
+                                match &obj_val {
+                                    Value::String(s) => {
+                                        // Simple closure without captured vars
+                                        self.pending_calls.push(PendingCall {
+                                            name: s.clone(),
+                                            args: Vec::new(),
+                                            named_args: Vec::new(),
+                                        });
                                     }
-                                    _ => None,
-                                };
-                                if let Some(name) = closure_name {
-                                    self.pending_calls.push(PendingCall {
-                                        name,
-                                        args: Vec::new(),
-                                        named_args: Vec::new(),
-                                    });
-                                } else {
-                                    self.pending_calls.push(PendingCall {
-                                        name: PhpString::from_bytes(b"__builtin_return"),
-                                        args: vec![Value::Null],
-                                        named_args: Vec::new(),
-                                    });
+                                    Value::Array(arr) => {
+                                        // Closure with captured vars: [name, use_val1, use_val2, ...]
+                                        let arr_borrow = arr.borrow();
+                                        let mut values: Vec<Value> = arr_borrow.values().cloned().collect();
+                                        drop(arr_borrow);
+                                        if !values.is_empty() {
+                                            let name = values.remove(0).to_php_string();
+                                            // Remaining values are captured use vars - prepend as args
+                                            self.pending_calls.push(PendingCall {
+                                                name,
+                                                args: values,
+                                                named_args: Vec::new(),
+                                            });
+                                        } else {
+                                            self.pending_calls.push(PendingCall {
+                                                name: PhpString::from_bytes(b"__builtin_return"),
+                                                args: vec![Value::Null],
+                                                named_args: Vec::new(),
+                                            });
+                                        }
+                                    }
+                                    _ => {
+                                        self.pending_calls.push(PendingCall {
+                                            name: PhpString::from_bytes(b"__builtin_return"),
+                                            args: vec![Value::Null],
+                                            named_args: Vec::new(),
+                                        });
+                                    }
                                 }
                             }
                             _ => {
@@ -20657,7 +21775,8 @@ impl Vm {
                 || self.class_extends(&class_lower, b"error");
             let is_reflection = class_lower.starts_with(b"reflection");
             let is_gmp = class_lower == b"gmp";
-            if !has_tostring && !is_throwable && !is_reflection && !is_gmp {
+            let is_simplexml = class_lower == b"simplexmlelement";
+            if !has_tostring && !is_throwable && !is_reflection && !is_gmp && !is_simplexml {
                 let class_display = String::from_utf8_lossy(&class_name).to_string();
                 let msg = format!("Object of class {} could not be converted to string", class_display);
                 let exc = self.create_exception(b"Error", &msg, self.current_line);
@@ -21644,6 +22763,7 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
         b"splobjectstorage" => &[b"Countable", b"Iterator", b"Traversable", b"Serializable", b"ArrayAccess"],
         b"splpriorityqueue" => &[b"Iterator", b"Traversable", b"Countable"],
         b"splheap" | b"splminheap" | b"splmaxheap" => &[b"Iterator", b"Traversable", b"Countable"],
+        b"weakmap" => &[b"ArrayAccess", b"Countable", b"IteratorAggregate", b"Traversable"],
         b"datetime" => &[b"DateTimeInterface"],
         b"datetimeimmutable" => &[b"DateTimeInterface"],
         b"exception" | b"error" | b"typeerror" | b"valueerror" | b"argumentcounterror"

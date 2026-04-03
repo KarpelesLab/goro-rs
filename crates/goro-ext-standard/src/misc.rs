@@ -5601,6 +5601,17 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    // Check for non-serializable classes
+    if let Value::Object(obj) = val {
+        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        if matches!(class_lower.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber") {
+            let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+            let msg = format!("Serialization of '{}' is not allowed", class_name);
+            let exc = _vm.create_exception(b"Exception", &msg, _vm.current_line);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: format!("Uncaught Exception: {}", msg), line: _vm.current_line });
+        }
+    }
     let s = serialize_value_with_vm(val, 0, _vm);
     Ok(Value::String(PhpString::from_string(s)))
 }
@@ -5979,6 +5990,16 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
                 *pos += 1;
             }
 
+            // Check for non-unserializable classes
+            let class_lower_check: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if matches!(class_lower_check.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber") {
+                let class_display = String::from_utf8_lossy(&class_name).to_string();
+                let msg = format!("Unserialization of '{}' is not allowed", class_display);
+                let exc = vm.create_exception(b"Exception", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return None;
+            }
+
             let obj_id = vm.next_object_id();
             // Use canonical class name
             let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -6199,22 +6220,35 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
             if *pos < data.len() && data[*pos] == b':' {
                 *pos += 1;
             }
-            // Skip class name length
+            // Read class name length
+            let c_name_len_start = *pos;
             while *pos < data.len() && data[*pos] != b':' {
                 *pos += 1;
             }
+            let c_name_len = String::from_utf8_lossy(&data[c_name_len_start..*pos]).parse::<usize>().unwrap_or(0);
             if *pos < data.len() {
                 *pos += 1;
             }
-            // Skip class name
+            // Read class name
+            let mut c_class_name = Vec::new();
             if *pos < data.len() && data[*pos] == b'"' {
                 *pos += 1;
-                while *pos < data.len() && data[*pos] != b'"' {
+                let c_name_start = *pos;
+                let c_name_end = (*pos + c_name_len).min(data.len());
+                c_class_name = data[c_name_start..c_name_end].to_vec();
+                *pos = c_name_end;
+                if *pos < data.len() && data[*pos] == b'"' {
                     *pos += 1;
                 }
-                if *pos < data.len() {
-                    *pos += 1;
-                }
+            }
+            // Check for non-unserializable classes
+            let c_class_lower: Vec<u8> = c_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if matches!(c_class_lower.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber") {
+                let class_display = String::from_utf8_lossy(&c_class_name).to_string();
+                let msg = format!("Unserialization of '{}' is not allowed", class_display);
+                let exc = vm.create_exception(b"Exception", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return None;
             }
             if *pos < data.len() && data[*pos] == b':' {
                 *pos += 1;

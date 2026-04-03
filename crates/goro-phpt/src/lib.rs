@@ -658,6 +658,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     goro_ext_bz2::register(&mut vm);
     goro_ext_curl::register(&mut vm);
     goro_ext_xml::register(&mut vm);
+    goro_ext_session::register(&mut vm);
     goro_ext_mysqli::register(&mut vm);
     goro_ext_sockets::register(&mut vm);
     goro_ext_mbstring::register(&mut vm);

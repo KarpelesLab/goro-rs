@@ -4737,7 +4737,7 @@ impl Parser {
                 }
             }
             _ => Err(ParseError {
-                message: format!("unexpected token {:?}", self.peek()),
+                message: format!("syntax error, unexpected token {}", self.peek().to_php_name()),
                 span,
             }),
         }

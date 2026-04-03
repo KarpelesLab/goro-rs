@@ -4708,14 +4708,18 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if is_closing { i += 1; }
 
             let name_start = i;
-            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' && bytes[i] != b'/' {
+            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' && bytes[i] != b'/' && bytes[i] != b'<' {
                 i += 1;
             }
             let tag_name = &bytes[name_start..i];
             let tag_name_lower = tag_name.to_ascii_lowercase();
 
-            // Skip attributes, handling quoted strings
+            // Skip attributes/rest of tag, handling quoted strings
+            // PHP strip_tags tracks nested <> with a depth counter:
+            // each '<' inside a tag increments depth, each '>' decrements it,
+            // and the tag only ends when '>' is seen at depth 0.
             let mut in_quote: u8 = 0;
+            let mut depth: u32 = 0;
             while i < bytes.len() {
                 if in_quote != 0 {
                     if bytes[i] == in_quote {
@@ -4723,8 +4727,14 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 } else if bytes[i] == b'"' || bytes[i] == b'\'' {
                     in_quote = bytes[i];
+                } else if bytes[i] == b'<' {
+                    depth += 1;
                 } else if bytes[i] == b'>' {
-                    break;
+                    if depth > 0 {
+                        depth -= 1;
+                    } else {
+                        break;
+                    }
                 }
                 i += 1;
             }

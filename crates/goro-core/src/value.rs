@@ -275,6 +275,14 @@ impl Value {
             Value::Array(_) => PhpString::from_bytes(b"Array"),
             Value::Object(obj) => {
                 let obj = obj.borrow();
+                // SimpleXMLElement: __toString returns text content
+                if obj.class_name.eq_ignore_ascii_case(b"SimpleXMLElement") {
+                    let text = obj.get_property(b"0");
+                    if matches!(text, Value::Null | Value::Undef) {
+                        return PhpString::empty();
+                    }
+                    return text.to_php_string();
+                }
                 // PHP tries __toString magic method; for now return class name
                 PhpString::from_vec(obj.class_name.clone())
             }

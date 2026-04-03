@@ -14,6 +14,7 @@ fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
         || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
         || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+        || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -109,6 +110,70 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
             let oid = obj_borrow.object_id;
+
+            // WeakReference: show ["object"] => referent or NULL
+            if class_lower == b"weakreference" {
+                let weak_id = obj_borrow.get_property(b"__weak_ref_id").to_long() as u64;
+                drop(obj_borrow);
+                let referent = if let Some(weak) = vm.weak_refs.get(&weak_id) {
+                    if let Some(strong) = weak.upgrade() {
+                        Some(Value::Object(strong))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                vm.write_output(format!("{}object(WeakReference)#{} (1) {{\n", prefix, oid).as_bytes());
+                if !seen.insert(oid) {
+                    vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    return;
+                }
+                vm.write_output(format!("{}  [\"object\"]=>\n", prefix).as_bytes());
+                if let Some(ref_val) = referent {
+                    var_dump_value(vm, &ref_val, indent + 2, seen);
+                } else {
+                    vm.write_output(format!("{}  NULL\n", prefix).as_bytes());
+                }
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
+
+            // WeakMap: show entries as indexed array of ["key"] => obj, ["value"] => val
+            if class_lower == b"weakmap" {
+                drop(obj_borrow);
+                // Get live entries from weak_map_entries
+                let entries: Vec<(Value, Value)> = if let Some(wm_entries) = vm.weak_map_entries.get(&oid) {
+                    wm_entries.iter()
+                        .filter_map(|(_, weak, val)| {
+                            weak.upgrade().map(|strong| (Value::Object(strong), val.clone()))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let count = entries.len();
+                vm.write_output(format!("{}object(WeakMap)#{} ({}) {{\n", prefix, oid, count).as_bytes());
+                if !seen.insert(oid) {
+                    vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    return;
+                }
+                for (idx, (key, value)) in entries.iter().enumerate() {
+                    vm.write_output(format!("{}  [{}]=>\n", prefix, idx).as_bytes());
+                    vm.write_output(format!("{}  array(2) {{\n", prefix).as_bytes());
+                    vm.write_output(format!("{}    [\"key\"]=>\n", prefix).as_bytes());
+                    var_dump_value(vm, key, indent + 4, seen);
+                    vm.write_output(format!("{}    [\"value\"]=>\n", prefix).as_bytes());
+                    var_dump_value(vm, value, indent + 4, seen);
+                    vm.write_output(format!("{}  }}\n", prefix).as_bytes());
+                }
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
 
             // Check if this is an SPL class with __spl_array - display array contents instead
             let is_spl_array_class = matches!(

@@ -766,6 +766,7 @@ impl<'a> Lexer<'a> {
             b"array" => TokenKind::ArrayCast,
             b"object" => TokenKind::ObjectCast,
             b"unset" => TokenKind::UnsetCast,
+            b"void" => TokenKind::VoidCast,
             _ => {
                 self.pos = saved_pos;
                 self.line = saved_line;

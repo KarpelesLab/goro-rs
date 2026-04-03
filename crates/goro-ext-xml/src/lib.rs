@@ -1554,7 +1554,7 @@ fn build_simplexml_subtree(
     vm: &mut Vm,
     events: &[XmlEvent],
     pos: &mut usize,
-    _tag_name: &str,
+    tag_name: &str,
     tag_attrs: &[(String, String)],
 ) -> Value {
     let mut children: HashMap<String, Vec<Value>> = HashMap::new();
@@ -1594,6 +1594,9 @@ fn build_simplexml_subtree(
 
     let obj_id = vm.next_object_id();
     let mut obj = PhpObject::new(b"SimpleXMLElement".to_vec(), obj_id);
+
+    // Store the tag name as an internal property (for getName())
+    obj.set_property(b"__sxml_name".to_vec(), Value::String(PhpString::from_string(tag_name.to_string())));
 
     // Set attributes
     if !tag_attrs.is_empty() {
