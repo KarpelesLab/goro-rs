@@ -394,7 +394,13 @@ fn strftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if fmt_bytes[i] == b'%' && i + 1 < fmt_bytes.len() {
             i += 1;
             match fmt_bytes[i] {
-                b'Y' => result.push_str(&format!("{:04}", year)),
+                b'Y' => {
+                if year < 0 {
+                    result.push_str(&format!("-{:04}", -year));
+                } else {
+                    result.push_str(&format!("{:04}", year));
+                }
+            }
                 b'm' => result.push_str(&format!("{:02}", month)),
                 b'd' => result.push_str(&format!("{:02}", day)),
                 b'H' => result.push_str(&format!("{:02}", hours)),
@@ -1128,7 +1134,13 @@ pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_abbrev: &str, 
             continue;
         }
         match c {
-            b'Y' => result.push_str(&format!("{:04}", year)),
+            b'Y' => {
+                if year < 0 {
+                    result.push_str(&format!("-{:04}", -year));
+                } else {
+                    result.push_str(&format!("{:04}", year));
+                }
+            }
             b'y' => result.push_str(&format!("{:02}", year % 100)),
             b'm' => result.push_str(&format!("{:02}", month)),
             b'n' => result.push_str(&format!("{}", month)),
@@ -1201,7 +1213,11 @@ pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_abbrev: &str, 
                         year
                     }
                 };
-                result.push_str(&format!("{:04}", iso_year));
+                if iso_year < 0 {
+                    result.push_str(&format!("-{:04}", -iso_year));
+                } else {
+                    result.push_str(&format!("{:04}", iso_year));
+                }
             }
             b'F' => {
                 let names = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -1343,7 +1359,13 @@ pub fn format_timestamp(format: &str, secs: i64) -> String {
             continue;
         }
         match c {
-            b'Y' => result.push_str(&format!("{:04}", year)),
+            b'Y' => {
+                if year < 0 {
+                    result.push_str(&format!("-{:04}", -year));
+                } else {
+                    result.push_str(&format!("{:04}", year));
+                }
+            }
             b'y' => result.push_str(&format!("{:02}", year % 100)),
             b'm' => result.push_str(&format!("{:02}", month)),
             b'n' => result.push_str(&format!("{}", month)),
@@ -1460,7 +1482,11 @@ pub fn format_timestamp(format: &str, secs: i64) -> String {
                         year
                     }
                 };
-                result.push_str(&format!("{:04}", iso_year_o));
+                if iso_year_o < 0 {
+                    result.push_str(&format!("-{:04}", -iso_year_o));
+                } else {
+                    result.push_str(&format!("{:04}", iso_year_o));
+                }
             }
             b'e' | b'T' => result.push_str("UTC"),
             b'O' => result.push_str("+0000"),

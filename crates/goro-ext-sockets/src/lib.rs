@@ -104,6 +104,11 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"SOCKET_ECONNREFUSED".to_vec(), Value::Long(111));
     vm.constants.insert(b"SOCKET_ETIMEDOUT".to_vec(), Value::Long(110));
     vm.constants.insert(b"SOCKET_ECONNRESET".to_vec(), Value::Long(104));
+
+    // Shutdown constants
+    vm.constants.insert(b"SHUT_RD".to_vec(), Value::Long(0));
+    vm.constants.insert(b"SHUT_WR".to_vec(), Value::Long(1));
+    vm.constants.insert(b"SHUT_RDWR".to_vec(), Value::Long(2));
 }
 
 /// socket_create(int $domain, int $type, int $protocol): Socket|false

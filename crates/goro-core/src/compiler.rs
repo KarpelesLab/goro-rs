@@ -8262,6 +8262,12 @@ impl Compiler {
                     }
                     _ => return None,
                 };
+
+                // ClassName::class returns the fully qualified class name as a string
+                if constant == b"class" {
+                    return Some(Value::String(PhpString::from_vec(target_class)));
+                }
+
                 // Check if this references the same class
                 let target_lower: Vec<u8> = target_class.iter().map(|b| b.to_ascii_lowercase()).collect();
                 let self_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
