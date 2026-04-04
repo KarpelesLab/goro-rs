@@ -1634,6 +1634,11 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut i = 0;
 
     while i < bytes.len() {
+        // PHP strip_tags strips NUL bytes
+        if bytes[i] == 0 {
+            i += 1;
+            continue;
+        }
         if bytes[i] == b'<' {
             // Check if this could be a tag: must be followed by ?, !, /, %, or alpha
             if i + 1 < bytes.len() {
@@ -4686,6 +4691,11 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut i = 0;
 
     while i < bytes.len() {
+        // PHP strip_tags strips NUL bytes
+        if bytes[i] == 0 {
+            i += 1;
+            continue;
+        }
         if bytes[i] == b'<' {
             // Check if this could be a tag: must be followed by ?, !, /, %, or alpha
             if i + 1 < bytes.len() {

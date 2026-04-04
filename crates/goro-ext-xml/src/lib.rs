@@ -1614,9 +1614,10 @@ fn build_simplexml_subtree(
     }
 
     if children.is_empty() {
-        // Leaf node: if has text, the object stringifies to the text
+        // Leaf node: if has non-whitespace text, the object stringifies to the text
         // We store it as "0" property (internal) for __toString
-        if !text_content.is_empty() {
+        // PHP SimpleXML does not create text nodes for whitespace-only content
+        if !text_content.is_empty() && text_content.chars().any(|c| !c.is_whitespace()) {
             obj.set_property(b"0".to_vec(), Value::String(PhpString::from_string(text_content)));
         }
     } else {

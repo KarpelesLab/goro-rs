@@ -459,6 +459,7 @@ fn restore_error_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
 
 fn set_exception_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let prev = vm.exception_handler.take();
+    vm.exception_handler_stack.push(prev.clone());
     if let Some(handler) = args.first() {
         if !matches!(handler, Value::Null) {
             vm.exception_handler = Some(handler.clone());
@@ -468,7 +469,7 @@ fn set_exception_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 }
 
 fn restore_exception_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    vm.exception_handler = None;
+    vm.exception_handler = vm.exception_handler_stack.pop().unwrap_or(None);
     Ok(Value::True)
 }
 
@@ -2146,7 +2147,7 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None => return Ok(Value::True),
     };
 
-    // For objects, convert properties to entries
+    // For objects, convert properties to entries with PHP-style mangled names
     if is_object {
         let obj = match first {
             Value::Object(o) => o.clone(),
@@ -2161,9 +2162,34 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         let entries: Vec<(ArrayKey, Value)> = {
             let obj_borrow = obj.borrow();
-            obj_borrow.properties.iter().map(|(k, v)| {
-                (ArrayKey::String(PhpString::from_vec(k.clone())), v.clone())
-            }).collect()
+            let class_name_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Map property name -> (visibility, declaring_class_original_case)
+            let prop_info: std::collections::HashMap<Vec<u8>, (goro_core::object::Visibility, Vec<u8>)> =
+                if let Some(class_def) = vm.get_class_def(&class_name_lower) {
+                    class_def.properties.iter()
+                        .map(|p| {
+                            let decl_lower = &p.declaring_class;
+                            let decl_display = vm.get_class_def(decl_lower)
+                                .map(|c| c.name.clone())
+                                .unwrap_or_else(|| p.declaring_class.clone());
+                            (p.name.clone(), (p.visibility, decl_display))
+                        })
+                        .collect()
+                } else {
+                    std::collections::HashMap::new()
+                };
+            obj_borrow.properties.iter()
+                .filter(|(k, _)| !k.starts_with(b"__spl_") && !k.starts_with(b"__reflection_")
+                    && !k.starts_with(b"__enum_") && !k.starts_with(b"__ctor_")
+                    && !k.starts_with(b"__clone_") && !k.starts_with(b"__destructed")
+                    && !k.starts_with(b"__fiber_") && !k.starts_with(b"__timestamp"))
+                .map(|(k, v)| {
+                    let (vis, declaring_class) = prop_info.get(k)
+                        .map(|(v, dc)| (Some(*v), dc.as_slice()))
+                        .unwrap_or((None, &[]));
+                    let mangled_key = mangle_property_name(k, declaring_class, vis);
+                    (ArrayKey::String(PhpString::from_vec(mangled_key)), v.clone())
+                }).collect()
         };
         let extra_data = args.get(2);
         return array_walk_entries(vm, callback, &entries, extra_data, None);
@@ -10178,9 +10204,24 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn get_mangled_object_vars_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(obj)) = args.first() {
         let obj = obj.borrow();
+        let class_name_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let prop_info: std::collections::HashMap<Vec<u8>, (goro_core::object::Visibility, Vec<u8>)> =
+            if let Some(class_def) = vm.get_class_def(&class_name_lower) {
+                class_def.properties.iter()
+                    .map(|p| {
+                        let decl_lower = &p.declaring_class;
+                        let decl_display = vm.get_class_def(decl_lower)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| p.declaring_class.clone());
+                        (p.name.clone(), (p.visibility, decl_display))
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
         let mut arr = PhpArray::new();
         for (name, val) in &obj.properties {
             if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__enum_")
@@ -10188,8 +10229,12 @@ fn get_mangled_object_vars_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
                 || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp") {
                 continue;
             }
+            let (vis, declaring_class) = prop_info.get(name)
+                .map(|(v, dc)| (Some(*v), dc.as_slice()))
+                .unwrap_or((None, &[]));
+            let mangled = mangle_property_name(name, declaring_class, vis);
             arr.set(
-                ArrayKey::String(PhpString::from_vec(name.clone())),
+                ArrayKey::String(PhpString::from_vec(mangled)),
                 val.clone(),
             );
         }
@@ -10500,5 +10545,31 @@ fn inet_ntop_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // PHP 8.1+: no warning for invalid length
             Ok(Value::False)
         }
+    }
+}
+
+/// Mangle a PHP object property name according to visibility.
+/// Private: \0DeclaringClass\0propName
+/// Protected: \0*\0propName
+/// Public: propName (unchanged)
+fn mangle_property_name(name: &[u8], declaring_class: &[u8], visibility: Option<goro_core::object::Visibility>) -> Vec<u8> {
+    match visibility {
+        Some(goro_core::object::Visibility::Private) => {
+            let mut mangled = Vec::with_capacity(1 + declaring_class.len() + 1 + name.len());
+            mangled.push(0);
+            mangled.extend_from_slice(declaring_class);
+            mangled.push(0);
+            mangled.extend_from_slice(name);
+            mangled
+        }
+        Some(goro_core::object::Visibility::Protected) => {
+            let mut mangled = Vec::with_capacity(3 + name.len());
+            mangled.push(0);
+            mangled.push(b'*');
+            mangled.push(0);
+            mangled.extend_from_slice(name);
+            mangled
+        }
+        _ => name.to_vec(),
     }
 }

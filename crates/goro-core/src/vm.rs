@@ -9629,18 +9629,34 @@ impl Vm {
         let result = self.execute_op_array(op_array, cvs);
 
         // If there's an uncaught exception and a user exception handler is set, call it
-        let result = match result {
-            Err(ref _e) if self.exception_handler.is_some() && self.current_exception.is_some() => {
-                let handler = self.exception_handler.take().unwrap();
-                let exc = self.current_exception.take().unwrap();
-                let handler_result = self.call_callback(&handler, &[exc.clone()]);
-                match handler_result {
-                    Ok(_) => Ok(Value::Null),
-                    Err(new_err) => Err(new_err),
+        // Support chaining: if the handler throws and a new handler was registered inside it,
+        // that new handler should catch the new exception.
+        let mut result = result;
+        loop {
+            match result {
+                Err(ref _e) if self.exception_handler.is_some() && self.current_exception.is_some() => {
+                    let handler = self.exception_handler.take().unwrap();
+                    let exc = self.current_exception.take().unwrap();
+                    let handler_result = self.call_callback(&handler, &[exc.clone()]);
+                    match handler_result {
+                        Ok(_) => {
+                            result = Ok(Value::Null);
+                            break;
+                        }
+                        Err(new_err) => {
+                            // The handler threw - check if a new handler was registered
+                            // during execution (chaining). If so, loop to try the new handler.
+                            result = Err(new_err);
+                            if self.exception_handler.is_some() && self.current_exception.is_some() {
+                                continue;
+                            }
+                            break;
+                        }
+                    }
                 }
+                _ => break,
             }
-            other => other,
-        };
+        }
 
         // Call shutdown functions (before destructors, like PHP does)
         let shutdown_fns = std::mem::take(&mut self.shutdown_functions);
@@ -14800,14 +14816,57 @@ impl Vm {
                             if let Value::Array(a) = spl_arr {
                                 Rc::new(RefCell::new(a.borrow().clone()))
                             } else {
-                                // Regular object: convert properties to array
+                                // Regular object: convert properties to array with PHP-style name mangling
+                                let class_name_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                // Map property name -> (visibility, declaring_class_original_case)
+                                let prop_info: std::collections::HashMap<Vec<u8>, (Visibility, Vec<u8>)> =
+                                    if let Some(class_def) = self.classes.get(&class_name_lower) {
+                                        class_def.properties.iter()
+                                            .map(|p| {
+                                                // Get the original-case name of the declaring class
+                                                let decl_lower = &p.declaring_class;
+                                                let decl_display = self.classes.get(decl_lower.as_slice())
+                                                    .map(|c| c.name.clone())
+                                                    .unwrap_or_else(|| p.declaring_class.clone());
+                                                (p.name.clone(), (p.visibility, decl_display))
+                                            })
+                                            .collect()
+                                    } else {
+                                        std::collections::HashMap::new()
+                                    };
                                 let mut arr = PhpArray::new();
                                 for (name, value) in &ob.properties {
-                                    if name.starts_with(b"__spl_") {
+                                    if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+                                        || name.starts_with(b"__enum_") || name.starts_with(b"__ctor_")
+                                        || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+                                        || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp") {
                                         continue;
                                     }
+                                    let mangled = if let Some((vis, declaring_class)) = prop_info.get(name) {
+                                        match vis {
+                                            Visibility::Private => {
+                                                let mut m = Vec::with_capacity(1 + declaring_class.len() + 1 + name.len());
+                                                m.push(0);
+                                                m.extend_from_slice(declaring_class);
+                                                m.push(0);
+                                                m.extend_from_slice(name);
+                                                m
+                                            }
+                                            Visibility::Protected => {
+                                                let mut m = Vec::with_capacity(3 + name.len());
+                                                m.push(0);
+                                                m.push(b'*');
+                                                m.push(0);
+                                                m.extend_from_slice(name);
+                                                m
+                                            }
+                                            Visibility::Public => name.clone(),
+                                        }
+                                    } else {
+                                        name.clone()
+                                    };
                                     arr.set(
-                                        ArrayKey::String(PhpString::from_vec(name.clone())),
+                                        ArrayKey::String(PhpString::from_vec(mangled)),
                                         value.clone(),
                                     );
                                 }
@@ -16039,6 +16098,17 @@ impl Vm {
                     let func_idx = func_idx_val.to_long() as usize;
 
                     if let Some(func_op_array) = op_array.child_functions.get(func_idx) {
+                        // Validate function-level attributes
+                        for attr in &func_op_array.attributes {
+                            let attr_lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if attr_lower == b"returntypewillchange" {
+                                let func_display = String::from_utf8_lossy(&func_op_array.name).to_string();
+                                return Err(VmError {
+                                    message: format!("Attribute \"ReturnTypeWillChange\" cannot target function (is targeting function {})", func_display),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         let name = name_val.to_php_string();
                         self.register_user_function(name.as_bytes(), func_op_array.clone());
                     }
@@ -18206,6 +18276,29 @@ impl Vm {
                                 // Inherit properties (parent properties come first, child overrides take precedence)
                                 let child_prop_names: Vec<Vec<u8>> =
                                     class.properties.iter().map(|p| p.name.clone()).collect();
+                                // Check property static/non-static mismatch (must come before visibility check)
+                                for parent_prop in &parent.properties {
+                                    if parent_prop.visibility != Visibility::Private {
+                                        if let Some(child_prop) = class.properties.iter().find(|p| p.name == parent_prop.name) {
+                                            if parent_prop.is_static != child_prop.is_static {
+                                                let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                                let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                                if parent_prop.is_static {
+                                                    return Err(VmError {
+                                                        message: format!("Cannot redeclare static {}::${} as non static {}::${}", parent_display, prop_display, child_display, prop_display),
+                                                        line: op.line,
+                                                    });
+                                                } else {
+                                                    return Err(VmError {
+                                                        message: format!("Cannot redeclare non static {}::${} as static {}::${}", parent_display, prop_display, child_display, prop_display),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 // Check property visibility compatibility
                                 for parent_prop in &parent.properties {
                                     if parent_prop.visibility != Visibility::Private {
@@ -18583,6 +18676,18 @@ impl Vm {
                                         message: format!("{} cannot use {} - it is not a trait", class_display, trait_display),
                                         line: op.line,
                                     });
+                                }
+                                // Check for #[Deprecated] attribute on the trait
+                                let has_deprecated = trait_def.attributes.iter().any(|a| {
+                                    a.name.eq_ignore_ascii_case(b"Deprecated")
+                                });
+                                if has_deprecated {
+                                    let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
+                                    let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                    self.emit_deprecated_at(
+                                        &format!("Trait {} used by {} is deprecated", trait_display, class_display),
+                                        op.line,
+                                    );
                                 }
                             } else {
                                 let trait_display = String::from_utf8_lossy(trait_name).to_string();
