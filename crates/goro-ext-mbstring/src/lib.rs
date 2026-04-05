@@ -373,13 +373,21 @@ fn mb_detect_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_bytes(b"UTF-8")))
 }
 
-fn mb_internal_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn mb_internal_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() || matches!(args.first(), Some(Value::Null)) {
+        // Return the currently configured internal encoding
+        if let Some(val) = vm.constants.get(b"mbstring.internal_encoding".as_ref()) {
+            let enc_str = val.to_php_string().to_string_lossy();
+            if !enc_str.is_empty() {
+                return Ok(Value::String(PhpString::from_string(enc_str)));
+            }
+        }
         Ok(Value::String(PhpString::from_bytes(b"UTF-8")))
     } else {
-        // Validate encoding name
+        // Set the internal encoding
         let enc = args[0].to_php_string().to_string_lossy();
         if resolve_encoding(&enc).is_some() || enc.to_ascii_lowercase() == "utf-8" || enc.to_ascii_lowercase() == "ascii" {
+            vm.constants.insert(b"mbstring.internal_encoding".to_vec(), Value::String(PhpString::from_string(enc)));
             Ok(Value::True)
         } else {
             Ok(Value::True) // Accept silently

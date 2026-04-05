@@ -8111,6 +8111,77 @@ impl Vm {
                 }
                 Some(Value::Null)
             }
+            b"offsetget" => {
+                // ArrayAccess: $xml['attr'] -> access @attributes
+                let key = args.get(1)?;
+                let key_str = key.to_php_string();
+                let ob = obj.borrow();
+                let attrs = ob.get_property(b"@attributes");
+                if let Value::Array(attrs_arr) = &attrs {
+                    let k = ArrayKey::String(key_str);
+                    let val = attrs_arr.borrow().get(&k).cloned().unwrap_or(Value::Null);
+                    if matches!(val, Value::Null | Value::Undef) {
+                        Some(Value::Null)
+                    } else {
+                        // Return as a SimpleXMLElement wrapping the string value
+                        let obj_id = self.next_object_id();
+                        let mut sxml_obj = PhpObject::new(b"SimpleXMLElement".to_vec(), obj_id);
+                        sxml_obj.set_property(b"0".to_vec(), val);
+                        Some(Value::Object(Rc::new(RefCell::new(sxml_obj))))
+                    }
+                } else {
+                    Some(Value::Null)
+                }
+            }
+            b"offsetset" => {
+                // ArrayAccess: $xml['attr'] = $val -> set @attributes
+                let key = args.get(1).cloned().unwrap_or(Value::Null);
+                let val = args.get(2).cloned().unwrap_or(Value::Null);
+                let key_str = key.to_php_string();
+                let val_str = val.to_php_string();
+                let mut ob = obj.borrow_mut();
+                let attrs = ob.get_property(b"@attributes");
+                if let Value::Array(attrs_arr) = &attrs {
+                    attrs_arr.borrow_mut().set(
+                        ArrayKey::String(key_str),
+                        Value::String(val_str),
+                    );
+                } else {
+                    let mut attrs_arr = PhpArray::new();
+                    attrs_arr.set(
+                        ArrayKey::String(key_str),
+                        Value::String(val_str),
+                    );
+                    ob.set_property(b"@attributes".to_vec(), Value::Array(Rc::new(RefCell::new(attrs_arr))));
+                }
+                Some(Value::Null)
+            }
+            b"offsetexists" => {
+                // ArrayAccess: isset($xml['attr'])
+                let key = args.get(1)?;
+                let key_str = key.to_php_string();
+                let ob = obj.borrow();
+                let attrs = ob.get_property(b"@attributes");
+                if let Value::Array(attrs_arr) = &attrs {
+                    let k = ArrayKey::String(key_str);
+                    let exists = attrs_arr.borrow().get(&k).is_some();
+                    Some(if exists { Value::True } else { Value::False })
+                } else {
+                    Some(Value::False)
+                }
+            }
+            b"offsetunset" => {
+                // ArrayAccess: unset($xml['attr'])
+                let key = args.get(1)?;
+                let key_str = key.to_php_string();
+                let ob = obj.borrow();
+                let attrs = ob.get_property(b"@attributes");
+                if let Value::Array(attrs_arr) = &attrs {
+                    let k = ArrayKey::String(key_str);
+                    attrs_arr.borrow_mut().remove(&k);
+                }
+                Some(Value::Null)
+            }
             _ => None,
         }
     }
@@ -14482,8 +14553,9 @@ impl Vm {
                                                 obj_mut.set_property(b"i".to_vec(), Value::Long(i));
                                                 obj_mut.set_property(b"s".to_vec(), Value::Long(s));
                                                 obj_mut.set_property(b"f".to_vec(), Value::Double(0.0));
-                                                obj_mut.set_property(b"days".to_vec(), Value::False);
                                                 obj_mut.set_property(b"invert".to_vec(), Value::Long(0));
+                                                obj_mut.set_property(b"days".to_vec(), Value::False);
+                                                obj_mut.set_property(b"from_string".to_vec(), Value::False);
                                             } else {
                                                 drop(obj_mut);
                                                 let err_msg = "DateInterval::__construct() expects exactly 1 argument, 0 given".to_string();
@@ -15379,7 +15451,7 @@ impl Vm {
                             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
                             b"splfixedarray" | b"splobjectstorage" |
                             b"spldoublylinkedlist" | b"splstack" | b"splqueue" |
-                            b"weakmap")
+                            b"weakmap" | b"simplexmlelement")
                             || {
                                 // Check parent chain for ArrayAccess support
                                 let mut found = false;
@@ -15493,7 +15565,7 @@ impl Vm {
                             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
                             b"splfixedarray" | b"splobjectstorage" |
                             b"spldoublylinkedlist" | b"splstack" | b"splqueue" |
-                            b"weakmap")
+                            b"weakmap" | b"simplexmlelement")
                             || {
                                 // Check parent chain for ArrayAccess support
                                 let mut found = false;
@@ -17918,7 +17990,7 @@ impl Vm {
                             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
                             b"splfixedarray" | b"splobjectstorage" |
                             b"spldoublylinkedlist" | b"splstack" | b"splqueue" |
-                            b"weakmap")
+                            b"weakmap" | b"simplexmlelement")
                             || {
                                 // Check parent chain for ArrayAccess support
                                 let mut found = false;
@@ -18694,6 +18766,22 @@ impl Vm {
                                                         child_display, const_display, iface_display, const_display),
                                                     line: op.line,
                                                 });
+                                            }
+                                            // Check visibility: interface constants are public,
+                                            // implementing class must keep them public
+                                            if !class.is_interface {
+                                                if let Some(child_meta) = class.constants_meta.get(const_name) {
+                                                    if child_meta.visibility != Visibility::Public {
+                                                        let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                                        let iface_display = String::from_utf8_lossy(iface_name).to_string();
+                                                        let const_display = String::from_utf8_lossy(const_name).to_string();
+                                                        return Err(VmError {
+                                                            message: format!("Access level to {}::{} must be public (as in interface {})",
+                                                                child_display, const_display, iface_display),
+                                                            line: op.line,
+                                                        });
+                                                    }
+                                                }
                                             }
                                         }
                                     } else {
@@ -20990,17 +21078,37 @@ impl Vm {
                                 let current_val = obj.borrow().get_property(prop_name.as_bytes());
                                 if obj.borrow().has_property(prop_name.as_bytes()) && !matches!(current_val, Value::Undef) {
                                     let in_clone_window = matches!(obj.borrow().get_property(b"__clone_window"), Value::True);
-                                    if in_clone_window {
+                                    let should_error = if in_clone_window {
                                         let modified_key = format!("__clone_modified_{}", String::from_utf8_lossy(prop_name.as_bytes()));
-                                        if matches!(obj.borrow().get_property(modified_key.as_bytes()), Value::True) {
-                                            let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
-                                            let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                        matches!(obj.borrow().get_property(modified_key.as_bytes()), Value::True)
+                                    } else {
+                                        true
+                                    };
+                                    if should_error {
+                                        // Use declaring class name for the error message
+                                        let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let class_display = self.classes.get(&declaring_lower)
+                                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                            .unwrap_or_else(|| String::from_utf8_lossy(&declaring_class).to_string());
+                                        let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                        // If property has asymmetric set visibility, include it in the error
+                                        if set_vis.is_some() && visibility_error.is_some() {
+                                            let vis_str = match effective_write_vis {
+                                                Visibility::Private => "private(set)",
+                                                Visibility::Protected => "protected(set)",
+                                                Visibility::Public => "public(set)",
+                                            };
+                                            let caller_scope = self.current_class_scope();
+                                            let scope_str = if let Some(cs) = caller_scope.as_deref() {
+                                                format!("scope {}", String::from_utf8_lossy(cs))
+                                            } else {
+                                                "global scope".to_string()
+                                            };
+                                            readonly_error = Some(format!("Cannot modify {} readonly property {}::${} from {}",
+                                                vis_str, class_display, prop_display, scope_str));
+                                        } else {
                                             readonly_error = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_display));
                                         }
-                                    } else {
-                                        let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
-                                        let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
-                                        readonly_error = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_display));
                                     }
                                 }
                             }
@@ -22383,11 +22491,16 @@ impl Vm {
                 };
                 if is_undef {
                     if let Some(name) = op_array.cv_names.get(i) {
-                        // Don't warn for superglobals
-                        if name != b"GLOBALS" && name != b"_SERVER" && name != b"_GET"
-                            && name != b"_POST" && name != b"_COOKIE" && name != b"_FILES"
-                            && name != b"_REQUEST" && name != b"_SESSION" && name != b"_ENV"
+                        // Don't warn for superglobals - try loading from globals instead
+                        if name == b"_SESSION" || name == b"_SERVER" || name == b"_GET"
+                            || name == b"_POST" || name == b"_COOKIE" || name == b"_FILES"
+                            || name == b"_REQUEST" || name == b"_ENV" || name == b"GLOBALS"
                         {
+                            // Try to load the superglobal from vm globals
+                            if let Some(global_val) = self.globals.get(name.as_slice()) {
+                                return global_val.clone().deref();
+                            }
+                        } else {
                             let varname = String::from_utf8_lossy(name);
                             self.emit_warning_at(&format!("Undefined variable ${}", varname), line);
                         }
@@ -24084,8 +24197,9 @@ fn create_date_interval_from_timestamps(vm: &mut Vm, ts1: i64, ts2: i64, absolut
     obj.set_property(b"i".to_vec(), Value::Long(minutes));
     obj.set_property(b"s".to_vec(), Value::Long(seconds));
     obj.set_property(b"f".to_vec(), Value::Double(0.0));
-    obj.set_property(b"days".to_vec(), Value::Long(total_days));
     obj.set_property(b"invert".to_vec(), Value::Long(if absolute { 0 } else { invert }));
+    obj.set_property(b"days".to_vec(), Value::Long(total_days));
+    obj.set_property(b"from_string".to_vec(), Value::False);
     Value::Object(Rc::new(RefCell::new(obj)))
 }
 

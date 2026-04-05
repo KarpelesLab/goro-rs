@@ -57,6 +57,17 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"curl_getinfo", curl_getinfo);
     vm.register_function(b"curl_reset", curl_reset);
     vm.register_function(b"curl_version", curl_version);
+    vm.register_function(b"curl_multi_init", curl_multi_init);
+    vm.register_function(b"curl_multi_add_handle", curl_multi_add_handle);
+    vm.register_function(b"curl_multi_remove_handle", curl_multi_remove_handle);
+    vm.register_function(b"curl_multi_exec", curl_multi_exec);
+    vm.register_function(b"curl_multi_getcontent", curl_multi_getcontent);
+    vm.register_function(b"curl_multi_close", curl_multi_close);
+    vm.register_function(b"curl_multi_errno", curl_multi_errno);
+    vm.register_function(b"curl_multi_strerror", curl_multi_strerror);
+    vm.register_function(b"curl_multi_setopt", curl_multi_setopt);
+    vm.register_function(b"curl_multi_info_read", curl_multi_info_read);
+    vm.register_function(b"curl_multi_select", curl_multi_select);
 
     // Register CURLOPT constants
     vm.constants.insert(b"CURLOPT_URL".to_vec(), Value::Long(10002));
@@ -116,6 +127,17 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"CURLAUTH_BASIC".to_vec(), Value::Long(1));
     vm.constants.insert(b"CURLAUTH_DIGEST".to_vec(), Value::Long(2));
     vm.constants.insert(b"CURLAUTH_ANY".to_vec(), Value::Long(-17));
+
+    // CurlMulti constants
+    vm.constants.insert(b"CURLM_OK".to_vec(), Value::Long(0));
+    vm.constants.insert(b"CURLM_CALL_MULTI_PERFORM".to_vec(), Value::Long(-1));
+    vm.constants.insert(b"CURLM_INTERNAL_ERROR".to_vec(), Value::Long(4));
+    vm.constants.insert(b"CURLM_BAD_HANDLE".to_vec(), Value::Long(1));
+    vm.constants.insert(b"CURLM_BAD_EASY_HANDLE".to_vec(), Value::Long(2));
+    vm.constants.insert(b"CURLM_OUT_OF_MEMORY".to_vec(), Value::Long(3));
+    vm.constants.insert(b"CURLMSG_DONE".to_vec(), Value::Long(1));
+    vm.constants.insert(b"CURLMOPT_MAXCONNECTS".to_vec(), Value::Long(6));
+    vm.constants.insert(b"CURLMOPT_PIPELINING".to_vec(), Value::Long(3));
 }
 
 /// curl_init(?string $url = null): CurlHandle|false
@@ -893,6 +915,137 @@ fn url_encode(s: &str) -> String {
         }
     }
     result
+}
+
+// === curl_multi_* stubs ===
+// These provide basic stub implementations so scripts using curl_multi don't fatal error.
+
+thread_local! {
+    static NEXT_MULTI_ID: RefCell<i64> = RefCell::new(1);
+    static MULTI_HANDLES: RefCell<std::collections::HashMap<i64, Vec<i64>>> = RefCell::new(std::collections::HashMap::new());
+}
+
+/// curl_multi_init(): CurlMultiHandle
+fn curl_multi_init(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let multi_id = NEXT_MULTI_ID.with(|id| {
+        let cur = *id.borrow();
+        *id.borrow_mut() = cur + 1;
+        cur
+    });
+    MULTI_HANDLES.with(|handles| {
+        handles.borrow_mut().insert(multi_id, Vec::new());
+    });
+    let obj_id = vm.next_object_id();
+    let mut obj = goro_core::object::PhpObject::new(b"CurlMultiHandle".to_vec(), obj_id);
+    obj.set_property(b"__multi_id".to_vec(), Value::Long(multi_id));
+    Ok(Value::Object(Rc::new(RefCell::new(obj))))
+}
+
+/// curl_multi_add_handle(CurlMultiHandle $multi_handle, CurlHandle $handle): int
+fn curl_multi_add_handle(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let multi_id = if let Some(Value::Object(obj)) = args.first() {
+        obj.borrow().get_property(b"__multi_id").to_long()
+    } else {
+        return Ok(Value::Long(1)); // CURLM_BAD_HANDLE
+    };
+    let handle_id = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    MULTI_HANDLES.with(|handles| {
+        if let Some(list) = handles.borrow_mut().get_mut(&multi_id) {
+            list.push(handle_id);
+        }
+    });
+    Ok(Value::Long(0)) // CURLM_OK
+}
+
+/// curl_multi_remove_handle(CurlMultiHandle $multi_handle, CurlHandle $handle): int
+fn curl_multi_remove_handle(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let multi_id = if let Some(Value::Object(obj)) = args.first() {
+        obj.borrow().get_property(b"__multi_id").to_long()
+    } else {
+        return Ok(Value::Long(1));
+    };
+    let handle_id = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    MULTI_HANDLES.with(|handles| {
+        if let Some(list) = handles.borrow_mut().get_mut(&multi_id) {
+            list.retain(|&id| id != handle_id);
+        }
+    });
+    Ok(Value::Long(0))
+}
+
+/// curl_multi_exec(CurlMultiHandle $multi_handle, int &$still_running): int
+fn curl_multi_exec(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Stub: set still_running to 0 (all done immediately)
+    if let Some(Value::Reference(r)) = args.get(1) {
+        *r.borrow_mut() = Value::Long(0);
+    }
+    Ok(Value::Long(0)) // CURLM_OK
+}
+
+/// curl_multi_getcontent(CurlHandle $handle): ?string
+fn curl_multi_getcontent(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let handle_id = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let result = CURL_HANDLES.with(|handles| {
+        if let Some(handle) = handles.borrow().get(&handle_id) {
+            if handle.response_body.is_empty() {
+                Value::Null
+            } else {
+                Value::String(PhpString::from_vec(handle.response_body.clone()))
+            }
+        } else {
+            Value::Null
+        }
+    });
+    Ok(result)
+}
+
+/// curl_multi_close(CurlMultiHandle $multi_handle): void
+fn curl_multi_close(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(obj)) = args.first() {
+        let multi_id = obj.borrow().get_property(b"__multi_id").to_long();
+        MULTI_HANDLES.with(|handles| {
+            handles.borrow_mut().remove(&multi_id);
+        });
+    }
+    Ok(Value::Null)
+}
+
+/// curl_multi_errno(CurlMultiHandle $multi_handle): int
+fn curl_multi_errno(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0)) // CURLM_OK
+}
+
+/// curl_multi_strerror(int $error_code): ?string
+fn curl_multi_strerror(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let code = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let msg = match code {
+        0 => "No error",
+        1 => "Invalid multi handle",
+        2 => "Invalid easy handle",
+        3 => "Out of memory",
+        4 => "Internal error",
+        _ => return Ok(Value::Null),
+    };
+    Ok(Value::String(PhpString::from_string(msg.to_string())))
+}
+
+/// curl_multi_setopt(CurlMultiHandle $multi_handle, int $option, mixed $value): bool
+fn curl_multi_setopt(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+/// curl_multi_info_read(CurlMultiHandle $multi_handle, int &$msgs_in_queue = null): array|false
+fn curl_multi_info_read(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Set msgs_in_queue to 0
+    if let Some(Value::Reference(r)) = args.get(1) {
+        *r.borrow_mut() = Value::Long(0);
+    }
+    Ok(Value::False)
+}
+
+/// curl_multi_select(CurlMultiHandle $multi_handle, float $timeout = 1.0): int
+fn curl_multi_select(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
 }
 
 /// Simple base64 encoding for Basic auth

@@ -430,6 +430,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"proc_terminate", proc_terminate_fn);
     vm.register_function(b"inet_pton", inet_pton_fn);
     vm.register_function(b"inet_ntop", inet_ntop_fn);
+    vm.register_function(b"stream_set_blocking", stream_set_blocking_fn);
+    vm.register_function(b"stream_set_timeout", stream_set_timeout_fn);
+    vm.register_function(b"stream_set_write_buffer", stream_set_write_buffer_fn);
+    vm.register_function(b"stream_set_read_buffer", stream_set_read_buffer_fn);
 
     // Regex functions are now in the regex module (regex.rs)
 }
@@ -10599,4 +10603,18 @@ fn mangle_property_name(name: &[u8], declaring_class: &[u8], visibility: Option<
         }
         _ => name.to_vec(),
     }
+}
+
+// Stream stubs
+fn stream_set_blocking_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+fn stream_set_timeout_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+fn stream_set_write_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
+}
+fn stream_set_read_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
 }

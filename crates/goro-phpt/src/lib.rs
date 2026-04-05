@@ -274,7 +274,13 @@ fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
             }
             if let Some(eq) = line.find('=') {
                 let key = line[..eq].trim().to_string();
-                let value = line[eq + 1..].trim().to_string();
+                let mut value = line[eq + 1..].trim().to_string();
+                // Strip surrounding quotes from INI values (e.g. "ISO-8859-1" -> ISO-8859-1)
+                if (value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\''))
+                {
+                    value = value[1..value.len() - 1].to_string();
+                }
                 settings.push((key, value));
             }
         }
@@ -283,6 +289,8 @@ fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
 }
 
 /// Parse error reporting expressions like "E_ALL&~E_DEPRECATED"
+/// Supports operators: | (OR), ^ (XOR), & (AND), ~ (NOT), ! (NOT)
+/// with proper precedence: ~ and ! (unary, highest) > & > ^ > | (lowest)
 fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
     // PHP error level constants
     fn resolve_constant(name: &str) -> Option<i64> {
@@ -307,40 +315,119 @@ fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
         }
     }
 
+    /// Tokenize an error_reporting expression into operands and operators
+    fn tokenize_expr(expr: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        for ch in expr.chars() {
+            match ch {
+                '|' | '^' | '&' | '~' | '!' | '(' | ')' => {
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        tokens.push(trimmed);
+                    }
+                    current.clear();
+                    tokens.push(ch.to_string());
+                }
+                ' ' | '\t' => {
+                    // whitespace is a separator
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        tokens.push(trimmed);
+                        current.clear();
+                    }
+                }
+                _ => {
+                    current.push(ch);
+                }
+            }
+        }
+        let trimmed = current.trim().to_string();
+        if !trimmed.is_empty() {
+            tokens.push(trimmed);
+        }
+        tokens
+    }
+
+    /// Recursive descent parser for bitwise expressions
+    /// Precedence (lowest to highest): | , ^ , & , unary ~/!
+    fn parse_or(tokens: &[String], pos: &mut usize) -> Option<i64> {
+        let mut left = parse_xor(tokens, pos)?;
+        while *pos < tokens.len() && tokens[*pos] == "|" {
+            *pos += 1;
+            let right = parse_xor(tokens, pos)?;
+            left |= right;
+        }
+        Some(left)
+    }
+
+    fn parse_xor(tokens: &[String], pos: &mut usize) -> Option<i64> {
+        let mut left = parse_and(tokens, pos)?;
+        while *pos < tokens.len() && tokens[*pos] == "^" {
+            *pos += 1;
+            let right = parse_and(tokens, pos)?;
+            left ^= right;
+        }
+        Some(left)
+    }
+
+    fn parse_and(tokens: &[String], pos: &mut usize) -> Option<i64> {
+        let mut left = parse_unary(tokens, pos)?;
+        while *pos < tokens.len() && tokens[*pos] == "&" {
+            *pos += 1;
+            let right = parse_unary(tokens, pos)?;
+            left &= right;
+        }
+        Some(left)
+    }
+
+    fn parse_unary(tokens: &[String], pos: &mut usize) -> Option<i64> {
+        if *pos < tokens.len() && (tokens[*pos] == "~" || tokens[*pos] == "!") {
+            *pos += 1;
+            let val = parse_unary(tokens, pos)?;
+            return Some(!val);
+        }
+        if *pos < tokens.len() && tokens[*pos] == "(" {
+            *pos += 1; // skip '('
+            let val = parse_or(tokens, pos)?;
+            if *pos < tokens.len() && tokens[*pos] == ")" {
+                *pos += 1;
+            }
+            return Some(val);
+        }
+        // Must be a constant or number
+        if *pos < tokens.len() {
+            let token = &tokens[*pos];
+            *pos += 1;
+            return resolve_constant(token);
+        }
+        None
+    }
+
     let expr = expr.trim();
     if expr.is_empty() {
         return None;
     }
 
-    // Handle simple constant
+    // Handle simple constant (fast path)
     if let Some(v) = resolve_constant(expr) {
         return Some(v);
     }
 
-    // Handle "E_ALL&~E_DEPRECATED" pattern
-    if let Some(amp_pos) = expr.find('&') {
-        let left = &expr[..amp_pos];
-        let right = &expr[amp_pos + 1..];
-        let left_val = resolve_constant(left)?;
-        let right = right.trim();
-        if let Some(rest) = right.strip_prefix('~') {
-            let right_val = resolve_constant(rest)?;
-            return Some(left_val & !right_val);
-        }
-        let right_val = resolve_constant(right)?;
-        return Some(left_val & right_val);
+    // Tokenize and parse with proper precedence
+    let tokens = tokenize_expr(expr);
+    if tokens.is_empty() {
+        return None;
     }
-
-    // Handle "|" operator
-    if let Some(pipe_pos) = expr.find('|') {
-        let left = &expr[..pipe_pos];
-        let right = &expr[pipe_pos + 1..];
-        let left_val = resolve_constant(left)?;
-        let right_val = parse_error_reporting_expr(right)?;
-        return Some(left_val | right_val);
+    let mut pos = 0;
+    let result = parse_or(&tokens, &mut pos)?;
+    // Ensure all tokens were consumed
+    if pos == tokens.len() {
+        Some(result)
+    } else {
+        // Partial parse - try anyway
+        Some(result)
     }
-
-    None
 }
 
 fn execute_php_with_timeout(

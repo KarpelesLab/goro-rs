@@ -88,6 +88,7 @@ struct RegexFlags {
     extended: bool,         // x
     ungreedy: bool,         // U
     anchored: bool,         // A
+    utf8: bool,             // u
 }
 
 // ============================================================================
@@ -1673,7 +1674,7 @@ pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
             b's' => flags.dotall = true,
             b'x' => flags.extended = true,
             b'U' => flags.ungreedy = true,
-            b'u' => {} // UTF-8 mode — we ignore for now
+            b'u' => flags.utf8 = true,
             b'D' => {} // Dollar end only — ignore
             b'A' => flags.anchored = true,
             b'S' => {} // Extra study — ignore
@@ -1886,6 +1887,13 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let input = subject.as_bytes();
+
+    // Validate UTF-8 when /u modifier is used
+    if compiled.flags.utf8 && std::str::from_utf8(input).is_err() {
+        vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
+        return Ok(Value::False);
+    }
+
     let result = compiled.find(input, offset);
 
     // If matches parameter was provided, try to fill it
@@ -1942,6 +1950,7 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// preg_match_all($pattern, $subject [, &$matches [, $flags [, $offset]]])
 pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.preg_last_error = 0;
     let pattern = match args.first() {
         Some(v) => v.to_php_string(),
         None => {
@@ -1991,6 +2000,20 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let input = subject.as_bytes();
+
+    // Validate UTF-8 when /u modifier is used
+    if compiled.flags.utf8 && std::str::from_utf8(input).is_err() {
+        vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
+        // Set empty matches array if parameter was provided
+        if let Some(matches_ref) = args.get(2) {
+            let empty_arr = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+            if let Value::Reference(r) = matches_ref {
+                *r.borrow_mut() = empty_arr;
+            }
+        }
+        return Ok(Value::False);
+    }
+
     let all_matches = {
         let mut matches = Vec::new();
         let mut off = offset;
@@ -2101,6 +2124,7 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// preg_replace($pattern, $replacement, $subject [, $limit [, &$count]])
 pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.preg_last_error = 0;
     let pattern_val = match args.first() {
         Some(v) => v.clone(),
         None => return Ok(Value::Null),
@@ -2243,6 +2267,12 @@ fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u
         }
     };
 
+    // Validate UTF-8 when /u modifier is used
+    if compiled.flags.utf8 && std::str::from_utf8(subject).is_err() {
+        vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
+        return None;
+    }
+
     let mut result = Vec::new();
     let mut offset = 0;
     let mut count = 0i64;
@@ -2344,6 +2374,7 @@ fn apply_replacement(result: &mut Vec<u8>, replacement: &[u8], subject: &[u8], m
 
 /// preg_split($pattern, $subject [, $limit [, $flags]])
 pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.preg_last_error = 0;
     let pattern = match args.first() {
         Some(v) => v.to_php_string(),
         None => return Ok(Value::Null),
@@ -2370,6 +2401,13 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let input = subject.as_bytes();
+
+    // Validate UTF-8 when /u modifier is used
+    if compiled.flags.utf8 && std::str::from_utf8(input).is_err() {
+        vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
+        return Ok(Value::False);
+    }
+
     let mut result = PhpArray::new();
     let mut parts = 0i64;
     let effective_limit = if limit <= 0 { i64::MAX } else { limit };
@@ -2615,6 +2653,7 @@ fn call_callback(vm: &mut Vm, callback: &Value, call_args: &[Value]) -> Result<V
 
 /// preg_replace_callback($pattern, $callback, $subject [, $limit [, &$count [, $flags]]])
 pub fn preg_replace_callback(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.preg_last_error = 0;
     let pattern_val = match args.first() {
         Some(v) => v.clone(),
         None => return Ok(Value::Null),
@@ -2693,6 +2732,12 @@ fn do_preg_replace_callback(
             return Ok((subject.to_vec(), 0));
         }
     };
+
+    // Validate UTF-8 when /u modifier is used
+    if compiled.flags.utf8 && std::str::from_utf8(subject).is_err() {
+        vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
+        return Ok((subject.to_vec(), 0));
+    }
 
     let mut result = Vec::new();
     let mut offset = 0;

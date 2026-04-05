@@ -2478,8 +2478,9 @@ fn create_date_interval_from_diff(vm: &mut Vm, ts1: i64, ts2: i64, absolute: boo
     obj.set_property(b"i".to_vec(), Value::Long(minutes));
     obj.set_property(b"s".to_vec(), Value::Long(seconds));
     obj.set_property(b"f".to_vec(), Value::Double(0.0));
-    obj.set_property(b"days".to_vec(), Value::Long(total_days));
     obj.set_property(b"invert".to_vec(), Value::Long(if absolute { 0 } else { invert }));
+    obj.set_property(b"days".to_vec(), Value::Long(total_days));
+    obj.set_property(b"from_string".to_vec(), Value::False);
 
     Value::Object(Rc::new(RefCell::new(obj)))
 }
@@ -2804,8 +2805,10 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
     obj.set_property(b"i".to_vec(), Value::Long(minutes));
     obj.set_property(b"s".to_vec(), Value::Long(seconds));
     obj.set_property(b"f".to_vec(), Value::Double(0.0));
-    obj.set_property(b"days".to_vec(), Value::False);
     obj.set_property(b"invert".to_vec(), Value::Long(0));
+    obj.set_property(b"days".to_vec(), Value::False);
+    obj.set_property(b"from_string".to_vec(), Value::True);
+    obj.set_property(b"date_string".to_vec(), Value::String(PhpString::from_string(s.clone())));
 
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
