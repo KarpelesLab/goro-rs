@@ -763,7 +763,7 @@ fn ord(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(code as i64))
 }
 
-/// Validate that the format argument to sprintf/printf is a string (not array/resource)
+/// Validate that the format argument to sprintf/printf is a string (not array/resource/non-Stringable object)
 fn validate_sprintf_format_arg(vm: &mut Vm, func_name: &str, format_arg: Option<&Value>) -> Result<(), VmError> {
     if let Some(arg) = format_arg {
         match arg {
@@ -772,6 +772,21 @@ fn validate_sprintf_format_arg(vm: &mut Vm, func_name: &str, format_arg: Option<
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
                 return Err(VmError { message: msg, line: vm.current_line });
+            }
+            Value::Object(obj) => {
+                // Check if the object implements __toString (Stringable)
+                let class_name = obj.borrow().class_name.clone();
+                let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let has_tostring = vm.classes.get(&class_lower)
+                    .map(|c| c.get_method(b"__tostring").is_some())
+                    .unwrap_or(false);
+                if !has_tostring {
+                    let class_display = String::from_utf8_lossy(&class_name).to_string();
+                    let msg = format!("{}(): Argument #1 ($format) must be of type string, {} given", func_name, class_display);
+                    let exc = vm.create_exception(b"TypeError", &msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
+                }
             }
             _ => {}
         }

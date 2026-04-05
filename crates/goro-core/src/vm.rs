@@ -8507,6 +8507,19 @@ impl Vm {
 
     /// Get built-in class constant values
     pub fn get_builtin_class_constant(&self, class_lower: &[u8], const_name: &[u8]) -> Option<Value> {
+        // Try exact match first, then uppercase (for keyword names like "match" -> "MATCH")
+        self.get_builtin_class_constant_inner(class_lower, const_name)
+            .or_else(|| {
+                let upper: Vec<u8> = const_name.iter().map(|b| b.to_ascii_uppercase()).collect();
+                if upper != const_name {
+                    self.get_builtin_class_constant_inner(class_lower, &upper)
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn get_builtin_class_constant_inner(&self, class_lower: &[u8], const_name: &[u8]) -> Option<Value> {
         match class_lower {
             b"reflectionmethod" | b"reflectionfunction" | b"reflectionfunctionabstract" => {
                 match const_name {
@@ -8602,11 +8615,13 @@ impl Vm {
             }
             b"regexiterator" | b"recursiveregexiterator" => {
                 match const_name {
-                    b"MATCH" | b"USE_KEY" => Some(Value::Long(0)),
+                    b"MATCH" => Some(Value::Long(0)),
                     b"GET_MATCH" => Some(Value::Long(1)),
                     b"ALL_MATCHES" => Some(Value::Long(2)),
                     b"SPLIT" => Some(Value::Long(3)),
                     b"REPLACE" => Some(Value::Long(4)),
+                    b"USE_KEY" => Some(Value::Long(1)),
+                    b"INVERT_MATCH" => Some(Value::Long(2)),
                     _ => None,
                 }
             }
@@ -11649,6 +11664,21 @@ impl Vm {
                             obj.borrow().class_name.clone()
                         }
                         Value::String(s) => s.as_bytes().to_vec(),
+                        Value::Null | Value::Undef | Value::True | Value::False
+                        | Value::Long(_) | Value::Double(_) | Value::Array(_) => {
+                            // Invalid type for class name
+                            let err_msg = "Class name must be a valid object or a string";
+                            let exc = self.create_exception(b"TypeError", err_msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _)) = exception_handlers.last() {
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
                         _ => class_val.to_php_string().as_bytes().to_vec(),
                     };
 
@@ -13130,7 +13160,7 @@ impl Vm {
                         }
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
                     {
-                        // Check visibility for static method calls (ClassName::method)
+                        // Check visibility and abstract for static method calls (ClassName::method)
                         if let Some(sep_pos) = func_name_lower.windows(2).position(|w| w == b"::") {
                             {
                                 let class_part_lower = &func_name_lower[..sep_pos];
@@ -13140,6 +13170,24 @@ impl Vm {
                                 if !is_magic {
                                     if let Some(class) = self.classes.get(class_part_lower) {
                                         if let Some(method) = class.get_method(method_part_lower) {
+                                            // Check for abstract method call
+                                            if method.is_abstract {
+                                                let orig_bytes = call.name.as_bytes();
+                                                let class_display = String::from_utf8_lossy(&orig_bytes[..sep_pos]).to_string();
+                                                let method_display = String::from_utf8_lossy(&method.name).to_string();
+                                                let err_msg = format!("Cannot call abstract method {}::{}()", class_display, method_display);
+                                                let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _)) = exception_handlers.last() {
+                                                    self.call_stack.pop();
+                                                    ip = *catch_target as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError {
+                                                    message: format!("Uncaught Error: {}", err_msg),
+                                                    line: op.line,
+                                                });
+                                            }
                                             if method.visibility != Visibility::Public {
                                                 let method_vis = method.visibility;
                                                 let method_declaring = method.declaring_class.clone();
@@ -15074,7 +15122,18 @@ impl Vm {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     if let Value::Array(arr) = &arr_val {
-                        arr.borrow_mut().push(val);
+                        if let Err(msg) = arr.borrow_mut().try_push(val) {
+                            let exc = self.create_exception(b"Error", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _)) = exception_handlers.last() {
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[] = $val -> offsetSet(null, $val)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -16608,7 +16667,7 @@ impl Vm {
 
                         let val = if let Some(class) = self.classes.get(&class_lower) {
                             // Check static properties first, then constants
-                            let raw_val_opt = class
+                            let mut raw_val_opt = class
                                 .static_properties
                                 .get(prop_name.as_bytes())
                                 .cloned()
@@ -16620,19 +16679,37 @@ impl Vm {
                                 while let Some(p) = parent {
                                     let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
                                     if let Some(pc) = self.classes.get(&p_lower) {
-                                        if pc.static_properties.contains_key(prop_name.as_bytes())
-                                            || pc.constants.contains_key(prop_name.as_bytes()) {
+                                        if let Some(v) = pc.static_properties.get(prop_name.as_bytes())
+                                            .or_else(|| pc.constants.get(prop_name.as_bytes())) {
+                                            raw_val_opt = Some(v.clone());
                                             found = true;
                                             break;
                                         }
                                         parent = pc.parent.clone();
                                     } else {
+                                        // Parent not in user classes - check builtin class constants
+                                        // and walk builtin parent chain
+                                        let mut check_builtin = p_lower;
+                                        for _ in 0..20 {
+                                            if let Some(bv) = self.get_builtin_class_constant(&check_builtin, prop_name.as_bytes()) {
+                                                raw_val_opt = Some(bv);
+                                                found = true;
+                                                break;
+                                            }
+                                            if let Some(bp) = get_builtin_parent(&check_builtin) {
+                                                check_builtin = bp.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            } else {
+                                                break;
+                                            }
+                                        }
                                         break;
                                     }
                                 }
                                 if !found {
-                                    // Also check built-in class constants before erroring
-                                    if self.get_builtin_class_constant(&class_lower, prop_name.as_bytes()).is_none() {
+                                    // Also check built-in class constants for the class itself
+                                    if let Some(bv) = self.get_builtin_class_constant(&class_lower, prop_name.as_bytes()) {
+                                        raw_val_opt = Some(bv);
+                                    } else {
                                         let class_display = String::from_utf8_lossy(&resolved_class).to_string();
                                         let prop_display = prop_name.to_string_lossy();
                                         let err_msg = format!("Undefined constant {}::{}", class_display, prop_display);
@@ -16766,8 +16843,21 @@ impl Vm {
                             }
                         } else {
                             // Check built-in class constants first
+                            // Also check if the class is a recognized builtin before "not found" error
                             if let Some(builtin_val) = self.get_builtin_class_constant(&class_lower, prop_name.as_bytes()) {
                                 builtin_val
+                            } else if self.is_known_builtin_class(&class_lower) {
+                                // Builtin class exists but constant doesn't
+                                let class_display = String::from_utf8_lossy(&resolved_class);
+                                let prop_display = prop_name.to_string_lossy();
+                                let err_msg = format!("Undefined constant {}::{}", class_display, prop_display);
+                                let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _)) = exception_handlers.last() {
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
                             } else {
                                 // Class not found - throw Error
                                 let class_display = String::from_utf8_lossy(&resolved_class);
@@ -21533,7 +21623,53 @@ impl Vm {
                         } else
                         // Find the method in the class
                         if let Some(class) = self.classes.get(&class_name_lower) {
-                            if let Some(method) = class.get_method(&method_name_lower) {
+                            // For private methods: PHP resolves them based on the calling scope,
+                            // not the runtime class. If the runtime class has a private method
+                            // with the same name but the caller's scope also has its own private
+                            // method with that name, use the caller's version.
+                            let method_resolved = {
+                                let initial_method = class.get_method(&method_name_lower);
+                                if let Some(ref m) = initial_method {
+                                    if m.visibility == Visibility::Private {
+                                        let declaring_lower: Vec<u8> = m.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let caller_scope = self.current_class_scope();
+                                        if let Some(caller) = &caller_scope {
+                                            let caller_lower: Vec<u8> = caller.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            if caller_lower != declaring_lower {
+                                                // Caller is a different class - check if caller has its own private method
+                                                if let Some(caller_class) = self.classes.get(&caller_lower) {
+                                                    if let Some(caller_method) = caller_class.get_method(&method_name_lower) {
+                                                        if caller_method.visibility == Visibility::Private {
+                                                            let cm_declaring_lower: Vec<u8> = caller_method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                            if cm_declaring_lower == caller_lower {
+                                                                // Use the caller's own private method instead
+                                                                Some(caller_method.clone())
+                                                            } else {
+                                                                initial_method.cloned()
+                                                            }
+                                                        } else {
+                                                            initial_method.cloned()
+                                                        }
+                                                    } else {
+                                                        initial_method.cloned()
+                                                    }
+                                                } else {
+                                                    initial_method.cloned()
+                                                }
+                                            } else {
+                                                initial_method.cloned()
+                                            }
+                                        } else {
+                                            initial_method.cloned()
+                                        }
+                                    } else {
+                                        initial_method.cloned()
+                                    }
+                                } else {
+                                    None
+                                }
+                            };
+                            if let Some(method) = method_resolved {
                                 // Check method visibility
                                 let visibility_err = if method.visibility != Visibility::Public {
                                     let method_vis = method.visibility;
@@ -21554,8 +21690,17 @@ impl Vm {
 
                                 if visibility_err.is_none() {
                                     // Method is accessible - set up the call
-                                    // Create a synthetic function name for the pending call
-                                    let mut func_name = class_name_orig.clone();
+                                    // Create a synthetic function name for the pending call.
+                                    // Use the method's declaring class to ensure private method
+                                    // resolution works correctly through DoCall.
+                                    let func_class = if method.visibility == Visibility::Private {
+                                        // For private methods, use the declaring class name
+                                        // so DoCall resolves the correct method (not the runtime class)
+                                        method.declaring_class.clone()
+                                    } else {
+                                        class_name_orig.clone()
+                                    };
+                                    let mut func_name = func_class;
                                     func_name.extend_from_slice(b"::");
                                     func_name.extend_from_slice(&method.name);
 

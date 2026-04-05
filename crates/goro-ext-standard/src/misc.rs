@@ -288,6 +288,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"header", header_fn);
     vm.register_function(b"headers_sent", headers_sent_fn);
     vm.register_function(b"http_response_code", http_response_code_fn);
+    vm.register_function(b"setcookie", setcookie_fn);
+    vm.register_function(b"setrawcookie", setcookie_fn);
     // SPL object functions moved to goro-ext-spl
     vm.register_function(b"forward_static_call", call_user_func);
     vm.register_function(b"forward_static_call_array", call_user_func_array);
@@ -1257,11 +1259,19 @@ fn call_user_func_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // === Array functions ===
 
-fn array_push(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_push(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
         for val in &args[1..] {
-            arr.push(val.clone());
+            if let Err(msg) = arr.try_push(val.clone()) {
+                drop(arr);
+                let exc = vm.create_exception(b"Error", msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError {
+                    message: format!("Uncaught Error: {}", msg),
+                    line: 0,
+                });
+            }
         }
         Ok(Value::Long(arr.len() as i64))
     } else {
@@ -5845,6 +5855,15 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
         _ => serialize_value_depth(val, depth),
     }
 }
+/// Check if a property name is an internal implementation detail that should be hidden from serialize
+fn is_serialize_internal_property(name: &[u8]) -> bool {
+    name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+        || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
+        || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
+        || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+        || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
+}
+
 fn serialize_value_depth(val: &Value, depth: usize) -> String {
     if depth > 128 {
         return "N;".to_string();
@@ -5899,9 +5918,13 @@ fn serialize_value_depth(val: &Value, depth: usize) -> String {
         Value::Object(obj) => {
             let obj = obj.borrow();
             let class_name = String::from_utf8_lossy(&obj.class_name);
-            let prop_count = obj.properties.len();
+            // Filter out internal properties (same list as var_dump)
+            let visible_props: Vec<_> = obj.properties.iter()
+                .filter(|(name, _)| !is_serialize_internal_property(name))
+                .collect();
+            let prop_count = visible_props.len();
             let mut result = format!("O:{}:\"{}\":{}:{{", class_name.len(), class_name, prop_count);
-            for (name, val) in &obj.properties {
+            for (name, val) in &visible_props {
                 let name_str = String::from_utf8_lossy(name);
                 result.push_str(&format!("s:{}:\"{}\";", name.len(), name_str));
                 result.push_str(&serialize_value_depth(val, depth + 1));
@@ -7198,6 +7221,10 @@ fn scandir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn header_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
+}
+fn setcookie_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Stub: setcookie/setrawcookie always returns true in CLI mode
+    Ok(Value::True)
 }
 fn headers_sent_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)

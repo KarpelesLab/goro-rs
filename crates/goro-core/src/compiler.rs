@@ -1518,6 +1518,12 @@ impl Compiler {
                                     line: stmt.span.line,
                                 });
                             }
+                            if lower == b"static" {
+                                return Err(CompileError {
+                                    message: "Cannot use \"static\" as a parameter type".to_string(),
+                                    line: stmt.span.line,
+                                });
+                            }
                         }
                     }
                 }
@@ -1836,6 +1842,12 @@ impl Compiler {
                                 op1: obj_operand,
                                 op2: prop_operand,
                                 result: OperandType::Unused,
+                                line: stmt.span.line,
+                            });
+                        }
+                        ExprKind::Variable(name) if name == b"GLOBALS" => {
+                            return Err(CompileError {
+                                message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
                                 line: stmt.span.line,
                             });
                         }
@@ -3200,6 +3212,13 @@ impl Compiler {
                                                 line: *method_line,
                                             });
                                         }
+                                        // "static" cannot be used as a parameter type (only as return type)
+                                        if check_static_param_type(hint) {
+                                            return Err(CompileError {
+                                                message: "Cannot use \"static\" as a parameter type".to_string(),
+                                                line: *method_line,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -3282,6 +3301,13 @@ impl Compiler {
                                         if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
                                             return Err(CompileError {
                                                 message: err,
+                                                line: *method_line,
+                                            });
+                                        }
+                                        // "static" cannot be used as a parameter type (only as return type)
+                                        if check_static_param_type(hint) {
+                                            return Err(CompileError {
+                                                message: "Cannot use \"static\" as a parameter type".to_string(),
                                                 line: *method_line,
                                             });
                                         }
@@ -4388,6 +4414,13 @@ impl Compiler {
                         line: target.span.line,
                     });
                 }
+                // $GLOBALS can only be modified using $GLOBALS[$name] = $value syntax
+                if matches!(&target.kind, ExprKind::Variable(name) if name == b"GLOBALS") {
+                    return Err(CompileError {
+                        message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
+                        line: expr.span.line,
+                    });
+                }
                 let val = self.compile_expr(value)?;
                 match &target.kind {
                     ExprKind::Variable(name) => {
@@ -4560,6 +4593,13 @@ impl Compiler {
                     return Err(CompileError {
                         message: "Can't use nullsafe operator in write context".into(),
                         line: target.span.line,
+                    });
+                }
+                // $GLOBALS can only be modified using $GLOBALS[$name] = $value syntax
+                if matches!(&target.kind, ExprKind::Variable(name) if name == b"GLOBALS") {
+                    return Err(CompileError {
+                        message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
+                        line: expr.span.line,
                     });
                 }
                 let val = self.compile_expr(value)?;
@@ -6650,6 +6690,18 @@ impl Compiler {
                 // Compile parameter attributes
                 closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
 
+                // Validate parameter types
+                for param in params.iter() {
+                    if let Some(hint) = &param.type_hint {
+                        if check_static_param_type(hint) {
+                            return Err(CompileError {
+                                message: "Cannot use \"static\" as a parameter type".to_string(),
+                                line: expr.span.line,
+                            });
+                        }
+                    }
+                }
+
                 // Set up parameter CVs
                 for param in params {
                     let cv = closure_compiler.op_array.get_or_create_cv(&param.name);
@@ -6846,6 +6898,18 @@ impl Compiler {
                 // Inherit scope_class from the enclosing function for visibility checks
                 closure_compiler.op_array.scope_class = self.op_array.scope_class.clone()
                     .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
+
+                // Validate parameter types
+                for param in params.iter() {
+                    if let Some(hint) = &param.type_hint {
+                        if check_static_param_type(hint) {
+                            return Err(CompileError {
+                                message: "Cannot use \"static\" as a parameter type".to_string(),
+                                line: expr.span.line,
+                            });
+                        }
+                    }
+                }
 
                 // Set up use vars as the first CVs (before params)
                 for uv in &use_vars {
@@ -7698,6 +7762,13 @@ impl Compiler {
                             line: expr.span.line,
                         });
                     }
+                }
+                // $GLOBALS can only be modified using $GLOBALS[$name] = $value syntax
+                if matches!(&target.kind, ExprKind::Variable(name) if name == b"GLOBALS") {
+                    return Err(CompileError {
+                        message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
+                        line: expr.span.line,
+                    });
                 }
                 // $target = &$value  — both CVs share the same reference
                 match (&target.kind, &value.kind) {
@@ -8707,6 +8778,21 @@ fn check_relative_type_outside_class(hint: &TypeHint) -> Option<String> {
                 }
             }
             None
+        }
+    }
+}
+
+/// Check if a type hint contains "static" - which cannot be used as a parameter type.
+/// Returns true if the hint contains "static".
+fn check_static_param_type(hint: &TypeHint) -> bool {
+    match hint {
+        TypeHint::Simple(name) => {
+            let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            lower == b"static"
+        }
+        TypeHint::Nullable(inner) => check_static_param_type(inner),
+        TypeHint::Union(types) | TypeHint::Intersection(types) => {
+            types.iter().any(check_static_param_type)
         }
     }
 }
