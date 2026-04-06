@@ -3343,9 +3343,16 @@ impl Compiler {
                                                 });
                                             }
                                             let pa = self.compile_attributes(&param.attributes);
+                                            // Promoted typed properties start as Undef (constructor sets the value)
+                                            // Promoted untyped properties get Null as default
+                                            let promoted_default = if promoted_prop_type.is_some() {
+                                                Value::Undef
+                                            } else {
+                                                Value::Null
+                                            };
                                             class.properties.push(PropertyDef {
                                                 name: param.name.clone(),
-                                                default: Value::Null,
+                                                default: promoted_default,
                                                 is_static: false,
                                                 visibility: prop_vis,
                                                 set_visibility: obj_set_vis_cpp,

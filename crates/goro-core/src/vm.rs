@@ -1833,7 +1833,7 @@ impl Vm {
     }
 
     /// Get a human-readable name for a ParamType
-    fn param_type_name(&self, pt: &ParamType) -> String {
+    pub fn param_type_name(&self, pt: &ParamType) -> String {
         self.param_type_name_inner(pt, false)
     }
 
@@ -1929,11 +1929,11 @@ impl Vm {
                             // Strict: only accept int
                             matches!(value, Value::Long(_))
                         } else {
-                        // Non-strict: accept int, float (truncatable), bool, numeric strings
+                        // Non-strict: accept int, float (truncatable), bool, numeric/leading-numeric strings
                         matches!(
                             value,
                             Value::Long(_) | Value::Double(_) | Value::True | Value::False
-                        ) || matches!(value, Value::String(s) if crate::value::parse_numeric_string(s.as_bytes()).is_some())
+                        ) || matches!(value, Value::String(s) if crate::value::parse_leading_numeric_string(s.as_bytes()).is_some())
                         }
                     }
                     b"float" | b"double" => {
@@ -1944,15 +1944,21 @@ impl Vm {
                         matches!(
                             value,
                             Value::Double(_) | Value::Long(_) | Value::True | Value::False
-                        ) || matches!(value, Value::String(s) if crate::value::parse_numeric_string(s.as_bytes()).is_some())
+                        ) || matches!(value, Value::String(s) if crate::value::parse_leading_numeric_string(s.as_bytes()).is_some())
                         }
                     }
                     b"string" => {
                         if strict {
-                            // Strict: only accept string
+                            // Strict: only accept string and Stringable objects
                             matches!(value, Value::String(_))
+                                || if let Value::Object(obj) = value {
+                                    let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    self.classes.get(&obj_class_lower)
+                                        .map(|c| c.get_method(b"__tostring").is_some())
+                                        .unwrap_or(false)
+                                } else { false }
                         } else {
-                        // Non-strict: accept string, int, float, bool (all coercible)
+                        // Non-strict: accept string, int, float, bool, and Stringable objects
                         matches!(
                             value,
                             Value::String(_)
@@ -1960,7 +1966,12 @@ impl Vm {
                                 | Value::Double(_)
                                 | Value::True
                                 | Value::False
-                        )
+                        ) || if let Value::Object(obj) = value {
+                                let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                self.classes.get(&obj_class_lower)
+                                    .map(|c| c.get_method(b"__tostring").is_some())
+                                    .unwrap_or(false)
+                            } else { false }
                         }
                     }
                     b"bool" | b"boolean" => {
@@ -13809,6 +13820,30 @@ impl Vm {
                                 implicit_args,
                                 op_array.strict_types,
                             );
+                            // Coerce Stringable objects to string for string-typed params
+                            for (i, arg) in call.args.iter_mut().enumerate() {
+                                if i >= user_fn.param_types.len() { break; }
+                                if let Some(type_info) = &user_fn.param_types[i] {
+                                    let is_string_param = matches!(&type_info.param_type,
+                                        ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string"))
+                                        || matches!(&type_info.param_type,
+                                            ParamType::Nullable(inner) if matches!(inner.as_ref(), ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string")));
+                                    if is_string_param {
+                                        if let Value::Object(obj) = arg {
+                                            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            let has_tostring = self.classes.get(&class_lower)
+                                                .map(|c| c.get_method(b"__tostring").is_some())
+                                                .unwrap_or(false);
+                                            if has_tostring {
+                                                match self.value_to_string_checked(arg) {
+                                                    Ok(s) => *arg = Value::String(s),
+                                                    Err(_) => {} // Error will be handled later
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // Check if this is a generator function
@@ -21101,7 +21136,15 @@ impl Vm {
                             k.extend_from_slice(b"::get");
                             k
                         };
-                        let in_hook = self.property_hook_stack.iter().any(|s| *s == hook_key);
+                        // When inside ANY hook for this property, access backing store directly
+                        let hook_key_base = {
+                            let mut k = class_lower.clone();
+                            k.push(b':');
+                            k.push(b':');
+                            k.extend_from_slice(prop_name_bytes);
+                            k
+                        };
+                        let in_hook = self.property_hook_stack.iter().any(|s| s.starts_with(&hook_key_base));
 
                         // Check for write-only virtual property (has set hook but no get hook)
                         if !in_hook && !has_get_hook {
@@ -21364,7 +21407,15 @@ impl Vm {
                             k.extend_from_slice(b"::set");
                             k
                         };
-                        let in_set_hook = self.property_hook_stack.iter().any(|s| *s == set_hook_key);
+                        // When inside ANY hook for this property, access backing store directly
+                        let set_hook_key_base = {
+                            let mut k = class_lower.clone();
+                            k.push(b':');
+                            k.push(b':');
+                            k.extend_from_slice(prop_name_bytes_set);
+                            k
+                        };
+                        let in_set_hook = self.property_hook_stack.iter().any(|s| s.starts_with(&set_hook_key_base));
 
                         // Check for read-only virtual property (has get hook but no set hook)
                         if !in_set_hook && !has_set_hook {

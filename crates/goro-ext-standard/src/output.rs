@@ -398,9 +398,22 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // If __debugInfo didn't return an array, fall through to normal display
             }
 
-            // Don't count uninitialized (Undef) properties or internal __spl_/__reflection_ properties
+            // Count visible properties including uninitialized typed properties
+            let class_lower_for_count: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_for_count = vm.classes.get(&class_lower_for_count).cloned();
             let prop_count = obj_borrow.properties.iter()
-                .filter(|(name, val)| !is_internal_property(name) && !matches!(val, Value::Undef))
+                .filter(|(name, val)| {
+                    if is_internal_property(name) { return false; }
+                    if matches!(val, Value::Undef) {
+                        // Only count uninitialized typed properties
+                        class_for_count.as_ref()
+                            .and_then(|c| c.properties.iter().find(|p| p.name == *name))
+                            .map(|p| p.property_type.is_some())
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    }
+                })
                 .count();
             vm.write_output(
                 format!(
@@ -426,8 +439,8 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             let obj_class_name = obj_borrow.class_name.clone();
             drop(obj_borrow);
             for (name, value) in &props {
-                // Skip internal SPL/Reflection properties and uninitialized (Undef) properties
-                if is_internal_property(name) || matches!(value, Value::Undef) {
+                // Skip internal SPL/Reflection properties
+                if is_internal_property(name) {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);
@@ -448,6 +461,18 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     }
                     _ => format!("\"{}\"", name_str),
                 };
+                // Handle uninitialized typed properties
+                if matches!(value, Value::Undef) {
+                    let prop_type = class_info.as_ref().and_then(|c| {
+                        c.properties.iter().find(|p| p.name == *name).and_then(|p| p.property_type.as_ref())
+                    });
+                    if let Some(ptype) = prop_type {
+                        let type_name = vm.param_type_name(ptype);
+                        vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
+                        vm.write_output(format!("{}  uninitialized({})\n", prefix, type_name).as_bytes());
+                    }
+                    continue;
+                }
                 vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
                 var_dump_value(vm, value, indent + 2, seen);
             }
