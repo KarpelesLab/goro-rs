@@ -89,6 +89,8 @@ pub struct Compiler {
     anon_class_name_map: HashMap<Vec<u8>, Vec<u8>>,
     /// Whether we're compiling inside a trait (for self:: tracking)
     is_in_trait: bool,
+    /// Compile-time warnings (message, line)
+    pub warnings: Vec<(String, u32)>,
 }
 
 impl Default for Compiler {
@@ -167,6 +169,7 @@ impl Compiler {
             has_never_return: false,
             anon_class_name_map: HashMap::new(),
             is_in_trait: false,
+            warnings: Vec::new(),
         }
     }
 
@@ -536,7 +539,7 @@ impl Compiler {
 
     /// Compile a complete program
     /// Compile a program, returning the op_array and compiled classes
-    pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>)> {
+    pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         self.build_anon_class_name_map(&program.statements);
         // First pass: process namespace/use declarations and compile function/class declarations
@@ -608,7 +611,7 @@ impl Compiler {
             result: OperandType::Unused,
             line: 0,
         });
-        Ok((self.op_array, self.compiled_classes))
+        Ok((self.op_array, self.compiled_classes, self.warnings))
     }
 
     /// First pass: process only namespace/use/function/class declarations for hoisting.
@@ -696,26 +699,35 @@ impl Compiler {
 
             StmtKind::Return(value) => {
                 // Check for return in never-returning function
+                let callable_kind = if self.current_class.is_some() { "method" } else { "function" };
                 if self.has_never_return {
                     return Err(CompileError {
-                        message: "A never-returning function must not return".into(),
+                        message: format!("A never-returning {} must not return", callable_kind),
                         line: stmt.span.line,
                     });
                 }
                 // Check for `return expr;` (with value) in void function
-                if value.is_some() {
+                if let Some(ret_expr) = value {
                     if let Some(ref ret_type) = self.op_array.return_type {
                         let is_void = matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"));
                         if is_void {
+                            // Check if the return value is `null` to provide a better hint
+                            let is_null_return = matches!(ret_expr.kind, ExprKind::Null);
+                            let msg = if is_null_return {
+                                format!("A void {} must not return a value (did you mean \"return;\" instead of \"return null;\"?)", callable_kind)
+                            } else {
+                                format!("A void {} must not return a value", callable_kind)
+                            };
                             return Err(CompileError {
-                                message: "A void function must not return a value".to_string(),
+                                message: msg,
                                 line: stmt.span.line,
                             });
                         }
                     }
                 }
                 // Check for `return;` (without value) in function with non-void return type
-                if value.is_none() {
+                // Generators are allowed to use `return;` regardless of return type
+                if value.is_none() && !self.op_array.is_generator {
                     if let Some(ref ret_type) = self.op_array.return_type {
                         // void allows `return;`
                         let is_void = matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"));
@@ -1579,6 +1591,8 @@ impl Compiler {
                     .count() as u32;
                 // Compile parameter attributes
                 func_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
+                // Record which parameters are by-reference
+                func_compiler.op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
                 for param in params {
                     let cv = func_compiler.op_array.get_or_create_cv(&param.name);
                     if param.variadic {
@@ -2426,6 +2440,13 @@ impl Compiler {
                                     });
                                 }
                             }
+                            // Hooked properties cannot be readonly
+                            if prop_is_readonly && (get_hook.is_some() || set_hook.is_some()) {
+                                return Err(CompileError {
+                                    message: "Hooked properties cannot be readonly".to_string(),
+                                    line: stmt.span.line,
+                                });
+                            }
                             // Check: null default on typed non-nullable property
                             if let (Some(hint), Some(expr)) = (type_hint, default) {
                                 if matches!(expr.kind, ExprKind::Null) {
@@ -2701,6 +2722,7 @@ impl Compiler {
                                         closure_compiler.op_array.required_param_count = closure_params.iter()
                                             .take_while(|p| p.default.is_none() && !p.variadic)
                                             .count() as u32;
+                                        closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
                                         for p in closure_params {
                                             let cv = closure_compiler.op_array.get_or_create_cv(&p.name);
                                             if p.variadic {
@@ -2783,7 +2805,13 @@ impl Compiler {
                                     _ => Value::Null,
                                 }
                             } else {
-                                Value::Null
+                                // No default value: typed properties should be Undef (uninitialized),
+                                // untyped properties default to Null
+                                if type_hint.is_some() {
+                                    Value::Undef
+                                } else {
+                                    Value::Null
+                                }
                             };
                             let vis = match visibility {
                                 Visibility::Public => ObjVisibility::Public,
@@ -2841,18 +2869,26 @@ impl Compiler {
                                 });
                             }
                             // Determine if property is virtual (hooks don't access backing store)
-                            let prop_is_virtual = if get_hook.is_some() || set_hook.is_some() {
+                            let hooks_would_be_virtual = if get_hook.is_some() || set_hook.is_some() {
                                 let get_uses_backing = get_hook.as_ref()
                                     .map(|body| stmts_reference_backing_store(body, prop_name))
                                     .unwrap_or(false);
                                 let set_uses_backing = set_hook.as_ref()
                                     .map(|(_, body)| stmts_reference_backing_store(body, prop_name))
                                     .unwrap_or(false);
-                                // Virtual if neither hook accesses the backing store AND no default value
-                                !get_uses_backing && !set_uses_backing && default.is_none()
+                                !get_uses_backing && !set_uses_backing
                             } else {
                                 false
                             };
+                            // Virtual properties cannot have a default value
+                            if hooks_would_be_virtual && default.is_some() {
+                                return Err(CompileError {
+                                    message: format!("Cannot specify default value for virtual hooked property {}::${}",
+                                        String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            let prop_is_virtual = hooks_would_be_virtual;
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
                                 default: default_val,
@@ -3131,84 +3167,88 @@ impl Compiler {
                                     }
                                 }
                             }
-                            // Validate magic method argument counts and static modifiers
+                            // Validate magic method argument counts, static modifiers, visibility, by-ref params, and param types
                             {
                                 let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                let class_display = String::from_utf8_lossy(name);
-                                let method_display = String::from_utf8_lossy(method_name);
-                                // Cannot be static checks
-                                if matches!(mn_lower.as_slice(), b"__construct" | b"__destruct" | b"__clone") {
-                                    if *is_static {
-                                        return Err(CompileError {
-                                            message: format!("Method {}::{}() cannot be static",
-                                                class_display, method_display),
-                                            line: *method_line,
-                                        });
+                                let class_display = String::from_utf8_lossy(name).to_string();
+                                let method_display = String::from_utf8_lossy(method_name).to_string();
+
+                                // 1) Argument count / signature checks first (PHP checks these before static)
+                                if matches!(mn_lower.as_slice(), b"__clone" | b"__destruct" | b"__tostring" | b"__serialize" | b"__sleep" | b"__wakeup") && !params.is_empty() {
+                                    return Err(CompileError { message: format!("Method {}::{}() cannot take arguments", class_display, method_display), line: *method_line });
+                                }
+                                if mn_lower == b"__isset" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__isset() must take exactly 1 argument", class_display), line: *method_line }); }
+                                if mn_lower == b"__unset" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__unset() must take exactly 1 argument", class_display), line: *method_line }); }
+                                if mn_lower == b"__get" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__get() must take exactly 1 argument", class_display), line: *method_line }); }
+                                if mn_lower == b"__set" && params.len() != 2 { return Err(CompileError { message: format!("Method {}::__set() must take exactly 2 arguments", class_display), line: *method_line }); }
+                                if mn_lower == b"__call" && params.len() != 2 { return Err(CompileError { message: format!("Method {}::__call() must take exactly 2 arguments", class_display), line: *method_line }); }
+                                if mn_lower == b"__callstatic" && params.len() != 2 { return Err(CompileError { message: format!("Method {}::__callStatic() must take exactly 2 arguments", class_display), line: *method_line }); }
+                                if mn_lower == b"__unserialize" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__unserialize() must take exactly 1 argument", class_display), line: *method_line }); }
+                                if mn_lower == b"__set_state" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__set_state() must take exactly 1 argument", class_display), line: *method_line }); }
+
+                                // 2) By-reference parameter checks
+                                if matches!(mn_lower.as_slice(), b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__callstatic") {
+                                    if params.iter().any(|p| p.by_ref) {
+                                        return Err(CompileError { message: format!("Method {}::{}() cannot take arguments by reference", class_display, method_display), line: *method_line });
                                     }
                                 }
-                                // __clone() cannot take arguments
-                                if mn_lower == b"__clone" && !params.is_empty() {
-                                    return Err(CompileError {
-                                        message: format!("Method {}::__clone() cannot take arguments",
-                                            class_display),
-                                        line: *method_line,
-                                    });
+
+                                // 3) Parameter type validation
+                                if matches!(mn_lower.as_slice(), b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__callstatic") {
+                                    if let Some(param) = params.first() {
+                                        if let Some(ref th) = param.type_hint {
+                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"string")) {
+                                                return Err(CompileError { message: format!("{}::{}(): Parameter #1 (${}) must be of type string when declared", class_display, method_display, String::from_utf8_lossy(&param.name)), line: *method_line });
+                                            }
+                                        }
+                                    }
                                 }
-                                // __destruct() cannot take arguments
-                                if mn_lower == b"__destruct" && !params.is_empty() {
-                                    return Err(CompileError {
-                                        message: format!("Method {}::__destruct() cannot take arguments",
-                                            class_display),
-                                        line: *method_line,
-                                    });
+                                if matches!(mn_lower.as_slice(), b"__call" | b"__callstatic") {
+                                    if let Some(param) = params.get(1) {
+                                        if let Some(ref th) = param.type_hint {
+                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array")) {
+                                                return Err(CompileError { message: format!("{}::{}(): Parameter #2 (${}) must be of type array when declared", class_display, method_display, String::from_utf8_lossy(&param.name)), line: *method_line });
+                                            }
+                                        }
+                                    }
                                 }
-                                // __isset() must take exactly 1 argument
-                                if mn_lower == b"__isset" && params.len() != 1 {
-                                    return Err(CompileError {
-                                        message: format!("Method {}::__isset() must take exactly 1 argument",
-                                            class_display),
-                                        line: *method_line,
-                                    });
+                                if mn_lower == b"__unserialize" {
+                                    if let Some(param) = params.first() {
+                                        if let Some(ref th) = param.type_hint {
+                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array")) {
+                                                return Err(CompileError { message: format!("{}::__unserialize(): Parameter #1 (${}) must be of type array when declared", class_display, String::from_utf8_lossy(&param.name)), line: *method_line });
+                                            }
+                                        }
+                                    }
                                 }
-                                // __unset() must take exactly 1 argument
-                                if mn_lower == b"__unset" && params.len() != 1 {
-                                    return Err(CompileError {
-                                        message: format!("Method {}::__unset() must take exactly 1 argument",
-                                            class_display),
-                                        line: *method_line,
-                                    });
+                                if mn_lower == b"__set_state" {
+                                    if let Some(param) = params.first() {
+                                        if let Some(ref th) = param.type_hint {
+                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array")) {
+                                                return Err(CompileError { message: format!("{}::__set_state(): Parameter #1 (${}) must be of type array when declared", class_display, String::from_utf8_lossy(&param.name)), line: *method_line });
+                                            }
+                                        }
+                                    }
                                 }
-                                // __call() must take exactly 2 arguments
-                                if mn_lower == b"__call" && params.len() != 2 {
-                                    return Err(CompileError {
-                                        message: format!("Method {}::__call() must take exactly 2 arguments",
-                                            class_display),
-                                        line: *method_line,
-                                    });
+
+                                // 4) Cannot be static checks (after argument checks)
+                                if matches!(mn_lower.as_slice(), b"__construct" | b"__destruct" | b"__clone" | b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__tostring" | b"__debuginfo") {
+                                    if *is_static {
+                                        return Err(CompileError { message: format!("Method {}::{}() cannot be static", class_display, method_display), line: *method_line });
+                                    }
                                 }
-                                // __callStatic() must take exactly 2 arguments
-                                if mn_lower == b"__callstatic" && params.len() != 2 {
-                                    return Err(CompileError {
-                                        message: format!("Method {}::__callStatic() must take exactly 2 arguments",
-                                            class_display),
-                                        line: *method_line,
-                                    });
+                                if mn_lower == b"__callstatic" && !*is_static {
+                                    return Err(CompileError { message: format!("Method {}::__callstatic() must be static", class_display), line: *method_line });
                                 }
-                                // __get() must take exactly 1 argument
-                                if mn_lower == b"__get" && params.len() != 1 {
-                                    return Err(CompileError {
-                                        message: format!("Method {}::__get() must take exactly 1 argument",
-                                            class_display),
-                                        line: *method_line,
-                                    });
+                                if mn_lower == b"__set_state" && !*is_static {
+                                    return Err(CompileError { message: format!("Method {}::__set_state() must be static", class_display), line: *method_line });
                                 }
-                                // __set() must take exactly 2 arguments
-                                if mn_lower == b"__set" && params.len() != 2 {
-                                    return Err(CompileError {
-                                        message: format!("Method {}::__set() must take exactly 2 arguments",
-                                            class_display),
-                                        line: *method_line,
-                                    });
+
+                                // 5) Visibility warnings (must be public)
+                                if matches!(mn_lower.as_slice(), b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__callstatic" | b"__tostring" | b"__debuginfo" | b"__serialize" | b"__unserialize" | b"__sleep" | b"__wakeup" | b"__set_state" | b"__clone") {
+                                    if *visibility != Visibility::Public {
+                                        self.warnings.push((format!("The magic method {}::{}() must have public visibility", class_display, method_display), *method_line));
+                                    }
                                 }
                             }
                             // Add promoted properties from constructor params
@@ -3430,6 +3470,14 @@ impl Compiler {
                                     .iter()
                                     .filter(|p| p.default.is_none() && !p.variadic)
                                     .count() as u32;
+                                // Record by-ref params (offset by 1 for non-static methods due to $this)
+                                if *is_static {
+                                    method_compiler.op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
+                                } else {
+                                    let mut by_ref = vec![false]; // $this is not by-ref
+                                    by_ref.extend(params.iter().map(|p| p.by_ref));
+                                    method_compiler.op_array.by_ref_params = by_ref;
+                                }
                                 // Compile parameter attributes
                                 method_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
 
@@ -3629,6 +3677,13 @@ impl Compiler {
                                     .iter()
                                     .filter(|p| p.default.is_none() && !p.variadic)
                                     .count() as u32;
+                                if *is_static {
+                                    abstract_op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
+                                } else {
+                                    let mut by_ref = vec![false];
+                                    by_ref.extend(params.iter().map(|p| p.by_ref));
+                                    abstract_op_array.by_ref_params = by_ref;
+                                }
                                 abstract_op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                                 for param in params {
                                     let cv = abstract_op_array.get_or_create_cv(&param.name);
@@ -3954,6 +4009,7 @@ impl Compiler {
                                         closure_compiler.op_array.required_param_count = closure_params.iter()
                                             .take_while(|p| p.default.is_none() && !p.variadic)
                                             .count() as u32;
+                                        closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
                                         for p in closure_params {
                                             let cv = closure_compiler.op_array.get_or_create_cv(&p.name);
                                             if p.variadic {
@@ -5505,18 +5561,21 @@ impl Compiler {
             }
 
             ExprKind::Exit(value) => {
-                if let Some(val_expr) = value {
-                    let val = self.compile_expr(val_expr)?;
-                    // Use ExitOp which checks at runtime: int values set exit code,
-                    // string values are echoed
-                    self.op_array.emit(Op {
-                        opcode: OpCode::ExitOp,
-                        op1: val,
-                        op2: OperandType::Unused,
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
-                }
+                let exit_val = if let Some(val_expr) = value {
+                    self.compile_expr(val_expr)?
+                } else {
+                    let zero = self.op_array.add_literal(Value::Long(0));
+                    OperandType::Const(zero)
+                };
+                // Use ExitOp which checks at runtime: int values set exit code,
+                // string values are echoed. Also signals script termination.
+                self.op_array.emit(Op {
+                    opcode: OpCode::ExitOp,
+                    op1: exit_val,
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: expr.span.line,
+                });
                 let zero = self.op_array.add_literal(Value::Long(0));
                 self.op_array.emit(Op {
                     opcode: OpCode::Return,
@@ -7008,6 +7067,14 @@ impl Compiler {
                     .count() as u32;
                 // Compile parameter attributes
                 closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
+                // Record by-ref params for closures (with offset for $this and use vars)
+                {
+                    let mut by_ref = Vec::new();
+                    if has_this { by_ref.push(false); } // $this
+                    for uv in use_vars { by_ref.push(uv.by_ref); } // use vars
+                    for p in params.iter() { by_ref.push(p.by_ref); } // params
+                    closure_compiler.op_array.by_ref_params = by_ref;
+                }
 
                 // Validate parameter types
                 for param in params.iter() {

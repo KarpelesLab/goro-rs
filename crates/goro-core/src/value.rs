@@ -1351,6 +1351,71 @@ fn parse_leading_float(s: &str) -> f64 {
     s[..i].parse::<f64>().unwrap_or(0.0)
 }
 
+/// Parse a leading-numeric PHP string, returning (value, is_fully_numeric).
+/// For "123abc", returns Some((123.0, false)).
+/// For "123", returns Some((123.0, true)).
+/// For "abc", returns None.
+pub fn parse_leading_numeric_string(s: &[u8]) -> Option<(f64, bool)> {
+    let s_str = std::str::from_utf8(s).ok()?;
+    let trimmed = s_str.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Try parsing the leading part as a number
+    let mut end = 0;
+    let mut chars = trimmed.chars().peekable();
+    // Optional sign
+    if matches!(chars.peek(), Some('+') | Some('-')) {
+        chars.next();
+        end += 1;
+    }
+    let mut has_digits = false;
+    let mut has_dot = false;
+    // Integer/decimal part
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            has_digits = true;
+            chars.next();
+            end += 1;
+        } else if c == '.' && !has_dot {
+            has_dot = true;
+            chars.next();
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    if !has_digits {
+        return None;
+    }
+    // Optional exponent
+    if matches!(chars.peek(), Some('e') | Some('E')) {
+        let saved_end = end;
+        chars.next();
+        end += 1;
+        if matches!(chars.peek(), Some('+') | Some('-')) {
+            chars.next();
+            end += 1;
+        }
+        if !matches!(chars.peek(), Some('0'..='9')) {
+            // Invalid exponent - revert
+            end = saved_end;
+        } else {
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_digit() {
+                    chars.next();
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    let numeric_part = &trimmed[..end];
+    let is_fully_numeric = end == trimmed.len();
+    numeric_part.parse::<f64>().ok().map(|v| (v, is_fully_numeric))
+}
+
 /// Parse a PHP numeric string, returning its value as f64 if it's numeric.
 pub fn parse_numeric_string(s: &[u8]) -> Option<f64> {
     let s = std::str::from_utf8(s).ok()?;

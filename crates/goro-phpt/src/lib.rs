@@ -722,7 +722,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     // Compile
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
-    let (op_array, compiled_classes) = match compiler.compile(&program) {
+    let (op_array, compiled_classes, compile_warnings) = match compiler.compile(&program) {
         Ok(r) => r,
         Err(e) => {
             let msg = format!(
@@ -735,6 +735,10 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
 
     // Execute
     let mut vm = Vm::new();
+    // Emit compile warnings before execution
+    for (msg, wline) in &compile_warnings {
+        vm.emit_warning_at(msg, *wline);
+    }
     vm.current_file = filename.to_string();
     goro_ext_standard::register_standard_functions(&mut vm);
     goro_ext_date::register(&mut vm);
@@ -934,7 +938,7 @@ fn format_exception_trace(trace_val: &goro_core::value::Value, fallback_trace: &
                 } else {
                     String::new()
                 };
-                let loc = if file.is_empty() {
+                let loc = if file.is_empty() || line == 0 {
                     "[internal function]".to_string()
                 } else {
                     format!("{}({})", file, line)

@@ -263,7 +263,14 @@ impl PhpGenerator {
         };
 
         // Push a call_stack entry for func_get_args() support
-        let func_name = String::from_utf8_lossy(&self.op_array.name).to_string();
+        let raw_name = String::from_utf8_lossy(&self.op_array.name).to_string();
+        // Format closure names for stack traces: __closure_N -> {closure:file:line}
+        let func_name = if raw_name.starts_with("__closure_") && !raw_name.starts_with("__closure_fcc_") {
+            let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
+            format!("{{closure:{}:{}}}", file, self.op_array.decl_line)
+        } else {
+            raw_name
+        };
         let func_file = vm.current_file.clone();
         vm.call_stack.push((func_name, func_file, 0, self.args.clone(), self.class_scope.is_some()));
 
@@ -1727,6 +1734,22 @@ impl PhpGenerator {
                         _ => Value::String(PhpString::empty()),
                     };
                     self.write_operand(&op.result, name);
+                }
+
+                OpCode::ExitOp => {
+                    // exit/die inside a generator/fiber: output value and signal exit
+                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    match &val {
+                        Value::Long(_) => {}
+                        _ => {
+                            let s = val.to_php_string();
+                            vm.write_output(s.as_bytes());
+                        }
+                    }
+                    self.state = GeneratorState::Completed;
+                    self.ip = ip;
+                    vm.exit_requested = true;
+                    return Ok(false);
                 }
 
                 // For any unhandled opcode, skip it silently

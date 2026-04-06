@@ -499,6 +499,15 @@ pub fn reflection_class_method(
                     names.push(Value::String(PhpString::from_vec(iface.clone())));
                 }
             }
+            // Add implicit Stringable interface for classes with __toString
+            if vm.class_implements_interface(&class_lower, b"stringable") {
+                let already_has = names.iter().any(|(_, v)| {
+                    v.to_php_string().as_bytes().eq_ignore_ascii_case(b"Stringable")
+                });
+                if !already_has {
+                    names.push(Value::String(PhpString::from_vec(b"Stringable".to_vec())));
+                }
+            }
             Some(Value::Array(Rc::new(RefCell::new(names))))
         }
         b"getinterfaces" => {
@@ -1744,12 +1753,22 @@ pub fn reflection_function_method(
             Some(if is_gen { Value::True } else { Value::False })
         }
         b"getextension" => {
-            Some(Value::Null)
+            let func_str = String::from_utf8_lossy(&func_lower);
+            let ext_name = get_function_extension(&func_str);
+            if let Some(ext) = ext_name {
+                let obj_id = vm.next_object_id();
+                let mut ext_obj = PhpObject::new(b"ReflectionExtension".to_vec(), obj_id);
+                ext_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(ext.to_string())));
+                Some(Value::Object(Rc::new(RefCell::new(ext_obj))))
+            } else {
+                Some(Value::Null)
+            }
         }
         b"getextensionname" => {
-            if vm.functions.contains_key(func_lower.as_slice()) {
-                // Built-in functions have extension names, but we don't track them
-                Some(Value::False)
+            let func_str = String::from_utf8_lossy(&func_lower);
+            let ext_name = get_function_extension(&func_str);
+            if let Some(ext) = ext_name {
+                Some(Value::String(PhpString::from_string(ext.to_string())))
             } else {
                 Some(Value::False)
             }
@@ -3376,4 +3395,111 @@ pub fn reflection_attribute_method(
         }
         _ => None,
     }
+}
+
+/// Determine which extension a built-in function belongs to
+fn get_function_extension(func_name: &str) -> Option<&'static str> {
+    // Standard library functions
+    let standard = [
+        "array_shift", "array_unshift", "array_pop", "array_push", "array_splice",
+        "array_slice", "array_merge", "array_combine", "array_chunk", "array_unique",
+        "array_flip", "array_reverse", "array_keys", "array_values", "array_search",
+        "array_map", "array_filter", "array_reduce", "array_walk", "array_walk_recursive",
+        "array_column", "array_fill", "array_fill_keys", "array_pad", "array_rand",
+        "array_sum", "array_product", "array_count_values", "array_diff", "array_diff_key",
+        "array_diff_assoc", "array_intersect", "array_intersect_key", "array_intersect_assoc",
+        "array_key_exists", "array_key_first", "array_key_last", "array_multisort",
+        "array_replace", "array_replace_recursive", "in_array", "compact", "extract",
+        "sort", "rsort", "asort", "arsort", "ksort", "krsort", "usort", "uasort", "uksort",
+        "natsort", "natcasesort", "count", "sizeof", "range", "shuffle", "list",
+        "strlen", "strpos", "strrpos", "strstr", "stristr", "substr", "substr_count",
+        "substr_replace", "str_replace", "str_ireplace", "str_repeat", "str_pad",
+        "str_split", "str_word_count", "str_contains", "str_starts_with", "str_ends_with",
+        "strtolower", "strtoupper", "ucfirst", "lcfirst", "ucwords",
+        "trim", "ltrim", "rtrim", "nl2br", "wordwrap", "number_format",
+        "sprintf", "printf", "fprintf", "sscanf", "vsprintf",
+        "implode", "join", "explode", "chunk_split",
+        "ord", "chr", "hex2bin", "bin2hex", "pack", "unpack",
+        "md5", "sha1", "crc32", "base64_encode", "base64_decode",
+        "htmlspecialchars", "htmlspecialchars_decode", "htmlentities", "html_entity_decode",
+        "urlencode", "urldecode", "rawurlencode", "rawurldecode", "http_build_query",
+        "parse_str", "parse_url",
+        "intval", "floatval", "strval", "boolval", "settype", "gettype",
+        "is_null", "is_int", "is_integer", "is_long", "is_float", "is_double",
+        "is_string", "is_bool", "is_array", "is_object", "is_numeric", "is_callable",
+        "is_resource", "is_finite", "is_infinite", "is_nan", "is_countable",
+        "isset", "unset", "empty", "var_dump", "var_export", "print_r", "debug_zval_refs",
+        "serialize", "unserialize",
+        "abs", "ceil", "floor", "round", "max", "min", "pow", "sqrt", "log", "log2", "log10",
+        "exp", "fmod", "intdiv", "fdiv",
+        "rand", "mt_rand", "random_int", "random_bytes", "srand", "mt_srand",
+        "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+        "pi", "deg2rad", "rad2deg", "base_convert", "bindec", "octdec", "hexdec", "decoct", "dechex",
+        "time", "microtime", "sleep", "usleep", "time_sleep_until",
+        "fopen", "fclose", "fread", "fwrite", "fgets", "fgetc", "feof", "fseek", "ftell",
+        "rewind", "fflush", "flock", "fstat", "ftruncate", "fgetcsv", "fputcsv",
+        "file_get_contents", "file_put_contents", "file_exists", "file",
+        "readfile", "copy", "rename", "unlink", "mkdir", "rmdir",
+        "is_file", "is_dir", "is_link", "is_readable", "is_writable", "is_executable",
+        "stat", "lstat", "realpath", "basename", "dirname", "pathinfo",
+        "glob", "tempnam", "sys_get_temp_dir", "tmpfile",
+        "chmod", "chown", "chgrp", "touch", "clearstatcache",
+        "readlink", "symlink", "link",
+        "opendir", "closedir", "readdir", "scandir",
+        "preg_match", "preg_match_all", "preg_replace", "preg_replace_callback",
+        "preg_split", "preg_quote", "preg_last_error",
+        "class_exists", "interface_exists", "trait_exists",
+        "function_exists", "method_exists", "property_exists",
+        "get_class", "get_parent_class", "get_called_class",
+        "get_object_vars", "get_class_vars", "get_class_methods",
+        "defined", "define", "constant",
+        "trigger_error", "user_error", "set_error_handler", "restore_error_handler",
+        "set_exception_handler", "restore_exception_handler",
+        "debug_backtrace", "debug_print_backtrace",
+        "header", "headers_sent", "headers_list", "setcookie",
+        "ini_get", "ini_set", "ini_restore", "get_cfg_var",
+        "phpversion", "phpinfo", "php_uname", "php_sapi_name",
+        "get_defined_vars", "get_defined_functions", "get_defined_constants",
+        "getenv", "putenv",
+        "call_user_func", "call_user_func_array",
+        "array_is_list",
+    ];
+    if standard.contains(&func_name) {
+        return Some("standard");
+    }
+
+    // Date functions
+    let date = [
+        "date", "time", "mktime", "gmmktime", "strtotime", "getdate", "localtime",
+        "checkdate", "date_create", "date_create_immutable", "date_create_from_format",
+        "date_format", "date_modify", "date_add", "date_sub", "date_diff",
+        "date_timezone_get", "date_timezone_set", "date_offset_get",
+        "date_time_set", "date_date_set", "date_isodate_set",
+        "date_timestamp_get", "date_timestamp_set",
+        "date_default_timezone_set", "date_default_timezone_get",
+        "date_parse", "date_parse_from_format",
+        "timezone_open", "timezone_name_get", "timezone_offset_get",
+        "timezone_identifiers_list", "timezone_abbreviations_list",
+        "strftime", "gmstrftime", "idate",
+    ];
+    if date.contains(&func_name) {
+        return Some("date");
+    }
+
+    // JSON functions
+    if func_name.starts_with("json_") {
+        return Some("json");
+    }
+
+    // Ctype functions
+    if func_name.starts_with("ctype_") {
+        return Some("ctype");
+    }
+
+    // mbstring functions
+    if func_name.starts_with("mb_") {
+        return Some("mbstring");
+    }
+
+    None
 }

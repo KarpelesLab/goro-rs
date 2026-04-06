@@ -328,6 +328,8 @@ pub struct OpArray {
     pub class_const_literals: Vec<u32>,
     /// Whether this file/function was declared with declare(strict_types=1)
     pub strict_types: bool,
+    /// Which parameters are passed by reference (indexed by parameter position, true = by-ref)
+    pub by_ref_params: Vec<bool>,
     pub attributes: Vec<crate::object::RuntimeAttribute>,
     pub param_attributes: Vec<Vec<crate::object::RuntimeAttribute>>,
     /// Source filename (for closures, error reporting)
@@ -354,6 +356,7 @@ impl OpArray {
             decl_line: 0,
             class_const_literals: Vec::new(),
             strict_types: false,
+            by_ref_params: Vec::new(),
             attributes: Vec::new(),
             param_attributes: Vec::new(),
             filename: Vec::new(),

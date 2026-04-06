@@ -847,6 +847,16 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                         buf.extend_from_slice(b"' => ");
                     }
                 }
+                // For complex values (arrays, objects/enums), put value on next line
+                let needs_newline = match &value {
+                    Value::Array(_) | Value::Object(_) => true,
+                    Value::Reference(r) => matches!(&*r.borrow(), Value::Array(_) | Value::Object(_)),
+                    _ => false,
+                };
+                if needs_newline {
+                    buf.extend_from_slice(b"\n");
+                    buf.extend_from_slice(format!("{}  ", prefix).as_bytes());
+                }
                 var_export_value(value, buf, indent + 2);
                 buf.extend_from_slice(b",\n");
             }

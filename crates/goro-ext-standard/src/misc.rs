@@ -5513,8 +5513,11 @@ fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
             (11, b"blksize", stat_buf.st_blksize as i64),
             (12, b"blocks", stat_buf.st_blocks as i64),
         ];
-        for (idx, name, val) in &fields {
+        // PHP stat returns all numeric keys first (0-12), then all string keys
+        for (idx, _name, val) in &fields {
             result.set(ArrayKey::Int(*idx), Value::Long(*val));
+        }
+        for (_idx, name, val) in &fields {
             result.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
         }
         Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -5531,8 +5534,11 @@ fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
                     (8, b"atime", 0), (9, b"mtime", 0), (10, b"ctime", 0),
                     (11, b"blksize", -1), (12, b"blocks", -1),
                 ];
-                for (idx, name, val) in &fields {
+                // PHP stat returns all numeric keys first (0-12), then all string keys
+                for (idx, _name, val) in &fields {
                     result.set(ArrayKey::Int(*idx), Value::Long(*val));
+                }
+                for (_idx, name, val) in &fields {
                     result.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
                 }
                 Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -8800,8 +8806,23 @@ fn restore_include_path_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErr
     Ok(Value::Null)
 }
 
-fn get_resource_type_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"Unknown")))
+fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    match val {
+        Value::Long(id) => {
+            // Check if this is a known file handle
+            let is_file = FILE_HANDLES.with(|handles| {
+                handles.borrow().contains_key(id)
+            });
+            if is_file || *id == 0 || *id == 1 || *id == 2 {
+                // STDIN (0), STDOUT (1), STDERR (2) or opened file handle
+                Ok(Value::String(PhpString::from_bytes(b"stream")))
+            } else {
+                Ok(Value::String(PhpString::from_bytes(b"Unknown")))
+            }
+        }
+        _ => Ok(Value::String(PhpString::from_bytes(b"Unknown"))),
+    }
 }
 
 fn link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -10397,8 +10418,11 @@ fn fstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     (11, b"blksize", stat_buf.st_blksize as i64),
                     (12, b"blocks", stat_buf.st_blocks as i64),
                 ];
-                for (idx, name, val) in &fields {
+                // PHP stat returns all numeric keys first (0-12), then all string keys
+                for (idx, _name, val) in &fields {
                     result.set(ArrayKey::Int(*idx), Value::Long(*val));
+                }
+                for (_idx, name, val) in &fields {
                     result.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
                 }
                 Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -10415,8 +10439,11 @@ fn fstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             (7, b"size", len), (8, b"atime", 0), (9, b"mtime", 0),
                             (10, b"ctime", 0), (11, b"blksize", -1), (12, b"blocks", -1),
                         ];
-                        for (idx, name, val) in &fields {
+                        // PHP stat returns all numeric keys first (0-12), then all string keys
+                        for (idx, _name, val) in &fields {
                             arr.set(ArrayKey::Int(*idx), Value::Long(*val));
+                        }
+                        for (_idx, name, val) in &fields {
                             arr.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
                         }
                         Ok(Value::Array(Rc::new(RefCell::new(arr))))

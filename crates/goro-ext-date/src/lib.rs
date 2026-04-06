@@ -230,13 +230,16 @@ fn ymd_to_days(year: i64, month: u32, day: u32) -> i64 {
 
 fn mktime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // mktime(hour, minute, second, month, day, year)
-    // Get current time as defaults
+    // Get current time as defaults (in local time)
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let now_days = now_secs / 86400;
-    let now_time = ((now_secs % 86400) + 86400) % 86400;
+    let tz_name = get_default_tz(_vm);
+    let (tz_offset, _) = timezone_offset_and_abbrev(&tz_name, now_secs);
+    let local_now = now_secs + tz_offset;
+    let now_days = local_now / 86400;
+    let now_time = ((local_now % 86400) + 86400) % 86400;
     let (now_year, now_month, now_day) = days_to_ymd(now_days);
     let now_hours = now_time / 3600;
     let now_minutes = (now_time % 3600) / 60;
@@ -259,7 +262,12 @@ fn mktime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let days = ymd_to_days(year, month as u32, day as u32);
-    let timestamp = days * 86400 + hour * 3600 + minute * 60 + second;
+    let local_ts = days * 86400 + hour * 3600 + minute * 60 + second;
+
+    // Adjust for timezone - mktime interprets args as local time
+    let tz_name = get_default_tz(_vm);
+    let (offset, _) = timezone_offset_and_abbrev(&tz_name, local_ts);
+    let timestamp = local_ts - offset;
     Ok(Value::Long(timestamp))
 }
 fn strtotime(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -327,8 +335,36 @@ fn gmdate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// gmmktime - UTC version of mktime
 fn gmmktime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // For now, same as mktime since we don't handle timezones
-    mktime(_vm, args)
+    // gmmktime treats the input as GMT/UTC, so no timezone adjustment needed
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now_days = now_secs / 86400;
+    let now_time = ((now_secs % 86400) + 86400) % 86400;
+    let (now_year, now_month, now_day) = days_to_ymd(now_days);
+    let now_hours = now_time / 3600;
+    let now_minutes = (now_time % 3600) / 60;
+    let now_seconds = now_time % 60;
+
+    let hour = args.first().map(|v| v.to_long()).unwrap_or(now_hours);
+    let minute = args.get(1).map(|v| v.to_long()).unwrap_or(now_minutes);
+    let second = args.get(2).map(|v| v.to_long()).unwrap_or(now_seconds);
+    let month = args.get(3).map(|v| v.to_long()).unwrap_or(now_month as i64);
+    let day = args.get(4).map(|v| v.to_long()).unwrap_or(now_day as i64);
+    let year = args.get(5).map(|v| v.to_long()).unwrap_or(now_year);
+
+    let year = if (0..70).contains(&year) {
+        year + 2000
+    } else if (70..=100).contains(&year) {
+        year + 1900
+    } else {
+        year
+    };
+
+    let days = ymd_to_days(year, month as u32, day as u32);
+    let timestamp = days * 86400 + hour * 3600 + minute * 60 + second;
+    Ok(Value::Long(timestamp))
 }
 
 /// strftime - format a timestamp using strftime-style format codes
@@ -458,6 +494,16 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         })
         .unwrap_or_default();
 
+    // Use the provided timezone or default
+    let tz_arg = args.get(1);
+    let tz_name = if let Some(Value::Object(tz_obj)) = tz_arg {
+        let tz_borrow = tz_obj.borrow();
+        let tz = tz_borrow.get_property(b"timezone").to_php_string().to_string_lossy();
+        if tz.is_empty() { get_default_tz(_vm) } else { tz }
+    } else {
+        get_default_tz(_vm)
+    };
+
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -467,20 +513,26 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         now_secs
     } else {
         match parse_datetime_string(&datetime_str, now_secs) {
-            Some(ts) => ts,
+            Some(ts) => {
+                // The parsed timestamp is assumed to be in UTC; adjust to account for
+                // the fact that the input is in the given timezone
+                let (offset, _) = timezone_offset_and_abbrev(&tz_name, ts);
+                ts - offset
+            }
             None => return Ok(Value::False),
         }
     };
 
     let obj_id = _vm.next_object_id();
     let mut obj = PhpObject::new(b"DateTime".to_vec(), obj_id);
-    // Store timestamp internally (used by date functions)
+    // Store timestamp internally as UTC (used by date functions)
     obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
-    // Format the date for var_dump display (PHP format)
-    let date_str = format_timestamp("Y-m-d H:i:s", timestamp) + ".000000";
+    // Format the date for var_dump display using the timezone
+    let (offset, _) = timezone_offset_and_abbrev(&tz_name, timestamp);
+    let date_str = format_timestamp("Y-m-d H:i:s", timestamp + offset) + ".000000";
     obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
     obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
-    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
+    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
@@ -1318,6 +1370,16 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         })
         .unwrap_or_default();
 
+    // Use the provided timezone or default
+    let tz_arg = args.get(1);
+    let tz_name = if let Some(Value::Object(tz_obj)) = tz_arg {
+        let tz_borrow = tz_obj.borrow();
+        let tz = tz_borrow.get_property(b"timezone").to_php_string().to_string_lossy();
+        if tz.is_empty() { get_default_tz(_vm) } else { tz }
+    } else {
+        get_default_tz(_vm)
+    };
+
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1327,7 +1389,10 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         now_secs
     } else {
         match parse_datetime_string(&datetime_str, now_secs) {
-            Some(ts) => ts,
+            Some(ts) => {
+                let (offset, _) = timezone_offset_and_abbrev(&tz_name, ts);
+                ts - offset
+            }
             None => return Ok(Value::False),
         }
     };
@@ -1335,6 +1400,11 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     let obj_id = _vm.next_object_id();
     let mut obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
     obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
+    let (offset, _) = timezone_offset_and_abbrev(&tz_name, timestamp);
+    let date_str = format_timestamp("Y-m-d H:i:s", timestamp + offset) + ".000000";
+    obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
+    obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 

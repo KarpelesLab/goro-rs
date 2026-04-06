@@ -99,7 +99,7 @@ fn run_code(source: &[u8], filename: &str) {
     // Compile
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
-    let (op_array, compiled_classes) = match compiler.compile(&program) {
+    let (op_array, compiled_classes, compile_warnings) = match compiler.compile(&program) {
         Ok(result) => result,
         Err(e) => {
             // Output as Fatal error to match PHP error format
@@ -111,6 +111,10 @@ fn run_code(source: &[u8], filename: &str) {
     // Execute
     let mut vm = Vm::new();
     vm.current_file = filename.to_string();
+    // Emit compile warnings before execution
+    for (msg, wline) in &compile_warnings {
+        vm.emit_warning_at(msg, *wline);
+    }
     goro_ext_standard::register_standard_functions(&mut vm);
     goro_ext_date::register(&mut vm);
     goro_ext_json::register(&mut vm);
