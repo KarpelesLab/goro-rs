@@ -702,6 +702,18 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
+                // Check for `return expr;` (with value) in void function
+                if value.is_some() {
+                    if let Some(ref ret_type) = self.op_array.return_type {
+                        let is_void = matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"));
+                        if is_void {
+                            return Err(CompileError {
+                                message: "A void function must not return a value".to_string(),
+                                line: stmt.span.line,
+                            });
+                        }
+                    }
+                }
                 // Check for `return;` (without value) in function with non-void return type
                 if value.is_none() {
                     if let Some(ref ret_type) = self.op_array.return_type {
@@ -2663,6 +2675,111 @@ impl Compiler {
                                         let lower: Vec<u8> = cname.iter().map(|c| c.to_ascii_lowercase()).collect();
                                         self.resolve_class_const_magic(&lower, &qualified_name, expr.span.line)
                                     }
+                                    ExprKind::Closure {
+                                        params: closure_params,
+                                        body: closure_body,
+                                        is_static: closure_is_static,
+                                        attributes: closure_attrs,
+                                        ..
+                                    } => {
+                                        // Closure in property default
+                                        let global_id = next_closure_id();
+                                        let closure_name = format!("__closure_{}", global_id).into_bytes();
+                                        let is_generator = stmts_contain_yield(closure_body);
+                                        let mut closure_compiler = Compiler::new();
+                                        closure_compiler.op_array.name = closure_name.clone();
+                                        closure_compiler.op_array.is_generator = is_generator;
+                                        closure_compiler.op_array.is_static_closure = *closure_is_static;
+                                        closure_compiler.op_array.decl_line = expr.span.line;
+                                        closure_compiler.op_array.strict_types = self.op_array.strict_types;
+                                        closure_compiler.op_array.attributes = self.compile_attributes(closure_attrs);
+                                        closure_compiler.source_file = self.source_file.clone();
+                                        closure_compiler.current_class = Some(qualified_name.clone());
+                                        closure_compiler.current_parent_class = self.current_parent_class.clone();
+                                        closure_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                        closure_compiler.op_array.param_count = closure_params.len() as u32;
+                                        closure_compiler.op_array.required_param_count = closure_params.iter()
+                                            .take_while(|p| p.default.is_none() && !p.variadic)
+                                            .count() as u32;
+                                        for p in closure_params {
+                                            let cv = closure_compiler.op_array.get_or_create_cv(&p.name);
+                                            if p.variadic {
+                                                closure_compiler.op_array.variadic_param = Some(cv);
+                                            }
+                                        }
+                                        for s in closure_body {
+                                            closure_compiler.compile_stmt(s)?;
+                                        }
+                                        let null_idx = closure_compiler.op_array.add_literal(Value::Null);
+                                        closure_compiler.op_array.emit(crate::opcode::Op {
+                                            opcode: OpCode::Return,
+                                            op1: OperandType::Const(null_idx),
+                                            op2: OperandType::Unused,
+                                            result: OperandType::Unused,
+                                            line: 0,
+                                        });
+                                        class.const_closures.push(closure_compiler.op_array);
+                                        let mut marker = b"__deferred_closure__::".to_vec();
+                                        marker.extend_from_slice(&closure_name);
+                                        Value::String(PhpString::from_vec(marker))
+                                    }
+                                    ExprKind::FirstClassCallable(target) => {
+                                        // FCC in property default
+                                        let global_id = next_closure_id();
+                                        let closure_name = format!("__closure_fcc_{}", global_id).into_bytes();
+                                        let mut cc = Compiler::new();
+                                        cc.op_array.name = closure_name.clone();
+                                        cc.op_array.strict_types = self.op_array.strict_types;
+                                        cc.current_class = Some(qualified_name.clone());
+                                        cc.current_parent_class = self.current_parent_class.clone();
+                                        cc.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                        cc.source_file = self.source_file.clone();
+                                        let args_cv = cc.op_array.get_or_create_cv(b"args");
+                                        cc.op_array.param_count = 1;
+                                        cc.op_array.required_param_count = 0;
+                                        cc.op_array.variadic_param = Some(args_cv);
+                                        match target {
+                                            CallableTarget::Function(name_expr) => {
+                                                if let ExprKind::Identifier(n) = &name_expr.kind {
+                                                    let resolved_name = self.resolve_function_name(n);
+                                                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(resolved_name)));
+                                                    let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::InitFCall, op1: OperandType::Const(name_idx), op2: OperandType::Const(arg_count_idx), result: OperandType::Unused, line: expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::SendUnpack, op1: OperandType::Cv(args_cv), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                                    let result_tmp = cc.op_array.alloc_temp();
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::DoFCall, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(result_tmp), line: expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::Return, op1: OperandType::Tmp(result_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                                }
+                                            }
+                                            CallableTarget::StaticMethod { class: class_expr, method } => {
+                                                if let ExprKind::Identifier(cn) = &class_expr.kind {
+                                                    let class_n = self.resolve_class_name(cn);
+                                                    let resolved = if class_n.eq_ignore_ascii_case(b"self") {
+                                                        qualified_name.clone()
+                                                    } else if class_n.eq_ignore_ascii_case(b"parent") {
+                                                        self.current_parent_class.clone().unwrap_or(class_n.clone())
+                                                    } else {
+                                                        class_n
+                                                    };
+                                                    let mut func_name = resolved;
+                                                    func_name.extend_from_slice(b"::");
+                                                    func_name.extend_from_slice(method);
+                                                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(func_name)));
+                                                    let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::InitFCall, op1: OperandType::Const(name_idx), op2: OperandType::Const(arg_count_idx), result: OperandType::Unused, line: expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::SendUnpack, op1: OperandType::Cv(args_cv), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                                    let result_tmp = cc.op_array.alloc_temp();
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::DoFCall, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(result_tmp), line: expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::Return, op1: OperandType::Tmp(result_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                        class.const_closures.push(cc.op_array);
+                                        let mut marker = b"__deferred_closure__::".to_vec();
+                                        marker.extend_from_slice(&closure_name);
+                                        Value::String(PhpString::from_vec(marker))
+                                    }
                                     _ => Value::Null,
                                 }
                             } else {
@@ -3807,6 +3924,129 @@ impl Compiler {
                                             Some(Value::Long(n)) => Value::Long(-n),
                                             Some(Value::Double(f)) => Value::Double(-f),
                                             _ => Value::Null,
+                                        }
+                                    }
+                                    ExprKind::Closure {
+                                        params: closure_params,
+                                        body: closure_body,
+                                        use_vars: closure_use_vars,
+                                        is_static: closure_is_static,
+                                        attributes: closure_attrs,
+                                        ..
+                                    } => {
+                                        // Compile closure for const expression
+                                        let global_id = next_closure_id();
+                                        let closure_name = format!("__closure_{}", global_id).into_bytes();
+                                        let is_generator = stmts_contain_yield(closure_body);
+                                        let mut closure_compiler = Compiler::new();
+                                        closure_compiler.op_array.name = closure_name.clone();
+                                        closure_compiler.op_array.is_generator = is_generator;
+                                        closure_compiler.op_array.is_static_closure = *closure_is_static;
+                                        closure_compiler.op_array.decl_line = const_expr.span.line;
+                                        closure_compiler.op_array.strict_types = self.op_array.strict_types;
+                                        closure_compiler.op_array.attributes = self.compile_attributes(closure_attrs);
+                                        closure_compiler.source_file = self.source_file.clone();
+                                        closure_compiler.current_class = Some(qualified_name.clone());
+                                        closure_compiler.current_parent_class = self.current_parent_class.clone();
+                                        closure_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                        // Compile params and body
+                                        closure_compiler.op_array.param_count = closure_params.len() as u32;
+                                        closure_compiler.op_array.required_param_count = closure_params.iter()
+                                            .take_while(|p| p.default.is_none() && !p.variadic)
+                                            .count() as u32;
+                                        for p in closure_params {
+                                            let cv = closure_compiler.op_array.get_or_create_cv(&p.name);
+                                            if p.variadic {
+                                                closure_compiler.op_array.variadic_param = Some(cv);
+                                            }
+                                        }
+                                        for s in closure_body {
+                                            closure_compiler.compile_stmt(s)?;
+                                        }
+                                        // Add implicit return null
+                                        let null_idx = closure_compiler.op_array.add_literal(Value::Null);
+                                        closure_compiler.op_array.emit(crate::opcode::Op {
+                                            opcode: OpCode::Return,
+                                            op1: OperandType::Const(null_idx),
+                                            op2: OperandType::Unused,
+                                            result: OperandType::Unused,
+                                            line: 0,
+                                        });
+                                        // Store the closure as a class child function
+                                        class.const_closures.push(closure_compiler.op_array);
+                                        // Create a deferred closure marker
+                                        let mut marker = b"__deferred_closure__::".to_vec();
+                                        marker.extend_from_slice(&closure_name);
+                                        Value::String(PhpString::from_vec(marker))
+                                    }
+                                    ExprKind::FirstClassCallable(target) => {
+                                        // FCC in const expression: compile and store as deferred
+                                        let global_id = next_closure_id();
+                                        let closure_name = format!("__closure_fcc_{}", global_id).into_bytes();
+                                        let mut cc = Compiler::new();
+                                        cc.op_array.name = closure_name.clone();
+                                        cc.op_array.strict_types = self.op_array.strict_types;
+                                        cc.current_class = Some(qualified_name.clone());
+                                        cc.current_parent_class = self.current_parent_class.clone();
+                                        cc.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                        cc.source_file = self.source_file.clone();
+                                        // Set up variadic ...$args parameter
+                                        let args_cv = cc.op_array.get_or_create_cv(b"args");
+                                        cc.op_array.param_count = 1;
+                                        cc.op_array.required_param_count = 0;
+                                        cc.op_array.variadic_param = Some(args_cv);
+                                        // Emit call inside closure body based on target
+                                        match target {
+                                            CallableTarget::Function(name_expr) => {
+                                                if let ExprKind::Identifier(n) = &name_expr.kind {
+                                                    let resolved_name = self.resolve_function_name(n);
+                                                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(resolved_name)));
+                                                    let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::InitFCall, op1: OperandType::Const(name_idx), op2: OperandType::Const(arg_count_idx), result: OperandType::Unused, line: const_expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::SendUnpack, op1: OperandType::Cv(args_cv), op2: OperandType::Unused, result: OperandType::Unused, line: const_expr.span.line });
+                                                    let result_tmp = cc.op_array.alloc_temp();
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::DoFCall, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(result_tmp), line: const_expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::Return, op1: OperandType::Tmp(result_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: const_expr.span.line });
+                                                }
+                                            }
+                                            CallableTarget::StaticMethod { class: class_expr, method } => {
+                                                if let ExprKind::Identifier(cn) = &class_expr.kind {
+                                                    let class_name = self.resolve_class_name(cn);
+                                                    let resolved = if class_name.eq_ignore_ascii_case(b"self") {
+                                                        qualified_name.clone()
+                                                    } else if class_name.eq_ignore_ascii_case(b"parent") {
+                                                        self.current_parent_class.clone().unwrap_or(class_name.clone())
+                                                    } else {
+                                                        class_name
+                                                    };
+                                                    let mut func_name = resolved;
+                                                    func_name.extend_from_slice(b"::");
+                                                    func_name.extend_from_slice(method);
+                                                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(func_name)));
+                                                    let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::InitFCall, op1: OperandType::Const(name_idx), op2: OperandType::Const(arg_count_idx), result: OperandType::Unused, line: const_expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::SendUnpack, op1: OperandType::Cv(args_cv), op2: OperandType::Unused, result: OperandType::Unused, line: const_expr.span.line });
+                                                    let result_tmp = cc.op_array.alloc_temp();
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::DoFCall, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(result_tmp), line: const_expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::Return, op1: OperandType::Tmp(result_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: const_expr.span.line });
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                        class.const_closures.push(cc.op_array);
+                                        let mut marker = b"__deferred_closure__::".to_vec();
+                                        marker.extend_from_slice(&closure_name);
+                                        Value::String(PhpString::from_vec(marker))
+                                    }
+                                    ExprKind::New { class: new_class, args: new_args } => {
+                                        // new Foo() in const expression - store as deferred
+                                        if let ExprKind::Identifier(cn) = &new_class.kind {
+                                            let resolved = self.resolve_class_name(cn);
+                                            let mut marker = b"__deferred_new__::".to_vec();
+                                            marker.extend_from_slice(&resolved);
+                                            Value::String(PhpString::from_vec(marker))
+                                        } else {
+                                            Value::Null
                                         }
                                     }
                                     _ => Value::Null,
@@ -6218,6 +6458,20 @@ impl Compiler {
 
             ExprKind::Isset(exprs) => {
                 // isset() returns true if all vars are set and not null
+                // Validate: isset() can only take variables, properties, array accesses
+                for check_expr in exprs {
+                    let is_valid = matches!(check_expr.kind,
+                        ExprKind::Variable(_) | ExprKind::DynamicVariable(_) |
+                        ExprKind::PropertyAccess { .. } | ExprKind::StaticPropertyAccess { .. } |
+                        ExprKind::ArrayAccess { .. } | ExprKind::NullCoalesce { .. }
+                    );
+                    if !is_valid {
+                        return Err(CompileError {
+                            message: "Cannot use isset() on the result of an expression (you can use \"null !== expression\" instead)".to_string(),
+                            line: expr.span.line,
+                        });
+                    }
+                }
                 // Uses IssetCheck opcode that checks for both Undef and Null
                 // Suppress warnings during isset check (e.g., Undefined array key)
                 self.op_array.emit(Op {
@@ -6721,6 +6975,7 @@ impl Compiler {
                 closure_compiler.op_array.decl_line = expr.span.line;
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(closure_attributes);
+                closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
@@ -7945,6 +8200,7 @@ impl Compiler {
         let mut cc = Compiler::new();
         cc.op_array.name = closure_name.clone();
         cc.op_array.strict_types = self.op_array.strict_types;
+        cc.op_array.filename = self.source_file.clone();
         cc.current_class = self.current_class.clone();
         cc.current_parent_class = self.current_parent_class.clone();
         cc.op_array.scope_class = self.op_array.scope_class.clone()

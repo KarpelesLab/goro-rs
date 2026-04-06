@@ -717,6 +717,28 @@ impl Parser {
                 }
             }
             _ => {
+                // Check for __halt_compiler()
+                if let TokenKind::Identifier(ref name) = self.peek().clone() {
+                    if name.eq_ignore_ascii_case(b"__halt_compiler") {
+                        // Check for () and ;
+                        if matches!(self.peek_at(1), TokenKind::OpenParen)
+                            && matches!(self.peek_at(2), TokenKind::CloseParen)
+                            && matches!(self.peek_at(3), TokenKind::Semicolon) {
+                            self.advance(); // __halt_compiler
+                            self.advance(); // (
+                            self.advance(); // )
+                            self.advance(); // ;
+                            // Skip all remaining tokens until EOF
+                            while !self.is_at_end() {
+                                self.advance();
+                            }
+                            return Ok(Statement {
+                                kind: StmtKind::Nop,
+                                span,
+                            });
+                        }
+                    }
+                }
                 // Check for label: identifier followed by colon (but not ::)
                 if let TokenKind::Identifier(name) = self.peek().clone() {
                     if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Colon) {
@@ -2310,7 +2332,11 @@ impl Parser {
         let mut set_hook = None;
 
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
-            // Skip optional modifiers: final, public, protected, private, &
+            // Skip optional attributes and modifiers: #[...] final, public, protected, private, &
+            while matches!(self.peek(), TokenKind::AttributeOpen) {
+                // Parse and discard attributes for now
+                let _ = self.parse_attributes()?;
+            }
             while matches!(self.peek(), TokenKind::Final | TokenKind::Public | TokenKind::Protected | TokenKind::Private | TokenKind::Ampersand) {
                 self.advance();
             }

@@ -330,6 +330,8 @@ pub struct OpArray {
     pub strict_types: bool,
     pub attributes: Vec<crate::object::RuntimeAttribute>,
     pub param_attributes: Vec<Vec<crate::object::RuntimeAttribute>>,
+    /// Source filename (for closures, error reporting)
+    pub filename: Vec<u8>,
 }
 
 impl OpArray {
@@ -354,6 +356,7 @@ impl OpArray {
             strict_types: false,
             attributes: Vec::new(),
             param_attributes: Vec::new(),
+            filename: Vec::new(),
         }
     }
 

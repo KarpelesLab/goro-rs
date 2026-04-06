@@ -9697,6 +9697,22 @@ impl Vm {
     pub fn resolve_deferred_value(&mut self, val: &Value) -> Value {
         if let Value::String(s) = val {
             let s_bytes = s.as_bytes();
+            if s_bytes.starts_with(b"__deferred_closure__::") {
+                let closure_name = &s_bytes[b"__deferred_closure__::".len()..];
+                // Find the closure in any class's const_closures and register it
+                let mut found_op = None;
+                for (_, cls) in &self.classes {
+                    if let Some(op) = cls.const_closures.iter().find(|op| op.name == closure_name) {
+                        found_op = Some(op.clone());
+                        break;
+                    }
+                }
+                if let Some(op_array) = found_op {
+                    let name = op_array.name.clone();
+                    self.register_user_function(&name, op_array);
+                    return Value::String(PhpString::from_vec(closure_name.to_vec()));
+                }
+            }
             if s_bytes.starts_with(b"__deferred_const__::") {
                 let rest = &s_bytes[b"__deferred_const__::".len()..];
                 if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
@@ -16625,6 +16641,18 @@ impl Vm {
 
                     if let Some((catch_target, finally_target, _exc_tmp, _)) = exception_handlers.pop()
                     {
+                        // If there's already a pending exception (e.g., we're inside a finally block
+                        // entered due to an exception), chain it as the "previous" of the new exception.
+                        if let Some(prev_exc) = self.current_exception.take() {
+                            if let Value::Object(ref new_obj) = exc_val {
+                                let mut new_borrow = new_obj.borrow_mut();
+                                // Only set previous if it's currently null
+                                let current_prev = new_borrow.get_property(b"previous");
+                                if matches!(current_prev, Value::Null) {
+                                    new_borrow.set_property(b"previous".to_vec(), prev_exc);
+                                }
+                            }
+                        }
                         // Store exception for the catch block to access
                         self.current_exception = Some(exc_val);
 
@@ -16639,6 +16667,16 @@ impl Vm {
                         }
                     } else {
                         // No handler - check if there's a pending finally from an outer scope
+                        // Chain previous exception if any
+                        if let Some(prev_exc) = self.current_exception.take() {
+                            if let Value::Object(ref new_obj) = exc_val {
+                                let mut new_borrow = new_obj.borrow_mut();
+                                let current_prev = new_borrow.get_property(b"previous");
+                                if matches!(current_prev, Value::Null) {
+                                    new_borrow.set_property(b"previous".to_vec(), prev_exc);
+                                }
+                            }
+                        }
                         // Store exception and return error
                         let msg = if let Value::Object(obj) = &exc_val {
                             let obj = obj.borrow();
@@ -16845,6 +16883,21 @@ impl Vm {
                                     self.write_operand(&op.result, final_val, &mut cvs, &mut tmps, &static_cv_keys);
                                     ip += 1;
                                     continue;
+                                }
+                                // Check for deferred closure marker
+                                if s.as_bytes().starts_with(b"__deferred_closure__::") {
+                                    let closure_name = &s.as_bytes()[b"__deferred_closure__::".len()..];
+                                    // Find the closure in the class's const_closures
+                                    let closure_op = self.classes.get(&class_lower)
+                                        .and_then(|c| c.const_closures.iter().find(|op| op.name == closure_name).cloned());
+                                    if let Some(op_array) = closure_op {
+                                        // Register as a user function and return the closure name
+                                        self.register_user_function(&op_array.name.clone(), op_array);
+                                        let closure_val = Value::String(PhpString::from_vec(closure_name.to_vec()));
+                                        self.write_operand(&op.result, closure_val, &mut cvs, &mut tmps, &static_cv_keys);
+                                        ip += 1;
+                                        continue;
+                                    }
                                 }
                             }
                             // Check if constant is an array with unresolved deferred spread markers (circular refs)
@@ -18572,9 +18625,14 @@ impl Vm {
                                             }
                                         }
                                         // Skip __construct compatibility checks
-                                        if mn_lower != b"__construct" && !method.is_abstract
+                                        // Check compatibility when:
+                                        // 1. Parent method is non-abstract and not private
+                                        // 2. Both methods are abstract (interface extending interface)
+                                        let should_check = mn_lower != b"__construct"
                                             && method.visibility != Visibility::Private
-                                            && child_method.visibility != Visibility::Private {
+                                            && child_method.visibility != Visibility::Private
+                                            && (!method.is_abstract || child_method.is_abstract);
+                                        if should_check {
                                             // Check method signature compatibility
                                             if let Some(err_msg) = Self::check_method_compatibility(
                                                 &class.name, child_method,
@@ -18763,7 +18821,22 @@ impl Vm {
                                     }
                                 }
                                 for (method_name, method) in &iface.methods {
-                                    if !class.methods.contains_key(method_name) {
+                                    if let Some(existing_method) = class.methods.get(method_name) {
+                                        // Check method signature compatibility when a class/interface
+                                        // redeclares a method that an interface defines
+                                        let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if mn_lower != b"__construct" {
+                                            if let Some(err_msg) = Self::check_method_compatibility(
+                                                &class.name, existing_method,
+                                                &iface.name, method,
+                                            ) {
+                                                return Err(VmError {
+                                                    message: err_msg,
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                    } else {
                                         class.methods.insert(method_name.clone(), method.clone());
                                     }
                                 }
@@ -19880,6 +19953,23 @@ impl Vm {
                                 }
                             }
                         }
+                        // Resolve deferred closures in class constants
+                        {
+                            let const_keys3: Vec<Vec<u8>> = class.constants.keys().cloned().collect();
+                            for const_name in const_keys3 {
+                                if let Some(Value::String(s)) = class.constants.get(&const_name) {
+                                    if s.as_bytes().starts_with(b"__deferred_closure__::") {
+                                        let closure_name = s.as_bytes()[b"__deferred_closure__::".len()..].to_vec();
+                                        let closure_op = class.const_closures.iter().find(|op| op.name == closure_name).cloned();
+                                        if let Some(op_array) = closure_op {
+                                            let name_copy = op_array.name.clone();
+                                            self.register_user_function(&name_copy, op_array);
+                                            class.constants.insert(const_name, Value::String(PhpString::from_vec(closure_name)));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // Resolve deferred binary operation expressions in property defaults
                         {
                             let mut prop_binop_updates: Vec<(usize, Value)> = Vec::new();
@@ -19930,6 +20020,37 @@ impl Vm {
                                             } else {
                                                 prop.default = val;
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Resolve deferred closures in property defaults
+                        for prop in &mut class.properties {
+                            if let Value::String(s) = &prop.default {
+                                if s.as_bytes().starts_with(b"__deferred_closure__::") {
+                                    let closure_name = &s.as_bytes()[b"__deferred_closure__::".len()..];
+                                    let closure_op = class.const_closures.iter().find(|op| op.name == closure_name).cloned();
+                                    if let Some(op_array) = closure_op {
+                                        let name = op_array.name.clone();
+                                        self.register_user_function(&name, op_array);
+                                        prop.default = Value::String(PhpString::from_vec(closure_name.to_vec()));
+                                    }
+                                }
+                            }
+                        }
+                        // Resolve deferred closures in static properties
+                        {
+                            let static_keys: Vec<Vec<u8>> = class.static_properties.keys().cloned().collect();
+                            for prop_name in static_keys {
+                                if let Some(Value::String(s)) = class.static_properties.get(&prop_name) {
+                                    if s.as_bytes().starts_with(b"__deferred_closure__::") {
+                                        let closure_name = s.as_bytes()[b"__deferred_closure__::".len()..].to_vec();
+                                        let closure_op = class.const_closures.iter().find(|op| op.name == closure_name).cloned();
+                                        if let Some(op_array) = closure_op {
+                                            let name = op_array.name.clone();
+                                            self.register_user_function(&name, op_array);
+                                            class.static_properties.insert(prop_name, Value::String(PhpString::from_vec(closure_name)));
                                         }
                                     }
                                 }
@@ -19992,16 +20113,33 @@ impl Vm {
                             && !is_anonymous_class
                         {
                             // Use the canonical (original case) name from the existing class or builtin table
-                            let canonical = if let Some(existing) = self.classes.get(&name_lower) {
-                                String::from_utf8_lossy(&existing.name).to_string()
+                            let (canonical, prev_info) = if let Some(existing) = self.classes.get(&name_lower) {
+                                let name = String::from_utf8_lossy(&existing.name).to_string();
+                                let prev = if existing.start_line > 0 {
+                                    format!(" (previously declared in {}:{})", &self.current_file, existing.start_line)
+                                } else {
+                                    String::new()
+                                };
+                                (name, prev)
                             } else {
                                 // Builtin class - use proper casing
-                                match name_lower.as_slice() {
+                                let name = match name_lower.as_slice() {
                                     b"stdclass" => "stdClass".to_string(),
                                     _ => String::from_utf8_lossy(&class.name).to_string(),
-                                }
+                                };
+                                (name, String::new())
                             };
-                            let msg = format!("Cannot redeclare class {}", canonical);
+                            // Determine the kind: class/interface/trait/enum
+                            let kind = if class.is_interface {
+                                "interface"
+                            } else if class.is_trait {
+                                "trait"
+                            } else if class.is_enum {
+                                "enum"
+                            } else {
+                                "class"
+                            };
+                            let msg = format!("Cannot redeclare {} {}{}", kind, canonical, prev_info);
                             return Err(VmError { message: msg, line: op.line });
                         }
                         // Validate #[Attribute] usage

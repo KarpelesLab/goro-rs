@@ -72,6 +72,8 @@ pub struct ClassEntry {
     /// Doc comment for the class (if any)
     pub doc_comment: Option<String>,
     pub attributes: Vec<RuntimeAttribute>,
+    /// Closures compiled from const expressions (for deferred resolution)
+    pub const_closures: Vec<crate::opcode::OpArray>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +147,7 @@ impl ClassEntry {
             filename: None,
             doc_comment: None,
             attributes: Vec::new(),
+            const_closures: Vec::new(),
         }
     }
 

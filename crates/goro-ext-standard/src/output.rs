@@ -58,11 +58,37 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
         Value::String(s) => {
             let b = s.as_bytes();
             if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
-                // Closures should be displayed as Closure objects with a stable ID
-                // We use 1 as default; tests use %d in EXPECTF patterns
-                vm.write_output(
-                    format!("{}object(Closure)#1 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
-                );
+                // Closures should be displayed as Closure objects
+                // Look up the closure function to get name, file, line info
+                let closure_name_str = s.to_string_lossy();
+                let fn_lower = closure_name_str.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect::<Vec<u8>>();
+                let closure_info = vm.user_functions.get(&fn_lower).map(|op| {
+                    let file = String::from_utf8_lossy(&op.filename).to_string();
+                    let line = op.decl_line;
+                    let name = if op.name.starts_with(b"__closure_fcc_") {
+                        // FCC closures show the target function name
+                        format!("{{closure}}")
+                    } else {
+                        // Regular closures show file and line
+                        format!("{{closure:{}:{}}}", file, line)
+                    };
+                    (name, file, line)
+                });
+                if let Some((name, file, line)) = closure_info {
+                    let prop_count = 3; // name, file, line
+                    vm.write_output(format!("{}object(Closure)#1 ({}) {{\n", prefix, prop_count).as_bytes());
+                    vm.write_output(format!("{}  [\"name\"]=>\n", prefix).as_bytes());
+                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, name.len(), name).as_bytes());
+                    vm.write_output(format!("{}  [\"file\"]=>\n", prefix).as_bytes());
+                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, file.len(), file).as_bytes());
+                    vm.write_output(format!("{}  [\"line\"]=>\n", prefix).as_bytes());
+                    vm.write_output(format!("{}  int({})\n", prefix, line).as_bytes());
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                } else {
+                    vm.write_output(
+                        format!("{}object(Closure)#1 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
+                    );
+                }
             } else {
                 vm.write_output(
                     format!(

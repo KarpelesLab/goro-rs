@@ -1,5 +1,5 @@
 use goro_core::array::{ArrayKey, PhpArray};
-use goro_core::object::PhpObject;
+use goro_core::object::{PhpObject, Visibility};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
@@ -893,8 +893,35 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     let class_name = &name_lower[..pos];
                     let method_name = &name_lower[pos + 2..];
                     if let Some(class) = vm.classes.get(class_name) {
-                        if class.get_method(method_name).is_some() {
-                            Value::True
+                        if let Some(method) = class.get_method(method_name) {
+                            // Check visibility
+                            let caller_scope = vm.current_class_scope();
+                            let caller_lower = caller_scope.as_ref().map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                            let decl_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            match method.visibility {
+                                Visibility::Private => {
+                                    if let Some(ref scope) = caller_lower {
+                                        if *scope == decl_lower { Value::True } else { Value::False }
+                                    } else {
+                                        Value::False
+                                    }
+                                }
+                                Visibility::Protected => {
+                                    if let Some(ref scope) = caller_lower {
+                                        if *scope == decl_lower
+                                            || vm.class_extends(scope, &decl_lower)
+                                            || vm.class_extends(&decl_lower, scope)
+                                        {
+                                            Value::True
+                                        } else {
+                                            Value::False
+                                        }
+                                    } else {
+                                        Value::False
+                                    }
+                                }
+                                Visibility::Public => Value::True,
+                            }
                         } else {
                             Value::False
                         }
@@ -958,12 +985,16 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::Object(obj) => {
                         let class_orig: Vec<u8> = obj.borrow().class_name.clone();
                         let class_lower: Vec<u8> = class_orig.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let mut current = class_lower;
+                        let mut current = class_lower.clone();
                         let mut found = false;
+                        let mut method_visibility = None;
+                        let mut declaring_class_lower: Vec<u8> = Vec::new();
                         for _ in 0..50 {
                             if let Some(class) = vm.classes.get(&current) {
-                                if class.methods.contains_key(&method_lower) {
+                                if let Some(method) = class.methods.get(&method_lower) {
                                     found = true;
+                                    method_visibility = Some(method.visibility);
+                                    declaring_class_lower = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
                                     break;
                                 }
                                 if let Some(ref parent) = class.parent {
@@ -973,6 +1004,39 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 }
                             } else {
                                 break;
+                            }
+                        }
+                        // Check visibility if method was found
+                        if found {
+                            if let Some(vis) = method_visibility {
+                                let caller_scope = vm.current_class_scope();
+                                let caller_lower = caller_scope.as_ref().map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                                match vis {
+                                    Visibility::Private => {
+                                        // Private methods are only callable from the declaring class
+                                        if let Some(ref scope) = caller_lower {
+                                            if *scope != declaring_class_lower {
+                                                found = false;
+                                            }
+                                        } else {
+                                            found = false;
+                                        }
+                                    }
+                                    Visibility::Protected => {
+                                        // Protected methods are callable from the declaring class and subclasses
+                                        if let Some(ref scope) = caller_lower {
+                                            if *scope != declaring_class_lower
+                                                && !vm.class_extends(scope, &declaring_class_lower)
+                                                && !vm.class_extends(&declaring_class_lower, scope)
+                                            {
+                                                found = false;
+                                            }
+                                        } else {
+                                            found = false;
+                                        }
+                                    }
+                                    Visibility::Public => {}
+                                }
                             }
                         }
                         let mut name = class_orig;
@@ -989,7 +1053,38 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         name.extend_from_slice(&method_name_bytes);
                         callable_name = Some(name);
                         if let Some(class) = vm.classes.get(&class_lower) {
-                            if class.methods.contains_key(&method_lower) { Value::True } else { Value::False }
+                            if let Some(method) = class.get_method(&method_lower) {
+                                // Check visibility
+                                let caller_scope = vm.current_class_scope();
+                                let caller_lower = caller_scope.as_ref().map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                                let decl_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                match method.visibility {
+                                    Visibility::Private => {
+                                        if let Some(ref scope) = caller_lower {
+                                            if *scope == decl_lower { Value::True } else { Value::False }
+                                        } else {
+                                            Value::False
+                                        }
+                                    }
+                                    Visibility::Protected => {
+                                        if let Some(ref scope) = caller_lower {
+                                            if *scope == decl_lower
+                                                || vm.class_extends(scope, &decl_lower)
+                                                || vm.class_extends(&decl_lower, scope)
+                                            {
+                                                Value::True
+                                            } else {
+                                                Value::False
+                                            }
+                                        } else {
+                                            Value::False
+                                        }
+                                    }
+                                    Visibility::Public => Value::True,
+                                }
+                            } else {
+                                Value::False
+                            }
                         } else {
                             Value::False
                         }
@@ -5945,12 +6040,39 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
                     }).collect();
                     drop(arr_borrow);
                     let obj_borrow = obj.borrow();
+                    let class_name_bytes = obj_borrow.class_name.clone();
+                    let class_lower_sleep: Vec<u8> = class_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
                     let mut s = format!("O:{}:\"{}\":{}:{{", class_name.len(), class_name, prop_names.len());
                     for prop_name in &prop_names {
                         let prop_str = String::from_utf8_lossy(prop_name);
                         if let Some(v) = obj_borrow.properties.iter().find(|(k, _)| k == prop_name).map(|(_, v)| v) {
-                            s.push_str(&format!("s:{}:\"{}\";", prop_name.len(), prop_str));
-                            s.push_str(&serialize_value_depth(v, depth + 1));
+                            // Check visibility for name mangling
+                            let vis = vm.classes.get(&class_lower_sleep)
+                                .and_then(|c| c.properties.iter().find(|p| p.name == *prop_name).map(|p| p.visibility));
+                            match vis {
+                                Some(Visibility::Private) => {
+                                    let mangled_len = class_name_bytes.len() + prop_name.len() + 2;
+                                    s.push_str(&format!("s:{}:\"", mangled_len));
+                                    s.push('\0');
+                                    s.push_str(&class_name);
+                                    s.push('\0');
+                                    s.push_str(&prop_str);
+                                    s.push_str("\";");
+                                }
+                                Some(Visibility::Protected) => {
+                                    let mangled_len = prop_name.len() + 3;
+                                    s.push_str(&format!("s:{}:\"", mangled_len));
+                                    s.push('\0');
+                                    s.push('*');
+                                    s.push('\0');
+                                    s.push_str(&prop_str);
+                                    s.push_str("\";");
+                                }
+                                _ => {
+                                    s.push_str(&format!("s:{}:\"{}\";", prop_name.len(), prop_str));
+                                }
+                            }
+                            s.push_str(&serialize_value_with_vm(v, depth + 1, vm));
                         } else {
                             // Property doesn't exist, emit warning and skip
                             vm.emit_warning(&format!(
@@ -5967,8 +6089,61 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
                 }
             }
 
-            // Default serialization
-            serialize_value_depth(val, depth)
+            // Default serialization - use VM to look up property visibility
+            {
+                let obj = obj.borrow();
+                let class_name_str = String::from_utf8_lossy(&obj.class_name);
+                let class_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let visible_props: Vec<_> = obj.properties.iter()
+                    .filter(|(name, _)| !is_serialize_internal_property(name))
+                    .collect();
+                let prop_count = visible_props.len();
+                let mut result = format!("O:{}:\"{}\":{}:{{", class_name_str.len(), class_name_str, prop_count);
+                for (name, prop_val) in &visible_props {
+                    // Look up property visibility from class definition
+                    let vis = vm.classes.get(&class_lower)
+                        .and_then(|c| {
+                            c.properties.iter().find(|p| p.name == *name).map(|p| p.visibility)
+                        });
+                    // If the property name already contains NUL bytes, it's already mangled
+                    if name.contains(&0u8) {
+                        result.push_str(&format!("s:{}:\"", name.len()));
+                        for &b in name.iter() { result.push(b as char); }
+                        result.push_str("\";");
+                    } else {
+                        match vis {
+                            Some(Visibility::Private) => {
+                                // Private: \0ClassName\0propName
+                                let mangled_len = obj.class_name.len() + name.len() + 2;
+                                result.push_str(&format!("s:{}:\"", mangled_len));
+                                result.push('\0');
+                                result.push_str(&class_name_str);
+                                result.push('\0');
+                                result.push_str(&String::from_utf8_lossy(name));
+                                result.push_str("\";");
+                            }
+                            Some(Visibility::Protected) => {
+                                // Protected: \0*\0propName
+                                let mangled_len = name.len() + 3;
+                                result.push_str(&format!("s:{}:\"", mangled_len));
+                                result.push('\0');
+                                result.push('*');
+                                result.push('\0');
+                                result.push_str(&String::from_utf8_lossy(name));
+                                result.push_str("\";");
+                            }
+                            _ => {
+                                // Public or unknown: plain name
+                                let name_str = String::from_utf8_lossy(name);
+                                result.push_str(&format!("s:{}:\"{}\";", name.len(), name_str));
+                            }
+                        }
+                    }
+                    result.push_str(&serialize_value_with_vm(prop_val, depth + 1, vm));
+                }
+                result.push('}');
+                result
+            }
         }
         Value::Reference(r) => serialize_value_with_vm(&r.borrow(), depth, vm),
         _ => serialize_value_depth(val, depth),
