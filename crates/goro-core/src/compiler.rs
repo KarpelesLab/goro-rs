@@ -130,6 +130,18 @@ impl Compiler {
                     // xml_parse_into_struct($parser, $data, &$values, &$index)
                     (b"xml_parse_into_struct", 2) => true,
                     (b"xml_parse_into_struct", 3) => true,
+                    // proc_open($command, $descriptorspec, &$pipes, $cwd, $env, $options)
+                    (b"proc_open", 2) => true,
+                    // exec($command, &$output, &$result_code)
+                    (b"exec", 1) => true,
+                    (b"exec", 2) => true,
+                    // fscanf($stream, $format, &$vars...)
+                    (b"fscanf", p) if p >= 2 => true,
+                    // fsockopen($hostname, $port, &$errno, &$errstr, $timeout)
+                    (b"fsockopen", 2) => true,
+                    (b"fsockopen", 3) => true,
+                    (b"pfsockopen", 2) => true,
+                    (b"pfsockopen", 3) => true,
                     _ => false,
                 }
             }
@@ -1146,6 +1158,24 @@ impl Compiler {
                 for jmp in ctx.continue_jumps {
                     self.op_array.patch_jump(jmp, loop_start);
                 }
+
+                // Clean up foreach temps to release references
+                // (important for by-ref foreach so Rc counts drop correctly)
+                let undef_const = self.op_array.add_literal(Value::Undef);
+                self.op_array.emit(Op {
+                    opcode: OpCode::Assign,
+                    op1: OperandType::Tmp(val_tmp),
+                    op2: OperandType::Const(undef_const),
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+                self.op_array.emit(Op {
+                    opcode: OpCode::Assign,
+                    op1: OperandType::Tmp(iter_tmp),
+                    op2: OperandType::Const(undef_const),
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
 
                 Ok(())
             }
@@ -4165,6 +4195,38 @@ impl Compiler {
                 });
             }
         }
+
+        // Check for empty list (all elements are empty/null placeholders)
+        let all_empty = elems.iter().all(|e| matches!(&e.value.kind, ExprKind::Null));
+        if elems.is_empty() || all_empty {
+            return Err(CompileError {
+                message: "Cannot use empty list".into(),
+                line,
+            });
+        }
+
+        // Check for mixed keyed and unkeyed elements
+        let has_keyed = elems.iter().any(|e| e.key.is_some());
+        let has_unkeyed = elems.iter().any(|e| e.key.is_none() && !matches!(&e.value.kind, ExprKind::Null));
+        if has_keyed && has_unkeyed {
+            return Err(CompileError {
+                message: "Cannot mix keyed and unkeyed array entries in assignments".into(),
+                line,
+            });
+        }
+
+        // Check for empty elements in keyed list
+        if has_keyed {
+            for elem in elems.iter() {
+                if elem.key.is_none() && matches!(&elem.value.kind, ExprKind::Null) {
+                    return Err(CompileError {
+                        message: "Cannot use empty array entries in keyed array assignment".into(),
+                        line,
+                    });
+                }
+            }
+        }
+
         for (i, elem) in elems.iter().enumerate() {
             let idx_op = if let Some(key_expr) = &elem.key {
                 self.compile_expr(key_expr)?
@@ -5205,8 +5267,10 @@ impl Compiler {
             ExprKind::Exit(value) => {
                 if let Some(val_expr) = value {
                     let val = self.compile_expr(val_expr)?;
+                    // Use ExitOp which checks at runtime: int values set exit code,
+                    // string values are echoed
                     self.op_array.emit(Op {
-                        opcode: OpCode::Echo,
+                        opcode: OpCode::ExitOp,
                         op1: val,
                         op2: OperandType::Unused,
                         result: OperandType::Unused,

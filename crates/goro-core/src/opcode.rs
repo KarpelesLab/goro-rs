@@ -286,6 +286,8 @@ pub enum OpCode {
     /// compact() set: op1 = array (tmp), op2 = CV, result = key (const)
     /// Like ArraySet but skips if CV is Undef and emits a warning
     CompactSet,
+    /// exit/die: op1 = value. If int, set exit code; if string, echo the string.
+    ExitOp,
 }
 
 /// A compiled function / script

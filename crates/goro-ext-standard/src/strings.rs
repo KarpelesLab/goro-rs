@@ -103,6 +103,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"strcoll", strcoll_fn);
     vm.register_function(b"money_format", money_format_fn);
     vm.register_function(b"settype", settype_fn);
+    vm.register_function(b"crypt", crypt_fn);
+    vm.register_function(b"password_hash", password_hash_fn);
+    vm.register_function(b"password_verify", password_verify_fn);
+    vm.register_function(b"password_get_info", password_get_info_fn);
+    vm.register_function(b"password_needs_rehash", password_needs_rehash_fn);
+    vm.register_function(b"password_algos", password_algos_fn);
 
     // Register parameter types for strict_types enforcement on builtins
     let s = || Some(ParamType::Simple(b"string".to_vec()));
@@ -5104,11 +5110,179 @@ fn money_format_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn settype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // settype() modifies the variable - we can't easily do this from a function
-    // but return true to indicate success
     if args.len() < 2 {
         return Ok(Value::False);
     }
     Ok(Value::True)
+}
+
+// ===== crypt() and password_* functions =====
+
+const BCRYPT_BASE64: &[u8] = b"./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+fn bcrypt_base64_decode(encoded: &[u8]) -> Option<[u8; 16]> {
+    if encoded.len() < 22 { return None; }
+    let mut result = [0u8; 16];
+    let mut bits: u32 = 0;
+    let mut num_bits: u32 = 0;
+    let mut out_idx = 0;
+    for &c in &encoded[..22] {
+        let val = BCRYPT_BASE64.iter().position(|&b| b == c)? as u32;
+        bits = (bits << 6) | val;
+        num_bits += 6;
+        while num_bits >= 8 && out_idx < 16 {
+            num_bits -= 8;
+            result[out_idx] = ((bits >> num_bits) & 0xff) as u8;
+            out_idx += 1;
+        }
+    }
+    Some(result)
+}
+
+fn crypt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let password = args.first().unwrap_or(&Value::Null).to_php_string();
+    let salt_val = args.get(1);
+    let password_str = password.to_string_lossy();
+
+    let salt = match salt_val {
+        Some(s) => s.to_php_string(),
+        None => {
+            vm.emit_deprecated("crypt(): Providing a non-standard salt is deprecated");
+            return Ok(Value::String(PhpString::from_bytes(b"*0")));
+        }
+    };
+    let salt_str = salt.to_string_lossy();
+
+    if salt_str.starts_with("$2") && salt_str.len() >= 4 {
+        let variant = salt_str.as_bytes().get(2).copied().unwrap_or(0);
+        if !matches!(variant, b'a' | b'b' | b'x' | b'y') {
+            return Ok(Value::String(PhpString::from_bytes(b"*0")));
+        }
+        if salt_str.as_bytes().get(3) != Some(&b'$') {
+            return Ok(Value::String(PhpString::from_bytes(b"*0")));
+        }
+        if salt_str.len() < 7 || salt_str.as_bytes()[6] != b'$' {
+            return Ok(Value::String(PhpString::from_bytes(b"*0")));
+        }
+        let cost: u32 = match salt_str[4..6].parse() {
+            Ok(c) => c,
+            Err(_) => return Ok(Value::String(PhpString::from_bytes(b"*0"))),
+        };
+        if cost < 4 || cost > 31 {
+            return Ok(Value::String(PhpString::from_bytes(b"*0")));
+        }
+        let salt_part = &salt_str[7..];
+        if salt_part.len() < 22 { return Ok(Value::String(PhpString::from_bytes(b"*0"))); }
+        let salt_22 = &salt_part[..22];
+        if salt_22.contains('$') { return Ok(Value::String(PhpString::from_bytes(b"*0"))); }
+        let raw_salt = match bcrypt_base64_decode(salt_22.as_bytes()) {
+            Some(s) => s,
+            None => return Ok(Value::String(PhpString::from_bytes(b"*0"))),
+        };
+        let version = match variant {
+            b'a' => bcrypt::Version::TwoA,
+            b'x' => bcrypt::Version::TwoX,
+            b'y' => bcrypt::Version::TwoY,
+            b'b' => bcrypt::Version::TwoB,
+            _ => bcrypt::Version::TwoY,
+        };
+        match bcrypt::hash_with_salt(&password_str, cost, raw_salt) {
+            Ok(parts) => Ok(Value::String(PhpString::from_string(parts.format_for_version(version)))),
+            Err(_) => Ok(Value::String(PhpString::from_bytes(b"*0"))),
+        }
+    } else {
+        Ok(Value::String(PhpString::from_bytes(b"*0")))
+    }
+}
+
+fn password_hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let password = args.first().unwrap_or(&Value::Null).to_php_string();
+    if password.as_bytes().contains(&0) {
+        vm.emit_warning("Bcrypt password must not contain null character");
+        return Ok(Value::False);
+    }
+    let algo = args.get(1).unwrap_or(&Value::Null);
+    let algo_str = match algo {
+        Value::Null | Value::Long(0) | Value::Long(1) => "2y".to_string(),
+        Value::String(s) => s.to_string_lossy(),
+        _ => "2y".to_string(),
+    };
+    if algo_str != "2y" {
+        let msg = "password_hash(): Argument #2 ($algo) must be a valid password hashing algorithm";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+    }
+    let mut cost: u32 = 10;
+    if let Some(Value::Array(opts)) = args.get(2) {
+        let opts = opts.borrow();
+        if let Some(cost_val) = opts.get_str(b"cost") {
+            let c = cost_val.to_long() as u32;
+            if c < 4 || c > 31 {
+                vm.emit_warning(&format!("Invalid bcrypt cost parameter specified: {}", c));
+                return Ok(Value::False);
+            }
+            cost = c;
+        }
+    }
+    match bcrypt::hash_with_result(&password.to_string_lossy(), cost) {
+        Ok(parts) => Ok(Value::String(PhpString::from_string(parts.format_for_version(bcrypt::Version::TwoY)))),
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn password_verify_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let password = args.first().unwrap_or(&Value::Null).to_php_string();
+    let hash = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    match bcrypt::verify(&password.to_string_lossy(), &hash.to_string_lossy()) {
+        Ok(true) => Ok(Value::True),
+        _ => Ok(Value::False),
+    }
+}
+
+fn password_get_info_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let hash = args.first().unwrap_or(&Value::Null).to_php_string();
+    let hash_str = hash.to_string_lossy();
+    let mut arr = PhpArray::new();
+    if hash_str.starts_with("$2y$") || hash_str.starts_with("$2a$") || hash_str.starts_with("$2b$") {
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"algo")), Value::String(PhpString::from_bytes(b"2y")));
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"algoName")), Value::String(PhpString::from_bytes(b"bcrypt")));
+        let mut options = PhpArray::new();
+        if hash_str.len() >= 7 {
+            if let Ok(cost) = hash_str[4..6].parse::<i64>() {
+                options.set(ArrayKey::String(PhpString::from_bytes(b"cost")), Value::Long(cost));
+            }
+        }
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"options")), Value::Array(Rc::new(RefCell::new(options))));
+    } else {
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"algo")), Value::Null);
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"algoName")), Value::String(PhpString::from_bytes(b"unknown")));
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"options")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn password_needs_rehash_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let hash = args.first().unwrap_or(&Value::Null).to_php_string();
+    let hash_str = hash.to_string_lossy();
+    let mut target_cost: u32 = 10;
+    if let Some(Value::Array(opts)) = args.get(2) {
+        let opts = opts.borrow();
+        if let Some(cost_val) = opts.get_str(b"cost") {
+            target_cost = cost_val.to_long() as u32;
+        }
+    }
+    if hash_str.starts_with("$2y$") && hash_str.len() >= 7 {
+        if let Ok(current_cost) = hash_str[4..6].parse::<u32>() {
+            if current_cost == target_cost { return Ok(Value::False); }
+        }
+    }
+    Ok(Value::True)
+}
+
+fn password_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    arr.push(Value::String(PhpString::from_bytes(b"2y")));
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 

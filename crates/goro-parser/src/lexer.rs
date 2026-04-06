@@ -1379,7 +1379,7 @@ impl<'a> Lexer<'a> {
             if self.remaining().starts_with(&label) {
                 let after_label = self.pos + label.len();
                 let next_ch = self.source.get(after_label).copied();
-                if matches!(next_ch, None | Some(b';') | Some(b'\n') | Some(b'\r')) {
+                if matches!(next_ch, None | Some(b';') | Some(b'\n') | Some(b'\r') | Some(b',') | Some(b')') | Some(b']')) {
                     self.pos = after_label;
                     closing_indent = indent;
                     // Consume ; and newline if present

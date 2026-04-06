@@ -324,6 +324,14 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         0
     };
+
+    // Handle edge cases
+    if f.is_nan() || f.is_infinite() || f == 0.0 { return Ok(Value::Double(f)); }
+    // Clamp precision to avoid overflow in 10^precision
+    if precision > 292 { return Ok(Value::Double(f)); }
+    if precision < -292 { return Ok(Value::Double(0.0)); }
+    let precision_i32 = precision as i32;
+
     // mode: 0=HALF_UP(default), 1=HALF_DOWN, 2=HALF_EVEN, 3=HALF_ODD
     // Also support RoundingMode enum backed values
     let mode = if let Some(mode_val) = args.get(2) {
@@ -349,7 +357,7 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         0 // PHP_ROUND_HALF_UP
     };
-    let factor = 10f64.powi(precision as i32);
+    let factor = 10f64.powi(precision_i32);
     let scaled = f * factor;
     let rounded = match mode {
         0 | 1 => { // HALF_UP / HalfAwayFromZero (PHP default, PHP_ROUND_HALF_UP=1)

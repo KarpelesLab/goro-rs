@@ -8,3 +8,4 @@ description = "PHP standard extension for goro-rs"
 goro-core = { path = "../goro-core" }
 goro-vfs = { path = "../goro-vfs" }
 libc = "0.2"
+bcrypt = "0.19"

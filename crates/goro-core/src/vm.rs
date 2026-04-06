@@ -15378,6 +15378,21 @@ impl Vm {
                         }
                     }
                 }
+                OpCode::ExitOp => {
+                    // exit/die: if the value is an integer, it's the exit code (don't print)
+                    // if it's a string or other type, echo it
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    match &val {
+                        Value::Long(_) => {
+                            // Integer exit code - don't echo
+                        }
+                        _ => {
+                            // String or other value - echo it
+                            let s = val.to_php_string();
+                            self.write_output(s.as_bytes());
+                        }
+                    }
+                }
                 OpCode::ArrayGet => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);

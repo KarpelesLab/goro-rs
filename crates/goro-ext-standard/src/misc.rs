@@ -434,6 +434,67 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"stream_set_timeout", stream_set_timeout_fn);
     vm.register_function(b"stream_set_write_buffer", stream_set_write_buffer_fn);
     vm.register_function(b"stream_set_read_buffer", stream_set_read_buffer_fn);
+    vm.register_function(b"stream_copy_to_stream", stream_copy_to_stream_fn);
+    vm.register_function(b"stream_filter_append", stream_filter_append_fn);
+    vm.register_function(b"stream_filter_prepend", stream_filter_prepend_fn);
+    vm.register_function(b"stream_filter_register", stream_filter_register_fn);
+    vm.register_function(b"stream_filter_remove", stream_filter_remove_fn);
+    vm.register_function(b"stream_context_create", stream_context_create_fn);
+    vm.register_function(b"stream_context_set_option", stream_context_set_option_fn);
+    vm.register_function(b"stream_context_get_options", stream_context_get_options_fn);
+    vm.register_function(b"stream_context_set_params", stream_context_set_params_fn);
+    vm.register_function(b"stream_context_get_params", stream_context_get_params_fn);
+    vm.register_function(b"stream_context_get_default", stream_context_get_default_fn);
+    vm.register_function(b"stream_context_set_default", stream_context_set_default_fn);
+    vm.register_function(b"stream_is_local", stream_is_local_fn);
+    vm.register_function(b"stream_get_meta_data", stream_get_meta_data_fn);
+    vm.register_function(b"stream_wrapper_register", stream_wrapper_register_fn);
+    vm.register_function(b"stream_register_wrapper", stream_wrapper_register_fn);
+    vm.register_function(b"stream_wrapper_unregister", stream_wrapper_unregister_fn);
+    vm.register_function(b"stream_wrapper_restore", stream_wrapper_restore_fn);
+    vm.register_function(b"stream_get_wrappers", stream_get_wrappers_fn);
+    vm.register_function(b"stream_get_filters", stream_get_filters_fn);
+    vm.register_function(b"stream_get_transports", stream_get_transports_fn);
+    vm.register_function(b"stream_socket_client", stream_socket_client_fn);
+    vm.register_function(b"stream_socket_server", stream_socket_server_fn);
+    vm.register_function(b"stream_socket_get_name", stream_socket_get_name_fn);
+    vm.register_function(b"stream_select", stream_select_fn);
+    vm.register_function(b"stream_socket_pair", stream_socket_pair_fn);
+    vm.register_function(b"stream_get_line", stream_get_line_fn);
+    vm.register_function(b"stream_set_chunk_size", stream_set_chunk_size_fn);
+    vm.register_function(b"headers_list", headers_list_fn);
+    vm.register_function(b"dir", dir_fn);
+    vm.register_function(b"popen", popen_fn);
+    vm.register_function(b"pclose", pclose_fn);
+    vm.register_function(b"rewinddir", rewinddir_fn);
+    vm.register_function(b"error_log", error_log_fn);
+    vm.register_function(b"highlight_file", highlight_file_fn);
+    vm.register_function(b"show_source", highlight_file_fn);
+    vm.register_function(b"php_strip_whitespace", php_strip_whitespace_fn);
+    vm.register_function(b"disk_free_space", disk_free_space_fn);
+    vm.register_function(b"diskfreespace", disk_free_space_fn);
+    vm.register_function(b"disk_total_space", disk_total_space_fn);
+    vm.register_function(b"get_resources", get_resources_fn);
+    vm.register_function(b"closelog", closelog_fn);
+    vm.register_function(b"openlog", openlog_fn);
+    vm.register_function(b"syslog", syslog_fn);
+    vm.register_function(b"mail", mail_fn);
+    vm.register_function(b"fsockopen", fsockopen_fn);
+    vm.register_function(b"pfsockopen", pfsockopen_fn);
+    vm.register_function(b"getimagesize", getimagesize_fn);
+    vm.register_function(b"register_tick_function", register_tick_function_fn);
+    vm.register_function(b"unregister_tick_function", unregister_tick_function_fn);
+    vm.register_function(b"output_add_rewrite_var", output_add_rewrite_var_fn);
+    vm.register_function(b"output_reset_rewrite_vars", output_reset_rewrite_vars_fn);
+    vm.register_function(b"dns_check_record", dns_check_record_fn);
+    vm.register_function(b"checkdnsrr", dns_check_record_fn);
+    vm.register_function(b"dns_get_record", dns_get_record_fn);
+    vm.register_function(b"getservbyname", getservbyname_fn);
+    vm.register_function(b"getservbyport", getservbyport_fn);
+    vm.register_function(b"getprotobyname", getprotobyname_fn);
+    vm.register_function(b"getprotobynumber", getprotobynumber_fn);
+    vm.register_function(b"get_browser", get_browser_fn);
+    vm.register_function(b"stream_socket_accept", stream_socket_accept_fn);
 
     // Regex functions are now in the regex module (regex.rs)
 }
@@ -1591,7 +1652,13 @@ fn array_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_splice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Array(arr)) = args.first() {
+    let first = args.first().unwrap_or(&Value::Null);
+    let arr_opt = match first {
+        Value::Array(a) => Some(a.clone()),
+        Value::Reference(r) => match &*r.borrow() { Value::Array(a) => Some(a.clone()), _ => None },
+        _ => None,
+    };
+    if let Some(arr) = arr_opt {
         let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         // length is nullable: null means remove everything from offset
         let length = match args.get(2) {
@@ -2483,29 +2550,7 @@ fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
                     }
                     goro_core::array::ArrayKey::String(s) => {
                         if let Some(existing) = result.get_str(s.as_bytes()) {
-                            // Merge recursively: if both are arrays, recurse; else create array
-                            let merged = match (existing, val) {
-                                (Value::Array(a), Value::Array(b)) => {
-                                    let mut merged_arr = a.borrow().clone();
-                                    for (k, v) in b.borrow().iter() {
-                                        match k {
-                                            goro_core::array::ArrayKey::Int(_) => {
-                                                merged_arr.push(v.clone());
-                                            }
-                                            _ => {
-                                                merged_arr.set(k.clone(), v.clone());
-                                            }
-                                        }
-                                    }
-                                    Value::Array(Rc::new(RefCell::new(merged_arr)))
-                                }
-                                (existing_val, new_val) => {
-                                    let mut arr = PhpArray::new();
-                                    arr.push(existing_val.clone());
-                                    arr.push(new_val.clone());
-                                    Value::Array(Rc::new(RefCell::new(arr)))
-                                }
-                            };
+                            let merged = merge_recursive_values(&existing, val, 0);
                             result.set(key.clone(), merged);
                         } else {
                             result.set(key.clone(), val.clone());
@@ -2516,6 +2561,40 @@ fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn merge_recursive_values(existing: &Value, new_val: &Value, depth: usize) -> Value {
+    if depth > 256 { return new_val.clone(); }
+    match (existing, new_val) {
+        (Value::Array(a), Value::Array(b)) => {
+            let mut merged_arr = a.borrow().clone();
+            let b_ref = b.borrow();
+            for (k, v) in b_ref.iter() {
+                match k {
+                    goro_core::array::ArrayKey::Int(_) => { merged_arr.push(v.clone()); }
+                    goro_core::array::ArrayKey::String(s) => {
+                        if let Some(ex) = merged_arr.get_str(s.as_bytes()) {
+                            let merged = merge_recursive_values(&ex, v, depth + 1);
+                            merged_arr.set(k.clone(), merged);
+                        } else {
+                            merged_arr.set(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+            Value::Array(Rc::new(RefCell::new(merged_arr)))
+        }
+        (existing_val, new_v) => {
+            let mut arr = PhpArray::new();
+            if let Value::Array(a) = existing_val {
+                for (_, v) in a.borrow().iter() { arr.push(v.clone()); }
+            } else { arr.push(existing_val.clone()); }
+            if let Value::Array(b) = new_v {
+                for (_, v) in b.borrow().iter() { arr.push(v.clone()); }
+            } else { arr.push(new_v.clone()); }
+            Value::Array(Rc::new(RefCell::new(arr)))
+        }
+    }
 }
 
 fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -5194,24 +5273,51 @@ fn file_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         Err(_) => Ok(Value::False),
     }
 }
-fn file_put_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let data_val = args.get(1).unwrap_or(&Value::Null);
     let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let append = flags & 8 != 0; // FILE_APPEND
-    let result = if append {
+    let lock_ex = flags & 2 != 0; // LOCK_EX
+
+    let data_bytes = match data_val {
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            let mut buf = Vec::new();
+            for (_, v) in arr.iter() { buf.extend_from_slice(v.to_php_string().as_bytes()); }
+            buf
+        }
+        _ => data_val.to_php_string().as_bytes().to_vec(),
+    };
+    let path_str = path.to_string_lossy();
+    let p = std::path::Path::new(&*path_str);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            vm.emit_warning(&format!("file_put_contents({}): Failed to open stream: No such file or directory", path_str));
+            return Ok(Value::False);
+        }
+    }
+    let result = {
         use std::io::Write;
-        std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&*path.to_string_lossy() as &str)
-            .and_then(|mut f| f.write_all(data.as_bytes()).map(|_| data.len()))
-    } else {
-        std::fs::write(&*path.to_string_lossy() as &str, data.as_bytes()).map(|_| data.len())
+        let file_result = if append {
+            std::fs::OpenOptions::new().append(true).create(true).open(&*path_str)
+        } else {
+            std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&*path_str)
+        };
+        file_result.and_then(|mut f| {
+            if lock_ex {
+                #[cfg(unix)]
+                { use std::os::unix::io::AsRawFd; unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) }; }
+            }
+            f.write_all(&data_bytes).map(|_| data_bytes.len())
+        })
     };
     match result {
         Ok(len) => Ok(Value::Long(len as i64)),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            vm.emit_warning(&format!("file_put_contents({}): Failed to open stream: {}", path_str, e));
+            Ok(Value::False)
+        }
     }
 }
 fn realpath_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -5245,12 +5351,21 @@ fn filesize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(_) => Ok(Value::False),
     }
 }
-fn touch_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
     let p = std::path::Path::new(&*path_str);
     if !p.exists() {
-        std::fs::write(p, b"").ok();
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                vm.emit_warning(&format!("touch(): Unable to create file {} because No such file or directory", path_str));
+                return Ok(Value::False);
+            }
+        }
+        if let Err(e) = std::fs::write(p, b"") {
+            vm.emit_warning(&format!("touch(): Unable to create file {} because {}", path_str, e));
+            return Ok(Value::False);
+        }
     }
     Ok(Value::True)
 }
@@ -10526,21 +10641,177 @@ fn gethostbyaddr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(ip))
 }
 
-fn proc_open_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // proc_open is complex to implement fully - return false as stub
-    Ok(Value::False)
+thread_local! {
+    static PROC_HANDLES: RefCell<StdHashMap<i64, std::process::Child>> = RefCell::new(StdHashMap::new());
+    static NEXT_PROC_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(1) };
 }
 
-fn proc_close_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(-1))
+fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let cmd = args.first().unwrap_or(&Value::Null);
+    let descriptor_spec = args.get(1);
+    let pipes_ref = args.get(2);
+    let cmd_str = match cmd {
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            arr.iter().map(|(_, v)| v.to_php_string().to_string_lossy()).collect::<Vec<_>>().join(" ")
+        }
+        _ => cmd.to_php_string().to_string_lossy(),
+    };
+
+    use std::process::{Command, Stdio};
+    let mut child_cmd = Command::new("sh");
+    child_cmd.arg("-c").arg(&cmd_str);
+    let mut has_stdin_pipe = false;
+    let mut has_stdout_pipe = false;
+    let mut has_stderr_pipe = false;
+
+    if let Some(Value::Array(spec)) = descriptor_spec {
+        let spec = spec.borrow();
+        for (key, val) in spec.iter() {
+            let fd_num = match key { ArrayKey::Int(n) => *n, _ => continue };
+            if let Value::Array(fd_spec) = val {
+                let fd_spec = fd_spec.borrow();
+                let fd_type = fd_spec.get_int(0).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+                match &*fd_type.to_string_lossy() {
+                    "pipe" => match fd_num {
+                        0 => { child_cmd.stdin(Stdio::piped()); has_stdin_pipe = true; }
+                        1 => { child_cmd.stdout(Stdio::piped()); has_stdout_pipe = true; }
+                        2 => { child_cmd.stderr(Stdio::piped()); has_stderr_pipe = true; }
+                        _ => {}
+                    },
+                    "file" => {
+                        let filename = fd_spec.get_int(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+                        let mode = fd_spec.get_int(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"r"));
+                        let mode_str = mode.to_string_lossy();
+                        let filename_str = filename.to_string_lossy();
+                        match fd_num {
+                            0 => { if let Ok(f) = std::fs::File::open(&*filename_str) { child_cmd.stdin(f); } }
+                            1 => {
+                                let file = if mode_str.contains('a') {
+                                    std::fs::OpenOptions::new().append(true).create(true).open(&*filename_str)
+                                } else { std::fs::File::create(&*filename_str) };
+                                if let Ok(f) = file { child_cmd.stdout(f); }
+                            }
+                            2 => {
+                                let file = if mode_str.contains('a') {
+                                    std::fs::OpenOptions::new().append(true).create(true).open(&*filename_str)
+                                } else { std::fs::File::create(&*filename_str) };
+                                if let Ok(f) = file { child_cmd.stderr(f); }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if !has_stdin_pipe { child_cmd.stdin(Stdio::null()); }
+    if !has_stdout_pipe { child_cmd.stdout(Stdio::inherit()); }
+    if !has_stderr_pipe { child_cmd.stderr(Stdio::inherit()); }
+
+    if let Some(cwd) = args.get(3) {
+        if !matches!(cwd, Value::Null) {
+            let s = cwd.to_php_string().to_string_lossy();
+            if !s.is_empty() { child_cmd.current_dir(&*s); }
+        }
+    }
+    if let Some(Value::Array(env_arr)) = args.get(4) {
+        child_cmd.env_clear();
+        for (key, val) in env_arr.borrow().iter() {
+            let k = match key { ArrayKey::String(s) => s.to_string_lossy(), ArrayKey::Int(n) => format!("{}", n) };
+            child_cmd.env(&*k, &*val.to_php_string().to_string_lossy());
+        }
+    }
+
+    match child_cmd.spawn() {
+        Ok(mut child) => {
+            use std::os::unix::io::{FromRawFd, IntoRawFd};
+            let mut pipes_arr = PhpArray::new();
+            if has_stdin_pipe {
+                if let Some(stdin) = child.stdin.take() {
+                    let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) }, "w");
+                    pipes_arr.set(ArrayKey::Int(0), Value::Long(fid));
+                }
+            }
+            if has_stdout_pipe {
+                if let Some(stdout) = child.stdout.take() {
+                    let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) }, "r");
+                    pipes_arr.set(ArrayKey::Int(1), Value::Long(fid));
+                }
+            }
+            if has_stderr_pipe {
+                if let Some(stderr) = child.stderr.take() {
+                    let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stderr.into_raw_fd()) }, "r");
+                    pipes_arr.set(ArrayKey::Int(2), Value::Long(fid));
+                }
+            }
+            if let Some(Value::Reference(r)) = pipes_ref {
+                *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(pipes_arr)));
+            }
+            let proc_id = NEXT_PROC_ID.with(|id| {
+                let pid = id.get(); id.set(pid + 1);
+                PROC_HANDLES.with(|h| h.borrow_mut().insert(pid, child));
+                pid
+            });
+            Ok(Value::Long(proc_id))
+        }
+        Err(_) => Ok(Value::False),
+    }
 }
 
-fn proc_get_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn proc_close_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let proc_id = args.first().unwrap_or(&Value::Null).to_long();
+    let exit_code = PROC_HANDLES.with(|h| {
+        match h.borrow_mut().remove(&proc_id) {
+            Some(mut child) => child.wait().map(|s| s.code().unwrap_or(-1) as i64).unwrap_or(-1),
+            None => -1,
+        }
+    });
+    Ok(Value::Long(exit_code))
 }
 
-fn proc_terminate_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn proc_get_status_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let proc_id = args.first().unwrap_or(&Value::Null).to_long();
+    PROC_HANDLES.with(|h| {
+        let mut handles = h.borrow_mut();
+        if let Some(child) = handles.get_mut(&proc_id) {
+            let mut arr = PhpArray::new();
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"command")), Value::String(PhpString::from_bytes(b"")));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"pid")), Value::Long(child.id() as i64));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"running")), Value::False);
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"signaled")), Value::False);
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"stopped")), Value::False);
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"exitcode")), Value::Long(status.code().unwrap_or(-1) as i64));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"termsig")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"stopsig")), Value::Long(0));
+                }
+                Ok(None) => {
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"command")), Value::String(PhpString::from_bytes(b"")));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"pid")), Value::Long(child.id() as i64));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"running")), Value::True);
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"signaled")), Value::False);
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"stopped")), Value::False);
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"exitcode")), Value::Long(-1));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"termsig")), Value::Long(0));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"stopsig")), Value::Long(0));
+                }
+                Err(_) => return Ok(Value::False),
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(arr))))
+        } else { Ok(Value::False) }
+    })
+}
+
+fn proc_terminate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let proc_id = args.first().unwrap_or(&Value::Null).to_long();
+    PROC_HANDLES.with(|h| {
+        if let Some(child) = h.borrow_mut().get_mut(&proc_id) {
+            match child.kill() { Ok(_) => Ok(Value::True), Err(_) => Ok(Value::False) }
+        } else { Ok(Value::False) }
+    })
 }
 
 fn inet_pton_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -10618,3 +10889,402 @@ fn stream_set_write_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
 fn stream_set_read_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
 }
+
+fn stream_copy_to_stream_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let src_fid = args.first().unwrap_or(&Value::Null).to_long();
+    let dst_fid = args.get(1).unwrap_or(&Value::Null).to_long();
+    let max_length = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+    let offset = args.get(3).map(|v| v.to_long()).unwrap_or(0);
+    let data = FILE_HANDLES.with(|h| {
+        let mut handles = h.borrow_mut();
+        if let Some(fh) = handles.get_mut(&src_fid) {
+            use std::io::{Read, Seek, SeekFrom};
+            if offset > 0 { let _ = fh.file.seek(SeekFrom::Start(offset as u64)); }
+            let mut buf = Vec::new();
+            if max_length >= 0 {
+                buf.resize(max_length as usize, 0);
+                match fh.file.read(&mut buf) { Ok(n) => { buf.truncate(n); Some(buf) } Err(_) => None }
+            } else {
+                match fh.file.read_to_end(&mut buf) { Ok(_) => Some(buf), Err(_) => None }
+            }
+        } else { None }
+    });
+    match data {
+        Some(buf) => {
+            let len = buf.len();
+            let ok = FILE_HANDLES.with(|h| {
+                let mut handles = h.borrow_mut();
+                if let Some(fh) = handles.get_mut(&dst_fid) {
+                    use std::io::Write;
+                    fh.file.write_all(&buf).is_ok()
+                } else { false }
+            });
+            if ok { Ok(Value::Long(len as i64)) } else { Ok(Value::False) }
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn stream_filter_append_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_filter_prepend_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_filter_register_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn stream_filter_remove_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn stream_context_create_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
+fn stream_context_set_option_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn stream_context_get_options_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
+fn stream_context_set_params_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn stream_context_get_params_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    arr.set(ArrayKey::String(PhpString::from_bytes(b"options")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+fn stream_context_get_default_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
+fn stream_context_set_default_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
+
+fn stream_is_local_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    match val {
+        Value::String(s) => {
+            let s_str = s.to_string_lossy();
+            if s_str.starts_with("http://") || s_str.starts_with("https://") || s_str.starts_with("ftp://") {
+                Ok(Value::False)
+            } else { Ok(Value::True) }
+        }
+        _ => Ok(Value::True),
+    }
+}
+
+fn stream_get_meta_data_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let mut arr = PhpArray::new();
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow().get(&fid) {
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"timed_out")), Value::False);
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"blocked")), Value::True);
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"eof")), if fh.eof { Value::True } else { Value::False });
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"wrapper_type")), Value::String(PhpString::from_bytes(b"plainfile")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"stream_type")), Value::String(PhpString::from_bytes(b"STDIO")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"mode")), Value::String(PhpString::from_string(fh.mode.clone())));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"unread_bytes")), Value::Long(0));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"seekable")), Value::True);
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"uri")), Value::String(PhpString::from_bytes(b"")));
+        }
+    });
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn stream_wrapper_register_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn stream_wrapper_unregister_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn stream_wrapper_restore_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+
+fn stream_get_wrappers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    arr.push(Value::String(PhpString::from_bytes(b"file")));
+    arr.push(Value::String(PhpString::from_bytes(b"php")));
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn stream_get_filters_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    for name in &[b"string.rot13" as &[u8], b"string.toupper", b"string.tolower", b"convert.iconv.*"] {
+        arr.push(Value::String(PhpString::from_bytes(name)));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn stream_get_transports_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    for name in &[b"tcp" as &[u8], b"udp", b"unix", b"udg"] {
+        arr.push(Value::String(PhpString::from_bytes(name)));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn stream_socket_client_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_socket_server_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_socket_get_name_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_select_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_socket_pair_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+
+fn stream_get_line_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let max_length = args.get(1).map(|v| v.to_long() as usize).unwrap_or(0);
+    let ending = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"\n"));
+    let ending_bytes = ending.as_bytes();
+    if max_length == 0 { return Ok(Value::False); }
+    FILE_HANDLES.with(|h| {
+        let mut handles = h.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            for _ in 0..max_length {
+                match fh.file.read(&mut byte) {
+                    Ok(0) => { fh.eof = true; break; }
+                    Ok(_) => {
+                        buf.push(byte[0]);
+                        if buf.len() >= ending_bytes.len() && buf[buf.len() - ending_bytes.len()..] == *ending_bytes {
+                            buf.truncate(buf.len() - ending_bytes.len());
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if buf.is_empty() && fh.eof { Ok(Value::False) }
+            else { Ok(Value::String(PhpString::from_vec(buf))) }
+        } else { Ok(Value::False) }
+    })
+}
+
+fn stream_set_chunk_size_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(8192)) }
+fn headers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
+
+fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = path.to_string_lossy();
+    let dir_path = std::path::Path::new(&*path_str);
+    if !dir_path.is_dir() {
+        vm.emit_warning(&format!("dir({}): Failed to open directory", path_str));
+        return Ok(Value::False);
+    }
+    match std::fs::read_dir(dir_path) {
+        Ok(entries) => {
+            let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
+            for entry in entries { if let Ok(e) = entry { names.push(e.file_name().to_string_lossy().to_string()); } }
+            names.sort(); names.reverse();
+            let key = format!("dir:{}", path_str);
+            DIR_HANDLES.with(|dh| dh.borrow_mut().insert(key.clone(), names));
+            let mut obj = PhpObject::new(b"Directory".to_vec(), 0);
+            obj.set_property(b"path".to_vec(), Value::String(PhpString::from_string(path_str.to_string())));
+            obj.set_property(b"handle".to_vec(), Value::String(PhpString::from_string(key)));
+            Ok(Value::Object(Rc::new(RefCell::new(obj))))
+        }
+        Err(_) => { vm.emit_warning(&format!("dir({}): Failed to open directory", path_str)); Ok(Value::False) }
+    }
+}
+
+fn popen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let command = args.first().unwrap_or(&Value::Null).to_php_string();
+    let mode = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"r"));
+    let cmd_str = command.to_string_lossy();
+    let mode_str = mode.to_string_lossy();
+    use std::process::{Command, Stdio};
+    let child = if mode_str.contains('r') {
+        Command::new("sh").arg("-c").arg(&*cmd_str).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()
+    } else {
+        Command::new("sh").arg("-c").arg(&*cmd_str).stdin(Stdio::piped()).spawn()
+    };
+    match child {
+        Ok(child) => {
+            use std::os::unix::io::{FromRawFd, IntoRawFd};
+            if mode_str.contains('r') {
+                if let Some(stdout) = child.stdout {
+                    return Ok(Value::Long(alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) }, &mode_str)));
+                }
+            } else if let Some(stdin) = child.stdin {
+                return Ok(Value::Long(alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) }, &mode_str)));
+            }
+            Ok(Value::False)
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn pclose_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
+    Ok(Value::Long(0))
+}
+
+fn rewinddir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let handle = args.first().unwrap_or(&Value::Null);
+    let key = handle.to_php_string().to_string_lossy();
+    DIR_HANDLES.with(|dh| {
+        if key.starts_with("dir:") {
+            let path = &key[4..];
+            if let Ok(entries) = std::fs::read_dir(path) {
+                let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
+                for entry in entries { if let Ok(e) = entry { names.push(e.file_name().to_string_lossy().to_string()); } }
+                names.sort(); names.reverse();
+                dh.borrow_mut().insert(key.to_string(), names);
+            }
+        }
+    });
+    Ok(Value::Null)
+}
+
+fn error_log_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let message = args.first().unwrap_or(&Value::Null).to_php_string();
+    let message_type = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let destination = args.get(2).map(|v| v.to_php_string());
+    match message_type {
+        3 => {
+            if let Some(dest) = destination {
+                use std::io::Write;
+                match std::fs::OpenOptions::new().append(true).create(true).open(&*dest.to_string_lossy()) {
+                    Ok(mut f) => { let _ = f.write_all(message.as_bytes()); Ok(Value::True) }
+                    Err(_) => Ok(Value::False),
+                }
+            } else { Ok(Value::False) }
+        }
+        _ => { eprintln!("{}", message.to_string_lossy()); Ok(Value::True) }
+    }
+}
+
+fn highlight_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let ret = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    match std::fs::read_to_string(&*path.to_string_lossy()) {
+        Ok(content) => {
+            let output = format!("<code><span style=\"color: #000000\">{}</span></code>",
+                content.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
+            if ret { Ok(Value::String(PhpString::from_string(output))) } else { Ok(Value::True) }
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn php_strip_whitespace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    match std::fs::read_to_string(&*path.to_string_lossy()) {
+        Ok(content) => Ok(Value::String(PhpString::from_string(content))),
+        Err(_) => Ok(Value::String(PhpString::from_bytes(b""))),
+    }
+}
+
+fn disk_free_space_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Double(1073741824.0)) }
+fn disk_total_space_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Double(10737418240.0)) }
+fn get_resources_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
+fn closelog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn openlog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn syslog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+
+fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Stub: mail() always returns false in test/CLI mode
+    let _to = args.first().unwrap_or(&Value::Null);
+    let _subject = args.get(1).unwrap_or(&Value::Null);
+    let _message = args.get(2).unwrap_or(&Value::Null);
+    if args.is_empty() {
+        let msg = "mail() expects at least 3 arguments, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+    }
+    // In CLI/test mode, mail() typically fails
+    Ok(Value::False)
+}
+
+fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let hostname = args.first().unwrap_or(&Value::Null).to_php_string();
+    let port = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+    let errno_ref = args.get(2);
+    let errstr_ref = args.get(3);
+
+    let host_str = hostname.to_string_lossy();
+
+    // Try to connect
+    use std::net::TcpStream;
+    let addr = if port > 0 {
+        format!("{}:{}", host_str.trim_start_matches("tcp://").trim_start_matches("ssl://"), port)
+    } else {
+        host_str.to_string()
+    };
+
+    match TcpStream::connect_timeout(&addr.parse().unwrap_or_else(|_| {
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)), 0)
+    }), std::time::Duration::from_secs(5)) {
+        Ok(stream) => {
+            // Set errno to 0 and errstr to ""
+            if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(0); }
+            if let Some(Value::Reference(r)) = errstr_ref { *r.borrow_mut() = Value::String(PhpString::from_bytes(b"")); }
+
+            use std::os::unix::io::IntoRawFd;
+            let raw_fd = stream.into_raw_fd();
+            use std::os::unix::io::FromRawFd;
+            let file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+            let fid = alloc_file_handle(file, "r+");
+            Ok(Value::Long(fid))
+        }
+        Err(e) => {
+            if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(111); } // ECONNREFUSED
+            if let Some(Value::Reference(r)) = errstr_ref {
+                *r.borrow_mut() = Value::String(PhpString::from_string(e.to_string()));
+            }
+            vm.emit_warning(&format!("fsockopen(): Unable to connect to {} ({})", addr, e));
+            Ok(Value::False)
+        }
+    }
+}
+
+fn pfsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    fsockopen_fn(vm, args)
+}
+
+fn getimagesize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = path.to_string_lossy();
+
+    // Read first few bytes to detect image type
+    match std::fs::read(&*path_str) {
+        Ok(data) => {
+            if data.len() < 8 { return Ok(Value::False); }
+            let mut arr = PhpArray::new();
+            // Detect image type from magic bytes
+            if data.starts_with(b"\x89PNG") {
+                // PNG
+                if data.len() >= 24 {
+                    let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]) as i64;
+                    let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]) as i64;
+                    arr.set(ArrayKey::Int(0), Value::Long(width));
+                    arr.set(ArrayKey::Int(1), Value::Long(height));
+                    arr.set(ArrayKey::Int(2), Value::Long(3)); // IMAGETYPE_PNG
+                    arr.set(ArrayKey::Int(3), Value::String(PhpString::from_string(format!("width=\"{}\" height=\"{}\"", width, height))));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"bits")), Value::Long(8));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"mime")), Value::String(PhpString::from_bytes(b"image/png")));
+                }
+            } else if data.starts_with(b"\xff\xd8\xff") {
+                // JPEG - basic detection
+                arr.set(ArrayKey::Int(0), Value::Long(0));
+                arr.set(ArrayKey::Int(1), Value::Long(0));
+                arr.set(ArrayKey::Int(2), Value::Long(2)); // IMAGETYPE_JPEG
+                arr.set(ArrayKey::Int(3), Value::String(PhpString::from_bytes(b"width=\"0\" height=\"0\"")));
+                arr.set(ArrayKey::String(PhpString::from_bytes(b"bits")), Value::Long(8));
+                arr.set(ArrayKey::String(PhpString::from_bytes(b"mime")), Value::String(PhpString::from_bytes(b"image/jpeg")));
+            } else if data.starts_with(b"GIF8") {
+                // GIF
+                if data.len() >= 10 {
+                    let width = u16::from_le_bytes([data[6], data[7]]) as i64;
+                    let height = u16::from_le_bytes([data[8], data[9]]) as i64;
+                    arr.set(ArrayKey::Int(0), Value::Long(width));
+                    arr.set(ArrayKey::Int(1), Value::Long(height));
+                    arr.set(ArrayKey::Int(2), Value::Long(1)); // IMAGETYPE_GIF
+                    arr.set(ArrayKey::Int(3), Value::String(PhpString::from_string(format!("width=\"{}\" height=\"{}\"", width, height))));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"bits")), Value::Long(8));
+                    arr.set(ArrayKey::String(PhpString::from_bytes(b"mime")), Value::String(PhpString::from_bytes(b"image/gif")));
+                }
+            } else {
+                return Ok(Value::False);
+            }
+            if arr.len() > 0 {
+                Ok(Value::Array(Rc::new(RefCell::new(arr))))
+            } else {
+                Ok(Value::False)
+            }
+        }
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn register_tick_function_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn unregister_tick_function_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
+fn output_add_rewrite_var_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn output_reset_rewrite_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn dns_check_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn dns_get_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn getservbyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn getservbyport_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn getprotobyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(-1)) }
+fn getprotobynumber_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn get_browser_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_socket_accept_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
