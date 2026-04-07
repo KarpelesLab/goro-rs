@@ -1557,6 +1557,45 @@ impl Vm {
         }
     }
 
+    /// Emit deprecation for optional parameters before required parameters.
+    fn emit_optional_before_required_deprecation(&mut self, op_array: &crate::opcode::OpArray, func_display: &str) {
+        let param_count = op_array.param_has_default.len();
+        if param_count == 0 { return; }
+        // Find the last required parameter index (no default, not variadic)
+        let variadic_idx = op_array.variadic_param.map(|v| v as usize);
+        // For each parameter, check if it's optional and there's a required param after it
+        for i in 0..param_count {
+            if variadic_idx == Some(i) { continue; }
+            let has_default = *op_array.param_has_default.get(i).unwrap_or(&false);
+            if !has_default { continue; }
+            // Check if this parameter is implicitly nullable (those are treated as required)
+            let is_implicitly_nullable = op_array.param_types.get(i)
+                .and_then(|pt| pt.as_ref())
+                .map(|pt| pt.implicitly_nullable)
+                .unwrap_or(false);
+            if is_implicitly_nullable { continue; }
+            // Check if there's a required parameter after this one
+            for j in (i+1)..param_count {
+                if variadic_idx == Some(j) { continue; }
+                let j_has_default = *op_array.param_has_default.get(j).unwrap_or(&false);
+                if !j_has_default {
+                    // Found a required parameter after an optional one
+                    let opt_name = op_array.cv_names.get(i)
+                        .map(|n| String::from_utf8_lossy(n).to_string())
+                        .unwrap_or_else(|| format!("param{}", i));
+                    let req_name = op_array.cv_names.get(j)
+                        .map(|n| String::from_utf8_lossy(n).to_string())
+                        .unwrap_or_else(|| format!("param{}", j));
+                    self.emit_deprecated_at(
+                        &format!("{}(): Optional parameter ${} declared before required parameter ${} is implicitly treated as a required parameter", func_display, opt_name, req_name),
+                        op_array.decl_line,
+                    );
+                    break; // Only warn once per optional param (about the first required after it)
+                }
+            }
+        }
+    }
+
     /// Return a type name string for error messages.
     /// For objects, this returns the class name (e.g. "stdClass") instead of just "object".
     /// For generators, this returns "Generator".
@@ -10134,6 +10173,8 @@ impl Vm {
         let mut static_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
         // Exception handler stack: (catch_target, finally_target, exception_tmp_idx, error_reporting_depth, pending_calls_depth)
         let mut exception_handlers: Vec<(u32, u32, u32, usize, usize)> = Vec::new();
+        // Saved pending_calls depth to restore when entering a catch block
+        let mut pending_calls_catch_depth: Option<usize> = None;
         // Maps CV index -> global var name (for saving back on write)
         let mut global_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
 
@@ -10176,7 +10217,7 @@ impl Vm {
                     match self.value_to_string_checked(&val) {
                         Ok(s) => self.write_output(s.as_bytes()),
                         Err(e) => {
-                            if let Some((_catch, _finally, _, _, _)) = exception_handlers.last() {
+                            if let Some((_catch, _finally, _, _, _eh_pc)) = exception_handlers.last() { pending_calls_catch_depth = Some(*_eh_pc);
                                 let catch = *_catch;
                                 let finally = *_finally;
                                 exception_handlers.pop();
@@ -10200,7 +10241,7 @@ impl Vm {
                     match self.value_to_string_checked(&val) {
                         Ok(s) => self.write_output(s.as_bytes()),
                         Err(e) => {
-                            if let Some((_catch, _finally, _, _, _)) = exception_handlers.last() {
+                            if let Some((_catch, _finally, _, _, _eh_pc)) = exception_handlers.last() { pending_calls_catch_depth = Some(*_eh_pc);
                                 let catch = *_catch;
                                 let finally = *_finally;
                                 exception_handlers.pop();
@@ -10311,7 +10352,7 @@ impl Vm {
                                     Some(Err(msg)) => {
                                         let exc_val = self.throw_type_error(msg.clone());
                                         self.current_exception = Some(exc_val);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
                                             continue;
                                         } else {
@@ -10328,7 +10369,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "+") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -10354,7 +10395,7 @@ impl Vm {
                                     Some(Err(msg)) => {
                                         let exc_val = self.throw_type_error(msg.clone());
                                         self.current_exception = Some(exc_val);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
                                         else { return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line }); }
                                     }
                                     None => {}
@@ -10367,7 +10408,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "-") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -10393,7 +10434,7 @@ impl Vm {
                                     Some(Err(msg)) => {
                                         let exc_val = self.throw_type_error(msg.clone());
                                         self.current_exception = Some(exc_val);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
                                         else { return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line }); }
                                     }
                                     None => {}
@@ -10406,7 +10447,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "*") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -10432,7 +10473,7 @@ impl Vm {
                                     Some(Err(msg)) => {
                                         let exc = self.create_exception(b"DivisionByZeroError", &msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
                                         else { return Err(VmError { message: format!("Uncaught DivisionByZeroError: {}", msg), line: op.line }); }
                                     }
                                     None => {}
@@ -10443,7 +10484,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "/") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -10474,7 +10515,7 @@ impl Vm {
                             err_obj.set_property(b"code".to_vec(), Value::Long(0));
                             let exc_val = Value::Object(Rc::new(RefCell::new(err_obj)));
                             self.current_exception = Some(exc_val);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -10500,7 +10541,7 @@ impl Vm {
                                     Some(Err(msg)) => {
                                         let exc = self.create_exception(b"DivisionByZeroError", &msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
                                         else { return Err(VmError { message: format!("Uncaught DivisionByZeroError: {}", msg), line: op.line }); }
                                     }
                                     None => {}
@@ -10511,7 +10552,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "%") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -10551,7 +10592,7 @@ impl Vm {
                             err_obj.set_property(b"code".to_vec(), Value::Long(0));
                             let exc_val = Value::Object(Rc::new(RefCell::new(err_obj)));
                             self.current_exception = Some(exc_val);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -10577,7 +10618,7 @@ impl Vm {
                                     Some(Err(msg)) => {
                                         let exc_val = self.throw_type_error(msg.clone());
                                         self.current_exception = Some(exc_val);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
                                         else { return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line }); }
                                     }
                                     None => {}
@@ -10588,7 +10629,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "**") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -10618,7 +10659,7 @@ impl Vm {
                     let a_str = match self.value_to_string_checked(&a) {
                         Ok(s) => s,
                         Err(e) => {
-                            if let Some((_catch, _finally, _, _, _)) = exception_handlers.last() {
+                            if let Some((_catch, _finally, _, _, _eh_pc)) = exception_handlers.last() { pending_calls_catch_depth = Some(*_eh_pc);
                                 let catch = *_catch;
                                 let finally = *_finally;
                                 exception_handlers.pop();
@@ -10631,7 +10672,7 @@ impl Vm {
                     let b_str = match self.value_to_string_checked(&b) {
                         Ok(s) => s,
                         Err(e) => {
-                            if let Some((_catch, _finally, _, _, _)) = exception_handlers.last() {
+                            if let Some((_catch, _finally, _, _, _eh_pc)) = exception_handlers.last() { pending_calls_catch_depth = Some(*_eh_pc);
                                 let catch = *_catch;
                                 let finally = *_finally;
                                 exception_handlers.pop();
@@ -10702,7 +10743,7 @@ impl Vm {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "&", &a, &b) {
                                     Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -10711,7 +10752,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "&") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -10748,7 +10789,7 @@ impl Vm {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "|", &a, &b) {
                                     Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -10757,7 +10798,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "|") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -10798,7 +10839,7 @@ impl Vm {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "^", &a, &b) {
                                     Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -10807,7 +10848,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "^") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -10868,7 +10909,7 @@ impl Vm {
                     let result = if matches!(a.deref(), Value::Array(_)) {
                         let exc = self.create_exception(b"TypeError", "Cannot perform bitwise not on array", op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, finally_target, _, _, _)) = exception_handlers.last() {
+                        if let Some((catch_target, finally_target, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                             if *catch_target > 0 {
                                 ip = *catch_target as usize;
                                 continue;
@@ -10905,7 +10946,7 @@ impl Vm {
                                     Some(Err(msg)) => {
                                         let exc = self.create_exception(b"ValueError", &msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((ct, _, _, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; }
+                                        if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; }
                                         else { return Err(VmError { message: msg, line: op.line }); }
                                     }
                                     None => {}
@@ -10918,7 +10959,7 @@ impl Vm {
                         let err = format!("Unsupported operand types: {} << {}", Vm::value_type_name(&a), Vm::value_type_name(&b));
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
                             continue;
                         }
@@ -10943,7 +10984,7 @@ impl Vm {
                                     Some(Err(msg)) => {
                                         let exc = self.create_exception(b"ValueError", &msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((ct, _, _, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; }
+                                        if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; }
                                         else { return Err(VmError { message: msg, line: op.line }); }
                                     }
                                     None => {}
@@ -10956,7 +10997,7 @@ impl Vm {
                         let err = format!("Unsupported operand types: {} >> {}", Vm::value_type_name(&a), Vm::value_type_name(&b));
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
                             continue;
                         }
@@ -10999,7 +11040,7 @@ impl Vm {
                                     let msg = "Number must be of type GMP|string|int, stdClass given".to_string();
                                     let exc_val = self.throw_type_error(msg.clone());
                                     self.current_exception = Some(exc_val);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
                                     else { return Err(VmError { message: msg, line: op.line }); }
                                 }
                                 if let Some(ord) = cmp_fn(&a, &b) {
@@ -11033,7 +11074,7 @@ impl Vm {
                                     let msg = "Number must be of type GMP|string|int, stdClass given".to_string();
                                     let exc_val = self.throw_type_error(msg.clone());
                                     self.current_exception = Some(exc_val);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() { ip = catch_target as usize; continue; }
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
                                     else { return Err(VmError { message: msg, line: op.line }); }
                                 }
                                 if let Some(ord) = cmp_fn(&a, &b) {
@@ -11226,7 +11267,7 @@ impl Vm {
                             if is_type(&cv_val) || is_type(&rhs) {
                                 match handler(self, "+", &cv_val, &rhs) {
                                     Some(Ok(result)) => { self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -11236,7 +11277,7 @@ impl Vm {
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -11262,7 +11303,7 @@ impl Vm {
                             if is_type(&cv_val) || is_type(&rhs) {
                                 match handler(self, "-", &cv_val, &rhs) {
                                     Some(Ok(result)) => { self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -11272,7 +11313,7 @@ impl Vm {
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -11298,7 +11339,7 @@ impl Vm {
                             if is_type(&cv_val) || is_type(&rhs) {
                                 match handler(self, "*", &cv_val, &rhs) {
                                     Some(Ok(result)) => { self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, _)) = exception_handlers.pop() { ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -11308,7 +11349,7 @@ impl Vm {
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -11333,7 +11374,7 @@ impl Vm {
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -11366,7 +11407,7 @@ impl Vm {
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -11410,7 +11451,7 @@ impl Vm {
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -11455,7 +11496,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "&") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -11502,7 +11543,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "|") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -11553,7 +11594,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "^") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -11602,7 +11643,7 @@ impl Vm {
                         let err = format!("Unsupported operand types: {} << {}", Vm::value_type_name(&cv_val), Vm::value_type_name(&rhs));
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
                             continue;
                         }
@@ -11624,7 +11665,7 @@ impl Vm {
                         let err = format!("Unsupported operand types: {} >> {}", Vm::value_type_name(&cv_val), Vm::value_type_name(&rhs));
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
                             continue;
                         }
@@ -11658,7 +11699,7 @@ impl Vm {
                     if let Some(err) = check_inc_dec_type(&val, true) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -11668,7 +11709,7 @@ impl Vm {
                     emit_inc_dec_warnings(self, &val, true, op.line);
                     // Check if the warning handler threw an exception
                     if self.current_exception.is_some() {
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -11700,7 +11741,7 @@ impl Vm {
                     if let Some(err) = check_inc_dec_type(&val, false) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -11708,7 +11749,7 @@ impl Vm {
                     }
                     emit_inc_dec_warnings(self, &val, false, op.line);
                     if self.current_exception.is_some() {
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -11740,7 +11781,7 @@ impl Vm {
                     if let Some(err) = check_inc_dec_type(&val, true) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -11748,7 +11789,7 @@ impl Vm {
                     }
                     emit_inc_dec_warnings(self, &val, true, op.line);
                     if self.current_exception.is_some() {
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -11763,7 +11804,7 @@ impl Vm {
                     if let Some(err) = check_inc_dec_type(&val, false) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -11771,7 +11812,7 @@ impl Vm {
                     }
                     emit_inc_dec_warnings(self, &val, false, op.line);
                     if self.current_exception.is_some() {
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -11893,7 +11934,7 @@ impl Vm {
                             let err_msg = "Class name must be a valid object or a string";
                             let exc = self.create_exception(b"TypeError", err_msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
                                 continue;
                             }
@@ -12173,7 +12214,7 @@ impl Vm {
                     let unpack_result: Result<(), String> = match collected {
                         Err(ref e) if e == "__exception__" => {
                             // Exception already set; propagate it
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -12227,7 +12268,7 @@ impl Vm {
                         };
                         let exc_val = self.create_exception(exc_class, &err_msg, op.line);
                         self.current_exception = Some(exc_val);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         } else {
@@ -12346,7 +12387,7 @@ impl Vm {
                             let exc = self.create_exception(b"FiberError", msg, op.line);
                             self.current_exception = Some(exc);
                             self.call_stack.pop();
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             }
@@ -12358,7 +12399,7 @@ impl Vm {
                             let exc = self.create_exception(b"FiberError", msg, op.line);
                             self.current_exception = Some(exc);
                             self.call_stack.pop();
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             }
@@ -12408,7 +12449,7 @@ impl Vm {
                                 }
                                 // Check if there's a current exception from the fiber
                                 if self.current_exception.is_some() {
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
                                     } else {
@@ -12422,7 +12463,7 @@ impl Vm {
                             }
                             Err(e) => {
                                 if self.current_exception.is_some() {
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         self.call_stack.pop();
                                         ip = catch_target as usize;
                                         continue;
@@ -12481,7 +12522,7 @@ impl Vm {
                             let err_msg = msg.replace("{}", type_name);
                             let exc = self.create_exception(b"TypeError", &err_msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
                                 continue;
                             }
@@ -12512,7 +12553,7 @@ impl Vm {
                                         let msg = format!("Object {}#{} not contained in WeakMap", class_display, key_oid);
                                         let exc = self.create_exception(b"Error", &msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
                                             continue;
                                         }
@@ -12522,7 +12563,7 @@ impl Vm {
                                     let msg = "WeakMap key must be an object";
                                     let exc = self.create_exception(b"TypeError", msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
                                         continue;
                                     }
@@ -12546,7 +12587,7 @@ impl Vm {
                                     let msg = "WeakMap key must be an object";
                                     let exc = self.create_exception(b"TypeError", msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
                                         continue;
                                     }
@@ -12569,7 +12610,7 @@ impl Vm {
                                     let msg = "WeakMap key must be an object";
                                     let exc = self.create_exception(b"TypeError", msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
                                         continue;
                                     }
@@ -12588,7 +12629,7 @@ impl Vm {
                                     let msg = "WeakMap key must be an object";
                                     let exc = self.create_exception(b"TypeError", msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
                                         continue;
                                     }
@@ -12610,7 +12651,7 @@ impl Vm {
                         let callable = call.args.first().cloned().unwrap_or(Value::Null);
                         let result = self.callable_to_closure(callable, op.line);
                         if self.current_exception.is_some() {
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -12637,7 +12678,7 @@ impl Vm {
                         let scope_provided = call.args.len() >= 3;
                         let result = self.bind_closure(&closure, new_this, scope, scope_provided);
                         if self.current_exception.is_some() {
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -12799,7 +12840,7 @@ impl Vm {
                                     .unwrap_or(Value::Null);
                                 // Check if the SPL method set an exception
                                 if let Some(exc_val) = self.current_exception.take() {
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                         let catch_target = *catch_target;
                                         self.current_exception = Some(exc_val);
                                         ip = catch_target as usize;
@@ -12828,7 +12869,7 @@ impl Vm {
                     } else if func_name_lower == b"__builtin_return" {
                         // Check if the SPL method set an exception
                         if let Some(exc_val) = self.current_exception.take() {
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let catch_target = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = catch_target as usize;
@@ -12861,7 +12902,7 @@ impl Vm {
                         let scope_provided = call.args.len() >= 3;
                         let result = self.bind_closure(&closure, new_this, scope, scope_provided);
                         if self.current_exception.is_some() {
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -12941,7 +12982,7 @@ impl Vm {
                                 let _ = gen_borrow.resume(self);
                                 if self.current_exception.is_some() {
                                     drop(gen_borrow);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
                                     }
@@ -12965,7 +13006,7 @@ impl Vm {
                             let result = gen_borrow.current_value.clone();
                             drop(gen_borrow);
                             if self.current_exception.is_some() {
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 }
@@ -13020,7 +13061,7 @@ impl Vm {
                                 let msg = format!("Generator::throw(): Argument #1 ($exception) must be of type Throwable, {} given", type_name);
                                 let exc = self.create_exception(b"TypeError", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 }
@@ -13033,7 +13074,7 @@ impl Vm {
                                 // Generator is already closed - re-throw the exception
                                 drop(gen_borrow);
                                 self.current_exception = Some(exception);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 }
@@ -13053,7 +13094,7 @@ impl Vm {
                                     // Generator completed without yielding - throw the exception
                                     drop(gen_borrow);
                                     self.current_exception = Some(exception);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
                                     }
@@ -13087,7 +13128,7 @@ impl Vm {
                                 }
                                 Err(e) => {
                                     if self.current_exception.is_some() {
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
                                             continue;
                                         }
@@ -13132,7 +13173,7 @@ impl Vm {
                                         let msg = format!("Cannot use ::from on non-backed enum {}", class_name);
                                         let exc = self.create_exception(b"Error", &msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
                                             continue;
                                         }
@@ -13148,7 +13189,7 @@ impl Vm {
                                             class_name, arg_type);
                                         let exc = self.create_exception(b"TypeError", &msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
                                             continue;
                                         }
@@ -13179,7 +13220,7 @@ impl Vm {
                                         };
                                         let exc = self.create_exception(b"ValueError", &msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
                                             continue;
                                         }
@@ -13202,7 +13243,7 @@ impl Vm {
                                                 class_name, arg_type);
                                             let exc = self.create_exception(b"TypeError", &msg, op.line);
                                             self.current_exception = Some(exc);
-                                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                 ip = catch_target as usize;
                                                 continue;
                                             }
@@ -13278,7 +13319,7 @@ impl Vm {
                                     };
                                     let exc_val = self.create_exception(exc_class, &final_msg, op.line);
                                     self.current_exception = Some(exc_val);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
                                     } else {
@@ -13294,7 +13335,7 @@ impl Vm {
                                 let err_msg = format!("Unknown named parameter ${}", first_name);
                                 let exc_val = self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc_val);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 } else {
@@ -13328,7 +13369,7 @@ impl Vm {
                                             );
                                             let exc_val = self.create_exception(b"TypeError", &err_msg, op.line);
                                             self.current_exception = Some(exc_val);
-                                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                 ip = catch_target as usize;
                                                 continue;
                                             } else {
@@ -13369,7 +13410,7 @@ impl Vm {
                                 // Only trigger handlers if the exception is newly set,
                                 // not if it was already present before the call (e.g. inside a finally block)
                                 if !had_exception_before && self.current_exception.is_some() {
-                                    if let Some((catch_target, finally_target, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         if catch_target > 0 {
                                             ip = catch_target as usize;
                                         } else if finally_target > 0 {
@@ -13404,7 +13445,7 @@ impl Vm {
                                 // For assert, keep the stack frame so it appears in stack traces
                                 // Check if there's a pending exception to catch
                                 if self.current_exception.is_some() {
-                                    if let Some((catch_target, finally_target, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         if is_assert_call {
                                             self.call_stack.pop();
                                         }
@@ -13443,7 +13484,7 @@ impl Vm {
                                                 let err_msg = format!("Cannot call abstract method {}::{}()", class_display, method_display);
                                                 let exc = self.create_exception(b"Error", &err_msg, op.line);
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                                     self.call_stack.pop();
                                                     ip = *catch_target as usize;
                                                     continue;
@@ -13557,7 +13598,7 @@ impl Vm {
                                                     err_obj.set_property(b"code".to_vec(), Value::Long(0));
                                                     self.current_exception =
                                                         Some(Value::Object(Rc::new(RefCell::new(err_obj))));
-                                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         continue;
                                                     } else {
@@ -13597,7 +13638,7 @@ impl Vm {
                                 if let Err(err_msg) = call.resolve_named_args(&user_fn.cv_names, implicit_args_count, user_fn.variadic_param) {
                                     let exc_val = self.create_exception(b"Error", &err_msg, op.line);
                                     self.current_exception = Some(exc_val);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
                                     } else {
@@ -13666,7 +13707,7 @@ impl Vm {
                                 );
                                 let exc_val = self.create_exception(b"ArgumentCountError", &err_msg, op.line);
                                 self.current_exception = Some(exc_val);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     self.call_stack.pop(); // pop early-pushed frame
                                     ip = catch_target as usize;
                                     continue;
@@ -13705,7 +13746,7 @@ impl Vm {
                                 if let Some(err_msg) = missing_param_err {
                                     let exc_val = self.create_exception(b"ArgumentCountError", &err_msg, op.line);
                                     self.current_exception = Some(exc_val);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         self.call_stack.pop();
                                         ip = catch_target as usize;
                                         continue;
@@ -13802,7 +13843,7 @@ impl Vm {
                                 };
                                 let exc_val = self.create_exception(b"TypeError", &err_msg, def_line);
                                 self.current_exception = Some(exc_val);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     self.call_stack.pop(); // pop early-pushed frame
                                     ip = catch_target as usize;
                                     continue;
@@ -14246,7 +14287,7 @@ impl Vm {
                                 let err_msg = format!("Unknown named parameter ${}", first_name);
                                 let exc_val = self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc_val);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 } else {
@@ -14326,7 +14367,7 @@ impl Vm {
                                                         let msg = format!("SplFixedArray::__construct(): Argument #1 ($size) must be of type int, {} given", class);
                                                         let exc = self.throw_type_error(msg.clone());
                                                         self.current_exception = Some(exc);
-                                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                                             let ct = *catch_target;
                                                             ip = ct as usize;
                                                             continue;
@@ -14338,7 +14379,7 @@ impl Vm {
                                                         let msg = "SplFixedArray::__construct(): Argument #1 ($size) must be of type int, array given".to_string();
                                                         let exc = self.throw_type_error(msg.clone());
                                                         self.current_exception = Some(exc);
-                                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                                             let ct = *catch_target;
                                                             ip = ct as usize;
                                                             continue;
@@ -14350,7 +14391,7 @@ impl Vm {
                                                         let msg = format!("SplFixedArray::__construct(): Argument #1 ($size) must be of type int, string given");
                                                         let exc = self.throw_type_error(msg.clone());
                                                         self.current_exception = Some(exc);
-                                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                                             let ct = *catch_target;
                                                             ip = ct as usize;
                                                             continue;
@@ -14485,7 +14526,7 @@ impl Vm {
                                                             let msg = format!("SplFileObject::__construct({}): Failed to open stream: File exists", path);
                                                             let exc = self.create_exception(b"RuntimeException", &msg, op.line);
                                                             self.current_exception = Some(exc);
-                                                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                                                 let ct = *catch_target;
                                                                 ip = ct as usize;
                                                                 continue;
@@ -14540,7 +14581,7 @@ impl Vm {
                                                     let msg = format!("SplFileObject::__construct({}): Failed to open stream: No such file or directory", path);
                                                     let exc = self.create_exception(b"RuntimeException", &msg, op.line);
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                                         let ct = *catch_target;
                                                         ip = ct as usize;
                                                         continue;
@@ -14582,7 +14623,7 @@ impl Vm {
                                                     let msg = format!("{}::__construct({}): Failed to open directory: No such file or directory", class_canonical, path);
                                                     let exc = self.create_exception(b"UnexpectedValueException", &msg, op.line);
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                                         let ct = *catch_target;
                                                         ip = ct as usize;
                                                         continue;
@@ -14602,7 +14643,7 @@ impl Vm {
                                             drop(obj_mut);
                                             let ctor_handled = crate::reflection::reflection_class_construct(self, &call.args, op.line);
                                             if !ctor_handled {
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 } else {
@@ -14617,7 +14658,7 @@ impl Vm {
                                             drop(obj_mut);
                                             let ctor_handled = crate::reflection::reflection_method_construct(self, &call.args, op.line);
                                             if !ctor_handled {
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 } else {
@@ -14632,7 +14673,7 @@ impl Vm {
                                             drop(obj_mut);
                                             let ctor_handled = crate::reflection::reflection_function_construct(self, &call.args, op.line);
                                             if !ctor_handled {
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 } else {
@@ -14647,7 +14688,7 @@ impl Vm {
                                             drop(obj_mut);
                                             let ctor_handled = crate::reflection::reflection_property_construct(self, &call.args, op.line);
                                             if !ctor_handled {
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 } else {
@@ -14662,7 +14703,7 @@ impl Vm {
                                             drop(obj_mut);
                                             let ctor_handled = crate::reflection::reflection_parameter_construct(self, &call.args, op.line);
                                             if !ctor_handled {
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 } else {
@@ -14677,7 +14718,7 @@ impl Vm {
                                             drop(obj_mut);
                                             let ctor_handled = crate::reflection::reflection_class_constant_construct(self, &call.args, op.line);
                                             if !ctor_handled {
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 } else {
@@ -14751,7 +14792,7 @@ impl Vm {
                                                         let err_msg = format!("Failed to parse time string ({}) at position 0", datetime_str);
                                                         let exc = self.create_exception(b"Exception", &err_msg, op.line);
                                                         self.current_exception = Some(exc);
-                                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                             ip = catch_target as usize;
                                                             continue;
                                                         } else {
@@ -14770,7 +14811,7 @@ impl Vm {
                                                         let err_msg = format!("Failed to parse time string ({}) at position 0", datetime_str);
                                                         let exc = self.create_exception(b"Exception", &err_msg, op.line);
                                                         self.current_exception = Some(exc);
-                                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                             ip = catch_target as usize;
                                                             continue;
                                                         } else {
@@ -14809,7 +14850,7 @@ impl Vm {
                                                     let err_msg = format!("DateInterval::__construct(): Unknown or bad format ({})", spec);
                                                     let exc = self.create_exception(b"DateMalformedIntervalStringException", &err_msg, op.line);
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         continue;
                                                     } else {
@@ -14832,7 +14873,7 @@ impl Vm {
                                                 let err_msg = "DateInterval::__construct() expects exactly 1 argument, 0 given".to_string();
                                                 let exc = self.create_exception(b"ArgumentCountError", &err_msg, op.line);
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 } else {
@@ -14849,7 +14890,7 @@ impl Vm {
                                                     let err_msg = format!("DateTimeZone::__construct(): Argument #1 ($timezone) must be a valid timezone string, \"{}\" given", tz);
                                                     let exc = self.create_exception(b"DateInvalidTimeZoneException", &err_msg, op.line);
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         continue;
                                                     } else {
@@ -14865,7 +14906,7 @@ impl Vm {
                                                 let err_msg = "DateTimeZone::__construct() expects exactly 1 argument, 0 given".to_string();
                                                 let exc = self.create_exception(b"ArgumentCountError", &err_msg, op.line);
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 } else {
@@ -14886,7 +14927,7 @@ impl Vm {
                                                 let exc = self.create_exception(b"FiberError", msg, op.line);
                                                 self.call_stack.pop();
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 }
@@ -14899,7 +14940,7 @@ impl Vm {
                                                 let msg = "Fiber::__construct() expects exactly 1 argument, 0 given".to_string();
                                                 let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
                                                     continue;
                                                 }
@@ -14973,7 +15014,7 @@ impl Vm {
                                                             let msg = format!("{}::__construct(): Argument #1 ($message) must be of type string, {} given", base_class, given_type);
                                                             let exc = self.create_exception(b"TypeError", &msg, op.line);
                                                             self.current_exception = Some(exc);
-                                                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                                 ip = catch_target as usize;
                                                                 continue;
                                                             }
@@ -15193,7 +15234,7 @@ impl Vm {
                                 {
                                     let exc = self.create_exception(b"Error", &err_msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
                                         continue;
                                     }
@@ -15289,7 +15330,7 @@ impl Vm {
                     let str_val = match self.value_to_string_checked(&val) {
                         Ok(s) => s,
                         Err(e) => {
-                            if let Some((_catch, _finally, _, _, _)) = exception_handlers.last() {
+                            if let Some((_catch, _finally, _, _, _eh_pc)) = exception_handlers.last() { pending_calls_catch_depth = Some(*_eh_pc);
                                 let catch = *_catch;
                                 let finally = *_finally;
                                 exception_handlers.pop();
@@ -15462,7 +15503,7 @@ impl Vm {
                         if let Err(msg) = arr.borrow_mut().try_push(val) {
                             let exc = self.create_exception(b"Error", msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
                                 continue;
                             }
@@ -15479,7 +15520,7 @@ impl Vm {
                             self.call_object_method(&arr_val, b"offsetset", &[Value::Null, val]);
                         }
                         if let Some(exc_val) = self.current_exception.take() {
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
@@ -15553,7 +15594,7 @@ impl Vm {
                             self.call_object_method(&arr_val, b"offsetset", &[key_val, val]);
                         }
                         if let Some(exc_val) = self.current_exception.take() {
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
@@ -15772,7 +15813,7 @@ impl Vm {
                             let msg = format!("Cannot use object of type {} as array", class_name_orig);
                             let exc = self.create_exception(b"Error", &msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
                                 continue;
@@ -15790,7 +15831,7 @@ impl Vm {
                                     .unwrap_or(Value::Null)
                             });
                         if let Some(exc_val) = self.current_exception.take() {
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
@@ -15891,7 +15932,7 @@ impl Vm {
                             let msg = format!("Cannot use object of type {} as array", class_name_orig);
                             let exc = self.create_exception(b"Error", &msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
                                 continue;
@@ -15908,7 +15949,7 @@ impl Vm {
                                     .unwrap_or(Value::Null)
                             });
                         if let Some(exc_val) = self.current_exception.take() {
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
@@ -15954,7 +15995,7 @@ impl Vm {
                                 drop(gen_borrow);
                                 if resume_result.is_err() || self.current_exception.is_some() {
                                     // Exception thrown during generator priming - propagate it
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                         exception_handlers.pop();
                                         ip = catch_target as usize;
                                         continue;
@@ -16385,7 +16426,7 @@ impl Vm {
                                 let resume_result = gen_borrow.resume(self);
                                 drop(gen_borrow);
                                 if resume_result.is_err() || self.current_exception.is_some() {
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                         exception_handlers.pop();
                                         ip = catch_target as usize;
                                         continue;
@@ -16664,6 +16705,19 @@ impl Vm {
                             }
                         }
                         let name = name_val.to_php_string();
+                        // Emit deprecation for implicitly nullable parameters
+                        let func_display = String::from_utf8_lossy(&func_op_array.name).to_string();
+                        for pt_info in func_op_array.param_types.iter().flatten() {
+                            if pt_info.implicitly_nullable {
+                                let param_name = String::from_utf8_lossy(&pt_info.param_name);
+                                self.emit_deprecated_at(
+                                    &format!("{}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead", func_display, param_name),
+                                    func_op_array.decl_line,
+                                );
+                            }
+                        }
+                        // Emit deprecation for optional parameters before required parameters
+                        self.emit_optional_before_required_deprecation(func_op_array, &func_display);
                         self.register_user_function(name.as_bytes(), func_op_array.clone());
                     }
                 }
@@ -16825,6 +16879,10 @@ impl Vm {
                 }
 
                 OpCode::CatchException => {
+                    // Restore pending_calls depth saved when we jumped to this catch block
+                    if let Some(depth) = pending_calls_catch_depth.take() {
+                        self.pending_calls.truncate(depth);
+                    }
                     // Store current exception into the CV
                     if let Some(exc) = self.current_exception.take() {
                         self.write_operand(&op.op1, exc, &mut cvs, &mut tmps, &static_cv_keys);
@@ -16854,7 +16912,7 @@ impl Vm {
                         let err_msg = "Can only throw objects".to_string();
                         let err_exc = self.create_exception(b"Error", &err_msg, op.line);
                         self.current_exception = Some(err_exc);
-                        if let Some((catch_target, finally_target, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             if catch_target > 0 {
                                 ip = catch_target as usize;
                             } else if finally_target > 0 {
@@ -16885,7 +16943,7 @@ impl Vm {
                             let err_msg = "Cannot throw objects that do not implement Throwable".to_string();
                             let err_exc = self.create_exception(b"Error", &err_msg, op.line);
                             self.current_exception = Some(err_exc);
-                            if let Some((catch_target, finally_target, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 if catch_target > 0 {
                                     ip = catch_target as usize;
                                 } else if finally_target > 0 {
@@ -17013,7 +17071,7 @@ impl Vm {
                             let err_msg = format!("Cannot use value of type {} as class constant name", type_name);
                             let exc = self.create_exception(b"TypeError", &err_msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
                                 continue;
                             }
@@ -17081,7 +17139,7 @@ impl Vm {
                                 let msg = format!("Cannot access trait constant {}::{} directly", class_display, prop_display);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                     let ct = *catch_target;
                                     ip = ct as usize;
                                     continue;
@@ -17137,7 +17195,7 @@ impl Vm {
                                         let err_msg = format!("Undefined constant {}::{}", class_display, prop_display);
                                         let exc = self.create_exception(b"Error", &err_msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
                                             continue;
                                         }
@@ -17170,7 +17228,7 @@ impl Vm {
                                         let err_msg = format!("Undefined constant {}", rest_str);
                                         let exc = self.create_exception(b"Error", &err_msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
                                             continue;
                                         }
@@ -17215,7 +17273,7 @@ impl Vm {
                                 if let Some(err_msg) = spread_err {
                                     let exc = self.create_exception(b"Error", &err_msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
                                         continue;
                                     }
@@ -17264,7 +17322,7 @@ impl Vm {
                                     if let Some(err_msg) = type_error {
                                         let exc = self.create_exception(b"TypeError", &err_msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
                                             continue;
                                         }
@@ -17290,7 +17348,7 @@ impl Vm {
                                 let err_msg = format!("Undefined constant {}::{}", class_display, prop_display);
                                 let exc = self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
                                     continue;
                                 }
@@ -17301,7 +17359,7 @@ impl Vm {
                                 let err_msg = format!("Class \"{}\" not found", class_display);
                                 let exc = self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
                                     continue;
                                 }
@@ -17387,7 +17445,7 @@ impl Vm {
                         let msg = format!("Undefined constant \"{}\"", name_str);
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, finally_target, _, _, _)) = exception_handlers.last().copied() {
+                        if let Some((catch_target, finally_target, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                             if catch_target > 0 {
                                 exception_handlers.pop();
                                 ip = catch_target as usize;
@@ -17498,7 +17556,7 @@ impl Vm {
                                                     if self.current_exception.is_some() {
                                                         self.pending_classes = saved_pending;
                                                         self.current_file = old_file;
-                                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                             ip = catch_target as usize;
                                                             continue;
                                                         }
@@ -17640,7 +17698,7 @@ impl Vm {
                                                 self.current_file = saved_file;
                                                 self.pending_classes = eval_saved_pending;
                                                 if self.current_exception.is_some() {
-                                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                                         ip = *catch_target as usize;
                                                         continue;
                                                     }
@@ -17693,7 +17751,7 @@ impl Vm {
                                     ob.set_property(b"line".to_vec(), Value::Long(e.span.line as i64));
                                 }
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
                                     continue;
                                 }
@@ -17755,7 +17813,7 @@ impl Vm {
                                 let msg = format!("Trying to clone an uncloneable object of class {}", class_name);
                                 let exc_val = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc_val);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 }
@@ -17796,7 +17854,7 @@ impl Vm {
                                         ob.properties.retain(|(k, _)| !k.starts_with(b"__clone_modified_"));
                                     }
                                     if self.current_exception.is_some() {
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
                                             continue;
                                         }
@@ -17824,7 +17882,7 @@ impl Vm {
                             let msg = "Trying to clone an uncloneable object of class Generator".to_string();
                             let exc_val = self.create_exception(b"Error", &msg, op.line);
                             self.current_exception = Some(exc_val);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
                                 continue;
                             }
@@ -17838,7 +17896,7 @@ impl Vm {
                             let msg = format!("clone(): Argument #1 ($object) must be of type object, {} given", type_name);
                             let exc_val = self.throw_type_error(msg.clone());
                             self.current_exception = Some(exc_val);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             }
@@ -18008,7 +18066,7 @@ impl Vm {
                             self.call_object_method(&obj_val, b"offsetunset", &[key_val]);
                         }
                         if let Some(exc_val) = self.current_exception.take() {
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
@@ -18041,7 +18099,7 @@ impl Vm {
                                 let msg = format!("Cannot unset readonly property {}::${}", class_name, prop_str);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 }
@@ -18051,7 +18109,7 @@ impl Vm {
                                 let msg = format!("Cannot unset dynamic property {}::${}", class_name, prop_str);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 }
@@ -18071,7 +18129,7 @@ impl Vm {
                                 let msg = format!("Cannot unset readonly property {}::${}", class_display, prop_str);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 }
@@ -18118,14 +18176,30 @@ impl Vm {
                             if let Some(msg) = avis_error {
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 }
                                 return Err(VmError { message: msg, line: op.line });
                             }
-                            obj.borrow_mut().properties
-                                .retain(|(name, _)| name != prop_name.as_bytes());
+                            // For typed properties: set to Undef (uninitialized) instead of removing
+                            // For untyped properties: remove entirely
+                            let is_typed = self.classes.get(&class_lower_u)
+                                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                                .map(|p| p.property_type.is_some())
+                                .unwrap_or(false);
+                            if is_typed {
+                                let mut obj_mut = obj.borrow_mut();
+                                for (name, val) in obj_mut.properties.iter_mut() {
+                                    if name == prop_name.as_bytes() {
+                                        *val = Value::Undef;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                obj.borrow_mut().properties
+                                    .retain(|(name, _)| name != prop_name.as_bytes());
+                            }
                         } else {
                             // Try __unset magic method (or throw avis error if no __unset)
                             let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -18151,7 +18225,7 @@ impl Vm {
                                 // Property was unset but still has asymmetric visibility restriction
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 }
@@ -18638,7 +18712,7 @@ impl Vm {
                     match collected {
                         Err(ref e) if e.is_empty() => {
                             // Exception already set by a method call; propagate it
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -18661,7 +18735,7 @@ impl Vm {
                             };
                             let exc_val = self.create_exception(exc_class, &e, op.line);
                             self.current_exception = Some(exc_val);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -18697,7 +18771,7 @@ impl Vm {
                                     drop(target_borrow);
                                     let exc_val = self.create_exception(b"Error", &err_msg, op.line);
                                     self.current_exception = Some(exc_val);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
                                     } else {
@@ -18770,9 +18844,10 @@ impl Vm {
 
 
 
-                    if let Some((catch_target, _finally_target, _exc_tmp, _, _)) =
+                    if let Some((catch_target, _finally_target, _exc_tmp, _, saved_pc)) =
                         exception_handlers.pop()
                     {
+                        pending_calls_catch_depth = Some(saved_pc);
                         self.current_exception = Some(exc_val);
                         ip = catch_target as usize;
                     } else {
@@ -19219,7 +19294,7 @@ impl Vm {
                                     let msg = format!("Interface \"{}\" not found", iface_display);
                                     let exc_val = self.create_exception(b"Error", &msg, op.line);
                                     self.current_exception = Some(exc_val);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                         let ct = *catch_target;
                                         ip = ct as usize;
                                         continue;
@@ -20074,7 +20149,7 @@ impl Vm {
                         if let Some(err_msg) = deferred_error {
                             let exc = self.create_exception(b"Error", &err_msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
                                 continue;
                             }
@@ -20691,6 +20766,29 @@ impl Vm {
                         if class.filename.is_none() {
                             class.filename = Some(self.current_file.clone());
                         }
+                        // Emit deprecation for implicitly nullable parameters in methods
+                        // and for optional parameters before required parameters
+                        // Only for methods declared in THIS class (not inherited)
+                        {
+                            let class_display = crate::value::display_class_name(&class.name);
+                            let class_lower_for_check: Vec<u8> = class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            for method in class.methods.values() {
+                                // Skip inherited methods
+                                if method.declaring_class != class_lower_for_check { continue; }
+                                for pt_info in method.op_array.param_types.iter().flatten() {
+                                    if pt_info.implicitly_nullable {
+                                        let method_display = String::from_utf8_lossy(&method.name);
+                                        let param_name = String::from_utf8_lossy(&pt_info.param_name);
+                                        self.emit_deprecated_at(
+                                            &format!("{}::{}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead", class_display, method_display, param_name),
+                                            method.op_array.decl_line,
+                                        );
+                                    }
+                                }
+                                let method_display_name = format!("{}::{}", class_display, String::from_utf8_lossy(&method.name));
+                                self.emit_optional_before_required_deprecation(&method.op_array, &method_display_name);
+                            }
+                        }
                         self.classes.insert(name_lower, class);
                     }
                 }
@@ -20749,7 +20847,7 @@ impl Vm {
                         );
                         let exc = self.create_exception(b"Error", &err_msg, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
                             continue;
                         }
@@ -20785,7 +20883,7 @@ impl Vm {
                             self.current_exception =
                                 Some(Value::Object(Rc::new(RefCell::new(err_obj))));
 
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -21159,7 +21257,7 @@ impl Vm {
                                 let msg = format!("Property {}::${} is write-only", class_display, prop_display);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                     exception_handlers.pop();
                                     ip = catch_target as usize;
                                     continue;
@@ -21190,7 +21288,7 @@ impl Vm {
                                 }
                                 Err(e) => {
                                     if self.current_exception.is_some() {
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
                                             continue;
@@ -21265,7 +21363,7 @@ impl Vm {
                                 err_obj.set_property(b"code".to_vec(), Value::Long(0));
                                 self.current_exception =
                                     Some(Value::Object(Rc::new(RefCell::new(err_obj))));
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 } else {
@@ -21286,7 +21384,7 @@ impl Vm {
                                 let msg = format!("Typed property {}::${} must not be accessed before initialization", class_display, prop_display);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                     let ct = *catch_target;
                                     ip = ct as usize;
                                     continue;
@@ -21430,7 +21528,7 @@ impl Vm {
                                 let msg = format!("Property {}::${} is read-only", class_display, prop_display);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                     exception_handlers.pop();
                                     ip = catch_target as usize;
                                     continue;
@@ -21459,7 +21557,7 @@ impl Vm {
                             self.property_hook_stack.pop();
                             if let Err(e) = hook_result {
                                 if self.current_exception.is_some() {
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                         exception_handlers.pop();
                                         ip = catch_target as usize;
                                         continue;
@@ -21477,7 +21575,7 @@ impl Vm {
                             let msg = format!("Cannot create dynamic property {}::${}", class_display, prop_str);
                             let exc = self.create_exception(b"Error", &msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             }
@@ -21498,7 +21596,7 @@ impl Vm {
                             };
                             let exc = self.create_exception(b"Error", &msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             }
@@ -21515,7 +21613,7 @@ impl Vm {
                                     let msg = format!("Cannot create dynamic property {}::${}", class_display, prop_str);
                                     let exc = self.create_exception(b"Error", &msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
                                     }
@@ -21635,7 +21733,7 @@ impl Vm {
                             // Property type violation - throw TypeError
                             let exc = self.create_exception(b"TypeError", &err_msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -21656,7 +21754,7 @@ impl Vm {
                             err_obj.set_property(b"code".to_vec(), Value::Long(0));
                             self.current_exception =
                                 Some(Value::Object(Rc::new(RefCell::new(err_obj))));
-                            if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
                             } else {
@@ -21719,7 +21817,7 @@ impl Vm {
                                 err_obj.set_property(b"code".to_vec(), Value::Long(0));
                                 self.current_exception =
                                     Some(Value::Object(Rc::new(RefCell::new(err_obj))));
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
                                 } else {
@@ -21777,7 +21875,7 @@ impl Vm {
                         let msg = format!("Cannot create dynamic property Generator::${}", prop_str);
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -21788,7 +21886,7 @@ impl Vm {
                         let msg = format!("Cannot create dynamic property Closure::${}", prop_str);
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -21800,7 +21898,7 @@ impl Vm {
                         let msg = format!("Attempt to assign property \"{}\" on {}", prop_str, type_name);
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             continue;
                         }
@@ -21899,7 +21997,7 @@ impl Vm {
                                         let exc = self.create_exception(b"FiberError", msg, op.line);
                                         self.call_stack.pop();
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
                                             continue;
                                         }
@@ -21913,7 +22011,7 @@ impl Vm {
                                         let exc = self.create_exception(b"FiberError", msg, op.line);
                                         self.call_stack.pop();
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
                                             continue;
                                         }
@@ -21966,7 +22064,7 @@ impl Vm {
                                     let msg = "Direct instantiation of WeakReference is not allowed, use WeakReference::create instead";
                                     let exc = self.create_exception(b"Error", msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
                                         continue;
                                     }
@@ -22364,7 +22462,7 @@ impl Vm {
                                     err_obj.set_property(b"code".to_vec(), Value::Long(0));
                                     self.current_exception =
                                         Some(Value::Object(Rc::new(RefCell::new(err_obj))));
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
                                     } else {
@@ -22512,7 +22610,7 @@ impl Vm {
                                     drop(gen_borrow);
                                     if resume_result.is_err() || self.current_exception.is_some() {
                                         // Exception during priming - propagate
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
                                             continue;
@@ -22528,7 +22626,7 @@ impl Vm {
                                     let msg = "Cannot rewind a generator that was already run";
                                     let exc = self.create_exception(b"Exception", msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.pop() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
                                     }
@@ -22557,7 +22655,7 @@ impl Vm {
                                         let msg = "Cannot get return value of a generator that hasn't returned";
                                         let exc = self.create_exception(b"Exception", msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
                                             continue;
@@ -22574,7 +22672,7 @@ impl Vm {
                                         let msg = "Cannot get return value of a generator that hasn't returned";
                                         let exc = self.create_exception(b"Exception", msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
                                             continue;
@@ -22586,7 +22684,7 @@ impl Vm {
                                     let msg = "Cannot get return value of a generator that hasn't returned";
                                     let exc = self.create_exception(b"Exception", msg, op.line);
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, _)) = exception_handlers.last().copied() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                         exception_handlers.pop();
                                         ip = catch_target as usize;
                                         continue;
@@ -22704,7 +22802,7 @@ impl Vm {
                                 err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
                                 err_obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
                                 self.current_exception = Some(Value::Object(Rc::new(RefCell::new(err_obj))));
-                                if let Some((catch_target, _, _, _, _)) = exception_handlers.last() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
                                     continue;
                                 } else {

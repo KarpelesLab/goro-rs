@@ -8263,11 +8263,34 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .collect();
     let mut result = PhpArray::new();
     if let Some(class) = vm.classes.get(&name_lower) {
+        // Non-static properties first, then static
         for prop in &class.properties {
             if !prop.is_static {
+                // Uninitialized typed properties (Undef) are returned as null
+                let val = match &prop.default {
+                    Value::Undef => Value::Null,
+                    other => other.clone(),
+                };
                 result.set(
                     goro_core::array::ArrayKey::String(PhpString::from_vec(prop.name.clone())),
-                    prop.default.clone(),
+                    val,
+                );
+            }
+        }
+        // Static properties
+        for prop in &class.properties {
+            if prop.is_static {
+                // Get current value from static_properties (may have been modified at runtime)
+                let val = class.static_properties.get(&prop.name)
+                    .cloned()
+                    .unwrap_or_else(|| prop.default.clone());
+                let val = match val {
+                    Value::Undef => Value::Null,
+                    other => other,
+                };
+                result.set(
+                    goro_core::array::ArrayKey::String(PhpString::from_vec(prop.name.clone())),
+                    val,
                 );
             }
         }

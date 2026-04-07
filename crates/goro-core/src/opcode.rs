@@ -20,6 +20,8 @@ pub struct ParamTypeInfo {
     pub param_type: ParamType,
     /// The parameter name (for error messages)
     pub param_name: Vec<u8>,
+    /// Whether this parameter was implicitly made nullable (Type $x = null)
+    pub implicitly_nullable: bool,
 }
 
 /// Operand type (how to interpret the operand index)
@@ -330,6 +332,8 @@ pub struct OpArray {
     pub strict_types: bool,
     /// Which parameters are passed by reference (indexed by parameter position, true = by-ref)
     pub by_ref_params: Vec<bool>,
+    /// Which parameters have default values (indexed by parameter position)
+    pub param_has_default: Vec<bool>,
     pub attributes: Vec<crate::object::RuntimeAttribute>,
     pub param_attributes: Vec<Vec<crate::object::RuntimeAttribute>>,
     /// Source filename (for closures, error reporting)
@@ -357,6 +361,7 @@ impl OpArray {
             class_const_literals: Vec::new(),
             strict_types: false,
             by_ref_params: Vec::new(),
+            param_has_default: Vec::new(),
             attributes: Vec::new(),
             param_attributes: Vec::new(),
             filename: Vec::new(),

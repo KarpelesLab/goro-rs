@@ -1593,6 +1593,8 @@ impl Compiler {
                 func_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                 // Record which parameters are by-reference
                 func_compiler.op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
+                // Record which parameters have default values
+                func_compiler.op_array.param_has_default = params.iter().map(|p| p.default.is_some()).collect();
                 for param in params {
                     let cv = func_compiler.op_array.get_or_create_cv(&param.name);
                     if param.variadic {
@@ -1603,14 +1605,17 @@ impl Compiler {
                     let type_info = param.type_hint.as_ref().map(|hint| {
                         let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
                         // Implicitly nullable: if default is null and type is not already nullable/mixed
+                        let mut is_implicitly_nullable = false;
                         if let Some(default_expr) = &param.default {
                             if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
                                 pt = ParamType::Nullable(Box::new(pt));
+                                is_implicitly_nullable = true;
                             }
                         }
                         ParamTypeInfo {
                             param_type: pt,
                             param_name: param.name.clone(),
+                            implicitly_nullable: is_implicitly_nullable,
                         }
                     });
                     // Ensure param_types vec is large enough
@@ -2723,6 +2728,7 @@ impl Compiler {
                                             .take_while(|p| p.default.is_none() && !p.variadic)
                                             .count() as u32;
                                         closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
+                                        closure_compiler.op_array.param_has_default = closure_params.iter().map(|p| p.default.is_some()).collect();
                                         for p in closure_params {
                                             let cv = closure_compiler.op_array.get_or_create_cv(&p.name);
                                             if p.variadic {
@@ -3480,10 +3486,14 @@ impl Compiler {
                                 // Record by-ref params (offset by 1 for non-static methods due to $this)
                                 if *is_static {
                                     method_compiler.op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
+                                    method_compiler.op_array.param_has_default = params.iter().map(|p| p.default.is_some()).collect();
                                 } else {
                                     let mut by_ref = vec![false]; // $this is not by-ref
                                     by_ref.extend(params.iter().map(|p| p.by_ref));
                                     method_compiler.op_array.by_ref_params = by_ref;
+                                    let mut has_default = vec![false]; // $this has no default
+                                    has_default.extend(params.iter().map(|p| p.default.is_some()));
+                                    method_compiler.op_array.param_has_default = has_default;
                                 }
                                 // Compile parameter attributes
                                 method_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
@@ -3527,14 +3537,17 @@ impl Compiler {
                                         param.type_hint.as_ref().map(|hint| {
                                             let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
                                             // Implicitly nullable: if default is null and type is not already nullable/mixed
+                                            let mut is_implicitly_nullable = false;
                                             if let Some(default_expr) = &param.default {
                                                 if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
                                                     pt = ParamType::Nullable(Box::new(pt));
+                                                    is_implicitly_nullable = true;
                                                 }
                                             }
                                             ParamTypeInfo {
                                                 param_type: pt,
                                                 param_name: param.name.clone(),
+                                                implicitly_nullable: is_implicitly_nullable,
                                             }
                                         });
                                     while method_compiler.op_array.param_types.len() <= cv as usize
@@ -3686,10 +3699,14 @@ impl Compiler {
                                     .count() as u32;
                                 if *is_static {
                                     abstract_op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
+                                    abstract_op_array.param_has_default = params.iter().map(|p| p.default.is_some()).collect();
                                 } else {
                                     let mut by_ref = vec![false];
                                     by_ref.extend(params.iter().map(|p| p.by_ref));
                                     abstract_op_array.by_ref_params = by_ref;
+                                    let mut has_default = vec![false];
+                                    has_default.extend(params.iter().map(|p| p.default.is_some()));
+                                    abstract_op_array.param_has_default = has_default;
                                 }
                                 abstract_op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                                 for param in params {
@@ -3699,14 +3716,17 @@ impl Compiler {
                                     }
                                     let type_info = param.type_hint.as_ref().map(|hint| {
                                         let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                        let mut is_implicitly_nullable = false;
                                         if let Some(default_expr) = &param.default {
                                             if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
                                                 pt = ParamType::Nullable(Box::new(pt));
+                                                is_implicitly_nullable = true;
                                             }
                                         }
                                         crate::opcode::ParamTypeInfo {
                                             param_type: pt,
                                             param_name: param.name.clone(),
+                                            implicitly_nullable: is_implicitly_nullable,
                                         }
                                     });
                                     // Store at CV index (cv already accounts for $this offset)
@@ -4017,6 +4037,7 @@ impl Compiler {
                                             .take_while(|p| p.default.is_none() && !p.variadic)
                                             .count() as u32;
                                         closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
+                                        closure_compiler.op_array.param_has_default = closure_params.iter().map(|p| p.default.is_some()).collect();
                                         for p in closure_params {
                                             let cv = closure_compiler.op_array.get_or_create_cv(&p.name);
                                             if p.variadic {
@@ -7077,10 +7098,12 @@ impl Compiler {
                 // Record by-ref params for closures (with offset for $this and use vars)
                 {
                     let mut by_ref = Vec::new();
-                    if has_this { by_ref.push(false); } // $this
-                    for uv in use_vars { by_ref.push(uv.by_ref); } // use vars
-                    for p in params.iter() { by_ref.push(p.by_ref); } // params
+                    let mut has_default = Vec::new();
+                    if has_this { by_ref.push(false); has_default.push(false); } // $this
+                    for uv in use_vars { by_ref.push(uv.by_ref); has_default.push(false); } // use vars
+                    for p in params.iter() { by_ref.push(p.by_ref); has_default.push(p.default.is_some()); } // params
                     closure_compiler.op_array.by_ref_params = by_ref;
+                    closure_compiler.op_array.param_has_default = has_default;
                 }
 
                 // Validate parameter types
@@ -7107,14 +7130,17 @@ impl Compiler {
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| {
                         let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                        let mut is_implicitly_nullable = false;
                         if let Some(default_expr) = &param.default {
                             if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
                                 pt = ParamType::Nullable(Box::new(pt));
+                                is_implicitly_nullable = true;
                             }
                         }
                         ParamTypeInfo {
                             param_type: pt,
                             param_name: param.name.clone(),
+                            implicitly_nullable: is_implicitly_nullable,
                         }
                     });
                     while closure_compiler.op_array.param_types.len() <= cv as usize {
@@ -7315,14 +7341,17 @@ impl Compiler {
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| {
                         let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                        let mut is_implicitly_nullable = false;
                         if let Some(default_expr) = &param.default {
                             if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
                                 pt = ParamType::Nullable(Box::new(pt));
+                                is_implicitly_nullable = true;
                             }
                         }
                         ParamTypeInfo {
                             param_type: pt,
                             param_name: param.name.clone(),
+                            implicitly_nullable: is_implicitly_nullable,
                         }
                     });
                     while closure_compiler.op_array.param_types.len() <= cv as usize {
