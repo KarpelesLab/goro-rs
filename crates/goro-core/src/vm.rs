@@ -5013,6 +5013,25 @@ impl Vm {
                 let offset_val = if let Value::Long(o) = offset { o } else { 0 };
                 Some(Value::Long(offset_val + pos_val))
             }
+            b"seek" => {
+                // LimitIterator::seek($position) - seek to the given position
+                let target = self.pending_call_args.first().map(|v| v.to_long()).unwrap_or(0);
+                let ob = obj.borrow();
+                let inner = ob.get_property(b"__spl_inner");
+                let offset = ob.get_property(b"__spl_offset");
+                let offset_val = if let Value::Long(o) = offset { o } else { 0 };
+                drop(ob);
+                // Rewind and seek to offset + target
+                self.call_object_method(&inner, b"rewind", &[]);
+                let total_skip = offset_val + target;
+                for _ in 0..total_skip {
+                    let valid = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
+                    if !valid.is_truthy() { break; }
+                    self.call_object_method(&inner, b"next", &[]);
+                }
+                obj.borrow_mut().set_property(b"__spl_pos".to_vec(), Value::Long(target));
+                Some(Value::Long(0))
+            }
             _ => None,
         }
     }
@@ -5933,7 +5952,7 @@ impl Vm {
                 }
             }
             b"seek" => None, // handled in handle_spl_docall
-            b"fgets" => {
+            b"fgets" | b"getcurrentline" => {
                 let mut ob = obj.borrow_mut();
                 let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
                 let lines = ob.get_property(b"__spl_file_lines");
@@ -19997,10 +20016,11 @@ impl Vm {
                                 let methods_list = abstract_methods.join(", ");
                                 let method_word = if count == 1 { "method" } else { "methods" };
                                 // Check if the abstract method was declared by this class itself
-                                // (not inherited from parent/interface)
+                                // (not inherited from parent/interface/trait)
                                 let mut self_declared_abstract: Vec<(String, u32)> = Vec::new();
+                                let has_traits = !class.traits.is_empty();
                                 for (_, method) in &class.methods {
-                                    if method.is_abstract && method.declaring_class == class_name_lower_str {
+                                    if method.is_abstract && method.declaring_class == class_name_lower_str && !has_traits {
                                         self_declared_abstract.push((
                                             String::from_utf8_lossy(&method.name).to_string(),
                                             method.op_array.decl_line,

@@ -462,6 +462,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"stream_socket_pair", stream_socket_pair_fn);
     vm.register_function(b"stream_get_line", stream_get_line_fn);
     vm.register_function(b"stream_set_chunk_size", stream_set_chunk_size_fn);
+    vm.register_function(b"stream_socket_recvfrom", stream_socket_recvfrom_fn);
+    vm.register_function(b"stream_socket_sendto", stream_socket_sendto_fn);
+    vm.register_function(b"stream_socket_shutdown", stream_socket_shutdown_fn);
+    vm.register_function(b"stream_socket_enable_crypto", stream_socket_enable_crypto_fn);
     vm.register_function(b"headers_list", headers_list_fn);
     vm.register_function(b"dir", dir_fn);
     vm.register_function(b"popen", popen_fn);
@@ -11280,6 +11284,10 @@ fn stream_get_line_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn stream_set_chunk_size_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(8192)) }
+fn stream_socket_recvfrom_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_socket_sendto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_socket_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn stream_socket_enable_crypto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn headers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
 
 fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
