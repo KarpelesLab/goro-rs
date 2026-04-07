@@ -5013,25 +5013,6 @@ impl Vm {
                 let offset_val = if let Value::Long(o) = offset { o } else { 0 };
                 Some(Value::Long(offset_val + pos_val))
             }
-            b"seek" => {
-                // LimitIterator::seek($position) - seek to the given position
-                let target = self.pending_call_args.first().map(|v| v.to_long()).unwrap_or(0);
-                let ob = obj.borrow();
-                let inner = ob.get_property(b"__spl_inner");
-                let offset = ob.get_property(b"__spl_offset");
-                let offset_val = if let Value::Long(o) = offset { o } else { 0 };
-                drop(ob);
-                // Rewind and seek to offset + target
-                self.call_object_method(&inner, b"rewind", &[]);
-                let total_skip = offset_val + target;
-                for _ in 0..total_skip {
-                    let valid = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
-                    if !valid.is_truthy() { break; }
-                    self.call_object_method(&inner, b"next", &[]);
-                }
-                obj.borrow_mut().set_property(b"__spl_pos".to_vec(), Value::Long(target));
-                Some(Value::Long(0))
-            }
             _ => None,
         }
     }
