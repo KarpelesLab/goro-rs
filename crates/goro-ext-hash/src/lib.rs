@@ -25,6 +25,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"hash_hkdf", hash_hkdf_fn);
     vm.register_function(b"md5_file", md5_file_fn);
     vm.register_function(b"sha1_file", sha1_file_fn);
+    vm.register_function(b"hash_hmac_file", hash_hmac_file_fn);
 }
 
 fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1652,5 +1653,29 @@ fn sha1_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Err(_) => Ok(Value::False),
+    }
+}
+
+fn hash_hmac_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 3 {
+        return Ok(Value::False);
+    }
+    let algo = args[0].to_php_string().to_string_lossy();
+    let filename = args[1].to_php_string().to_string_lossy();
+    let key = args[2].to_php_string();
+    let raw = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
+
+    match std::fs::read(&filename) {
+        Ok(data) => {
+            let data_val = Value::String(PhpString::from_vec(data));
+            let algo_val = Value::String(PhpString::from_string(algo));
+            let key_val = Value::String(key);
+            let raw_val = if raw { Value::True } else { Value::False };
+            hash_hmac_fn(vm, &[algo_val, data_val, key_val, raw_val])
+        }
+        Err(_) => {
+            vm.emit_warning(&format!("hash_hmac_file({}): Failed to open stream: No such file or directory", filename));
+            Ok(Value::False)
+        }
     }
 }

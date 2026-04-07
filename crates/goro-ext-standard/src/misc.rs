@@ -495,6 +495,23 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"getprotobynumber", getprotobynumber_fn);
     vm.register_function(b"get_browser", get_browser_fn);
     vm.register_function(b"stream_socket_accept", stream_socket_accept_fn);
+    vm.register_function(b"stream_isatty", stream_isatty_fn);
+    vm.register_function(b"is_uploaded_file", is_uploaded_file_fn);
+    vm.register_function(b"move_uploaded_file", move_uploaded_file_fn);
+    vm.register_function(b"cli_set_process_title", cli_set_process_title_fn);
+    vm.register_function(b"cli_get_process_title", cli_get_process_title_fn);
+    vm.register_function(b"ini_parse_quantity", ini_parse_quantity_fn);
+    vm.register_function(b"dl", dl_fn);
+    vm.register_function(b"header_register_callback", header_register_callback_fn);
+    vm.register_function(b"token_get_all", token_get_all_fn);
+    vm.register_function(b"token_name", token_name_fn);
+    vm.register_function(b"request_parse_body", request_parse_body_fn);
+    vm.register_function(b"ignore_user_abort", ignore_user_abort_fn);
+    vm.register_function(b"connection_aborted", connection_aborted_fn);
+    vm.register_function(b"connection_status", connection_status_fn);
+    vm.register_function(b"get_html_translation_table", get_html_translation_table_fn);
+    vm.register_function(b"nl_langinfo", nl_langinfo_fn);
+    vm.register_function(b"localeconv", localeconv_fn);
 
     // Regex functions are now in the regex module (regex.rs)
 }
@@ -11513,3 +11530,377 @@ fn getprotobyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { 
 fn getprotobynumber_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn get_browser_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn stream_socket_accept_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+
+fn stream_isatty_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // In CLI mode, always return false (not a TTY)
+    Ok(Value::False)
+}
+
+fn is_uploaded_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // No files are ever uploaded in CLI mode
+    Ok(Value::False)
+}
+
+fn move_uploaded_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // No files are ever uploaded in CLI mode
+    Ok(Value::False)
+}
+
+fn cli_set_process_title_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn cli_get_process_title_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"")))
+}
+
+fn ini_parse_quantity_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        return Ok(Value::Long(0));
+    }
+    let s = args[0].to_php_string();
+    let s_str = s.to_string();
+    let trimmed = s_str.trim();
+    if trimmed.is_empty() {
+        return Ok(Value::Long(0));
+    }
+    // Parse numeric part
+    let (num_str, suffix) = if let Some(pos) = trimmed.find(|c: char| c.is_ascii_alphabetic()) {
+        (&trimmed[..pos], &trimmed[pos..])
+    } else {
+        (trimmed, "")
+    };
+    let base_val: i64 = match num_str.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            vm.emit_warning(&format!("Invalid quantity \"{}\": no valid leading digits, interpreting as \"0\" for backwards compatibility", s_str));
+            return Ok(Value::Long(0));
+        }
+    };
+    let multiplier = match suffix.to_ascii_uppercase().as_str() {
+        "K" => 1024,
+        "M" => 1024 * 1024,
+        "G" => 1024 * 1024 * 1024,
+        "" => 1,
+        _ => {
+            vm.emit_warning(&format!("Invalid quantity \"{}\": unknown multiplier \"{}\", interpreting as \"{}\" for backwards compatibility", s_str, suffix, base_val));
+            1
+        }
+    };
+    Ok(Value::Long(base_val * multiplier))
+}
+
+fn dl_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_warning("dl(): Dynamically loaded extensions aren't enabled");
+    Ok(Value::False)
+}
+
+fn header_register_callback_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    let source = args[0].to_php_string();
+    let _flags = if args.len() > 1 { args[1].to_long() } else { 0 };
+
+    let mut lexer = goro_parser::Lexer::new(source.as_bytes());
+    let tokens = lexer.tokenize();
+
+    let mut result = PhpArray::new();
+    let src = source.as_bytes();
+
+    for token in &tokens {
+        let token_id = match &token.kind {
+            goro_parser::token::TokenKind::InlineHtml(_) => 312_i64, // T_INLINE_HTML
+            goro_parser::token::TokenKind::Variable(_) => 320, // T_VARIABLE
+            goro_parser::token::TokenKind::LongNumber(_) => 317, // T_LNUMBER
+            goro_parser::token::TokenKind::DoubleNumber(_) => 318, // T_DNUMBER
+            goro_parser::token::TokenKind::ConstantString(_) => 323, // T_CONSTANT_ENCAPSED_STRING
+            goro_parser::token::TokenKind::Identifier(_) => 319, // T_STRING
+            goro_parser::token::TokenKind::InterpolatedStringPart(_) => 324, // T_ENCAPSED_AND_WHITESPACE
+            goro_parser::token::TokenKind::InterpolatedStringEnd(_) => 324,
+            goro_parser::token::TokenKind::OpenTag => 379, // T_OPEN_TAG
+            goro_parser::token::TokenKind::OpenTagShort => 380, // T_OPEN_TAG_WITH_ECHO
+            goro_parser::token::TokenKind::CloseTag => 381, // T_CLOSE_TAG
+            goro_parser::token::TokenKind::Function => 346, // T_FUNCTION
+            goro_parser::token::TokenKind::If => 330,
+            goro_parser::token::TokenKind::Else => 333,
+            goro_parser::token::TokenKind::ElseIf => 331,
+            goro_parser::token::TokenKind::While => 334,
+            goro_parser::token::TokenKind::For => 336,
+            goro_parser::token::TokenKind::Foreach => 337,
+            goro_parser::token::TokenKind::Return => 348,
+            goro_parser::token::TokenKind::Echo => 316,
+            goro_parser::token::TokenKind::Class => 361,
+            goro_parser::token::TokenKind::New => 300,
+            goro_parser::token::TokenKind::Static => 352,
+            goro_parser::token::TokenKind::Public => 362,
+            goro_parser::token::TokenKind::Protected => 363,
+            goro_parser::token::TokenKind::Private => 364,
+            goro_parser::token::TokenKind::Abstract => 358,
+            goro_parser::token::TokenKind::Final => 359,
+            goro_parser::token::TokenKind::Interface => 360,
+            goro_parser::token::TokenKind::Extends => 354,
+            goro_parser::token::TokenKind::Implements => 355,
+            goro_parser::token::TokenKind::As => 329,
+            goro_parser::token::TokenKind::Try => 340,
+            goro_parser::token::TokenKind::Catch => 341,
+            goro_parser::token::TokenKind::Finally => 342,
+            goro_parser::token::TokenKind::Throw => 343,
+            goro_parser::token::TokenKind::Switch => 335,
+            goro_parser::token::TokenKind::Case => 327,
+            goro_parser::token::TokenKind::Default => 328,
+            goro_parser::token::TokenKind::Break => 338,
+            goro_parser::token::TokenKind::Continue => 339,
+            goro_parser::token::TokenKind::Do => 344,
+            goro_parser::token::TokenKind::Instanceof => 301,
+            goro_parser::token::TokenKind::Trait => 357,
+            goro_parser::token::TokenKind::Namespace => 382,
+            goro_parser::token::TokenKind::Use => 356,
+            goro_parser::token::TokenKind::Include => 262,
+            goro_parser::token::TokenKind::IncludeOnce => 263,
+            goro_parser::token::TokenKind::Require => 264,
+            goro_parser::token::TokenKind::RequireOnce => 265,
+            goro_parser::token::TokenKind::Const => 347,
+            goro_parser::token::TokenKind::Isset => 350,
+            goro_parser::token::TokenKind::Unset => 349,
+            goro_parser::token::TokenKind::Empty => 351,
+            goro_parser::token::TokenKind::Yield => 267,
+            goro_parser::token::TokenKind::YieldFrom => 268,
+            goro_parser::token::TokenKind::Match => 369,
+            goro_parser::token::TokenKind::Enum => 370,
+            goro_parser::token::TokenKind::Fn => 345,
+            goro_parser::token::TokenKind::Print => 266,
+            goro_parser::token::TokenKind::Exit => 305,
+            goro_parser::token::TokenKind::Eval => 260,
+            goro_parser::token::TokenKind::Clone => 302,
+            goro_parser::token::TokenKind::List => 353,
+            goro_parser::token::TokenKind::Array => 365,
+            goro_parser::token::TokenKind::Callable => 366,
+            goro_parser::token::TokenKind::Readonly => 367,
+            goro_parser::token::TokenKind::Var => 347,
+            goro_parser::token::TokenKind::Global => 326,
+            goro_parser::token::TokenKind::Goto => 325,
+            goro_parser::token::TokenKind::Null => 310,
+            goro_parser::token::TokenKind::True => 308,
+            goro_parser::token::TokenKind::False => 309,
+            goro_parser::token::TokenKind::And => 297,
+            goro_parser::token::TokenKind::Or => 298,
+            goro_parser::token::TokenKind::Xor => 299,
+            goro_parser::token::TokenKind::Declare => 326,
+            goro_parser::token::TokenKind::BooleanAnd => 285,
+            goro_parser::token::TokenKind::BooleanOr => 286,
+            goro_parser::token::TokenKind::Equal => 283,
+            goro_parser::token::TokenKind::NotEqual => 282,
+            goro_parser::token::TokenKind::Identical => 281,
+            goro_parser::token::TokenKind::NotIdentical => 280,
+            goro_parser::token::TokenKind::LessEqual => 279,
+            goro_parser::token::TokenKind::GreaterEqual => 278,
+            goro_parser::token::TokenKind::Spaceship => 277,
+            goro_parser::token::TokenKind::PlusAssign => 270,
+            goro_parser::token::TokenKind::MinusAssign => 271,
+            goro_parser::token::TokenKind::StarAssign => 272,
+            goro_parser::token::TokenKind::SlashAssign => 273,
+            goro_parser::token::TokenKind::DotAssign => 274,
+            goro_parser::token::TokenKind::PercentAssign => 275,
+            goro_parser::token::TokenKind::AmpersandAssign => 276,
+            goro_parser::token::TokenKind::PipeAssign => 287,
+            goro_parser::token::TokenKind::CaretAssign => 288,
+            goro_parser::token::TokenKind::ShiftLeftAssign => 289,
+            goro_parser::token::TokenKind::ShiftRightAssign => 290,
+            goro_parser::token::TokenKind::NullCoalesceAssign => 291,
+            goro_parser::token::TokenKind::NullCoalesce => 292,
+            goro_parser::token::TokenKind::ShiftLeft => 293,
+            goro_parser::token::TokenKind::ShiftRight => 294,
+            goro_parser::token::TokenKind::Pow => 303,
+            goro_parser::token::TokenKind::PowAssign => 304,
+            goro_parser::token::TokenKind::Arrow => 384,
+            goro_parser::token::TokenKind::NullsafeArrow => 385,
+            goro_parser::token::TokenKind::DoubleArrow => 386,
+            goro_parser::token::TokenKind::DoubleColon => 387,
+            goro_parser::token::TokenKind::Ellipsis => 388,
+            goro_parser::token::TokenKind::Increment => 295,
+            goro_parser::token::TokenKind::Decrement => 296,
+            goro_parser::token::TokenKind::IntCast => 306,
+            goro_parser::token::TokenKind::FloatCast => 307,
+            goro_parser::token::TokenKind::StringCast => 308,
+            goro_parser::token::TokenKind::BoolCast => 309,
+            goro_parser::token::TokenKind::ArrayCast => 310,
+            goro_parser::token::TokenKind::ObjectCast => 311,
+            goro_parser::token::TokenKind::UnsetCast => 312,
+            goro_parser::token::TokenKind::Eof => continue,
+            _ => 0, // Single-char token
+        };
+
+        if token_id == 0 {
+            let start = token.span.start as usize;
+            let end = token.span.end as usize;
+            if start < src.len() && end <= src.len() && start < end {
+                let text = &src[start..end];
+                result.push(Value::String(PhpString::from_bytes(text)));
+            }
+        } else {
+            let start = token.span.start as usize;
+            let end = token.span.end as usize;
+            let text = if start < src.len() && end <= src.len() && start < end {
+                &src[start..end]
+            } else {
+                b""
+            };
+            let mut token_arr = PhpArray::new();
+            token_arr.set(ArrayKey::Int(0), Value::Long(token_id));
+            token_arr.set(ArrayKey::Int(1), Value::String(PhpString::from_bytes(text)));
+            token_arr.set(ArrayKey::Int(2), Value::Long(token.span.line as i64));
+            result.push(Value::Array(Rc::new(RefCell::new(token_arr))));
+        }
+    }
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn token_name_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        return Ok(Value::String(PhpString::from_bytes(b"UNKNOWN")));
+    }
+    let id = args[0].to_long();
+    let name = match id {
+        260 => "T_EVAL",
+        262 => "T_INCLUDE",
+        263 => "T_INCLUDE_ONCE",
+        264 => "T_REQUIRE",
+        265 => "T_REQUIRE_ONCE",
+        266 => "T_PRINT",
+        267 => "T_YIELD",
+        268 => "T_YIELD_FROM",
+        297 => "T_LOGICAL_AND",
+        298 => "T_LOGICAL_OR",
+        299 => "T_LOGICAL_XOR",
+        300 => "T_NEW",
+        301 => "T_INSTANCEOF",
+        302 => "T_CLONE",
+        305 => "T_EXIT",
+        308 => "T_TRUE",
+        309 => "T_FALSE",
+        310 => "T_NULL",
+        312 => "T_INLINE_HTML",
+        316 => "T_ECHO",
+        317 => "T_LNUMBER",
+        318 => "T_DNUMBER",
+        319 => "T_STRING",
+        320 => "T_VARIABLE",
+        323 => "T_CONSTANT_ENCAPSED_STRING",
+        324 => "T_ENCAPSED_AND_WHITESPACE",
+        325 => "T_GOTO",
+        326 => "T_GLOBAL",
+        327 => "T_CASE",
+        328 => "T_DEFAULT",
+        329 => "T_AS",
+        330 => "T_IF",
+        331 => "T_ELSEIF",
+        333 => "T_ELSE",
+        334 => "T_WHILE",
+        335 => "T_SWITCH",
+        336 => "T_FOR",
+        337 => "T_FOREACH",
+        338 => "T_BREAK",
+        339 => "T_CONTINUE",
+        340 => "T_TRY",
+        341 => "T_CATCH",
+        342 => "T_FINALLY",
+        343 => "T_THROW",
+        344 => "T_DO",
+        345 => "T_FN",
+        346 => "T_FUNCTION",
+        347 => "T_CONST",
+        348 => "T_RETURN",
+        349 => "T_UNSET",
+        350 => "T_ISSET",
+        351 => "T_EMPTY",
+        352 => "T_STATIC",
+        353 => "T_LIST",
+        354 => "T_EXTENDS",
+        355 => "T_IMPLEMENTS",
+        356 => "T_USE",
+        357 => "T_TRAIT",
+        358 => "T_ABSTRACT",
+        359 => "T_FINAL",
+        360 => "T_INTERFACE",
+        361 => "T_CLASS",
+        362 => "T_PUBLIC",
+        363 => "T_PROTECTED",
+        364 => "T_PRIVATE",
+        365 => "T_ARRAY",
+        366 => "T_CALLABLE",
+        367 => "T_READONLY",
+        369 => "T_MATCH",
+        370 => "T_ENUM",
+        379 => "T_OPEN_TAG",
+        380 => "T_OPEN_TAG_WITH_ECHO",
+        381 => "T_CLOSE_TAG",
+        382 => "T_NAMESPACE",
+        _ => "UNKNOWN",
+    };
+    Ok(Value::String(PhpString::from_bytes(name.as_bytes())))
+}
+
+fn request_parse_body_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Err(VmError { message: "request_parse_body() can only be called during a request".into(), line: vm.current_line })
+}
+
+fn ignore_user_abort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
+}
+
+fn connection_aborted_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
+}
+
+fn connection_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
+}
+
+fn get_html_translation_table_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let table = if !args.is_empty() { args[0].to_long() } else { 0 };
+    let _flags = if args.len() > 1 { args[1].to_long() } else { 11 };
+    let mut result = PhpArray::new();
+    if table == 1 {
+        result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
+    } else {
+        result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
+        result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn nl_langinfo_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"")))
+}
+
+fn localeconv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    result.set(ArrayKey::String(PhpString::from_bytes(b"decimal_point")), Value::String(PhpString::from_bytes(b".")));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"thousands_sep")), Value::String(PhpString::from_bytes(b"")));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"int_curr_symbol")), Value::String(PhpString::from_bytes(b"")));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"currency_symbol")), Value::String(PhpString::from_bytes(b"")));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"mon_decimal_point")), Value::String(PhpString::from_bytes(b"")));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"mon_thousands_sep")), Value::String(PhpString::from_bytes(b"")));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"positive_sign")), Value::String(PhpString::from_bytes(b"")));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"negative_sign")), Value::String(PhpString::from_bytes(b"")));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"int_frac_digits")), Value::Long(127));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"frac_digits")), Value::Long(127));
+    let grouping = PhpArray::new();
+    result.set(ArrayKey::String(PhpString::from_bytes(b"grouping")), Value::Array(Rc::new(RefCell::new(grouping))));
+    let mon_grouping = PhpArray::new();
+    result.set(ArrayKey::String(PhpString::from_bytes(b"mon_grouping")), Value::Array(Rc::new(RefCell::new(mon_grouping))));
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}

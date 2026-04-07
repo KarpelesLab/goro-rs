@@ -1476,7 +1476,7 @@ impl Compiler {
             } => {
                 // Check for promoted properties in free functions
                 for param in params {
-                    if param.visibility.is_some() || param.readonly {
+                    if param.visibility.is_some() || param.readonly || param.is_final {
                         return Err(CompileError {
                             message: "Cannot declare promoted property outside a constructor".to_string(),
                             line: stmt.span.line,
@@ -3264,7 +3264,7 @@ impl Compiler {
                                 // Check for promoted properties in non-constructors
                                 if mn_lower != b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some() || param.readonly {
+                                        if param.visibility.is_some() || param.readonly || param.is_final {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property outside a constructor".to_string(),
                                                 line: stmt.span.line,
@@ -3275,7 +3275,7 @@ impl Compiler {
                                 // Check for promoted properties in abstract constructors
                                 if mn_lower == b"__construct" && *is_abstract {
                                     for param in params {
-                                        if param.visibility.is_some() || param.readonly {
+                                        if param.visibility.is_some() || param.readonly || param.is_final {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property in an abstract constructor".to_string(),
                                                 line: stmt.span.line,
@@ -3285,7 +3285,7 @@ impl Compiler {
                                 }
                                 if mn_lower == b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some() || param.set_visibility.is_some() {
+                                        if param.visibility.is_some() || param.set_visibility.is_some() || param.is_final {
                                             let prop_vis = match param.visibility.as_ref().unwrap_or(&Visibility::Public) {
                                                 Visibility::Public => {
                                                     crate::object::Visibility::Public

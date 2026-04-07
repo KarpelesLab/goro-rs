@@ -3,8 +3,11 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 
+use goro_core::array::{ArrayKey, PhpArray};
+use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
+use std::rc::Rc;
 
 /// Socket handle variants
 enum SocketHandle {
@@ -76,6 +79,19 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"socket_shutdown", socket_shutdown);
     vm.register_function(b"socket_select", socket_select);
     vm.register_function(b"socket_clear_error", socket_clear_error);
+    vm.register_function(b"socket_create_listen", socket_create_listen_fn);
+    vm.register_function(b"socket_create_pair", socket_create_pair_fn);
+    vm.register_function(b"socket_import_stream", socket_import_stream_fn);
+    vm.register_function(b"socket_export_stream", socket_export_stream_fn);
+    vm.register_function(b"socket_addrinfo_lookup", socket_addrinfo_lookup_fn);
+    vm.register_function(b"socket_addrinfo_connect", socket_addrinfo_connect_fn);
+    vm.register_function(b"socket_addrinfo_bind", socket_addrinfo_bind_fn);
+    vm.register_function(b"socket_addrinfo_explain", socket_addrinfo_explain_fn);
+    vm.register_function(b"socket_sendto", socket_sendto_fn);
+    vm.register_function(b"socket_recvfrom", socket_recvfrom_fn);
+    vm.register_function(b"socket_cmsg_space", socket_cmsg_space_fn);
+    vm.register_function(b"socket_sendmsg", socket_sendmsg_fn);
+    vm.register_function(b"socket_recvmsg", socket_recvmsg_fn);
 
     // Constants
     vm.constants.insert(b"AF_INET".to_vec(), Value::Long(2));
@@ -1289,4 +1305,79 @@ fn errno_to_string(errno: i64) -> String {
         111 => "Connection refused".to_string(),
         _ => format!("Unknown error {}", errno),
     }
+}
+
+fn socket_create_listen_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Stub: return false (would need actual socket binding)
+    Ok(Value::False)
+}
+
+fn socket_create_pair_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 4 {
+        return Ok(Value::False);
+    }
+    // Create a real socketpair using libc
+    let domain = args[0].to_long() as i32;
+    let sock_type = args[1].to_long() as i32;
+    let protocol = args[2].to_long() as i32;
+    let mut fds: [i32; 2] = [0, 0];
+    let result = unsafe { libc::socketpair(domain, sock_type, protocol, fds.as_mut_ptr()) };
+    if result != 0 {
+        return Ok(Value::False);
+    }
+    // Store the sockets as resource-like values in the output array
+    // For now return false since we'd need proper socket resource integration
+    unsafe { libc::close(fds[0]); libc::close(fds[1]); }
+    Ok(Value::False)
+}
+
+fn socket_import_stream_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn socket_export_stream_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn socket_addrinfo_lookup_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+
+fn socket_addrinfo_connect_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn socket_addrinfo_bind_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn socket_addrinfo_explain_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    result.set(ArrayKey::String(PhpString::from_bytes(b"ai_flags")), Value::Long(0));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"ai_family")), Value::Long(0));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"ai_socktype")), Value::Long(0));
+    result.set(ArrayKey::String(PhpString::from_bytes(b"ai_protocol")), Value::Long(0));
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn socket_sendto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn socket_recvfrom_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn socket_cmsg_space_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let _level = if !args.is_empty() { args[0].to_long() } else { 0 };
+    let _type_ = if args.len() > 1 { args[1].to_long() } else { 0 };
+    Ok(Value::Long(0))
+}
+
+fn socket_sendmsg_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn socket_recvmsg_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
 }

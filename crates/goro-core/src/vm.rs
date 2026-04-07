@@ -17651,7 +17651,7 @@ impl Vm {
                         match parser.parse() {
                             Ok(program) => {
                                 let mut compiler = crate::compiler::Compiler::new();
-                                let eval_file = format!("{} : eval()'d code", self.current_file);
+                                let eval_file = format!("{}({}) : eval()'d code", self.current_file, op.line);
                                 compiler.source_file = eval_file.into_bytes();
                                 match compiler.compile(&program) {
                                     Ok((eval_op_array, eval_classes, eval_warnings)) => {
@@ -17727,8 +17727,8 @@ impl Vm {
                                     }
                                     Err(e) => {
                                         // Compile error in eval - output as parse error
-                                        let msg = format!("\nParse error: {} in {} : eval()'d code on line {}\n",
-                                            e.message, self.current_file, e.line);
+                                        let msg = format!("\nParse error: {} in {}({}) : eval()'d code on line {}\n",
+                                            e.message, self.current_file, op.line, e.line);
                                         self.output.extend_from_slice(msg.as_bytes());
                                         Value::False
                                     }
@@ -17736,13 +17736,12 @@ impl Vm {
                             }
                             Err(e) => {
                                 // PHP 7+: parse errors in eval throw ParseError exception
-                                let msg = format!("syntax error, unexpected token \"{}\"",
-                                    if e.message.contains("unexpected") {
-                                        e.message.clone()
-                                    } else {
-                                        format!("syntax error in eval()'d code on line {}", e.span.line)
-                                    });
-                                let eval_file = format!("{} : eval()'d code", self.current_file);
+                                let msg = if e.message.contains("unexpected") || e.message.contains("syntax error") {
+                                    e.message.clone()
+                                } else {
+                                    format!("syntax error in eval()'d code on line {}", e.span.line)
+                                };
+                                let eval_file = format!("{}({}) : eval()'d code", self.current_file, op.line);
                                 let exc = self.create_exception(b"ParseError", &msg, e.span.line);
                                 // Set file and line on the exception
                                 if let Value::Object(ref obj) = exc {
@@ -17756,8 +17755,13 @@ impl Vm {
                                     continue;
                                 }
                                 // No exception handler - output as parse error
-                                let msg = format!("\nParse error: syntax error in {} : eval()'d code on line {}\n",
-                                    self.current_file, e.span.line);
+                                let err_msg = if e.message.contains("unexpected") || e.message.contains("syntax error") {
+                                    e.message.clone()
+                                } else {
+                                    format!("syntax error")
+                                };
+                                let msg = format!("\nParse error: {} in {}({}) : eval()'d code on line {}\n",
+                                    err_msg, self.current_file, op.line, e.span.line);
                                 self.output.extend_from_slice(msg.as_bytes());
                                 Value::False
                             }
@@ -18908,6 +18912,21 @@ impl Vm {
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_long() as usize;
                     if let Some(mut class) = self.pending_classes.get(class_idx).cloned() {
+                        // Check for using "_" as a class/interface/trait/enum name (deprecated since 8.4)
+                        {
+                            let short_name = if let Some(pos) = class.name.iter().rposition(|b| *b == b'\\') {
+                                &class.name[pos+1..]
+                            } else {
+                                &class.name[..]
+                            };
+                            if short_name == b"_" {
+                                let type_name = if class.is_enum { "an enum" }
+                                    else if class.is_interface { "an interface" }
+                                    else if class.is_trait { "a trait" }
+                                    else { "a class" };
+                                self.emit_deprecated(&format!("Using \"_\" as {} name is deprecated since 8.4", type_name));
+                            }
+                        }
                         // Record methods directly defined in this class BEFORE parent inheritance
                         // so we know which methods trait methods should NOT override later
                         let own_method_names_pre_inherit: std::collections::HashSet<Vec<u8>> = class.methods.keys().cloned().collect();
@@ -20010,6 +20029,22 @@ impl Vm {
                                         "{} {} must implement {} abstract {} ({})",
                                         kind, class_name_str, count, method_word, methods_list
                                     ), op.line)
+                                } else if !self_declared_abstract.is_empty() && count == self_declared_abstract.len() {
+                                    // All abstract methods are declared in this class itself
+                                    // PHP format: "Class X declares abstract method Y() and must therefore be declared abstract"
+                                    if count == 1 {
+                                        let method_name = &self_declared_abstract[0].0;
+                                        (format!(
+                                            "{} {} declares abstract method {}() and must therefore be declared abstract",
+                                            kind, class_name_str, method_name
+                                        ), op.line)
+                                    } else {
+                                        let remain_word = if count == 1 { "method" } else { "methods" };
+                                        (format!(
+                                            "{} {} contains {} abstract {} and must therefore be declared abstract or implement the remaining {} ({})",
+                                            kind, class_name_str, count, method_word, remain_word, methods_list
+                                        ), op.line)
+                                    }
                                 } else {
                                     // PHP format: "Class X contains N abstract method(s) and must therefore be declared abstract or implement the remaining method(s) (methods)"
                                     let remain_word = if count == 1 { "method" } else { "methods" };
@@ -20556,6 +20591,7 @@ impl Vm {
                                 if class.is_trait {
                                     return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to trait {}", class_display), line: op.line });
                                 }
+                                class.allow_dynamic_properties = true;
                             }
                         }
                         // Validate #[\Override] attribute on methods
@@ -21864,6 +21900,41 @@ impl Vm {
                                 if matches!(obj.borrow().get_property(b"__clone_window"), Value::True) {
                                     let modified_key = format!("__clone_modified_{}", String::from_utf8_lossy(prop_name.as_bytes()));
                                     obj.borrow_mut().set_property(modified_key.into_bytes(), Value::True);
+                                }
+                                // Emit deprecation warning for dynamic property creation
+                                if !obj.borrow().has_property(prop_name.as_bytes()) && !prop_name.as_bytes().starts_with(b"__") {
+                                    // Check if property is declared in class definition
+                                    let prop_declared = self.classes.get(&class_lower)
+                                        .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
+                                        .unwrap_or(false);
+                                    if !prop_declared {
+                                        let is_internal = is_builtin_subclass(&class_lower, b"stdclass")
+                                            || class_lower == b"stdclass"
+                                            || class_lower == b"__php_incomplete_class";
+                                        let allows_dynamic = self.classes.get(&class_lower)
+                                            .map(|c| c.allow_dynamic_properties)
+                                            .unwrap_or(false);
+                                        // Also check parent chain for AllowDynamicProperties
+                                        let parent_allows = if !allows_dynamic {
+                                            let mut parent_check = self.classes.get(&class_lower).and_then(|c| c.parent.clone());
+                                            let mut found = false;
+                                            while let Some(ref p) = parent_check {
+                                                let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                if let Some(pc) = self.classes.get(&p_lower) {
+                                                    if pc.allow_dynamic_properties { found = true; break; }
+                                                    parent_check = pc.parent.clone();
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            found
+                                        } else { false };
+                                        if !is_internal && !allows_dynamic && !parent_allows {
+                                            let class_display = crate::value::display_class_name(&class_name_orig);
+                                            let prop_str = String::from_utf8_lossy(prop_name.as_bytes());
+                                            self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, prop_str));
+                                        }
+                                    }
                                 }
                                 obj.borrow_mut()
                                     .set_property(prop_name.as_bytes().to_vec(), value);
@@ -24064,7 +24135,8 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
         | b"outofrangeexception" | b"closedgeneratorexception" | b"errorexception"
         | b"jsonexception" | b"fibererror"
         | b"dateexception" | b"dateinvalidtimezoneexception" | b"datemalformedintervalstringexception"
-        | b"datemalformedstringexception" | b"datemalformedperiodstringexception" => &[b"Throwable"],
+        | b"datemalformedstringexception" | b"datemalformedperiodstringexception"
+        | b"parseerror" | b"compileerror" => &[b"Throwable"],
         _ => &[],
     };
     interfaces.iter().map(|i| i.to_vec()).collect()
@@ -24074,7 +24146,9 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
 pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
     match class {
         b"typeerror" | b"valueerror" | b"rangeerror"
-        | b"unhandledmatcherror" | b"assertionerror" | b"fibererror" => Some(b"Error"),
+        | b"unhandledmatcherror" | b"assertionerror" | b"fibererror"
+        | b"compileerror" => Some(b"Error"),
+        b"parseerror" => Some(b"CompileError"),
         b"argumentcounterror" => Some(b"TypeError"),
         b"arithmeticerror" => Some(b"Error"),
         b"divisionbyzeroerror" => Some(b"ArithmeticError"),

@@ -129,6 +129,9 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"date_sun_info", date_sun_info_fn);
     vm.register_function(b"date_sunrise", date_sunrise_fn);
     vm.register_function(b"date_sunset", date_sunset_fn);
+    vm.register_function(b"date_get_last_errors", date_get_last_errors_fn);
+    vm.register_function(b"date_add", date_add_fn);
+    vm.register_function(b"date_sub", date_sub_fn);
 }
 
 fn date_default_timezone_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3208,4 +3211,27 @@ fn date_sunrise_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn date_sunset_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     _vm.emit_deprecated("Function date_sunset() is deprecated since 8.1");
     Ok(Value::False)
+}
+
+/// date_get_last_errors returns false when no errors, or an array with warnings/errors
+fn date_get_last_errors_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+/// date_add - add an interval to a DateTime (procedural version of DateTime::add)
+fn date_add_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 2 {
+        return Ok(Value::False);
+    }
+    // Procedural stub - returns the datetime object
+    Ok(args[0].clone())
+}
+
+/// date_sub - subtract an interval from a DateTime (procedural version of DateTime::sub)
+fn date_sub_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 2 {
+        return Ok(Value::False);
+    }
+    // Procedural stub - returns the datetime object
+    Ok(args[0].clone())
 }

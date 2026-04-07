@@ -104,7 +104,7 @@ impl Parser {
             Ok(span)
         } else {
             Err(ParseError {
-                message: format!("syntax error, unexpected token {}, expecting {}", self.peek().to_php_name(), expected.to_php_name()),
+                message: format!("syntax error, unexpected {}, expecting {}", self.peek().to_php_unexpected(), expected.to_php_name()),
                 span: self.span(),
             })
         }
@@ -122,7 +122,7 @@ impl Parser {
                 Ok(())
             }
             _ => Err(ParseError {
-                message: format!("syntax error, unexpected token {}", self.peek().to_php_name()),
+                message: format!("syntax error, unexpected {}", self.peek().to_php_unexpected()),
                 span: self.span(),
             }),
         }
@@ -1173,8 +1173,9 @@ impl Parser {
             let mut visibility = None;
             let mut set_visibility = None;
             let mut readonly = false;
+            let mut is_final = false;
 
-            // Constructor promotion visibility (possibly with asymmetric set visibility)
+            // Constructor promotion modifiers (possibly with asymmetric set visibility)
             loop {
                 match self.peek() {
                     TokenKind::Public | TokenKind::Protected | TokenKind::Private => {
@@ -1194,13 +1195,16 @@ impl Parser {
                             visibility = Some(vis);
                         }
                     }
+                    TokenKind::Final => {
+                        is_final = true;
+                        self.advance();
+                    }
+                    TokenKind::Readonly => {
+                        readonly = true;
+                        self.advance();
+                    }
                     _ => break,
                 }
-            }
-
-            if matches!(self.peek(), TokenKind::Readonly) {
-                readonly = true;
-                self.advance();
             }
 
             let type_hint = if !matches!(
@@ -1243,6 +1247,7 @@ impl Parser {
                 visibility,
                 set_visibility,
                 readonly,
+                is_final,
                 attributes: param_attributes,
             });
 
@@ -4391,6 +4396,10 @@ impl Parser {
                                 name
                             }
                             _ => {
+                                // Allow trailing comma: if we already have vars, break
+                                if !vars.is_empty() && !by_ref {
+                                    break;
+                                }
                                 return Err(ParseError {
                                     message: "expected variable name in use clause".into(),
                                     span: self.span(),
@@ -4818,7 +4827,7 @@ impl Parser {
                 }
             }
             _ => Err(ParseError {
-                message: format!("syntax error, unexpected token {}", self.peek().to_php_name()),
+                message: format!("syntax error, unexpected {}", self.peek().to_php_unexpected()),
                 span,
             }),
         }
@@ -5086,11 +5095,31 @@ impl Parser {
                 | TokenKind::Null
                 | TokenKind::True
                 | TokenKind::False
+                | TokenKind::And
+                | TokenKind::Or
+                | TokenKind::Xor
+                | TokenKind::Exit
+                | TokenKind::Eval
+                | TokenKind::Include
+                | TokenKind::IncludeOnce
+                | TokenKind::Require
+                | TokenKind::RequireOnce
+                | TokenKind::Declare
+                | TokenKind::EndDeclare
+                | TokenKind::EndFor
+                | TokenKind::EndForeach
+                | TokenKind::EndIf
+                | TokenKind::EndSwitch
+                | TokenKind::EndWhile
         )
     }
 
     /// Convert a keyword token to its identifier bytes
     fn keyword_to_identifier(&self) -> Vec<u8> {
+        // For tokens that have aliases (die/exit, include/include_once, require/require_once),
+        // use span length to determine which keyword was actually written
+        let span = self.span();
+        let span_len = span.end - span.start;
         match self.peek() {
             TokenKind::List => b"list".to_vec(),
             TokenKind::Array => b"array".to_vec(),
@@ -5149,6 +5178,22 @@ impl Parser {
             TokenKind::Null => b"null".to_vec(),
             TokenKind::True => b"true".to_vec(),
             TokenKind::False => b"false".to_vec(),
+            TokenKind::And => b"and".to_vec(),
+            TokenKind::Or => b"or".to_vec(),
+            TokenKind::Xor => b"xor".to_vec(),
+            TokenKind::Exit => if span_len == 3 { b"die".to_vec() } else { b"exit".to_vec() },
+            TokenKind::Eval => b"eval".to_vec(),
+            TokenKind::Include => b"include".to_vec(),
+            TokenKind::IncludeOnce => b"include_once".to_vec(),
+            TokenKind::Require => b"require".to_vec(),
+            TokenKind::RequireOnce => b"require_once".to_vec(),
+            TokenKind::Declare => b"declare".to_vec(),
+            TokenKind::EndDeclare => b"enddeclare".to_vec(),
+            TokenKind::EndFor => b"endfor".to_vec(),
+            TokenKind::EndForeach => b"endforeach".to_vec(),
+            TokenKind::EndIf => b"endif".to_vec(),
+            TokenKind::EndSwitch => b"endswitch".to_vec(),
+            TokenKind::EndWhile => b"endwhile".to_vec(),
             _ => vec![],
         }
     }

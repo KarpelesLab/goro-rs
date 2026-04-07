@@ -74,6 +74,8 @@ pub struct ClassEntry {
     pub attributes: Vec<RuntimeAttribute>,
     /// Closures compiled from const expressions (for deferred resolution)
     pub const_closures: Vec<crate::opcode::OpArray>,
+    /// Whether the class has #[AllowDynamicProperties]
+    pub allow_dynamic_properties: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +150,7 @@ impl ClassEntry {
             doc_comment: None,
             attributes: Vec::new(),
             const_closures: Vec::new(),
+            allow_dynamic_properties: false,
         }
     }
 

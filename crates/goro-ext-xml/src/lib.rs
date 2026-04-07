@@ -716,6 +716,11 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"xml_get_current_column_number", xml_get_current_column_number);
     vm.register_function(b"xml_get_current_byte_index", xml_get_current_byte_index);
     vm.register_function(b"xml_parse_into_struct", xml_parse_into_struct);
+    vm.register_function(b"xml_set_external_entity_ref_handler", xml_set_stub_handler);
+    vm.register_function(b"xml_set_notation_decl_handler", xml_set_stub_handler);
+    vm.register_function(b"xml_set_unparsed_entity_decl_handler", xml_set_stub_handler);
+    vm.register_function(b"xml_set_start_namespace_decl_handler", xml_set_stub_handler);
+    vm.register_function(b"xml_set_end_namespace_decl_handler", xml_set_stub_handler);
     vm.register_function(b"simplexml_load_string", simplexml_load_string);
     vm.register_function(b"simplexml_load_file", simplexml_load_file);
 
@@ -1703,4 +1708,9 @@ fn simplexml_load_file(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(_) => Ok(Value::False),
     }
+}
+
+/// Stub handler for XML set handler functions that are not fully implemented
+fn xml_set_stub_handler(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
 }

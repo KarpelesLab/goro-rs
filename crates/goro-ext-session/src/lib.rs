@@ -398,6 +398,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"session_cache_expire", session_cache_expire);
     vm.register_function(b"session_set_cookie_params", session_set_cookie_params);
     vm.register_function(b"session_get_cookie_params", session_get_cookie_params);
+    vm.register_function(b"session_set_save_handler", session_set_save_handler_fn);
+    vm.register_function(b"session_module_name", session_module_name_fn);
 
     // Register constants
     vm.constants
@@ -973,4 +975,28 @@ fn session_get_cookie_params(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
     });
 
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn session_set_save_handler_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Check if first arg is an object implementing SessionHandlerInterface
+    if args.is_empty() {
+        return Ok(Value::False);
+    }
+    // For now, emit deprecation if using individual callbacks (not object form)
+    if args.len() > 2 {
+        vm.emit_deprecated("session_set_save_handler(): Providing individual callbacks instead of an object implementing SessionHandlerInterface is deprecated");
+    }
+    // Stub: accept the handler but don't actually use it
+    Ok(Value::True)
+}
+
+fn session_module_name_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Return current module name, optionally set it
+    let _new_name = if !args.is_empty() {
+        Some(args[0].to_php_string().to_string_lossy())
+    } else {
+        None
+    };
+    // Always return "files" as the default handler
+    Ok(Value::String(PhpString::from_bytes(b"files")))
 }

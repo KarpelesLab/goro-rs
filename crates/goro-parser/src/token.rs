@@ -340,6 +340,26 @@ impl TokenKind {
             _ => format!("{:?}", self),
         }
     }
+
+    /// Return the "unexpected ..." string for syntax error messages.
+    /// PHP uses different prefixes: "token" for keywords/operators, type name for literals,
+    /// no prefix for EOF.
+    pub fn to_php_unexpected(&self) -> String {
+        match self {
+            TokenKind::Eof => "end of file".into(),
+            TokenKind::LongNumber(n) => format!("integer \"{}\"", n),
+            TokenKind::DoubleNumber(n) => format!("floating-point number \"{}\"", n),
+            TokenKind::ConstantString(s) => {
+                let display = String::from_utf8_lossy(s);
+                let truncated: String = display.chars().take(15).collect();
+                format!("double-quoted string \"{}\"", truncated)
+            },
+            TokenKind::Identifier(n) => format!("identifier \"{}\"", String::from_utf8_lossy(n)),
+            TokenKind::Variable(n) => format!("variable \"${}\"", String::from_utf8_lossy(n)),
+            TokenKind::VariableVariable(_) => "variable \"$\"".into(),
+            _ => format!("token {}", self.to_php_name()),
+        }
+    }
 }
 
 /// Map identifier bytes to keyword token kind
