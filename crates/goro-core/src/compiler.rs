@@ -245,6 +245,65 @@ impl Compiler {
             b"php_int_size" => Value::Long(8),
             b"php_major_version" => Value::Long(8),
             b"php_minor_version" => Value::Long(5),
+            b"php_version" => Value::String(PhpString::from_bytes(b"8.5.4")),
+            b"php_version_id" => Value::Long(80504),
+            b"php_maxpathlen" => Value::Long(4096),
+            b"php_os" => Value::String(PhpString::from_bytes(b"Linux")),
+            b"php_os_family" => Value::String(PhpString::from_bytes(b"Linux")),
+            b"php_sapi" => Value::String(PhpString::from_bytes(b"cli")),
+            b"php_float_dig" => Value::Long(15),
+            b"php_float_epsilon" => Value::Double(f64::EPSILON),
+            b"php_float_max" => Value::Double(f64::MAX),
+            b"php_float_min" => Value::Double(f64::MIN_POSITIVE),
+            b"php_float_inf" => Value::Double(f64::INFINITY),
+            b"php_float_nan" => Value::Double(f64::NAN),
+            b"php_prefix" => Value::String(PhpString::from_bytes(b"/usr")),
+            b"directory_separator" | b"php_separator" => Value::String(PhpString::from_bytes(b"/")),
+            b"path_separator" => Value::String(PhpString::from_bytes(b":")),
+            // Error reporting constants
+            b"e_error" => Value::Long(1),
+            b"e_warning" => Value::Long(2),
+            b"e_parse" => Value::Long(4),
+            b"e_notice" => Value::Long(8),
+            b"e_core_error" => Value::Long(16),
+            b"e_core_warning" => Value::Long(32),
+            b"e_compile_error" => Value::Long(64),
+            b"e_compile_warning" => Value::Long(128),
+            b"e_user_error" => Value::Long(256),
+            b"e_user_warning" => Value::Long(512),
+            b"e_user_notice" => Value::Long(1024),
+            b"e_strict" => Value::Long(2048),
+            b"e_recoverable_error" => Value::Long(4096),
+            b"e_deprecated" => Value::Long(8192),
+            b"e_user_deprecated" => Value::Long(16384),
+            b"e_all" => Value::Long(30719),
+            // SEEK constants
+            b"seek_set" => Value::Long(0),
+            b"seek_cur" => Value::Long(1),
+            b"seek_end" => Value::Long(2),
+            // Sort constants
+            b"sort_regular" => Value::Long(0),
+            b"sort_numeric" => Value::Long(1),
+            b"sort_string" => Value::Long(2),
+            b"sort_locale_string" => Value::Long(5),
+            b"sort_natural" => Value::Long(6),
+            b"sort_flag_case" => Value::Long(8),
+            // Array filter constants
+            b"array_filter_use_both" => Value::Long(1),
+            b"array_filter_use_key" => Value::Long(2),
+            // JSON constants
+            b"json_pretty_print" => Value::Long(128),
+            b"json_unescaped_unicode" => Value::Long(256),
+            b"json_unescaped_slashes" => Value::Long(64),
+            b"json_throw_on_error" => Value::Long(4194304),
+            // String constants
+            b"str_pad_right" => Value::Long(1),
+            b"str_pad_left" => Value::Long(0),
+            b"str_pad_both" => Value::Long(2),
+            // PREG constants
+            b"preg_split_no_empty" => Value::Long(1),
+            b"preg_split_delim_capture" => Value::Long(2),
+            b"preg_split_offset_capture" => Value::Long(4),
             _ => Value::Null,
         }
     }
@@ -1578,6 +1637,19 @@ impl Compiler {
                                     line: stmt.span.line,
                                 });
                             }
+                        }
+                    }
+                }
+
+                // Check for duplicate parameter names
+                {
+                    let mut seen_params = std::collections::HashSet::new();
+                    for param in params {
+                        if !seen_params.insert(&param.name) {
+                            return Err(CompileError {
+                                message: format!("Redefinition of parameter ${}", String::from_utf8_lossy(&param.name)),
+                                line: func_compiler.op_array.decl_line,
+                            });
                         }
                     }
                 }
@@ -3042,6 +3114,22 @@ impl Compiler {
                                     line: *method_line,
                                 });
                             }
+                            // Check: interface methods must not be final
+                            if modifiers.is_interface && *method_is_final {
+                                return Err(CompileError {
+                                    message: format!("Interface method {}::{}() must not be final",
+                                        String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                    line: *method_line,
+                                });
+                            }
+                            // Check: interface methods must not be abstract (they are implicitly abstract)
+                            if modifiers.is_interface && *is_abstract {
+                                return Err(CompileError {
+                                    message: format!("Interface method {}::{}() must not be abstract",
+                                        String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                    line: *method_line,
+                                });
+                            }
                             // Check: abstract method cannot be private (except in traits, since PHP 8.0)
                             if *is_abstract && matches!(visibility, goro_parser::ast::Visibility::Private) && !modifiers.is_trait {
                                 return Err(CompileError {
@@ -3251,7 +3339,7 @@ impl Compiler {
                                 }
 
                                 // 5) Visibility warnings (must be public)
-                                if matches!(mn_lower.as_slice(), b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__callstatic" | b"__tostring" | b"__debuginfo" | b"__serialize" | b"__unserialize" | b"__sleep" | b"__wakeup" | b"__set_state" | b"__clone") {
+                                if matches!(mn_lower.as_slice(), b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__callstatic" | b"__tostring" | b"__debuginfo" | b"__serialize" | b"__unserialize" | b"__sleep" | b"__wakeup" | b"__set_state") {
                                     if *visibility != Visibility::Public {
                                         self.warnings.push((format!("The magic method {}::{}() must have public visibility", class_display, method_display), *method_line));
                                     }

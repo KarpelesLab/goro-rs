@@ -310,7 +310,7 @@ fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
             "E_RECOVERABLE_ERROR" => Some(4096),
             "E_DEPRECATED" => Some(8192),
             "E_USER_DEPRECATED" => Some(16384),
-            "E_ALL" => Some(30719), // PHP 8.4+: excludes E_STRICT
+            "E_ALL" => Some(30719), // E_ALL
             _ => name.trim().parse::<i64>().ok(),
         }
     }

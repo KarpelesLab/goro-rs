@@ -317,6 +317,8 @@ pub struct Vm {
     /// WeakMap entries: keyed by (weakmap_object_id, target_object_id) -> (Weak<RefCell<PhpObject>>, Value)
     /// The Weak is used to detect when the key object has been freed
     pub weak_map_entries: HashMap<u64, Vec<(u64, Weak<RefCell<PhpObject>>, Value)>>,
+    /// Class alias mappings: alias_lower -> original_lower (from class_alias())
+    pub class_aliases: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 impl Vm {
@@ -336,7 +338,7 @@ impl Vm {
             pending_classes: Vec::new(),
             is_global_scope: true,
             current_exception: None,
-            error_reporting: 30719, // E_ALL (PHP 8.4+: excludes E_STRICT)
+            error_reporting: 30719, // E_ALL
             magic_depth: 0,
             destructible_objects: Vec::new(),
             called_class_stack: Vec::new(),
@@ -380,8 +382,11 @@ impl Vm {
                 );
                 c.insert(b"precision".to_vec(), Value::Long(14));
                 c.insert(b"serialize_precision".to_vec(), Value::Long(-1));
-                c.insert(b"error_reporting".to_vec(), Value::Long(30719)); // E_ALL (PHP 8.4+)
+                c.insert(b"error_reporting".to_vec(), Value::Long(30719)); // E_ALL
                 c.insert(b"display_errors".to_vec(), Value::Long(1));
+                c.insert(b"include_path".to_vec(), Value::String(PhpString::from_bytes(b".")));
+                c.insert(b"open_basedir".to_vec(), Value::String(PhpString::from_bytes(b"")));
+                c.insert(b"date.timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
                 c.insert(
                     b"memory_limit".to_vec(),
                     Value::String(PhpString::from_bytes(b"128M")),
@@ -460,6 +465,19 @@ impl Vm {
                     b"PHP_BINARY".to_vec(),
                     Value::String(PhpString::from_bytes(b"goro")),
                 );
+                c.insert(
+                    b"PHP_SHLIB_SUFFIX".to_vec(),
+                    Value::String(PhpString::from_bytes(b"so")),
+                );
+                c.insert(b"PHP_FD_SETSIZE".to_vec(), Value::Long(1024));
+                c.insert(
+                    b"PHP_CONFIG_FILE_PATH".to_vec(),
+                    Value::String(PhpString::from_bytes(b"")),
+                );
+                c.insert(
+                    b"PHP_CONFIG_FILE_SCAN_DIR".to_vec(),
+                    Value::String(PhpString::from_bytes(b"")),
+                );
                 // File handles - use Long as resource placeholders (non-zero so they are truthy)
                 c.insert(b"STDIN".to_vec(), Value::Long(1));
                 c.insert(b"STDOUT".to_vec(), Value::Long(2));
@@ -488,7 +506,7 @@ impl Vm {
                 c.insert(b"E_RECOVERABLE_ERROR".to_vec(), Value::Long(4096));
                 c.insert(b"E_DEPRECATED".to_vec(), Value::Long(8192));
                 c.insert(b"E_USER_DEPRECATED".to_vec(), Value::Long(16384));
-                c.insert(b"E_ALL".to_vec(), Value::Long(30719)); // PHP 8.4+: excludes E_STRICT
+                c.insert(b"E_ALL".to_vec(), Value::Long(30719)); // E_ALL
                 // mt_rand constants
                 c.insert(b"MT_RAND_MT19937".to_vec(), Value::Long(0));
                 c.insert(b"MT_RAND_PHP".to_vec(), Value::Long(1));
@@ -957,6 +975,141 @@ impl Vm {
                 c.insert(b"T_WHITESPACE".to_vec(), Value::Long(394));
                 c.insert(b"T_COMMENT".to_vec(), Value::Long(395));
                 c.insert(b"T_DOC_COMMENT".to_vec(), Value::Long(396));
+                // More token constants
+                c.insert(b"TOKEN_PARSE".to_vec(), Value::Long(1));
+                c.insert(b"T_FUNCTION".to_vec(), Value::Long(346));
+                c.insert(b"T_CLASS".to_vec(), Value::Long(369));
+                c.insert(b"T_IF".to_vec(), Value::Long(324));
+                c.insert(b"T_ELSE".to_vec(), Value::Long(308));
+                c.insert(b"T_ELSEIF".to_vec(), Value::Long(307));
+                c.insert(b"T_WHILE".to_vec(), Value::Long(327));
+                c.insert(b"T_FOR".to_vec(), Value::Long(329));
+                c.insert(b"T_FOREACH".to_vec(), Value::Long(331));
+                c.insert(b"T_SWITCH".to_vec(), Value::Long(326));
+                c.insert(b"T_CASE".to_vec(), Value::Long(333));
+                c.insert(b"T_BREAK".to_vec(), Value::Long(335));
+                c.insert(b"T_CONTINUE".to_vec(), Value::Long(336));
+                c.insert(b"T_RETURN".to_vec(), Value::Long(348));
+                c.insert(b"T_ECHO".to_vec(), Value::Long(323));
+                c.insert(b"T_NEW".to_vec(), Value::Long(309));
+                c.insert(b"T_EXIT".to_vec(), Value::Long(305));
+                c.insert(b"T_TRY".to_vec(), Value::Long(337));
+                c.insert(b"T_CATCH".to_vec(), Value::Long(338));
+                c.insert(b"T_FINALLY".to_vec(), Value::Long(339));
+                c.insert(b"T_THROW".to_vec(), Value::Long(341));
+                c.insert(b"T_EXTENDS".to_vec(), Value::Long(364));
+                c.insert(b"T_IMPLEMENTS".to_vec(), Value::Long(365));
+                c.insert(b"T_INTERFACE".to_vec(), Value::Long(367));
+                c.insert(b"T_ABSTRACT".to_vec(), Value::Long(374));
+                c.insert(b"T_FINAL".to_vec(), Value::Long(375));
+                c.insert(b"T_PRIVATE".to_vec(), Value::Long(373));
+                c.insert(b"T_PROTECTED".to_vec(), Value::Long(372));
+                c.insert(b"T_PUBLIC".to_vec(), Value::Long(371));
+                c.insert(b"T_STATIC".to_vec(), Value::Long(376));
+                c.insert(b"T_CONST".to_vec(), Value::Long(362));
+                c.insert(b"T_ARRAY".to_vec(), Value::Long(370));
+                c.insert(b"T_LIST".to_vec(), Value::Long(363));
+                c.insert(b"T_ISSET".to_vec(), Value::Long(354));
+                c.insert(b"T_UNSET".to_vec(), Value::Long(355));
+                c.insert(b"T_EMPTY".to_vec(), Value::Long(356));
+                c.insert(b"T_INSTANCEOF".to_vec(), Value::Long(310));
+                c.insert(b"T_AS".to_vec(), Value::Long(332));
+                c.insert(b"T_DO".to_vec(), Value::Long(328));
+                c.insert(b"T_YIELD".to_vec(), Value::Long(267));
+                c.insert(b"T_YIELD_FROM".to_vec(), Value::Long(268));
+                c.insert(b"T_MATCH".to_vec(), Value::Long(349));
+                c.insert(b"T_ENUM".to_vec(), Value::Long(389));
+                c.insert(b"T_TRAIT".to_vec(), Value::Long(368));
+                c.insert(b"T_NAMESPACE".to_vec(), Value::Long(390));
+                c.insert(b"T_USE".to_vec(), Value::Long(357));
+                c.insert(b"T_INCLUDE".to_vec(), Value::Long(262));
+                c.insert(b"T_INCLUDE_ONCE".to_vec(), Value::Long(263));
+                c.insert(b"T_REQUIRE".to_vec(), Value::Long(264));
+                c.insert(b"T_REQUIRE_ONCE".to_vec(), Value::Long(265));
+                c.insert(b"T_PRINT".to_vec(), Value::Long(266));
+                c.insert(b"T_PLUS_EQUAL".to_vec(), Value::Long(277));
+                c.insert(b"T_MINUS_EQUAL".to_vec(), Value::Long(278));
+                c.insert(b"T_MUL_EQUAL".to_vec(), Value::Long(279));
+                c.insert(b"T_DIV_EQUAL".to_vec(), Value::Long(280));
+                c.insert(b"T_CONCAT_EQUAL".to_vec(), Value::Long(281));
+                c.insert(b"T_MOD_EQUAL".to_vec(), Value::Long(282));
+                c.insert(b"T_AND_EQUAL".to_vec(), Value::Long(283));
+                c.insert(b"T_OR_EQUAL".to_vec(), Value::Long(284));
+                c.insert(b"T_XOR_EQUAL".to_vec(), Value::Long(285));
+                c.insert(b"T_SL_EQUAL".to_vec(), Value::Long(286));
+                c.insert(b"T_SR_EQUAL".to_vec(), Value::Long(287));
+                c.insert(b"T_COALESCE_EQUAL".to_vec(), Value::Long(288));
+                c.insert(b"T_POW_EQUAL".to_vec(), Value::Long(289));
+                c.insert(b"T_BOOLEAN_OR".to_vec(), Value::Long(290));
+                c.insert(b"T_BOOLEAN_AND".to_vec(), Value::Long(291));
+                c.insert(b"T_IS_EQUAL".to_vec(), Value::Long(292));
+                c.insert(b"T_IS_NOT_EQUAL".to_vec(), Value::Long(293));
+                c.insert(b"T_IS_IDENTICAL".to_vec(), Value::Long(294));
+                c.insert(b"T_IS_NOT_IDENTICAL".to_vec(), Value::Long(295));
+                c.insert(b"T_IS_SMALLER_OR_EQUAL".to_vec(), Value::Long(296));
+                c.insert(b"T_IS_GREATER_OR_EQUAL".to_vec(), Value::Long(297));
+                c.insert(b"T_SPACESHIP".to_vec(), Value::Long(298));
+                c.insert(b"T_SL".to_vec(), Value::Long(299));
+                c.insert(b"T_SR".to_vec(), Value::Long(300));
+                c.insert(b"T_INC".to_vec(), Value::Long(301));
+                c.insert(b"T_DEC".to_vec(), Value::Long(302));
+                c.insert(b"T_INT_CAST".to_vec(), Value::Long(303));
+                c.insert(b"T_DOUBLE_CAST".to_vec(), Value::Long(304));
+                c.insert(b"T_STRING_CAST".to_vec(), Value::Long(305));
+                c.insert(b"T_ARRAY_CAST".to_vec(), Value::Long(306));
+                c.insert(b"T_OBJECT_CAST".to_vec(), Value::Long(315));
+                c.insert(b"T_BOOL_CAST".to_vec(), Value::Long(316));
+                c.insert(b"T_UNSET_CAST".to_vec(), Value::Long(317));
+                c.insert(b"T_OBJECT_OPERATOR".to_vec(), Value::Long(395));
+                c.insert(b"T_NULLSAFE_OBJECT_OPERATOR".to_vec(), Value::Long(396));
+                c.insert(b"T_DOUBLE_ARROW".to_vec(), Value::Long(397));
+                c.insert(b"T_DOUBLE_COLON".to_vec(), Value::Long(398));
+                c.insert(b"T_ELLIPSIS".to_vec(), Value::Long(399));
+                c.insert(b"T_COALESCE".to_vec(), Value::Long(400));
+                c.insert(b"T_POW".to_vec(), Value::Long(401));
+                c.insert(b"T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG".to_vec(), Value::Long(402));
+                c.insert(b"T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG".to_vec(), Value::Long(403));
+                c.insert(b"T_NAME_FULLY_QUALIFIED".to_vec(), Value::Long(312));
+                c.insert(b"T_NAME_QUALIFIED".to_vec(), Value::Long(313));
+                c.insert(b"T_NAME_RELATIVE".to_vec(), Value::Long(314));
+                c.insert(b"T_READONLY".to_vec(), Value::Long(383));
+                c.insert(b"T_FN".to_vec(), Value::Long(347));
+                c.insert(b"T_ATTRIBUTE".to_vec(), Value::Long(404));
+                c.insert(b"T_NAMED_ARGUMENT".to_vec(), Value::Long(405));
+                c.insert(b"T_PIPE".to_vec(), Value::Long(406));
+                c.insert(b"T_GLOBAL".to_vec(), Value::Long(358));
+                c.insert(b"T_VAR".to_vec(), Value::Long(360));
+                c.insert(b"T_EVAL".to_vec(), Value::Long(323));
+                c.insert(b"T_LOGICAL_OR".to_vec(), Value::Long(311));
+                c.insert(b"T_LOGICAL_AND".to_vec(), Value::Long(312));
+                c.insert(b"T_LOGICAL_XOR".to_vec(), Value::Long(313));
+                c.insert(b"T_LINE".to_vec(), Value::Long(380));
+                c.insert(b"T_FILE".to_vec(), Value::Long(381));
+                c.insert(b"T_DIR".to_vec(), Value::Long(382));
+                c.insert(b"T_CLASS_C".to_vec(), Value::Long(384));
+                c.insert(b"T_TRAIT_C".to_vec(), Value::Long(385));
+                c.insert(b"T_METHOD_C".to_vec(), Value::Long(386));
+                c.insert(b"T_FUNC_C".to_vec(), Value::Long(387));
+                c.insert(b"T_NS_C".to_vec(), Value::Long(388));
+                c.insert(b"T_NS_SEPARATOR".to_vec(), Value::Long(391));
+                c.insert(b"T_DECLARE".to_vec(), Value::Long(340));
+                c.insert(b"T_ENDDECLARE".to_vec(), Value::Long(342));
+                c.insert(b"T_ENDFOR".to_vec(), Value::Long(330));
+                c.insert(b"T_ENDFOREACH".to_vec(), Value::Long(332));
+                c.insert(b"T_ENDIF".to_vec(), Value::Long(325));
+                c.insert(b"T_ENDSWITCH".to_vec(), Value::Long(327));
+                c.insert(b"T_ENDWHILE".to_vec(), Value::Long(328));
+                c.insert(b"T_CLONE".to_vec(), Value::Long(310));
+                c.insert(b"T_DEFAULT".to_vec(), Value::Long(334));
+                c.insert(b"T_INSTEADOF".to_vec(), Value::Long(366));
+                c.insert(b"T_CALLABLE".to_vec(), Value::Long(377));
+                c.insert(b"T_CURLY_OPEN".to_vec(), Value::Long(399));
+                c.insert(b"T_DOLLAR_OPEN_CURLY_BRACES".to_vec(), Value::Long(400));
+                c.insert(b"T_START_HEREDOC".to_vec(), Value::Long(401));
+                c.insert(b"T_END_HEREDOC".to_vec(), Value::Long(402));
+                c.insert(b"T_OPEN_TAG_WITH_ECHO".to_vec(), Value::Long(393));
+                c.insert(b"T_HALT_COMPILER".to_vec(), Value::Long(378));
+                c.insert(b"T_BAD_CHARACTER".to_vec(), Value::Long(403));
                 // Boolean constants
                 c.insert(b"TRUE".to_vec(), Value::True);
                 c.insert(b"FALSE".to_vec(), Value::False);
@@ -990,6 +1143,7 @@ impl Vm {
             next_weak_ref_id: 1,
             weak_ref_cache: HashMap::new(),
             weak_map_entries: HashMap::new(),
+            class_aliases: HashMap::new(),
         }
     }
 
@@ -6144,9 +6298,9 @@ impl Vm {
                 b"getbasename" | b"setfileclass" | b"setinfoclass" | b"seek"
             ),
             b"recursivetreeiterator" => false, // delegate to outer iterator
-            b"datetime" | b"datetimeimmutable" => matches!(method, b"format" | b"modify" | b"settimezone" | b"gettimezone" | b"settime" | b"setdate" | b"settimestamp" | b"add" | b"sub" | b"diff" | b"getoffset"),
+            b"datetime" | b"datetimeimmutable" => matches!(method, b"format" | b"modify" | b"settimezone" | b"gettimezone" | b"settime" | b"setdate" | b"setisodate" | b"settimestamp" | b"gettimestamp" | b"add" | b"sub" | b"diff" | b"getoffset"),
             b"dateinterval" => matches!(method, b"format"),
-            b"datetimezone" => matches!(method, b"getname" | b"getoffset"),
+            b"datetimezone" => matches!(method, b"getname" | b"getoffset" | b"gettransitions" | b"getlocation"),
             b"reflectionclass" | b"reflectionobject" | b"reflectionenum" => matches!(
                 method,
                 b"getmethod" | b"getproperty" | b"getconstant" | b"hasconstant"
@@ -16790,7 +16944,14 @@ impl Vm {
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
 
-                        if obj_class_lower == class_lower {
+                        // Check direct match or alias match
+                        let is_alias_match = if let Some(alias_target) = self.class_aliases.get(&class_lower) {
+                            obj_class_lower == *alias_target
+                        } else {
+                            false
+                        };
+
+                        if obj_class_lower == class_lower || is_alias_match {
                             Value::True
                         } else {
                             // Walk the class hierarchy (parents + interfaces)
@@ -16803,11 +16964,18 @@ impl Vm {
                                 }
                                 visited.push(current.clone());
                                 if let Some(class_def) = self.classes.get(&current) {
-                                    // Check interfaces
+                                    // Check interfaces (also resolve aliases)
                                     for iface in &class_def.interfaces {
                                         let iface_lower: Vec<u8> =
                                             iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        if iface_lower == class_lower {
+                                        let iface_matches = iface_lower == class_lower || {
+                                            if let Some(alias_target) = self.class_aliases.get(&class_lower) {
+                                                iface_lower == *alias_target
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if iface_matches {
                                             found = true;
                                             break;
                                         }
@@ -16815,11 +16983,18 @@ impl Vm {
                                     if found {
                                         break;
                                     }
-                                    // Check parent
+                                    // Check parent (also resolve aliases)
                                     if let Some(ref parent) = class_def.parent {
                                         let parent_lower: Vec<u8> =
                                             parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        if parent_lower == class_lower {
+                                        let parent_matches = parent_lower == class_lower || {
+                                            if let Some(alias_target) = self.class_aliases.get(&class_lower) {
+                                                parent_lower == *alias_target
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if parent_matches {
                                             found = true;
                                             break;
                                         }
@@ -17845,9 +18020,47 @@ impl Vm {
                             let new_obj_val = Value::Object(Rc::new(RefCell::new(new_obj)));
                             // Call __clone() if defined
                             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let class_name_display = String::from_utf8_lossy(&obj_borrow.class_name).to_string();
                             drop(obj_borrow);
                             if let Some(class_def) = self.classes.get(&class_lower) {
-                                if class_def.get_method(b"__clone").is_some() {
+                                if let Some(clone_method) = class_def.get_method(b"__clone") {
+                                    // Check __clone visibility
+                                    let current_scope = self.current_class_scope();
+                                    let accessible = match clone_method.visibility {
+                                        crate::object::Visibility::Public => true,
+                                        crate::object::Visibility::Protected => {
+                                            if let Some(scope) = &current_scope {
+                                                let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                scope_lower == class_lower || self.class_extends(&scope_lower, &class_lower) || self.class_extends(&class_lower, &scope_lower)
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                        crate::object::Visibility::Private => {
+                                            if let Some(scope) = &current_scope {
+                                                let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                scope_lower == class_lower
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                    };
+                                    if !accessible {
+                                        let scope_str = current_scope.map(|s| String::from_utf8_lossy(&s).to_string()).unwrap_or_else(|| "global scope".to_string());
+                                        let vis_str = match clone_method.visibility {
+                                            crate::object::Visibility::Private => "private",
+                                            crate::object::Visibility::Protected => "protected",
+                                            _ => "public",
+                                        };
+                                        let msg = format!("Call to {} {}::__clone() from {}", vis_str, class_name_display, scope_str);
+                                        let exc = self.create_exception(b"Error", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                    }
                                     if let Value::Object(ref rc) = new_obj_val {
                                         rc.borrow_mut().set_property(b"__clone_window".to_vec(), Value::True);
                                     }
@@ -18984,6 +19197,23 @@ impl Vm {
                                         line: op.line,
                                     });
                                 }
+                                // Check readonly inheritance rules
+                                if !class.is_readonly && parent.is_readonly {
+                                    let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                    let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                    return Err(VmError {
+                                        message: format!("Non-readonly class {} cannot extend readonly class {}", child_display, parent_display),
+                                        line: op.line,
+                                    });
+                                }
+                                if class.is_readonly && !parent.is_readonly {
+                                    let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                    let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                    return Err(VmError {
+                                        message: format!("Readonly class {} cannot extend non-readonly class {}", child_display, parent_display),
+                                        line: op.line,
+                                    });
+                                }
                                 // Inherit methods (child overrides take precedence)
                                 for (method_name, method) in &parent.methods {
                                     // Check if parent method is final and child overrides it
@@ -19452,6 +19682,22 @@ impl Vm {
                                         line: 0,
                                     });
                                 }
+                            }
+                        }
+
+                        // Check: cannot implement both Iterator and IteratorAggregate
+                        {
+                            let all_ifaces: Vec<Vec<u8>> = class.interfaces.iter()
+                                .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>())
+                                .collect();
+                            let has_iterator = all_ifaces.iter().any(|n| n == b"iterator");
+                            let has_iterator_aggregate = all_ifaces.iter().any(|n| n == b"iteratoraggregate");
+                            if has_iterator && has_iterator_aggregate {
+                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                return Err(VmError {
+                                    message: format!("Class {} cannot implement both Iterator and IteratorAggregate at the same time", class_display),
+                                    line: op.line,
+                                });
                             }
                         }
 
@@ -24342,7 +24588,10 @@ pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             | b"valueerror"
             | b"rangeerror"
             | b"unhandledmatcherror"
-            | b"assertionerror" => Some(b"error".to_vec()),
+            | b"assertionerror"
+            | b"fibererror"
+            | b"compileerror" => Some(b"error".to_vec()),
+            b"parseerror" => Some(b"compileerror".to_vec()),
             b"argumentcounterror" => Some(b"typeerror".to_vec()),
             b"arithmeticerror" => Some(b"error".to_vec()),
             b"divisionbyzeroerror" => Some(b"arithmeticerror".to_vec()),
@@ -24363,9 +24612,29 @@ pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             b"badfunctioncallexception" => Some(b"badmethodcallexception".to_vec()),
             b"errorexception" => Some(b"exception".to_vec()),
             b"exception" => Some(b"throwable".to_vec()),
+            // Date exception hierarchy
+            b"dateexception" | b"dateinvalidtimezoneexception"
+            | b"datemalformedintervalstringexception" | b"datemalformedstringexception"
+            | b"datemalformedperiodstringexception" => Some(b"exception".to_vec()),
             // SPL class hierarchy
             b"splstack" | b"splqueue" => Some(b"spldoublylinkedlist".to_vec()),
             b"splminheap" | b"splmaxheap" => Some(b"splheap".to_vec()),
+            // SPL iterator hierarchy
+            b"recursivearrayiterator" => Some(b"arrayiterator".to_vec()),
+            b"recursiveiteratoriterator" => Some(b"iteratoriterator".to_vec()),
+            b"recursivecachingiterator" => Some(b"cachingiterator".to_vec()),
+            b"recursivefilteriterator" => Some(b"filteriterator".to_vec()),
+            b"recursivecallbackfilteriterator" => Some(b"callbackfilteriterator".to_vec()),
+            b"recursiveregexiterator" => Some(b"regexiterator".to_vec()),
+            b"callbackfilteriterator" | b"regexiterator" | b"filteriterator"
+            | b"cachingiterator" | b"appenditerator" | b"norewinditerator"
+            | b"infiniteiterator" | b"limititerator" => Some(b"iteratoriterator".to_vec()),
+            b"parentiterator" => Some(b"recursivefilteriterator".to_vec()),
+            b"recursivetreeiterator" => Some(b"recursiveiteratoriterator".to_vec()),
+            b"filesystemiterator" => Some(b"directoryiterator".to_vec()),
+            b"recursivedirectoryiterator" => Some(b"filesystemiterator".to_vec()),
+            b"globiterator" => Some(b"filesystemiterator".to_vec()),
+            b"splfileobject" | b"spltempfileobject" => Some(b"splfileinfo".to_vec()),
             // Reflection class hierarchy
             b"reflectionexception" => Some(b"exception".to_vec()),
             b"reflectionmethod" => Some(b"reflectionfunctionabstract".to_vec()),

@@ -15,6 +15,7 @@ fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
         || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
         || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
+        || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -62,27 +63,63 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // Look up the closure function to get name, file, line info
                 let closure_name_str = s.to_string_lossy();
                 let fn_lower = closure_name_str.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect::<Vec<u8>>();
+
+                // Collect closure info before writing output
+                struct ClosureDisplayInfo {
+                    name: String,
+                    file: String,
+                    line: u32,
+                    params: Vec<(String, bool)>, // (name, has_default)
+                    is_variadic_last: bool,
+                }
+
                 let closure_info = vm.user_functions.get(&fn_lower).map(|op| {
                     let file = String::from_utf8_lossy(&op.filename).to_string();
                     let line = op.decl_line;
                     let name = if op.name.starts_with(b"__closure_fcc_") {
-                        // FCC closures show the target function name
                         format!("{{closure}}")
                     } else {
-                        // Regular closures show file and line
                         format!("{{closure:{}:{}}}", file, line)
                     };
-                    (name, file, line)
+                    let param_count = op.param_count as usize;
+                    let mut params = Vec::new();
+                    for i in 0..param_count {
+                        if let Some(cv_name) = op.cv_names.get(i) {
+                            let pname = format!("${}", String::from_utf8_lossy(cv_name));
+                            let has_default = op.param_has_default.get(i).copied().unwrap_or(false);
+                            params.push((pname, has_default));
+                        }
+                    }
+                    let is_variadic_last = op.variadic_param.is_some();
+                    ClosureDisplayInfo { name, file, line, params, is_variadic_last }
                 });
-                if let Some((name, file, line)) = closure_info {
-                    let prop_count = 3; // name, file, line
+                if let Some(info) = closure_info {
+                    let has_params = !info.params.is_empty();
+                    let prop_count = 3 + if has_params { 1 } else { 0 }; // name, file, line[, parameter]
                     vm.write_output(format!("{}object(Closure)#1 ({}) {{\n", prefix, prop_count).as_bytes());
                     vm.write_output(format!("{}  [\"name\"]=>\n", prefix).as_bytes());
-                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, name.len(), name).as_bytes());
+                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, info.name.len(), info.name).as_bytes());
                     vm.write_output(format!("{}  [\"file\"]=>\n", prefix).as_bytes());
-                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, file.len(), file).as_bytes());
+                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, info.file.len(), info.file).as_bytes());
                     vm.write_output(format!("{}  [\"line\"]=>\n", prefix).as_bytes());
-                    vm.write_output(format!("{}  int({})\n", prefix, line).as_bytes());
+                    vm.write_output(format!("{}  int({})\n", prefix, info.line).as_bytes());
+                    if has_params {
+                        vm.write_output(format!("{}  [\"parameter\"]=>\n", prefix).as_bytes());
+                        vm.write_output(format!("{}  array({}) {{\n", prefix, info.params.len()).as_bytes());
+                        for (i, (pname, has_default)) in info.params.iter().enumerate() {
+                            let is_variadic = info.is_variadic_last && i == info.params.len() - 1;
+                            let label = if is_variadic {
+                                "<optional>"
+                            } else if *has_default {
+                                "<optional>"
+                            } else {
+                                "<required>"
+                            };
+                            vm.write_output(format!("{}    [\"{}\"]=>\n", prefix, pname).as_bytes());
+                            vm.write_output(format!("{}    string({}) \"{}\"\n", prefix, label.len(), label).as_bytes());
+                        }
+                        vm.write_output(format!("{}  }}\n", prefix).as_bytes());
+                    }
                     vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 } else {
                     vm.write_output(
@@ -398,21 +435,16 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // If __debugInfo didn't return an array, fall through to normal display
             }
 
-            // Count visible properties including uninitialized typed properties
-            let class_lower_for_count: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let class_for_count = vm.classes.get(&class_lower_for_count).cloned();
+            // Count visible properties excluding uninitialized typed properties
+            // PHP counts only initialized properties in the object header count
             let prop_count = obj_borrow.properties.iter()
                 .filter(|(name, val)| {
                     if is_internal_property(name) { return false; }
+                    // Uninitialized properties (Value::Undef) are displayed but not counted
                     if matches!(val, Value::Undef) {
-                        // Only count uninitialized typed properties
-                        class_for_count.as_ref()
-                            .and_then(|c| c.properties.iter().find(|p| p.name == *name))
-                            .map(|p| p.property_type.is_some())
-                            .unwrap_or(false)
-                    } else {
-                        true
+                        return false;
                     }
+                    true
                 })
                 .count();
             vm.write_output(
@@ -905,6 +937,8 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                 // PHP 8.2+: stdClass uses (object) array(...) format
                 buf.extend_from_slice(b"(object) array(\n");
                 for (name, value) in &obj_borrow.properties {
+                    if is_internal_property(name) { continue; }
+                    if matches!(value, Value::Undef) { continue; }
                     let name_str = String::from_utf8_lossy(name);
                     buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
                     var_export_value(value, buf, indent + 2);
@@ -916,6 +950,8 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                 let prefix_backslash = if class_name.starts_with('\\') { "" } else { "\\" };
                 buf.extend_from_slice(format!("{}{}::__set_state(array(\n", prefix_backslash, class_name).as_bytes());
                 for (name, value) in &obj_borrow.properties {
+                    if is_internal_property(name) { continue; }
+                    if matches!(value, Value::Undef) { continue; }
                     let name_str = String::from_utf8_lossy(name);
                     buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
                     var_export_value(value, buf, indent + 2);

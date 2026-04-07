@@ -92,6 +92,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"fpow", fpow_fn);
     vm.register_function(b"srand", srand_fn);
     vm.register_function(b"mt_srand", srand_fn);
+    vm.register_function(b"lcg_value", lcg_value_fn);
 
     // Register parameter types for strict_types enforcement on builtins
     let num = || Some(ParamType::Union(vec![
@@ -1344,4 +1345,14 @@ fn fpow_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn srand_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // srand/mt_srand is a no-op in our implementation since we use the system RNG
     Ok(Value::Null)
+}
+
+fn lcg_value_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // lcg_value() returns a pseudo-random float between 0 and 1
+    use std::time::SystemTime;
+    let seed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as f64;
+    Ok(Value::Double(seed / 1_000_000_000.0))
 }

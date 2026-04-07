@@ -692,6 +692,8 @@ fn implode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     } else {
         let msg = "implode() expects at least 1 argument, 0 given".to_string();
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });
     };
 

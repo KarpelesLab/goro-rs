@@ -273,6 +273,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"is_link", is_link_fn);
     vm.register_function(b"chmod", chmod_fn);
     vm.register_function(b"chown", chown_fn);
+    vm.register_function(b"chgrp", chgrp_fn);
     vm.register_function(b"clearstatcache", clearstatcache_fn);
     vm.register_function_with_params(b"fputcsv", fputcsv_fn, &[b"stream", b"fields", b"separator", b"enclosure", b"escape", b"eol"]);
     vm.register_function_with_params(b"fgetcsv", fgetcsv_fn, &[b"stream", b"length", b"separator", b"enclosure", b"escape"]);
@@ -373,6 +374,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"file_get_contents", file_get_contents_fn);
     vm.register_function(b"file_put_contents", file_put_contents_fn);
     vm.register_function(b"realpath", realpath_fn);
+    vm.register_function(b"realpath_cache_size", realpath_cache_size_fn);
+    vm.register_function(b"realpath_cache_get", realpath_cache_get_fn);
     vm.register_function(b"is_link", is_link_fn);
     vm.register_function(b"stat", stat_fn);
     vm.register_function(b"is_numeric", is_numeric_fn);
@@ -441,6 +444,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"stream_filter_remove", stream_filter_remove_fn);
     vm.register_function(b"stream_context_create", stream_context_create_fn);
     vm.register_function(b"stream_context_set_option", stream_context_set_option_fn);
+    vm.register_function(b"stream_context_set_options", stream_context_set_option_fn);
     vm.register_function(b"stream_context_get_options", stream_context_get_options_fn);
     vm.register_function(b"stream_context_set_params", stream_context_set_params_fn);
     vm.register_function(b"stream_context_get_params", stream_context_get_params_fn);
@@ -5445,6 +5449,15 @@ fn realpath_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(_) => Ok(Value::False),
     }
 }
+
+fn realpath_cache_size_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
+}
+
+fn realpath_cache_get_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+
 fn getcwd_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     match std::env::current_dir() {
         Ok(p) => Ok(Value::String(PhpString::from_string(
@@ -5872,8 +5885,31 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 std::collections::HashMap::new()
             };
 
+        // Build a set of typed properties to skip when uninitialized
+        let typed_props: std::collections::HashSet<Vec<u8>> =
+            if let Some(class_def) = vm.get_class_def(&class_name_lower) {
+                class_def.properties.iter()
+                    .filter(|p| p.property_type.is_some())
+                    .map(|p| p.name.clone())
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
         let mut arr = PhpArray::new();
         for (name, val) in &obj.properties {
+            // Skip internal properties
+            if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+                || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
+                || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
+                || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+                || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_") {
+                continue;
+            }
+            // Skip uninitialized typed properties
+            if matches!(val, Value::Undef) && typed_props.contains(name) {
+                continue;
+            }
             // Check visibility
             let vis = prop_visibility.get(name).copied().unwrap_or(goro_core::object::Visibility::Public);
             let accessible = match vis {
@@ -6815,7 +6851,10 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let original_lower: Vec<u8> = original.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
     let alias_lower: Vec<u8> = alias.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
     if let Some(class) = vm.classes.get(&original_lower).cloned() {
-        vm.classes.insert(alias_lower, class);
+        vm.classes.insert(alias_lower.clone(), class);
+        // Register bidirectional alias mappings so instanceof works correctly
+        vm.class_aliases.insert(alias_lower.clone(), original_lower.clone());
+        vm.class_aliases.insert(original_lower, alias_lower);
         Ok(Value::True)
     } else {
         Ok(Value::False)
@@ -6875,6 +6914,13 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
     // Direct match
     if class_lower == check_lower {
         return true;
+    }
+
+    // Check alias match
+    if let Some(alias_target) = vm.class_aliases.get(&check_lower) {
+        if class_lower == *alias_target {
+            return true;
+        }
     }
 
     // Check built-in exception hierarchy
@@ -9930,6 +9976,10 @@ fn filegroup_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn chown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn chgrp_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 

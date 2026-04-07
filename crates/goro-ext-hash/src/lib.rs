@@ -26,6 +26,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"md5_file", md5_file_fn);
     vm.register_function(b"sha1_file", sha1_file_fn);
     vm.register_function(b"hash_hmac_file", hash_hmac_file_fn);
+    vm.register_function(b"hash_update_stream", hash_update_stream_fn);
 }
 
 fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -222,7 +223,7 @@ fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let obj_id = vm.next_object_id();
     let mut obj = goro_core::object::PhpObject::new(b"HashContext".to_vec(), obj_id);
     obj.set_property(b"algo".to_vec(), Value::String(PhpString::from_string(algo.clone())));
-    obj.set_property(b"data".to_vec(), Value::String(PhpString::from_vec(Vec::new())));
+    obj.set_property(b"__hash_data".to_vec(), Value::String(PhpString::from_vec(Vec::new())));
 
     // HASH_HMAC = 1
     if options & 1 != 0 {
@@ -235,8 +236,8 @@ fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             while key_bytes.len() < block_size {
                 key_bytes.push(0);
             }
-            obj.set_property(b"hmac_key".to_vec(), Value::String(PhpString::from_vec(key_bytes)));
-            obj.set_property(b"is_hmac".to_vec(), Value::True);
+            obj.set_property(b"__hmac_key".to_vec(), Value::String(PhpString::from_vec(key_bytes)));
+            obj.set_property(b"__hash_is_hmac".to_vec(), Value::True);
         }
     }
 
@@ -247,10 +248,10 @@ fn hash_update_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(obj)) = args.first() {
         let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
         let mut obj = obj.borrow_mut();
-        let existing = obj.get_property(b"data").to_php_string();
+        let existing = obj.get_property(b"__hash_data").to_php_string();
         let mut combined = existing.as_bytes().to_vec();
         combined.extend_from_slice(data.as_bytes());
-        obj.set_property(b"data".to_vec(), Value::String(PhpString::from_vec(combined)));
+        obj.set_property(b"__hash_data".to_vec(), Value::String(PhpString::from_vec(combined)));
         return Ok(Value::True);
     }
     Ok(Value::False)
@@ -261,9 +262,9 @@ fn hash_final_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
         let obj_borrow = obj.borrow();
         let algo = obj_borrow.get_property(b"algo").to_php_string().to_string_lossy().to_ascii_lowercase();
-        let data = obj_borrow.get_property(b"data").to_php_string();
-        let is_hmac = obj_borrow.get_property(b"is_hmac").is_truthy();
-        let hmac_key_val = obj_borrow.get_property(b"hmac_key");
+        let data = obj_borrow.get_property(b"__hash_data").to_php_string();
+        let is_hmac = obj_borrow.get_property(b"__hash_is_hmac").is_truthy();
+        let hmac_key_val = obj_borrow.get_property(b"__hmac_key");
         let hmac_key = hmac_key_val.to_php_string();
         drop(obj_borrow);
 
@@ -304,17 +305,17 @@ fn hash_copy_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(obj)) = args.first() {
         let obj_borrow = obj.borrow();
         let algo = obj_borrow.get_property(b"algo");
-        let data = obj_borrow.get_property(b"data");
-        let is_hmac = obj_borrow.get_property(b"is_hmac");
-        let hmac_key = obj_borrow.get_property(b"hmac_key");
+        let data = obj_borrow.get_property(b"__hash_data");
+        let is_hmac = obj_borrow.get_property(b"__hash_is_hmac");
+        let hmac_key = obj_borrow.get_property(b"__hmac_key");
         drop(obj_borrow);
 
         let new_id = 0; // simplified
         let mut new_obj = goro_core::object::PhpObject::new(b"HashContext".to_vec(), new_id);
         new_obj.set_property(b"algo".to_vec(), algo);
-        new_obj.set_property(b"data".to_vec(), data);
-        new_obj.set_property(b"is_hmac".to_vec(), is_hmac);
-        new_obj.set_property(b"hmac_key".to_vec(), hmac_key);
+        new_obj.set_property(b"__hash_data".to_vec(), data);
+        new_obj.set_property(b"__hash_is_hmac".to_vec(), is_hmac);
+        new_obj.set_property(b"__hmac_key".to_vec(), hmac_key);
         return Ok(Value::Object(Rc::new(RefCell::new(new_obj))));
     }
     Ok(Value::False)
@@ -1678,4 +1679,10 @@ fn hash_hmac_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::False)
         }
     }
+}
+
+fn hash_update_stream_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // hash_update_stream(HashContext $context, resource $stream, int $length = -1): int
+    // Stub: file handle access is in a different crate, so we can't read from streams here
+    Ok(Value::Long(0))
 }
