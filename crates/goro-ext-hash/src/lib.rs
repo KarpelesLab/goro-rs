@@ -126,7 +126,7 @@ fn hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         None => {
-            let msg = format!("hash(): Unknown hashing algorithm: {}", algo_lower);
+            let msg = format!("hash(): Argument #1 ($algo) must be a valid hashing algorithm");
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
             Err(VmError { message: msg, line: vm.current_line })
@@ -1067,7 +1067,7 @@ fn hash_hkdf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         "sha384" => 48,
         "sha512" => 64,
         _ => {
-            let msg = format!("hash_hkdf(): Argument #1 ($algo) must be a valid hashing algorithm, \"{}\" given", algo);
+            let msg = format!("hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm");
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: 0 });

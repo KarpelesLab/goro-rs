@@ -2875,7 +2875,8 @@ impl Parser {
         let mut left = self.parse_logical_and()?;
         while matches!(self.peek(), TokenKind::BooleanOr) {
             self.advance();
-            let right = self.parse_logical_and()?;
+            // Right side allows assignment: `$a || $b = expr` → `$a || ($b = expr)`
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -2892,7 +2893,8 @@ impl Parser {
         let mut left = self.parse_bitwise_or()?;
         while matches!(self.peek(), TokenKind::BooleanAnd) {
             self.advance();
-            let right = self.parse_bitwise_or()?;
+            // Right side allows assignment: `$a && $b = expr` → `$a && ($b = expr)`
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -2909,7 +2911,7 @@ impl Parser {
         let mut left = self.parse_bitwise_xor()?;
         while matches!(self.peek(), TokenKind::Pipe) {
             self.advance();
-            let right = self.parse_bitwise_xor()?;
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -2926,7 +2928,7 @@ impl Parser {
         let mut left = self.parse_bitwise_and()?;
         while matches!(self.peek(), TokenKind::Caret) {
             self.advance();
-            let right = self.parse_bitwise_and()?;
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -2943,7 +2945,7 @@ impl Parser {
         let mut left = self.parse_pipe()?;
         while matches!(self.peek(), TokenKind::Ampersand) {
             self.advance();
-            let right = self.parse_equality()?;
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -2985,10 +2987,10 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            // Right side should be comparison-level (higher precedence than equality)
-            // This ensures `$x === 'a' || $x === 'b'` parses as `($x === 'a') || ($x === 'b')`
-            // not as `$x === ('a' || $x === 'b')`
-            let right = self.parse_comparison()?;
+            // Right side allows assignment: `null !== $key = key($arr)` → `null !== ($key = key($arr))`
+            // Left-associativity of `===`/`!==` still works because the loop breaks on non-equality tokens,
+            // and `||` etc. are handled by the caller (parse_logical_or).
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -3012,6 +3014,7 @@ impl Parser {
                 TokenKind::Spaceship => BinaryOp::Spaceship,
                 TokenKind::Instanceof => {
                     self.advance();
+                    // instanceof right side is a class name, not an arbitrary expression
                     let right = self.parse_shift()?;
                     left = Expr {
                         span: left.span.merge(right.span),
@@ -3025,7 +3028,7 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_shift()?;
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -3047,7 +3050,7 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_additive()?;
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -3070,7 +3073,7 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_multiplicative()?;
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -3093,7 +3096,7 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_pow()?;
+            let right = self.parse_assignment()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -3109,7 +3112,7 @@ impl Parser {
     fn parse_pow(&mut self) -> ParseResult<Expr> {
         let base = self.parse_unary()?;
         if self.eat(&TokenKind::Pow) {
-            let exp = self.parse_pow()?; // right-associative
+            let exp = self.parse_assignment()?; // right-associative, allows assignment
             Ok(Expr {
                 span: base.span.merge(exp.span),
                 kind: ExprKind::BinaryOp {

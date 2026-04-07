@@ -768,16 +768,8 @@ pub fn reflection_class_method(
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"hascase" => {
-            if let Some(ce) = vm.classes.get(&class_lower) {
-                let ob = obj.borrow();
-                // The case name is passed as first arg but for no-arg dispatch, we check if it's been called
-                // Actually hasCase needs args - but since it's dispatched via no-arg, let's handle it here
-                // No-arg means we got called with no specific args (should be impossible for hasCase)
-                drop(ob);
-                Some(Value::False)
-            } else {
-                Some(Value::False)
-            }
+            // hasCase needs args - let it fall through to docall dispatch
+            None
         }
         b"__tostring" => {
             // Build a detailed __toString representation for ReflectionClass
@@ -816,9 +808,38 @@ pub fn reflection_class_docall(
             }
             b"hasproperty" => {
                 let prop_name = args.get(1)?.to_php_string();
-                let has = vm.classes.get(&class_lower)
-                    .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
-                    .unwrap_or(false);
+                let prop_bytes = prop_name.as_bytes();
+                // Walk parent chain, respecting visibility
+                // Private properties are only visible in the declaring class
+                let mut has = false;
+                let mut current = class_lower.clone();
+                let mut is_declaring_class = true;
+                for _ in 0..50 {
+                    if let Some(c) = vm.classes.get(&current) {
+                        for p in &c.properties {
+                            if p.name == prop_bytes {
+                                if p.visibility == crate::object::Visibility::Private {
+                                    // Private: only visible if this is the original class (not inherited)
+                                    if is_declaring_class {
+                                        has = true;
+                                    }
+                                } else {
+                                    has = true;
+                                }
+                                break;
+                            }
+                        }
+                        if has { break; }
+                        if let Some(ref parent) = c.parent {
+                            current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            is_declaring_class = false;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 Some(if has { Value::True } else { Value::False })
             }
             b"hasconstant" => {
@@ -948,8 +969,9 @@ pub fn reflection_class_docall(
                 let parent_name = match parent_arg {
                     Value::Object(o) => {
                         let ob = o.borrow();
-                        // If it's a ReflectionClass, use its name
-                        if ob.class_name.eq_ignore_ascii_case(b"ReflectionClass") {
+                        // If it's a ReflectionClass or ReflectionObject, use its name property
+                        if ob.class_name.eq_ignore_ascii_case(b"ReflectionClass")
+                            || ob.class_name.eq_ignore_ascii_case(b"ReflectionObject") {
                             ob.get_property(b"name").to_php_string().to_string_lossy()
                         } else {
                             String::from_utf8_lossy(&ob.class_name).to_string()
@@ -972,7 +994,8 @@ pub fn reflection_class_docall(
                 let iface_name = match iface_arg {
                     Value::Object(o) => {
                         let ob = o.borrow();
-                        if ob.class_name.eq_ignore_ascii_case(b"ReflectionClass") {
+                        if ob.class_name.eq_ignore_ascii_case(b"ReflectionClass")
+                            || ob.class_name.eq_ignore_ascii_case(b"ReflectionObject") {
                             ob.get_property(b"name").to_php_string().to_string_lossy()
                         } else {
                             String::from_utf8_lossy(&ob.class_name).to_string()
@@ -2434,9 +2457,15 @@ pub fn reflection_class_constant_method(
         b"getdoccomment" => Some(Value::False),
         b"isfinal" => Some(if is_final { Value::True } else { Value::False }),
         b"isenumcase" => {
-            let val = ob.get_property(b"__reflection_value");
+            let const_name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            let class_name = ob.get_property(b"class").to_php_string().to_string_lossy();
+            let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
             drop(ob);
-            Some(if Vm::is_enum_case(&val) { Value::True } else { Value::False })
+            // Check if this constant name is in the enum's case list
+            let is_case = vm.classes.get(&class_lower)
+                .map(|ce| ce.is_enum && ce.enum_cases.iter().any(|(cn, _)| cn == const_name.as_bytes()))
+                .unwrap_or(false);
+            Some(if is_case { Value::True } else { Value::False })
         }
         b"isdeprecated" => Some(Value::False),
         b"hastype" => Some(Value::False),

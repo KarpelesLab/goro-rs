@@ -187,6 +187,13 @@ fn resolve_encoding(name: &str) -> Option<&'static encoding_rs::Encoding> {
     }
 }
 
+/// Check if an encoding name is valid
+fn is_valid_encoding(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "utf-8" || lower == "utf8" || lower == "ascii" || lower == "us-ascii"
+        || resolve_encoding(name).is_some()
+}
+
 /// Convert bytes from one encoding to another, returning the result as bytes
 fn convert_encoding(data: &[u8], to_enc: &str, from_enc: &str) -> Option<Vec<u8>> {
     if data.is_empty() {
@@ -386,11 +393,15 @@ fn mb_internal_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         // Set the internal encoding
         let enc = args[0].to_php_string().to_string_lossy();
-        if resolve_encoding(&enc).is_some() || enc.to_ascii_lowercase() == "utf-8" || enc.to_ascii_lowercase() == "ascii" {
+        let enc_lower = enc.to_ascii_lowercase();
+        if resolve_encoding(&enc).is_some() || enc_lower == "utf-8" || enc_lower == "ascii" || enc_lower == "iso-8859-1" || enc_lower == "latin1" {
             vm.constants.insert(b"mbstring.internal_encoding".to_vec(), Value::String(PhpString::from_string(enc)));
             Ok(Value::True)
         } else {
-            Ok(Value::True) // Accept silently
+            let msg = format!("mb_internal_encoding(): Argument #1 ($encoding) must be a valid encoding, \"{}\" given", enc);
+            let exc = vm.create_exception(b"ValueError", &msg, 0);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: vm.current_line })
         }
     }
 }
@@ -432,7 +443,19 @@ fn mb_strtolower(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let bytes = s.as_bytes();
     if let Ok(s) = std::str::from_utf8(bytes) {
-        let lower = s.to_lowercase();
+        // PHP uses simple Unicode case mapping (no context-sensitive rules like final sigma)
+        let mut lower = String::with_capacity(s.len());
+        for c in s.chars() {
+            if c == '\u{03A3}' {
+                // Σ (Greek capital sigma) -> σ (Greek small sigma) always in PHP
+                // Rust would context-sensitively produce ς (final sigma) at word boundaries
+                lower.push('\u{03C3}');
+            } else {
+                for lc in c.to_lowercase() {
+                    lower.push(lc);
+                }
+            }
+        }
         Ok(Value::String(PhpString::from_vec(lower.into_bytes())))
     } else {
         let lower: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -857,6 +880,15 @@ fn mb_check_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn mb_substr_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(enc_arg) = args.get(2) {
+        let enc = enc_arg.to_php_string().to_string_lossy();
+        if !is_valid_encoding(&enc) {
+            let msg = format!("mb_substr_count(): Argument #3 ($encoding) must be a valid encoding, \"{}\" given", enc);
+            let exc = _vm.create_exception(b"ValueError", &msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: _vm.current_line });
+        }
+    }
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let h = haystack.as_bytes();
@@ -881,6 +913,16 @@ fn mb_substr_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn mb_strstr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Validate encoding if provided
+    if let Some(enc_arg) = args.get(3) {
+        let enc = enc_arg.to_php_string().to_string_lossy();
+        if !is_valid_encoding(&enc) {
+            let msg = format!("mb_strstr(): Argument #4 ($encoding) must be a valid encoding, \"{}\" given", enc);
+            let exc = _vm.create_exception(b"ValueError", &msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: _vm.current_line });
+        }
+    }
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
@@ -900,6 +942,15 @@ fn mb_strstr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn mb_stristr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(enc_arg) = args.get(3) {
+        let enc = enc_arg.to_php_string().to_string_lossy();
+        if !is_valid_encoding(&enc) {
+            let msg = format!("mb_stristr(): Argument #4 ($encoding) must be a valid encoding, \"{}\" given", enc);
+            let exc = _vm.create_exception(b"ValueError", &msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: _vm.current_line });
+        }
+    }
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
@@ -920,6 +971,15 @@ fn mb_stristr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn mb_strrchr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(enc_arg) = args.get(3) {
+        let enc = enc_arg.to_php_string().to_string_lossy();
+        if !is_valid_encoding(&enc) {
+            let msg = format!("mb_strrchr(): Argument #4 ($encoding) must be a valid encoding, \"{}\" given", enc);
+            let exc = _vm.create_exception(b"ValueError", &msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: _vm.current_line });
+        }
+    }
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
@@ -951,6 +1011,15 @@ fn mb_strrchr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn mb_strrichr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(enc_arg) = args.get(3) {
+        let enc = enc_arg.to_php_string().to_string_lossy();
+        if !is_valid_encoding(&enc) {
+            let msg = format!("mb_strrichr(): Argument #4 ($encoding) must be a valid encoding, \"{}\" given", enc);
+            let exc = _vm.create_exception(b"ValueError", &msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: _vm.current_line });
+        }
+    }
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
@@ -1014,24 +1083,53 @@ fn mb_convert_case_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Ok(s) = std::str::from_utf8(bytes) {
         let result = match mode {
             0 | 3 => s.to_uppercase(), // MB_CASE_UPPER / MB_CASE_UPPER_SIMPLE
-            1 | 4 | 5 => s.to_lowercase(), // MB_CASE_LOWER / MB_CASE_LOWER_SIMPLE / MB_CASE_FOLD_SIMPLE
+            1 | 4 | 5 => {
+                // MB_CASE_LOWER / MB_CASE_LOWER_SIMPLE / MB_CASE_FOLD_SIMPLE
+                // Use simple case mapping (no context-sensitive final sigma rule)
+                let mut lower = String::with_capacity(s.len());
+                for c in s.chars() {
+                    if c == '\u{03A3}' {
+                        lower.push('\u{03C3}');
+                    } else {
+                        for lc in c.to_lowercase() {
+                            lower.push(lc);
+                        }
+                    }
+                }
+                lower
+            },
             2 => {
                 // MB_CASE_TITLE - capitalize first letter of each word
+                // PHP uses Unicode word boundaries: whitespace/punctuation triggers new word
+                // but apostrophe within a word does NOT trigger capitalization
                 let mut result = String::new();
                 let mut cap_next = true;
+                let mut prev_was_alpha = false;
                 for c in s.chars() {
                     if cap_next && c.is_alphabetic() {
                         for uc in c.to_uppercase() {
                             result.push(uc);
                         }
                         cap_next = false;
+                        prev_was_alpha = true;
+                    } else if c.is_alphabetic() {
+                        if c == '\u{03A3}' {
+                            result.push('\u{03C3}');
+                        } else {
+                            for lc in c.to_lowercase() {
+                                result.push(lc);
+                            }
+                        }
+                        prev_was_alpha = true;
                     } else {
-                        for lc in c.to_lowercase() {
-                            result.push(lc);
+                        result.push(c);
+                        // Apostrophe/quote within a word doesn't start a new word
+                        if c == '\'' && prev_was_alpha {
+                            // Keep cap_next = false (still in the same word)
+                        } else {
+                            cap_next = true;
                         }
-                        if c.is_whitespace() || c == '\'' || !c.is_alphabetic() {
-                            cap_next = c.is_whitespace() || !c.is_alphabetic();
-                        }
+                        prev_was_alpha = false;
                     }
                 }
                 result
