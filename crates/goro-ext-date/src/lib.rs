@@ -329,7 +329,7 @@ fn gmdate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     });
 
     // Always use UTC for gmdate
-    let result = format_timestamp_with_tz(&format, secs, "UTC", 0);
+    let result = format_timestamp_with_tz(&format, secs, "GMT", 0);
     Ok(Value::String(PhpString::from_string(result)))
 }
 

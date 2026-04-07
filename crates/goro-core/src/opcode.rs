@@ -274,9 +274,6 @@ pub enum OpCode {
     SaveJump,
     /// Check and execute deferred return or jump after finally block
     ReturnDeferred,
-    /// Save the current pending exception onto a stack at finally-block entry.
-    /// This preserves the original exception so inner try/catch blocks don't lose it.
-    SaveException,
     /// Save and suppress error reporting (for @ operator)
     ErrorSuppress,
     /// Restore error reporting (for @ operator)

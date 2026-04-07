@@ -3534,15 +3534,7 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(result))))
     } else {
         let s = string_arg.to_php_string();
-        // If replacement is an array, use the first element
-        let replacement = if let Value::Array(repl_arr) = replacement_arg {
-            let repl_arr = repl_arr.borrow();
-            repl_arr.iter().next()
-                .map(|(_, v)| v.to_php_string())
-                .unwrap_or(PhpString::empty())
-        } else {
-            replacement_arg.to_php_string()
-        };
+        let replacement = replacement_arg.to_php_string();
         let start = start_arg.to_long();
         let length = length_arg.map(|v| v.to_long());
         let result = substr_replace_single(s.as_bytes(), replacement.as_bytes(), start, length);

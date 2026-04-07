@@ -3562,51 +3562,24 @@ fn get_declared_interfaces_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
 fn property_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_or_obj = args.first().unwrap_or(&Value::Null);
     let prop_name = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let prop_bytes = prop_name.as_bytes();
-
-    // Helper closure to check class hierarchy for a property
-    let check_class_hierarchy = |vm: &Vm, class_lower: &[u8]| -> bool {
-        let mut current = class_lower.to_vec();
-        for _ in 0..50 {
-            if let Some(class) = vm.classes.get(&current) {
-                if class.properties.iter().any(|p| p.name == prop_bytes) {
-                    return true;
-                }
-                if let Some(ref parent) = class.parent {
-                    current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-        false
-    };
-
     match class_or_obj {
-        Value::Object(obj) => {
-            let obj_ref = obj.borrow();
-            if obj_ref.has_property(prop_bytes) {
-                return Ok(Value::True);
-            }
-            // Also check the class hierarchy for declared properties (including private from parents)
-            let class_lower: Vec<u8> = obj_ref.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            drop(obj_ref);
-            Ok(if check_class_hierarchy(vm, &class_lower) {
-                Value::True
-            } else {
-                Value::False
-            })
-        },
+        Value::Object(obj) => Ok(if obj.borrow().has_property(prop_name.as_bytes()) {
+            Value::True
+        } else {
+            Value::False
+        }),
         Value::String(s) => {
             let class_lower: Vec<u8> = s
                 .as_bytes()
                 .iter()
                 .map(|c| c.to_ascii_lowercase())
                 .collect();
-            Ok(if check_class_hierarchy(vm, &class_lower) {
-                Value::True
+            Ok(if let Some(class) = vm.classes.get(&class_lower) {
+                if class.properties.iter().any(|p| p.name == prop_name.as_bytes()) {
+                    Value::True
+                } else {
+                    Value::False
+                }
             } else {
                 Value::False
             })
@@ -3660,12 +3633,21 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     // Walk parent chain to check for method
-    // method_exists() returns true regardless of visibility (including inherited private methods)
     let mut current = class_lower.clone();
     for _ in 0..50 {
         if let Some(class) = vm.classes.get(&current) {
-            if class.methods.contains_key(&method_lower) {
-                return Ok(Value::True);
+            if let Some(method) = class.methods.get(&method_lower) {
+                // Private methods are only visible in their declaring class
+                if method.visibility == goro_core::object::Visibility::Private {
+                    // Check if the declaring class matches the requested class
+                    let declaring_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if declaring_lower == class_lower {
+                        return Ok(Value::True);
+                    }
+                    // Private method from parent - not accessible
+                } else {
+                    return Ok(Value::True);
+                }
             }
             if let Some(ref parent) = class.parent {
                 current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -10536,28 +10518,6 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let prop_name = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
     let prop_bytes = prop_name.as_bytes();
 
-    // Helper to check class hierarchy for a property declaration
-    let check_class_hierarchy = |vm: &Vm, start_class: &[u8]| -> bool {
-        let mut current = start_class.to_vec();
-        for _ in 0..50 {
-            if let Some(class_def) = vm.get_class_def(&current) {
-                for prop in &class_def.properties {
-                    if prop.name == prop_bytes {
-                        return true;
-                    }
-                }
-                if let Some(ref parent) = class_def.parent {
-                    current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-        false
-    };
-
     match obj_or_class {
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
@@ -10565,22 +10525,28 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if obj_borrow.has_property(prop_bytes) {
                 return Ok(Value::True);
             }
-            // Check class definition hierarchy (including parent private properties)
+            // Check class definition
             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             drop(obj_borrow);
-            Ok(if check_class_hierarchy(vm, &class_lower) {
-                Value::True
-            } else {
-                Value::False
-            })
+            if let Some(class_def) = vm.get_class_def(&class_lower) {
+                for prop in &class_def.properties {
+                    if prop.name == prop_bytes {
+                        return Ok(Value::True);
+                    }
+                }
+            }
+            Ok(Value::False)
         }
         Value::String(s) => {
             let class_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-            Ok(if check_class_hierarchy(vm, &class_lower) {
-                Value::True
-            } else {
-                Value::False
-            })
+            if let Some(class_def) = vm.get_class_def(&class_lower) {
+                for prop in &class_def.properties {
+                    if prop.name == prop_bytes {
+                        return Ok(Value::True);
+                    }
+                }
+            }
+            Ok(Value::False)
         }
         _ => Ok(Value::Null),
     }

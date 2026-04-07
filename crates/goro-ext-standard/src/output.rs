@@ -58,106 +58,37 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
         Value::String(s) => {
             let b = s.as_bytes();
             if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
-                // Closures should be displayed as Closure objects, matching PHP 8.4+ var_dump format.
-                // Regular closures: name, file, line (+ parameter if params exist)
-                // FCC closures: function (+ parameter if params exist)
+                // Closures should be displayed as Closure objects
+                // Look up the closure function to get name, file, line info
                 let closure_name_str = s.to_string_lossy();
                 let fn_lower = closure_name_str.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect::<Vec<u8>>();
-
-                let mut fcc_func_name: Option<String> = None;
-                let mut closure_name: Option<String> = None;
-                let mut closure_file: Option<String> = None;
-                let mut closure_line: Option<u32> = None;
-                let mut params: Vec<(String, bool)> = Vec::new();
-
-                if let Some(op) = vm.user_functions.get(&fn_lower) {
-                    if op.name.starts_with(b"__closure_fcc_") {
-                        // FCC closure: extract the target function name
-                        for instr in &op.ops {
-                            if instr.opcode == goro_core::opcode::OpCode::InitFCall {
-                                if let goro_core::opcode::OperandType::Const(idx) = instr.op1 {
-                                    if let Some(goro_core::value::Value::String(name_str)) = op.literals.get(idx as usize) {
-                                        fcc_func_name = Some(name_str.to_string_lossy());
-                                    }
-                                }
-                                break;
-                            }
-                            if instr.opcode == goro_core::opcode::OpCode::InitMethodCall {
-                                if let goro_core::opcode::OperandType::Const(idx) = instr.op2 {
-                                    if let Some(goro_core::value::Value::String(method_str)) = op.literals.get(idx as usize) {
-                                        fcc_func_name = Some(method_str.to_string_lossy());
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                        // For FCC, look up the target function's parameters
-                        if let Some(ref func_name) = fcc_func_name {
-                            let target_lower: Vec<u8> = func_name.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect();
-                            if let Some(target_op) = vm.user_functions.get(&target_lower) {
-                                for i in 0..target_op.param_count {
-                                    if let Some(name) = target_op.cv_names.get(i as usize) {
-                                        let param_name = format!("${}", String::from_utf8_lossy(name));
-                                        let is_required = i < target_op.required_param_count;
-                                        params.push((param_name, is_required));
-                                    }
-                                }
-                            } else if let Some(builtin_params) = vm.get_function_params(&target_lower) {
-                                params = builtin_params;
-                            }
-                        }
+                let closure_info = vm.user_functions.get(&fn_lower).map(|op| {
+                    let file = String::from_utf8_lossy(&op.filename).to_string();
+                    let line = op.decl_line;
+                    let name = if op.name.starts_with(b"__closure_fcc_") {
+                        // FCC closures show the target function name
+                        format!("{{closure}}")
                     } else {
-                        // Regular closure: show name, file, line (PHP 8.4+ format)
-                        let file = String::from_utf8_lossy(&op.filename).to_string();
-                        let line = op.decl_line;
-                        let name = format!("{{closure:{}:{}}}", file, line);
-                        closure_name = Some(name);
-                        closure_file = Some(file);
-                        closure_line = Some(line);
-                        // Also show parameters
-                        for i in 0..op.param_count {
-                            if let Some(name) = op.cv_names.get(i as usize) {
-                                let param_name = format!("${}", String::from_utf8_lossy(name));
-                                let is_required = i < op.required_param_count;
-                                params.push((param_name, is_required));
-                            }
-                        }
-                    }
-                }
-
-                let mut prop_count = 0;
-                if fcc_func_name.is_some() { prop_count += 1; }
-                if closure_name.is_some() { prop_count += 3; } // name, file, line
-                if !params.is_empty() { prop_count += 1; }
-
-                vm.write_output(format!("{}object(Closure)#1 ({}) {{\n", prefix, prop_count).as_bytes());
-                if let Some(func_name) = &fcc_func_name {
-                    vm.write_output(format!("{}  [\"function\"]=>\n", prefix).as_bytes());
-                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, func_name.len(), func_name).as_bytes());
-                }
-                if let Some(name) = &closure_name {
+                        // Regular closures show file and line
+                        format!("{{closure:{}:{}}}", file, line)
+                    };
+                    (name, file, line)
+                });
+                if let Some((name, file, line)) = closure_info {
+                    let prop_count = 3; // name, file, line
+                    vm.write_output(format!("{}object(Closure)#1 ({}) {{\n", prefix, prop_count).as_bytes());
                     vm.write_output(format!("{}  [\"name\"]=>\n", prefix).as_bytes());
                     vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, name.len(), name).as_bytes());
-                    if let Some(file) = &closure_file {
-                        vm.write_output(format!("{}  [\"file\"]=>\n", prefix).as_bytes());
-                        vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, file.len(), file).as_bytes());
-                    }
-                    if let Some(line) = closure_line {
-                        vm.write_output(format!("{}  [\"line\"]=>\n", prefix).as_bytes());
-                        vm.write_output(format!("{}  int({})\n", prefix, line).as_bytes());
-                    }
+                    vm.write_output(format!("{}  [\"file\"]=>\n", prefix).as_bytes());
+                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, file.len(), file).as_bytes());
+                    vm.write_output(format!("{}  [\"line\"]=>\n", prefix).as_bytes());
+                    vm.write_output(format!("{}  int({})\n", prefix, line).as_bytes());
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                } else {
+                    vm.write_output(
+                        format!("{}object(Closure)#1 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
+                    );
                 }
-                if !params.is_empty() {
-                    vm.write_output(format!("{}  [\"parameter\"]=>\n", prefix).as_bytes());
-                    vm.write_output(format!("{}  array({}) {{\n", prefix, params.len()).as_bytes());
-                    for (param_name, is_required) in &params {
-                        let req_str = if *is_required { "<required>" } else { "<optional>" };
-                        vm.write_output(format!("{}    [\"{}\"]=>\n", prefix, param_name).as_bytes());
-                        vm.write_output(format!("{}    string({}) \"{}\"\n", prefix, req_str.len(), req_str).as_bytes());
-                    }
-                    vm.write_output(format!("{}  }}\n", prefix).as_bytes());
-                }
-                vm.write_output(format!("{}}}\n", prefix).as_bytes());
             } else {
                 vm.write_output(
                     format!(
@@ -467,17 +398,23 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // If __debugInfo didn't return an array, fall through to normal display
             }
 
-            // Count visible INITIALIZED properties only (PHP behavior)
-            // Uninitialized typed properties are shown but don't count toward the total
+            // Count visible properties including uninitialized typed properties
+            let class_lower_for_count: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_for_count = vm.classes.get(&class_lower_for_count).cloned();
             let prop_count = obj_borrow.properties.iter()
                 .filter(|(name, val)| {
                     if is_internal_property(name) { return false; }
-                    // Only count initialized (non-Undef) properties
-                    !matches!(val, Value::Undef)
+                    if matches!(val, Value::Undef) {
+                        // Only count uninitialized typed properties
+                        class_for_count.as_ref()
+                            .and_then(|c| c.properties.iter().find(|p| p.name == *name))
+                            .map(|p| p.property_type.is_some())
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    }
                 })
                 .count();
-            let class_lower_for_count: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let class_for_count = vm.classes.get(&class_lower_for_count).cloned();
             vm.write_output(
                 format!(
                     "{}object({})#{} ({}) {{\n",
@@ -1086,10 +1023,9 @@ fn format_php_float_serialize(f: f64) -> String {
     // PHP serialize_precision=-1: shortest exact representation
     // Use scientific notation for very large/small numbers
     let abs = f.abs();
-
-    // First, find the shortest scientific notation representation
-    let sci_repr = if abs != 0.0 {
-        let mut best_sci: Option<String> = None;
+    if abs != 0.0 && !(1e-4..1e15).contains(&abs) {
+        // Use scientific notation like PHP
+        // Find shortest scientific representation that roundtrips
         for prec in 0..20 {
             let s = format!("{:.prec$e}", f, prec = prec);
             if let Ok(parsed) = s.parse::<f64>() {
@@ -1110,44 +1046,21 @@ fn format_php_float_serialize(f: f64) -> String {
                         } else {
                             format!("E{}", exp)
                         };
-                        best_sci = Some(format!("{}{}", mantissa, exp_str));
+                        return format!("{}{}", mantissa, exp_str);
                     }
-                    break;
                 }
             }
         }
-        best_sci
-    } else {
-        None
-    };
+    }
 
-    // Find the shortest plain representation
-    let mut plain_repr = ryu_format(f);
+    // PHP serialize_precision=-1: shortest roundtrip representation
+    // Use ryu-style formatting for exact roundtrip
+    let mut buf = ryu_format(f);
     // Ensure no trailing dot
-    if plain_repr.ends_with('.') {
-        plain_repr.push('0');
+    if buf.ends_with('.') {
+        buf.push('0');
     }
-
-    // Choose the shorter representation, like PHP serialize_precision=-1
-    // PHP generally uses scientific notation for very small/large numbers
-    // but prefers plain when it's shorter or comparable
-    if let Some(ref sci) = sci_repr {
-        if abs != 0.0 && !(1e-4..1e16).contains(&abs) {
-            // For very large/small numbers, prefer scientific notation
-            // unless plain is shorter
-            if plain_repr.len() <= sci.len() {
-                // Check that the plain form actually roundtrips
-                if let Ok(parsed) = plain_repr.parse::<f64>() {
-                    if parsed == f {
-                        return plain_repr;
-                    }
-                }
-            }
-            return sci.clone();
-        }
-    }
-
-    plain_repr
+    buf
 }
 
 /// Format float with shortest roundtrip representation (like PHP serialize_precision=-1)

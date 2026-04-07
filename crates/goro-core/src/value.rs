@@ -468,24 +468,7 @@ impl Value {
                     }
                 }
             }
-            _ => {
-                let base = self.to_double();
-                let exp = other.to_double();
-                let result = base.powf(exp);
-                // Fix sign for negative base with odd integer exponent
-                // powf can lose the sign for very large exponents due to IEEE 754
-                if base < 0.0 && result > 0.0 && exp == exp.trunc() {
-                    // Check if exponent is odd (only for integer exponents)
-                    let exp_i64 = exp as i64;
-                    if exp_i64 % 2 != 0 {
-                        Value::Double(-result)
-                    } else {
-                        Value::Double(result)
-                    }
-                } else {
-                    Value::Double(result)
-                }
-            },
+            _ => Value::Double(self.to_double().powf(other.to_double())),
         }
     }
 

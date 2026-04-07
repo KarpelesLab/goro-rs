@@ -235,9 +235,6 @@ pub struct Vm {
     pending_return: Option<Value>,
     /// Pending jump target (for deferred break/continue in finally blocks)
     pending_finally_jump: Option<u32>,
-    /// Stack of saved exceptions at finally-block entry.
-    /// Pushed by SaveException, popped by ReturnDeferred.
-    saved_exception_stack: Vec<Option<Value>>,
     /// User error handler callback (from set_error_handler)
     pub error_handler: Option<Value>,
     /// User exception handler callback (from set_exception_handler)
@@ -349,7 +346,6 @@ impl Vm {
             error_reporting_stack: Vec::new(),
             pending_return: None,
             pending_finally_jump: None,
-            saved_exception_stack: Vec::new(),
             error_handler: None,
             exception_handler: None,
             exception_handler_stack: Vec::new(),
@@ -3023,19 +3019,6 @@ impl Vm {
     pub fn register_builtin_param_types(&mut self, name: &[u8], types: Vec<Option<ParamType>>) {
         let lower = name.to_ascii_lowercase();
         self.builtin_param_types.insert(lower, types);
-    }
-
-    /// Get parameter info for a built-in function (for closure var_dump display).
-    /// Returns Vec<(name_with_dollar, is_required)>.
-    pub fn get_function_params(&self, func_name_lower: &[u8]) -> Option<Vec<(String, bool)>> {
-        self.builtin_param_names.get(func_name_lower).map(|names| {
-            names.iter().enumerate().map(|(_i, name)| {
-                let param_name = format!("${}", String::from_utf8_lossy(name));
-                // For builtins, we don't have required_param_count info readily available,
-                // so mark all as required for now
-                (param_name, true)
-            }).collect()
-        })
     }
 
     // ---- Accessors for reflection module ----
@@ -17874,18 +17857,7 @@ impl Vm {
                         Value::Object(obj) => {
                             Value::String(PhpString::from_vec(obj.borrow().class_name.clone()))
                         }
-                        Value::Null | Value::Undef => {
-                            // Cannot use "::class" on null
-                            let msg = "Cannot use \"::class\" on null".to_string();
-                            self.throw_type_error(msg.clone());
-                            return Err(VmError { message: msg, line: op.line });
-                        }
-                        _ => {
-                            let type_name = Self::value_type_name(&val);
-                            let msg = format!("Cannot use \"::class\" on value of type {}", type_name);
-                            self.throw_type_error(msg.clone());
-                            return Err(VmError { message: msg, line: op.line });
-                        }
+                        _ => Value::String(PhpString::empty()),
                     };
                     self.write_operand(&op.result, class_name, &mut cvs, &mut tmps, &static_cv_keys);
                 }
@@ -18230,32 +18202,6 @@ impl Vm {
                     }
                 }
 
-                OpCode::SaveException => {
-                    // At the start of a finally block, save the pending exception.
-                    // This protects the original exception from being consumed by
-                    // inner try/catch blocks within the finally body.
-                    self.saved_exception_stack.push(self.current_exception.take());
-
-                    // Pop any exception handler whose finally_target matches this position.
-                    // When entering a finally block via SaveJump+Jmp or SaveReturn+Jmp,
-                    // the TryEnd was skipped, so the handler is still on the stack.
-                    // We must pop it now to prevent throws within the finally body
-                    // from re-entering this same finally block.
-                    let this_pos = (ip - 1) as u32; // ip was already incremented
-                    eprintln!("DEBUG SaveException: this_pos={}, handlers={:?}", this_pos,
-                        exception_handlers.iter().map(|(c,f,_,_,_)| (*c, *f)).collect::<Vec<_>>());
-                    while let Some(&(_catch, finally_target, _, _, _)) = exception_handlers.last() {
-                        if finally_target == this_pos {
-                            exception_handlers.pop();
-                            eprintln!("DEBUG SaveException: popped matching handler");
-                            break;
-                        }
-                        break;
-                    }
-                    eprintln!("DEBUG SaveException: after pop, handlers={:?}",
-                        exception_handlers.iter().map(|(c,f,_,_,_)| (*c, *f)).collect::<Vec<_>>());
-                }
-
                 OpCode::SaveReturn => {
                     // Save return value for deferred return (finally blocks)
                     // Use raw read for CVs to preserve Reference wrapper (for by-ref returns)
@@ -18292,30 +18238,6 @@ impl Vm {
                     } else {
                         0
                     };
-
-                    // Restore the saved exception from SaveException at the start of this finally block.
-                    // If the finally block completed normally (current_exception is None and no new
-                    // exception was thrown/caught within the finally), restore the original exception
-                    // so it can be re-thrown.
-                    // If the finally block threw a NEW uncaught exception (current_exception is Some),
-                    // the new exception replaces the saved one (with the saved one chained as `previous`).
-                    let saved_exc = self.saved_exception_stack.pop().flatten();
-                    if let Some(saved) = saved_exc {
-                        if let Some(new_exc) = &self.current_exception {
-                            // Finally threw an uncaught exception - chain the saved one as previous
-                            if let Value::Object(new_obj) = new_exc {
-                                let mut new_borrow = new_obj.borrow_mut();
-                                let current_prev = new_borrow.get_property(b"previous");
-                                if matches!(current_prev, Value::Null) {
-                                    new_borrow.set_property(b"previous".to_vec(), saved);
-                                }
-                            }
-                        } else {
-                            // Finally completed normally - restore the original exception for re-throw
-                            self.current_exception = Some(saved);
-                        }
-                    }
-
                     // If there's a pending return, chain through outer finally blocks if any
                     if let Some(val) = self.pending_return.take() {
                         // Pop exception handlers that correspond to this finally block.
@@ -18353,42 +18275,8 @@ impl Vm {
                         // No outer finally - return the value now
                         return Ok(val);
                     }
-                    // If there's a pending jump (deferred break/continue), chain through outer finally blocks
+                    // If there's a pending jump (deferred break/continue), execute it now
                     if let Some(target) = self.pending_finally_jump.take() {
-                        // Pop the handler for the current finally's try block if it's still on the stack.
-                        // (SaveException may have already popped it.)
-                        if this_finally_start > 0 {
-                            if let Some(&(_catch_target, finally_target, _, _, _)) = exception_handlers.last() {
-                                if finally_target == this_finally_start {
-                                    exception_handlers.pop();
-                                }
-                            }
-                        }
-                        // Check for outer finally blocks that need to execute first.
-                        // If the jump target is outside the outer try-finally scope (i.e.,
-                        // the break/continue will leave the outer scope), chain through
-                        // the outer finally block first.
-                        let mut outer_finally: Option<u32> = None;
-                        while let Some(&(_catch_target, finally_target, _, _, _)) = exception_handlers.last() {
-                            if finally_target > 0 && finally_target != this_finally_start {
-                                // Chain through this outer finally block
-                                outer_finally = Some(finally_target);
-                                exception_handlers.pop();
-                                break;
-                            } else if finally_target == 0 {
-                                // Catch-only handler - pop and continue looking
-                                exception_handlers.pop();
-                            } else {
-                                break;
-                            }
-                        }
-                        if let Some(finally_ip) = outer_finally {
-                            // Chain through outer finally with the pending jump preserved
-                            self.pending_finally_jump = Some(target);
-                            ip = finally_ip as usize;
-                            continue;
-                        }
-                        // No outer finally - execute the jump now
                         ip = target as usize;
                         continue;
                     }

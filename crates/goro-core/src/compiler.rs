@@ -2154,15 +2154,6 @@ impl Compiler {
                     // so that returns inside finally don't loop back to finally
                     self.finally_targets.pop();
 
-                    // Save the pending exception (if any) so inner try/catch won't lose it
-                    self.op_array.emit(Op {
-                        opcode: OpCode::SaveException,
-                        op1: OperandType::Unused,
-                        op2: OperandType::Unused,
-                        result: OperandType::Unused,
-                        line: stmt.span.line,
-                    });
-
                     for s in finally_stmts {
                         self.compile_stmt(s)?;
                     }
