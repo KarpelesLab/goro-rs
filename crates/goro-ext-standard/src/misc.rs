@@ -520,6 +520,15 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"get_html_translation_table", get_html_translation_table_fn);
     vm.register_function(b"nl_langinfo", nl_langinfo_fn);
     vm.register_function(b"localeconv", localeconv_fn);
+    vm.register_function(b"time_nanosleep", time_nanosleep_fn);
+    vm.register_function(b"time_sleep_until", time_sleep_until_fn);
+    vm.register_function(b"socket_get_status", stream_get_meta_data_fn); // alias
+    vm.register_function(b"set_file_buffer", set_file_buffer_fn);
+    vm.register_function(b"stream_resolve_include_path", stream_resolve_include_path_fn);
+    vm.register_function(b"stream_supports_lock", stream_supports_lock_fn);
+    vm.register_function(b"stream_bucket_new", stream_bucket_new_fn);
+    vm.register_function(b"iptcparse", iptcparse_fn);
+    vm.register_function(b"iptcembed", iptcembed_fn);
 
     // Regex functions are now in the regex module (regex.rs)
 }
@@ -12004,4 +12013,65 @@ fn localeconv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mon_grouping = PhpArray::new();
     result.set(ArrayKey::String(PhpString::from_bytes(b"mon_grouping")), Value::Array(Rc::new(RefCell::new(mon_grouping))));
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn time_nanosleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let seconds = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let nanoseconds = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let duration = std::time::Duration::new(seconds as u64, nanoseconds as u32);
+    std::thread::sleep(duration);
+    Ok(Value::True)
+}
+
+fn time_sleep_until_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let timestamp = args.first().map(|v| v.to_double()).unwrap_or(0.0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    if timestamp > now {
+        let sleep_time = timestamp - now;
+        std::thread::sleep(std::time::Duration::from_secs_f64(sleep_time));
+    }
+    Ok(Value::True)
+}
+
+fn set_file_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0)) // success
+}
+
+fn stream_resolve_include_path_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    let path = std::path::Path::new(&*filename);
+    if path.exists() {
+        match path.canonicalize() {
+            Ok(p) => Ok(Value::String(PhpString::from_string(p.to_string_lossy().into_owned()))),
+            Err(_) => Ok(Value::False),
+        }
+    } else {
+        Ok(Value::False)
+    }
+}
+
+fn stream_supports_lock_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True) // Most streams support locking
+}
+
+fn stream_bucket_new_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Return a simple object representing a stream bucket
+    let _stream = args.first().unwrap_or(&Value::Null);
+    let data = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+    let id = _vm.next_object_id();
+    let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), id);
+    obj.set_property(b"data".to_vec(), Value::String(data));
+    obj.set_property(b"datalen".to_vec(), Value::Long(0));
+    Ok(Value::Object(Rc::new(RefCell::new(obj))))
+}
+
+fn iptcparse_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn iptcembed_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
 }

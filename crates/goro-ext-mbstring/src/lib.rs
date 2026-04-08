@@ -137,6 +137,7 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"MB_CASE_UPPER_SIMPLE".to_vec(), Value::Long(3));
     vm.constants.insert(b"MB_CASE_LOWER_SIMPLE".to_vec(), Value::Long(4));
     vm.constants.insert(b"MB_CASE_FOLD_SIMPLE".to_vec(), Value::Long(5));
+    vm.constants.insert(b"MB_CASE_TITLE_SIMPLE".to_vec(), Value::Long(6));
 }
 
 // ========== Encoding conversion helpers ==========

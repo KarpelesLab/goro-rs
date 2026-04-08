@@ -789,6 +789,46 @@ pub fn register(vm: &mut Vm) {
         b"XML_SAX_IMPL".to_vec(),
         Value::String(PhpString::from_bytes(b"goro")),
     );
+
+    // LIBXML constants
+    vm.constants.insert(b"LIBXML_VERSION".to_vec(), Value::Long(20913));
+    vm.constants.insert(b"LIBXML_DOTTED_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"2.9.13")));
+    vm.constants.insert(b"LIBXML_LOADED_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"20913")));
+    vm.constants.insert(b"LIBXML_NOENT".to_vec(), Value::Long(2));
+    vm.constants.insert(b"LIBXML_DTDLOAD".to_vec(), Value::Long(4));
+    vm.constants.insert(b"LIBXML_DTDATTR".to_vec(), Value::Long(8));
+    vm.constants.insert(b"LIBXML_DTDVALID".to_vec(), Value::Long(16));
+    vm.constants.insert(b"LIBXML_NOERROR".to_vec(), Value::Long(32));
+    vm.constants.insert(b"LIBXML_NOWARNING".to_vec(), Value::Long(64));
+    vm.constants.insert(b"LIBXML_NOBLANKS".to_vec(), Value::Long(256));
+    vm.constants.insert(b"LIBXML_XINCLUDE".to_vec(), Value::Long(1024));
+    vm.constants.insert(b"LIBXML_NSCLEAN".to_vec(), Value::Long(8192));
+    vm.constants.insert(b"LIBXML_NOCDATA".to_vec(), Value::Long(16384));
+    vm.constants.insert(b"LIBXML_NONET".to_vec(), Value::Long(2048));
+    vm.constants.insert(b"LIBXML_PEDANTIC".to_vec(), Value::Long(128));
+    vm.constants.insert(b"LIBXML_COMPACT".to_vec(), Value::Long(65536));
+    vm.constants.insert(b"LIBXML_NOXMLDECL".to_vec(), Value::Long(2));
+    vm.constants.insert(b"LIBXML_PARSEHUGE".to_vec(), Value::Long(524288));
+    vm.constants.insert(b"LIBXML_BIGLINES".to_vec(), Value::Long(4194304));
+    vm.constants.insert(b"LIBXML_NOEMPTYTAG".to_vec(), Value::Long(4));
+    vm.constants.insert(b"LIBXML_SCHEMA_CREATE".to_vec(), Value::Long(1));
+    vm.constants.insert(b"LIBXML_HTML_NOIMPLIED".to_vec(), Value::Long(8192));
+    vm.constants.insert(b"LIBXML_HTML_NODEFDTD".to_vec(), Value::Long(4));
+    vm.constants.insert(b"LIBXML_ERR_NONE".to_vec(), Value::Long(0));
+    vm.constants.insert(b"LIBXML_ERR_WARNING".to_vec(), Value::Long(1));
+    vm.constants.insert(b"LIBXML_ERR_ERROR".to_vec(), Value::Long(2));
+    vm.constants.insert(b"LIBXML_ERR_FATAL".to_vec(), Value::Long(3));
+    vm.constants.insert(b"LIBXML_RECOVER".to_vec(), Value::Long(1));
+
+    // libxml functions
+    vm.register_function(b"libxml_use_internal_errors", libxml_use_internal_errors_fn);
+    vm.register_function(b"libxml_get_errors", libxml_get_errors_fn);
+    vm.register_function(b"libxml_clear_errors", libxml_clear_errors_fn);
+    vm.register_function(b"libxml_get_last_error", libxml_get_last_error_fn);
+    vm.register_function(b"libxml_set_streams_context", libxml_set_streams_context_fn);
+    vm.register_function(b"libxml_disable_entity_loader", libxml_disable_entity_loader_fn);
+    vm.register_function(b"libxml_set_external_entity_loader", libxml_set_external_entity_loader_fn);
+    vm.register_extension(b"libxml");
 }
 
 // ── Built-in function implementations ───────────────────────────────────────
@@ -1074,6 +1114,7 @@ fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn xml_parser_free(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    _vm.emit_deprecated("Function xml_parser_free() is deprecated since 8.5, as it has no effect since PHP 8.0");
     let parser_id = args.first().unwrap_or(&Value::Null).to_long();
     let removed = XML_PARSERS.with(|p| p.borrow_mut().remove(&parser_id).is_some());
     Ok(if removed { Value::True } else { Value::False })
@@ -1712,5 +1753,47 @@ fn simplexml_load_file(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// Stub handler for XML set handler functions that are not fully implemented
 fn xml_set_stub_handler(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+// ── libxml function stubs ───────────────────────────────────────────────────
+
+thread_local! {
+    static LIBXML_USE_INTERNAL_ERRORS: Cell<bool> = const { Cell::new(false) };
+}
+
+fn libxml_use_internal_errors_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let previous = LIBXML_USE_INTERNAL_ERRORS.with(|c| c.get());
+    if let Some(val) = args.first() {
+        if !matches!(val, Value::Null | Value::Undef) {
+            LIBXML_USE_INTERNAL_ERRORS.with(|c| c.set(val.is_truthy()));
+        }
+    }
+    Ok(if previous { Value::True } else { Value::False })
+}
+
+fn libxml_get_errors_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Return empty array since we don't track libxml errors
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+
+fn libxml_clear_errors_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
+}
+
+fn libxml_get_last_error_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn libxml_set_streams_context_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
+}
+
+fn libxml_disable_entity_loader_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_deprecated("libxml_disable_entity_loader() is deprecated");
+    Ok(Value::True)
+}
+
+fn libxml_set_external_entity_loader_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }

@@ -2,6 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 /// Represents a PHP curl handle with all its options and response data.
+#[derive(Clone)]
 pub struct CurlHandle {
     // URL and request
     pub url: String,

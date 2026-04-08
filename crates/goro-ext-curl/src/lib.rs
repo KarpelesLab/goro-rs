@@ -68,6 +68,16 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"curl_multi_setopt", curl_multi_setopt);
     vm.register_function(b"curl_multi_info_read", curl_multi_info_read);
     vm.register_function(b"curl_multi_select", curl_multi_select);
+    vm.register_function(b"curl_copy_handle", curl_copy_handle);
+    vm.register_function(b"curl_file_create", curl_file_create);
+    vm.register_function(b"curl_share_init", curl_share_init);
+    vm.register_function(b"curl_share_setopt", curl_share_setopt);
+    vm.register_function(b"curl_share_close", curl_share_close);
+    vm.register_function(b"curl_share_strerror", curl_share_strerror);
+    vm.register_function(b"curl_share_errno", curl_share_errno);
+    vm.register_function(b"curl_strerror", curl_strerror);
+    vm.register_function(b"curl_pause", curl_pause);
+    vm.register_function(b"curl_upkeep", curl_upkeep);
 
     // Register CURLOPT constants
     vm.constants.insert(b"CURLOPT_URL".to_vec(), Value::Long(10002));
@@ -138,6 +148,92 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"CURLMSG_DONE".to_vec(), Value::Long(1));
     vm.constants.insert(b"CURLMOPT_MAXCONNECTS".to_vec(), Value::Long(6));
     vm.constants.insert(b"CURLMOPT_PIPELINING".to_vec(), Value::Long(3));
+
+    // Additional CURLOPT constants
+    vm.constants.insert(b"CURLOPT_FILE".to_vec(), Value::Long(10001));
+    vm.constants.insert(b"CURLOPT_STDERR".to_vec(), Value::Long(10037));
+    vm.constants.insert(b"CURLOPT_SAFE_UPLOAD".to_vec(), Value::Long(148));
+    vm.constants.insert(b"CURLOPT_NOPROGRESS".to_vec(), Value::Long(43));
+    vm.constants.insert(b"CURLOPT_UPLOAD".to_vec(), Value::Long(46));
+    vm.constants.insert(b"CURLOPT_PRIVATE".to_vec(), Value::Long(10103));
+    vm.constants.insert(b"CURLOPT_PROGRESSFUNCTION".to_vec(), Value::Long(20056));
+    vm.constants.insert(b"CURLOPT_PROTOCOLS_STR".to_vec(), Value::Long(10318));
+    vm.constants.insert(b"CURLOPT_SSH_HOSTKEYFUNCTION".to_vec(), Value::Long(20316));
+    vm.constants.insert(b"CURLINFO_HEADER_OUT".to_vec(), Value::Long(2));
+    vm.constants.insert(b"CURL_LOCK_DATA_DNS".to_vec(), Value::Long(3));
+    vm.constants.insert(b"CURLOPT_INFILE".to_vec(), Value::Long(10009));
+    vm.constants.insert(b"CURLOPT_REFERER".to_vec(), Value::Long(10016));
+    vm.constants.insert(b"CURLOPT_PROXY".to_vec(), Value::Long(10004));
+    vm.constants.insert(b"CURLOPT_PROXYTYPE".to_vec(), Value::Long(101));
+    vm.constants.insert(b"CURLOPT_SSLCERT".to_vec(), Value::Long(10025));
+    vm.constants.insert(b"CURLOPT_SSLKEY".to_vec(), Value::Long(10087));
+    vm.constants.insert(b"CURLOPT_CAINFO".to_vec(), Value::Long(10065));
+    vm.constants.insert(b"CURLOPT_CAPATH".to_vec(), Value::Long(10097));
+    vm.constants.insert(b"CURLOPT_RANGE".to_vec(), Value::Long(10007));
+    vm.constants.insert(b"CURLOPT_RESUME_FROM".to_vec(), Value::Long(21));
+    vm.constants.insert(b"CURLOPT_BUFFERSIZE".to_vec(), Value::Long(98));
+    vm.constants.insert(b"CURLOPT_LOW_SPEED_LIMIT".to_vec(), Value::Long(19));
+    vm.constants.insert(b"CURLOPT_LOW_SPEED_TIME".to_vec(), Value::Long(20));
+    vm.constants.insert(b"CURLOPT_TIMEOUT_MS".to_vec(), Value::Long(155));
+    vm.constants.insert(b"CURLOPT_CONNECTTIMEOUT_MS".to_vec(), Value::Long(156));
+    vm.constants.insert(b"CURLOPT_PORT".to_vec(), Value::Long(3));
+    vm.constants.insert(b"CURLOPT_COOKIEJAR".to_vec(), Value::Long(10082));
+    vm.constants.insert(b"CURLOPT_COOKIESESSION".to_vec(), Value::Long(96));
+    vm.constants.insert(b"CURLOPT_SSLVERSION".to_vec(), Value::Long(32));
+    vm.constants.insert(b"CURLOPT_INTERFACE".to_vec(), Value::Long(10062));
+    vm.constants.insert(b"CURLOPT_XOAUTH2_BEARER".to_vec(), Value::Long(10220));
+    vm.constants.insert(b"CURLOPT_ACCEPT_ENCODING".to_vec(), Value::Long(10102));
+    vm.constants.insert(b"CURLOPT_TRANSFER_ENCODING".to_vec(), Value::Long(207));
+    vm.constants.insert(b"CURLOPT_MAXFILESIZE".to_vec(), Value::Long(114));
+    vm.constants.insert(b"CURLOPT_RESOLVE".to_vec(), Value::Long(10203));
+    vm.constants.insert(b"CURLOPT_DNS_SERVERS".to_vec(), Value::Long(10211));
+
+    // Additional CURLINFO constants
+    vm.constants.insert(b"CURLINFO_SIZE_DOWNLOAD".to_vec(), Value::Long(3145736));
+    vm.constants.insert(b"CURLINFO_SIZE_UPLOAD".to_vec(), Value::Long(3145735));
+    vm.constants.insert(b"CURLINFO_SPEED_DOWNLOAD".to_vec(), Value::Long(3145737));
+    vm.constants.insert(b"CURLINFO_SPEED_UPLOAD".to_vec(), Value::Long(3145738));
+    vm.constants.insert(b"CURLINFO_FILETIME".to_vec(), Value::Long(2097166));
+    vm.constants.insert(b"CURLINFO_CONTENT_LENGTH_DOWNLOAD".to_vec(), Value::Long(3145743));
+    vm.constants.insert(b"CURLINFO_CONTENT_LENGTH_UPLOAD".to_vec(), Value::Long(3145744));
+    vm.constants.insert(b"CURLINFO_REDIRECT_URL".to_vec(), Value::Long(1048607));
+    vm.constants.insert(b"CURLINFO_PRIMARY_IP".to_vec(), Value::Long(1048608));
+    vm.constants.insert(b"CURLINFO_LOCAL_IP".to_vec(), Value::Long(1048617));
+    vm.constants.insert(b"CURLINFO_LOCAL_PORT".to_vec(), Value::Long(2097194));
+    vm.constants.insert(b"CURLINFO_PRIMARY_PORT".to_vec(), Value::Long(2097192));
+
+    // CURL share constants
+    vm.constants.insert(b"CURL_LOCK_DATA_COOKIE".to_vec(), Value::Long(2));
+    vm.constants.insert(b"CURL_LOCK_DATA_SSL_SESSION".to_vec(), Value::Long(4));
+    vm.constants.insert(b"CURL_LOCK_DATA_CONNECT".to_vec(), Value::Long(5));
+
+    // CURLcode constants
+    vm.constants.insert(b"CURLE_ABORTED_BY_CALLBACK".to_vec(), Value::Long(42));
+    vm.constants.insert(b"CURLE_GOT_NOTHING".to_vec(), Value::Long(52));
+    vm.constants.insert(b"CURLE_RECV_ERROR".to_vec(), Value::Long(56));
+    vm.constants.insert(b"CURLE_SEND_ERROR".to_vec(), Value::Long(55));
+
+    // CURLPROXY constants
+    vm.constants.insert(b"CURLPROXY_HTTP".to_vec(), Value::Long(0));
+    vm.constants.insert(b"CURLPROXY_SOCKS4".to_vec(), Value::Long(4));
+    vm.constants.insert(b"CURLPROXY_SOCKS5".to_vec(), Value::Long(5));
+
+    // CURL version constants
+    vm.constants.insert(b"CURL_VERSION_SSL".to_vec(), Value::Long(4));
+    vm.constants.insert(b"CURL_VERSION_IPV6".to_vec(), Value::Long(1));
+    vm.constants.insert(b"CURL_VERSION_LIBZ".to_vec(), Value::Long(8));
+
+    // CURL sslversion constants
+    vm.constants.insert(b"CURL_SSLVERSION_TLSv1".to_vec(), Value::Long(1));
+    vm.constants.insert(b"CURL_SSLVERSION_TLSv1_0".to_vec(), Value::Long(4));
+    vm.constants.insert(b"CURL_SSLVERSION_TLSv1_1".to_vec(), Value::Long(5));
+    vm.constants.insert(b"CURL_SSLVERSION_TLSv1_2".to_vec(), Value::Long(6));
+    vm.constants.insert(b"CURL_SSLVERSION_TLSv1_3".to_vec(), Value::Long(7));
+
+    // HTTP version constants
+    vm.constants.insert(b"CURL_HTTP_VERSION_2_0".to_vec(), Value::Long(3));
+    vm.constants.insert(b"CURL_HTTP_VERSION_2TLS".to_vec(), Value::Long(4));
+    vm.constants.insert(b"CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE".to_vec(), Value::Long(5));
 }
 
 /// curl_init(?string $url = null): CurlHandle|false
@@ -1077,4 +1173,114 @@ fn base64_encode(input: &str) -> String {
     }
 
     result
+}
+
+// ── Additional curl functions ───────────────────────────────────────────────
+
+/// curl_copy_handle: Create a copy of a cURL handle
+fn curl_copy_handle(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let handle_id = args.first().unwrap_or(&Value::Null).to_long();
+    let new_handle = CURL_HANDLES.with(|handles| {
+        let handles = handles.borrow();
+        handles.get(&handle_id).cloned()
+    });
+
+    match new_handle {
+        Some(new_h) => {
+            let new_id = NEXT_CURL_ID.with(|cell| {
+                let id = cell.get();
+                cell.set(id + 1);
+                id
+            });
+            let id = vm.next_object_id();
+            let mut obj = goro_core::object::PhpObject::new(b"CurlHandle".to_vec(), id);
+            obj.set_property(b"__curl_id".to_vec(), Value::Long(new_id));
+            CURL_HANDLES.with(|handles| {
+                handles.borrow_mut().insert(new_id, new_h);
+            });
+            Ok(Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj))))
+        }
+        None => Ok(Value::False),
+    }
+}
+
+/// curl_share_init: Create a curl share handle
+fn curl_share_init(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let id = vm.next_object_id();
+    let mut obj = goro_core::object::PhpObject::new(b"CurlShareHandle".to_vec(), id);
+    obj.set_property(b"__share_id".to_vec(), Value::Long(id as i64));
+    Ok(Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj))))
+}
+
+/// curl_share_setopt: Set an option for a curl share handle
+fn curl_share_setopt(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+/// curl_share_close: Close a curl share handle
+fn curl_share_close(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
+}
+
+/// curl_share_strerror: Return string describing curl share error code
+fn curl_share_strerror(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let code = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let msg = match code {
+        0 => "No error",
+        1 => "Unknown share option",
+        2 => "Share currently in use",
+        3 => "Out of memory",
+        4 => "Feature not available in this library",
+        _ => "Unknown error",
+    };
+    Ok(Value::String(goro_core::string::PhpString::from_bytes(msg.as_bytes())))
+}
+
+/// curl_share_errno: Return the last share curl error number
+fn curl_share_errno(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
+}
+
+/// curl_strerror: Return string describing error code
+fn curl_strerror(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let code = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let msg = match code {
+        0 => "No error",
+        1 => "Unsupported protocol",
+        3 => "URL using bad/illegal format or missing URL",
+        6 => "Couldn't resolve host name",
+        7 => "Couldn't connect to server",
+        28 => "Connection timed out",
+        35 => "SSL connect error",
+        42 => "Callback aborted",
+        52 => "Server returned nothing (no headers, no data)",
+        55 => "Failed sending data to the peer",
+        56 => "Failure when receiving data from the peer",
+        _ => "Unknown error",
+    };
+    Ok(Value::String(goro_core::string::PhpString::from_bytes(msg.as_bytes())))
+}
+
+/// curl_pause: Pause and unpause a connection
+fn curl_pause(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0)) // CURLE_OK
+}
+
+/// curl_upkeep: Perform any connection upkeep
+fn curl_upkeep(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+/// curl_file_create: Create a CURLFile object
+fn curl_file_create(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().map(|v| v.to_php_string()).unwrap_or_else(|| goro_core::string::PhpString::from_bytes(b""));
+    let mime_type = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| goro_core::string::PhpString::from_bytes(b"application/octet-stream"));
+    let posted_filename = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(|| goro_core::string::PhpString::from_bytes(b""));
+
+    let id = vm.next_object_id();
+    let mut obj = goro_core::object::PhpObject::new(b"CURLFile".to_vec(), id);
+    obj.set_property(b"name".to_vec(), Value::String(filename));
+    obj.set_property(b"mime".to_vec(), Value::String(mime_type));
+    obj.set_property(b"postname".to_vec(), Value::String(posted_filename));
+    Ok(Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj))))
 }

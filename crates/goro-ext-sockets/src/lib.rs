@@ -125,6 +125,31 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"SHUT_RD".to_vec(), Value::Long(0));
     vm.constants.insert(b"SHUT_WR".to_vec(), Value::Long(1));
     vm.constants.insert(b"SHUT_RDWR".to_vec(), Value::Long(2));
+
+    // Missing socket constants
+    vm.constants.insert(b"IPPROTO_IP".to_vec(), Value::Long(0));
+    vm.constants.insert(b"IPPROTO_IPV6".to_vec(), Value::Long(41));
+    vm.constants.insert(b"MSG_OOB".to_vec(), Value::Long(1));
+    vm.constants.insert(b"MSG_WAITALL".to_vec(), Value::Long(256));
+    vm.constants.insert(b"MSG_EOF".to_vec(), Value::Long(512));
+    vm.constants.insert(b"MSG_DONTROUTE".to_vec(), Value::Long(4));
+    vm.constants.insert(b"SO_TYPE".to_vec(), Value::Long(3));
+    vm.constants.insert(b"SO_LINGER".to_vec(), Value::Long(13));
+    vm.constants.insert(b"SO_ERROR".to_vec(), Value::Long(4));
+    vm.constants.insert(b"SO_REUSEPORT".to_vec(), Value::Long(15));
+    vm.constants.insert(b"SO_OOBINLINE".to_vec(), Value::Long(10));
+    vm.constants.insert(b"IP_MULTICAST_LOOP".to_vec(), Value::Long(34));
+    vm.constants.insert(b"IP_MULTICAST_TTL".to_vec(), Value::Long(33));
+    vm.constants.insert(b"IP_TOS".to_vec(), Value::Long(1));
+    vm.constants.insert(b"IP_TTL".to_vec(), Value::Long(2));
+    vm.constants.insert(b"IPV6_MULTICAST_LOOP".to_vec(), Value::Long(19));
+    vm.constants.insert(b"IPV6_MULTICAST_HOPS".to_vec(), Value::Long(18));
+    vm.constants.insert(b"IPV6_V6ONLY".to_vec(), Value::Long(26));
+    vm.constants.insert(b"STREAM_IPPROTO_IP".to_vec(), Value::Long(0));
+    vm.constants.insert(b"STREAM_IPPROTO_TCP".to_vec(), Value::Long(6));
+    vm.constants.insert(b"STREAM_IPPROTO_UDP".to_vec(), Value::Long(17));
+    vm.constants.insert(b"STREAM_IPPROTO_ICMP".to_vec(), Value::Long(1));
+    vm.constants.insert(b"STREAM_IPPROTO_RAW".to_vec(), Value::Long(255));
 }
 
 /// socket_create(int $domain, int $type, int $protocol): Socket|false

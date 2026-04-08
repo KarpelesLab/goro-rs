@@ -302,5 +302,69 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"basename", b"path", b"suffix");
     params!(b"pathinfo", b"path", b"flags");
 
+    // Time functions
+    params!(b"time_nanosleep", b"seconds", b"nanoseconds");
+    params!(b"time_sleep_until", b"timestamp");
+    params!(b"sleep", b"seconds");
+    params!(b"usleep", b"microseconds");
+    params!(b"uniqid", b"prefix", b"more_entropy");
+
+    // Stream functions
+    params!(b"stream_resolve_include_path", b"filename");
+    params!(b"stream_supports_lock", b"stream");
+    params!(b"stream_get_meta_data", b"stream");
+    params!(b"stream_set_blocking", b"stream", b"enable");
+    params!(b"stream_set_timeout", b"stream", b"seconds", b"microseconds");
+    params!(b"stream_context_create", b"options", b"params");
+    params!(b"stream_copy_to_stream", b"from", b"to", b"length", b"offset");
+    params!(b"stream_get_contents", b"stream", b"length", b"offset");
+
+    // Misc
+    params!(b"sys_get_temp_dir");
+    params!(b"tempnam", b"directory", b"prefix");
+    params!(b"getenv", b"name", b"local_only");
+    params!(b"putenv", b"assignment");
+    params!(b"set_time_limit", b"seconds");
+    params!(b"ini_set", b"option", b"value");
+    params!(b"ini_get", b"option");
+    params!(b"ini_restore", b"option");
+    params!(b"register_shutdown_function", b"callback", b"args");
+    params!(b"memory_get_usage", b"real_usage");
+    params!(b"memory_get_peak_usage", b"real_usage");
+    params!(b"get_object_vars", b"object");
+    params!(b"get_class_methods", b"object_or_class");
+    params!(b"get_class_vars", b"class");
+    params!(b"class_alias", b"class", b"alias", b"autoload");
+    params!(b"serialize", b"value");
+    params!(b"unserialize", b"data", b"options");
+    params!(b"error_reporting", b"error_level");
+    params!(b"error_log", b"message", b"message_type", b"destination", b"additional_headers");
+
+    // File functions (additional)
+    params!(b"fopen", b"filename", b"mode", b"use_include_path", b"context");
+    params!(b"fclose", b"stream");
+    params!(b"fread", b"stream", b"length");
+    params!(b"fwrite", b"stream", b"data", b"length");
+    params!(b"fgets", b"stream", b"length");
+    params!(b"feof", b"stream");
+    params!(b"fseek", b"stream", b"offset", b"whence");
+    params!(b"ftell", b"stream");
+    params!(b"fflush", b"stream");
+    params!(b"ftruncate", b"stream", b"size");
+    params!(b"flock", b"stream", b"operation", b"would_block");
+    params!(b"unlink", b"filename", b"context");
+    params!(b"rename", b"from", b"to", b"context");
+    params!(b"copy", b"from", b"to", b"context");
+    params!(b"mkdir", b"directory", b"permissions", b"recursive", b"context");
+    params!(b"rmdir", b"directory", b"context");
+    params!(b"glob", b"pattern", b"flags");
+    params!(b"scandir", b"directory", b"sorting_order", b"context");
+    params!(b"is_file", b"filename");
+    params!(b"is_dir", b"filename");
+    params!(b"filesize", b"filename");
+    params!(b"stat", b"filename");
+    params!(b"chmod", b"filename", b"permissions");
+    params!(b"clearstatcache", b"clear_realpath_cache", b"filename");
+
     // Iterator/SPL functions moved to goro-ext-spl
 }

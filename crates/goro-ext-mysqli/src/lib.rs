@@ -161,6 +161,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mysqli_more_results", mysqli_more_results);
     vm.register_function(b"mysqli_field_count", mysqli_field_count);
     vm.register_function(b"mysqli_character_set_name", mysqli_character_set_name);
+    vm.register_function(b"mysqli_report", mysqli_report_fn);
+    vm.register_function(b"mysqli_init", mysqli_init_fn);
+    vm.register_function(b"mysqli_get_client_info", mysqli_get_client_info_fn);
+    vm.register_function(b"mysqli_get_server_version", mysqli_get_server_version_fn);
 
     vm.constants.insert(b"MYSQLI_ASSOC".to_vec(), Value::Long(MYSQLI_ASSOC));
     vm.constants.insert(b"MYSQLI_NUM".to_vec(), Value::Long(MYSQLI_NUM));
@@ -783,4 +787,27 @@ fn mysqli_field_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn mysqli_character_set_name(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_bytes(b"utf8mb4")))
+}
+
+fn mysqli_report_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Stub - just return true
+    Ok(Value::True)
+}
+
+fn mysqli_init_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Return a mysqli object (similar to new mysqli but not connected)
+    let id = vm.next_object_id();
+    let mut obj = goro_core::object::PhpObject::new(b"mysqli".to_vec(), id);
+    obj.set_property(b"__conn_id".to_vec(), Value::Long(-1));
+    obj.set_property(b"connect_errno".to_vec(), Value::Long(0));
+    obj.set_property(b"connect_error".to_vec(), Value::Null);
+    Ok(Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj))))
+}
+
+fn mysqli_get_client_info_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"mysqlnd 8.5.4")))
+}
+
+fn mysqli_get_server_version_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(80100)) // 8.1.0
 }

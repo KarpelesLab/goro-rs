@@ -963,6 +963,7 @@ impl Vm {
                 c.insert(b"IMAGETYPE_AVIF".to_vec(), Value::Long(19));
                 c.insert(b"IMAGETYPE_UNKNOWN".to_vec(), Value::Long(0));
                 c.insert(b"IMAGETYPE_COUNT".to_vec(), Value::Long(20));
+                c.insert(b"IMAGETYPE_JPEG2000".to_vec(), Value::Long(9)); // alias for JPC
                 // Token constants
                 c.insert(b"T_LNUMBER".to_vec(), Value::Long(260));
                 c.insert(b"T_DNUMBER".to_vec(), Value::Long(261));
@@ -8934,6 +8935,7 @@ impl Vm {
                     b"IS_PROTECTED" => Some(Value::Long(2)),
                     b"IS_PRIVATE" => Some(Value::Long(4)),
                     b"IS_READONLY" => Some(Value::Long(0x10000)),
+                    b"IS_VIRTUAL" => Some(Value::Long(0x200000)),
                     _ => None,
                 }
             }
@@ -8943,6 +8945,8 @@ impl Vm {
                     b"IS_EXPLICIT_ABSTRACT" => Some(Value::Long(0x40)),
                     b"IS_FINAL" => Some(Value::Long(0x20)),
                     b"IS_READONLY" => Some(Value::Long(0x10000)),
+                    b"SKIP_INITIALIZATION_ON_SERIALIZE" => Some(Value::Long(1)),
+                    b"SKIP_DESTRUCTOR" => Some(Value::Long(2)),
                     _ => None,
                 }
             }
@@ -8979,6 +8983,7 @@ impl Vm {
                 match const_name {
                     b"STD_PROP_LIST" => Some(Value::Long(1)),
                     b"ARRAY_AS_PROPS" => Some(Value::Long(2)),
+                    b"CHILD_ARRAYS_ONLY" => Some(Value::Long(4)),
                     _ => None,
                 }
             }

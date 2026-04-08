@@ -2546,11 +2546,39 @@ impl Compiler {
                                         // Format the type name for the error message
                                         let type_name = match hint {
                                             TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
-                                            _ => "?".to_string(), // shouldn't happen since nullable/union are handled above
+                                            TypeHint::Union(types) => {
+                                                types.iter().map(|t| match t {
+                                                    TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
+                                                    _ => "?".to_string(),
+                                                }).collect::<Vec<_>>().join("|")
+                                            }
+                                            TypeHint::Intersection(types) => {
+                                                types.iter().map(|t| match t {
+                                                    TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
+                                                    _ => "?".to_string(),
+                                                }).collect::<Vec<_>>().join("&")
+                                            }
+                                            TypeHint::Nullable(inner) => {
+                                                format!("?{}", match inner.as_ref() {
+                                                    TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
+                                                    _ => "?".to_string(),
+                                                })
+                                            }
+                                        };
+                                        let nullable_type_name = match hint {
+                                            TypeHint::Union(types) => {
+                                                let mut parts: Vec<String> = types.iter().map(|t| match t {
+                                                    TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
+                                                    _ => "?".to_string(),
+                                                }).collect();
+                                                parts.push("null".to_string());
+                                                parts.join("|")
+                                            }
+                                            _ => format!("?{}", type_name),
                                         };
                                         return Err(CompileError {
-                                            message: format!("Default value for property of type {} may not be null. Use the nullable type ?{} to allow null default value",
-                                                type_name, type_name),
+                                            message: format!("Default value for property of type {} may not be null. Use the nullable type {} to allow null default value",
+                                                type_name, nullable_type_name),
                                             line: stmt.span.line,
                                         });
                                     }

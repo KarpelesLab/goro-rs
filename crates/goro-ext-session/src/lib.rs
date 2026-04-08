@@ -408,6 +408,8 @@ pub fn register(vm: &mut Vm) {
         .insert(b"PHP_SESSION_NONE".to_vec(), Value::Long(PHP_SESSION_NONE));
     vm.constants
         .insert(b"PHP_SESSION_ACTIVE".to_vec(), Value::Long(PHP_SESSION_ACTIVE));
+    // SID constant (empty when session is using cookies)
+    vm.constants.entry(b"SID".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"")));
 
     // Register default session INI values (can be overridden by --INI-- section)
     vm.constants.entry(b"session.save_path".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"")));
