@@ -2011,6 +2011,12 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
 }
 
 fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 2 {
+        let msg = format!("array_map() expects at least 2 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let callback_raw = args.first().cloned().unwrap_or(Value::Null);
     // Treat Undef as Null for callback
     let callback = match &callback_raw {
@@ -2330,6 +2336,12 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() > 3 {
+        let msg = format!("array_walk() expects at most 3 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let first = args.first().unwrap_or(&Value::Null);
 
     // Accept arrays and objects (objects are iterated by their properties)
@@ -7609,7 +7621,7 @@ fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = if i == 0 {
                 format!("array_diff_key(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
-                format!("array_diff_key(): Argument #{} ($arrays) must be of type array, {} given", i + 1, type_name)
+                format!("array_diff_key(): Argument #{} must be of type array, {} given", i + 1, type_name)
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -7653,7 +7665,7 @@ fn array_diff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = if i == 0 {
                 format!("array_diff_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
-                format!("array_diff_assoc(): Argument #{} ($arrays) must be of type array, {} given", i + 1, type_name)
+                format!("array_diff_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name)
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -7701,7 +7713,7 @@ fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             let msg = if i == 0 {
                 format!("array_intersect_key(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
-                format!("array_intersect_key(): Argument #{} ($arrays) must be of type array, {} given", i + 1, type_name)
+                format!("array_intersect_key(): Argument #{} must be of type array, {} given", i + 1, type_name)
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -7742,7 +7754,7 @@ fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             let msg = if i == 0 {
                 format!("array_intersect_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
-                format!("array_intersect_assoc(): Argument #{} ($arrays) must be of type array, {} given", i + 1, type_name)
+                format!("array_intersect_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name)
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -8583,6 +8595,31 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
 fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let key = args.first().unwrap_or(&Value::Null);
     let arr = args.get(1).unwrap_or(&Value::Null);
+
+    // Check for null key deprecation
+    let key_deref = key.deref();
+    if matches!(key_deref, Value::Null | Value::Undef) {
+        vm.emit_deprecated("Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead");
+    }
+
+    // Check for invalid key types (array, object)
+    match &key_deref {
+        Value::Array(_) => {
+            let msg = "Cannot access offset of type array on array".to_string();
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        Value::Object(obj) => {
+            let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+            let msg = format!("Cannot access offset of type {} on array", class_name);
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        _ => {}
+    }
+
     if let Value::Array(a) = arr {
         let arr_key = goro_core::vm::Vm::value_to_array_key(key.clone());
         Ok(if a.borrow().contains_key(&arr_key) {
@@ -8604,6 +8641,12 @@ fn clearstatcache_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() > 3 {
+        let msg = format!("array_walk_recursive() expects at most 3 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let arr_val = args.first().unwrap_or(&Value::Null);
     let callback = args.get(1).unwrap_or(&Value::Null);
     let extra_data = args.get(2).cloned();
@@ -9760,7 +9803,7 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Key=value
         if let Some(eq_pos) = trimmed.find('=') {
             let key = trimmed[..eq_pos].trim().to_string();
-            let val_str = trimmed[eq_pos+1..].trim();
+            let val_str = trimmed[eq_pos+1..].trim_start();
             // Remove surrounding quotes
             let val_str = if val_str.len() >= 2
                 && ((val_str.starts_with('"') && val_str.ends_with('"'))

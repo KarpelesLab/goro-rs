@@ -45,6 +45,7 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"str_repeat", b"string", b"times");
     params!(b"str_word_count", b"string", b"format", b"characters");
     params!(b"str_split", b"string", b"length");
+    params!(b"strrev", b"string");
     params!(b"strtolower", b"string");
     params!(b"strtoupper", b"string");
     params!(b"trim", b"string", b"characters");

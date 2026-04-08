@@ -360,6 +360,10 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let factor = 10f64.powi(precision_i32);
     let scaled = f * factor;
+    // Beyond float64 precision, rounding is pointless - return value as-is
+    if scaled.abs() >= 1e15 {
+        return Ok(Value::Double(f));
+    }
     let rounded = match mode {
         0 | 1 => { // HALF_UP / HalfAwayFromZero (PHP default, PHP_ROUND_HALF_UP=1)
             // Use PHP's floor(f+0.5) approach for correct edge case handling

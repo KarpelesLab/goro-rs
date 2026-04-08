@@ -338,6 +338,8 @@ pub struct OpArray {
     pub param_attributes: Vec<Vec<crate::object::RuntimeAttribute>>,
     /// Source filename (for closures, error reporting)
     pub filename: Vec<u8>,
+    /// For FCC closures: the original function/method name (e.g. "strrev", "Foo::bar")
+    pub fcc_target_name: Option<Vec<u8>>,
 }
 
 impl OpArray {
@@ -363,6 +365,7 @@ impl OpArray {
             by_ref_params: Vec::new(),
             param_has_default: Vec::new(),
             attributes: Vec::new(),
+            fcc_target_name: None,
             param_attributes: Vec::new(),
             filename: Vec::new(),
         }

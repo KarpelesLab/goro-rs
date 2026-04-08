@@ -73,6 +73,54 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     is_variadic_last: bool,
                 }
 
+                // Check if this is an FCC (first-class callable) with a known target
+                let fcc_target = vm.user_functions.get(&fn_lower)
+                    .and_then(|op| op.fcc_target_name.clone());
+
+                if let Some(target_name) = fcc_target {
+                    // FCC closure: display with ["function"] and target's parameters
+                    let target_display = String::from_utf8_lossy(&target_name).to_string();
+
+                    // Look up the target function's parameters
+                    let target_lower: Vec<u8> = target_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let target_params: Vec<(String, bool)> = if let Some(target_op) = vm.user_functions.get(&target_lower) {
+                        let param_count = target_op.param_count as usize;
+                        let mut params = Vec::new();
+                        for i in 0..param_count {
+                            if let Some(cv_name) = target_op.cv_names.get(i) {
+                                let pname = format!("${}", String::from_utf8_lossy(cv_name));
+                                let has_default = target_op.param_has_default.get(i).copied().unwrap_or(false);
+                                params.push((pname, has_default));
+                            }
+                        }
+                        params
+                    } else if let Some(param_names) = vm.builtin_param_names.get(&target_lower) {
+                        // Built-in function: get parameter names from registered info
+                        param_names.iter().map(|name| {
+                            let pname = format!("${}", String::from_utf8_lossy(name));
+                            (pname, false) // We don't track defaults for builtins in detail
+                        }).collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let has_params = !target_params.is_empty();
+                    let prop_count = 1 + if has_params { 1 } else { 0 }; // function[, parameter]
+                    vm.write_output(format!("{}object(Closure)#1 ({}) {{\n", prefix, prop_count).as_bytes());
+                    vm.write_output(format!("{}  [\"function\"]=>\n", prefix).as_bytes());
+                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, target_display.len(), target_display).as_bytes());
+                    if has_params {
+                        vm.write_output(format!("{}  [\"parameter\"]=>\n", prefix).as_bytes());
+                        vm.write_output(format!("{}  array({}) {{\n", prefix, target_params.len()).as_bytes());
+                        for (pname, has_default) in &target_params {
+                            let label = if *has_default { "<optional>" } else { "<required>" };
+                            vm.write_output(format!("{}    [\"{}\"]=>\n", prefix, pname).as_bytes());
+                            vm.write_output(format!("{}    string({}) \"{}\"\n", prefix, label.len(), label).as_bytes());
+                        }
+                        vm.write_output(format!("{}  }}\n", prefix).as_bytes());
+                    }
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                } else {
                 let closure_info = vm.user_functions.get(&fn_lower).map(|op| {
                     let file = String::from_utf8_lossy(&op.filename).to_string();
                     let line = op.decl_line;
@@ -125,6 +173,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     vm.write_output(
                         format!("{}object(Closure)#1 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
                     );
+                }
                 }
             } else {
                 vm.write_output(

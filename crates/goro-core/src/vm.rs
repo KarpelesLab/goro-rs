@@ -19613,7 +19613,11 @@ impl Vm {
                                         // Throwable cannot be implemented by user classes/enums
                                         let kind = if class.is_enum { "Enum" } else { "Class" };
                                         return Err(VmError {
-                                            message: format!("{} {} cannot implement interface Throwable", kind, class_display),
+                                            message: if class.is_enum {
+                                                format!("{} {} cannot implement interface Throwable", kind, class_display)
+                                            } else {
+                                                format!("{} {} cannot implement interface Throwable, extend Exception or Error instead", kind, class_display)
+                                            },
                                             line: op.line,
                                         });
                                     }

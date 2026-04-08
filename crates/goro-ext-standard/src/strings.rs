@@ -2049,6 +2049,14 @@ fn strtr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Ok(Value::String(PhpString::from_vec(result)))
+    } else if args.len() == 2 {
+        // strtr($str, $replace_pairs) - second arg must be an array
+        let val = &args[1];
+        let type_name = goro_core::vm::Vm::value_type_name(val);
+        let msg = format!("strtr(): Argument #2 ($from) must be of type array, {} given", type_name);
+        let exc = _vm.throw_type_error(msg.clone());
+        _vm.current_exception = Some(exc);
+        Err(goro_core::vm::VmError { message: msg, line: _vm.current_line })
     } else {
         Ok(Value::String(subject))
     }

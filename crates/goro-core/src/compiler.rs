@@ -2842,6 +2842,7 @@ impl Compiler {
                                             CallableTarget::Function(name_expr) => {
                                                 if let ExprKind::Identifier(n) = &name_expr.kind {
                                                     let resolved_name = self.resolve_function_name(n);
+                                                    cc.op_array.fcc_target_name = Some(resolved_name.clone());
                                                     let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(resolved_name)));
                                                     let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
                                                     cc.op_array.emit(crate::opcode::Op { opcode: OpCode::InitFCall, op1: OperandType::Const(name_idx), op2: OperandType::Const(arg_count_idx), result: OperandType::Unused, line: expr.span.line });
@@ -8426,6 +8427,7 @@ impl Compiler {
                 let call_op = if let ExprKind::Identifier(n) = &name_expr.kind {
                     // Static function name - resolve at compile time
                     let resolved_name = self.resolve_function_name(n);
+                    cc.op_array.fcc_target_name = Some(resolved_name.clone());
                     let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(resolved_name)));
                     OperandType::Const(name_idx)
                 } else {
@@ -8470,6 +8472,8 @@ impl Compiler {
                     ExprKind::Identifier(name) => name.clone(),
                     _ => b"__invoke".to_vec(),
                 };
+                // For method FCCs, we don't know the class name at compile time
+                // since it depends on the object type at runtime
                 let method_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(method_name)));
                 cc.op_array.emit(Op {
                     opcode: OpCode::InitMethodCall,
@@ -8523,6 +8527,7 @@ impl Compiler {
                 let mut func_name = resolved_class;
                 func_name.extend_from_slice(b"::");
                 func_name.extend_from_slice(method);
+                cc.op_array.fcc_target_name = Some(func_name.clone());
                 let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(func_name)));
                 let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
                 cc.op_array.emit(Op {
