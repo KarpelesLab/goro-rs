@@ -187,8 +187,20 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"CURLOPT_MAXFILESIZE".to_vec(), Value::Long(114));
     vm.constants.insert(b"CURLOPT_RESOLVE".to_vec(), Value::Long(10203));
     vm.constants.insert(b"CURLOPT_DNS_SERVERS".to_vec(), Value::Long(10211));
+    vm.constants.insert(b"CURLOPT_XFERINFOFUNCTION".to_vec(), Value::Long(20219));
+    vm.constants.insert(b"CURLOPT_WRITEHEADER".to_vec(), Value::Long(10029));
+    vm.constants.insert(b"CURLOPT_INFILESIZE".to_vec(), Value::Long(14));
+
+    // CURLPAUSE constants
+    vm.constants.insert(b"CURLPAUSE_ALL".to_vec(), Value::Long(5));
+    vm.constants.insert(b"CURLPAUSE_CONT".to_vec(), Value::Long(0));
+    vm.constants.insert(b"CURLPAUSE_RECV".to_vec(), Value::Long(1));
+    vm.constants.insert(b"CURLPAUSE_RECV_CONT".to_vec(), Value::Long(0));
+    vm.constants.insert(b"CURLPAUSE_SEND".to_vec(), Value::Long(4));
+    vm.constants.insert(b"CURLPAUSE_SEND_CONT".to_vec(), Value::Long(0));
 
     // Additional CURLINFO constants
+    vm.constants.insert(b"CURLINFO_PRIVATE".to_vec(), Value::Long(1048597));
     vm.constants.insert(b"CURLINFO_SIZE_DOWNLOAD".to_vec(), Value::Long(3145736));
     vm.constants.insert(b"CURLINFO_SIZE_UPLOAD".to_vec(), Value::Long(3145735));
     vm.constants.insert(b"CURLINFO_SPEED_DOWNLOAD".to_vec(), Value::Long(3145737));

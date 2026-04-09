@@ -785,6 +785,8 @@ pub fn register(vm: &mut Vm) {
         .insert(b"XML_OPTION_SKIP_TAGSTART".to_vec(), Value::Long(3));
     vm.constants
         .insert(b"XML_OPTION_SKIP_WHITE".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"XML_OPTION_PARSE_HUGE".to_vec(), Value::Long(5));
     vm.constants.insert(
         b"XML_SAX_IMPL".to_vec(),
         Value::String(PhpString::from_bytes(b"goro")),

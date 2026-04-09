@@ -4458,24 +4458,35 @@ fn utf8_encode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn get_html_translation_table_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let table_type = args.first().map(|v| v.to_long()).unwrap_or(0); // HTML_SPECIALCHARS=0, HTML_ENTITIES=1
-    let _flags = args.get(1).map(|v| v.to_long()).unwrap_or(11); // ENT_QUOTES|ENT_SUBSTITUTE
-    
+    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(11); // ENT_QUOTES|ENT_SUBSTITUTE
+
+    // ENT_COMPAT=2 (double quotes), ENT_QUOTES=3 (both), ENT_NOQUOTES=0 (neither)
+    let quote_style = flags & 3;
+
     let mut result = PhpArray::new();
-    
+
     if table_type == 0 {
         // HTML_SPECIALCHARS
         result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+        if quote_style & 2 != 0 {
+            result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+        }
         result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
         result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+        if quote_style & 1 != 0 {
+            result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+        }
     } else {
         // HTML_ENTITIES - include common entities
         result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+        if quote_style & 2 != 0 {
+            result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+        }
         result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
         result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+        if quote_style & 1 != 0 {
+            result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+        }
         // Add more HTML entities for characters 160-255
         let entities = [
             (160, "&nbsp;"), (161, "&iexcl;"), (162, "&cent;"), (163, "&pound;"),
@@ -4889,8 +4900,40 @@ fn nl2br_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-pub fn str_getcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+pub fn str_getcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+
+    // Validate separator must be a single character
+    if let Some(sep_val) = args.get(1) {
+        let sep_str = sep_val.to_php_string();
+        if sep_str.len() != 1 {
+            let msg = "str_getcsv(): Argument #2 ($separator) must be a single character".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
+    // Validate enclosure must be a single character
+    if let Some(enc_val) = args.get(2) {
+        let enc_str = enc_val.to_php_string();
+        if enc_str.len() != 1 {
+            let msg = "str_getcsv(): Argument #3 ($enclosure) must be a single character".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
+    // Validate escape must be a single character or empty string
+    if let Some(esc_val) = args.get(3) {
+        let esc_str = esc_val.to_php_string();
+        if esc_str.len() > 1 {
+            let msg = "str_getcsv(): Argument #4 ($escape) must be empty or a single character".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
+
     let separator = args.get(1).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b',')).unwrap_or(b',');
     let enclosure = args.get(2).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b'"')).unwrap_or(b'"');
 

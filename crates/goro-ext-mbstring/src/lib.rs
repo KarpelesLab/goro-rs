@@ -391,7 +391,10 @@ fn mb_internal_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.constants.insert(b"mbstring.internal_encoding".to_vec(), Value::String(PhpString::from_string(enc)));
             Ok(Value::True)
         } else {
-            Ok(Value::True) // Accept silently
+            let msg = format!("mb_internal_encoding(): Argument #1 ($encoding) must be a valid encoding, \"{}\" given", enc);
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
         }
     }
 }
@@ -1030,8 +1033,8 @@ fn mb_convert_case_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         for lc in c.to_lowercase() {
                             result.push(lc);
                         }
-                        if c.is_whitespace() || c == '\'' || !c.is_alphabetic() {
-                            cap_next = c.is_whitespace() || !c.is_alphabetic();
+                        if !c.is_alphabetic() && c != '\'' {
+                            cap_next = true;
                         }
                     }
                 }

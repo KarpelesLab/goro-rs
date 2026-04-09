@@ -961,8 +961,9 @@ impl Vm {
                 c.insert(b"IMAGETYPE_ICO".to_vec(), Value::Long(17));
                 c.insert(b"IMAGETYPE_WEBP".to_vec(), Value::Long(18));
                 c.insert(b"IMAGETYPE_AVIF".to_vec(), Value::Long(19));
+                c.insert(b"IMAGETYPE_HEIF".to_vec(), Value::Long(20));
                 c.insert(b"IMAGETYPE_UNKNOWN".to_vec(), Value::Long(0));
-                c.insert(b"IMAGETYPE_COUNT".to_vec(), Value::Long(20));
+                c.insert(b"IMAGETYPE_COUNT".to_vec(), Value::Long(21));
                 c.insert(b"IMAGETYPE_JPEG2000".to_vec(), Value::Long(9)); // alias for JPC
                 // Token constants
                 c.insert(b"T_LNUMBER".to_vec(), Value::Long(260));

@@ -105,6 +105,8 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"OPENSSL_KEYTYPE_DH".to_vec(), Value::Long(2));
     vm.constants.insert(b"OPENSSL_KEYTYPE_EC".to_vec(), Value::Long(3));
     vm.constants.insert(b"OPENSSL_PKCS1_OAEP_PADDING".to_vec(), Value::Long(4));
+    vm.constants.insert(b"OPENSSL_NO_PADDING".to_vec(), Value::Long(3));
+    vm.constants.insert(b"OPENSSL_PKCS1_PSS_PADDING".to_vec(), Value::Long(6));
     vm.constants.insert(b"OPENSSL_SSLV23_PADDING".to_vec(), Value::Long(2));
     vm.constants.insert(b"OPENSSL_TLSEXT_SERVER_NAME".to_vec(), Value::Long(1));
     vm.constants.insert(b"PKCS7_DETACHED".to_vec(), Value::Long(64));

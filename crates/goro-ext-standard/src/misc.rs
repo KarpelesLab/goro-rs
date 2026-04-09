@@ -334,6 +334,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"php_ini_scanned_files", php_ini_scanned_files_fn);
     vm.register_function(b"getmypid", getmypid_fn);
     vm.register_function(b"getmyuid", getmyuid_fn);
+    vm.register_function(b"getlastmod", getlastmod_fn);
     vm.register_function(b"getmygid", getmygid_fn);
     vm.register_function(b"get_current_user", get_current_user_fn);
     // sizeof is an alias for count (registered in type_funcs.rs)
@@ -497,6 +498,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"dns_check_record", dns_check_record_fn);
     vm.register_function(b"checkdnsrr", dns_check_record_fn);
     vm.register_function(b"dns_get_record", dns_get_record_fn);
+    vm.register_function(b"getmxrr", getmxrr_fn);
     vm.register_function(b"getservbyname", getservbyname_fn);
     vm.register_function(b"getservbyport", getservbyport_fn);
     vm.register_function(b"getprotobyname", getprotobyname_fn);
@@ -8880,7 +8882,7 @@ fn walk_recursive_inner(
     Ok(())
 }
 
-fn fgetcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let _length = args.get(1).map(|v| v.to_long());
     let separator = args.get(2).map(|v| {
@@ -8953,7 +8955,7 @@ fn fgetcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::String(PhpString::from_bytes(b""))
                 },
             ];
-            crate::strings::str_getcsv_fn(_vm, &csv_args)
+            crate::strings::str_getcsv_fn(vm, &csv_args)
         }
     }
 }
@@ -10057,22 +10059,61 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn assert_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    _vm.emit_deprecated("Function assert_options() is deprecated since 8.3");
     let option = args.first().map(|v| v.to_long()).unwrap_or(0);
-    // Also emit deprecated for ASSERT_CALLBACK constant
-    if option == 5 && args.len() > 1 {
-        _vm.emit_deprecated("Constant ASSERT_CALLBACK is deprecated since 8.3, as assert_options() is deprecated");
+    let new_value = args.get(1);
+
+    // Emit deprecated for the ASSERT_* constant - must come before the function deprecation
+    // (in PHP, constant access happens before function dispatch)
+    let const_name = match option {
+        1 => Some("ASSERT_ACTIVE"),
+        2 => Some("ASSERT_WARNING"),
+        3 => Some("ASSERT_BAIL"),
+        4 => Some("ASSERT_QUIET_EVAL"),
+        5 => Some("ASSERT_CALLBACK"),
+        6 => Some("ASSERT_EXCEPTION"),
+        _ => None,
+    };
+    if let Some(name) = const_name {
+        _vm.emit_deprecated(&format!("Constant {} is deprecated since 8.3, as assert_options() is deprecated", name));
     }
-    // Return previous value for the option
-    match option {
-        1 => Ok(Value::Long(1)),  // ASSERT_ACTIVE
-        2 => Ok(Value::Long(0)),  // ASSERT_WARNING (deprecated)
-        3 => Ok(Value::Long(0)),  // ASSERT_BAIL (deprecated)
-        4 => Ok(Value::Long(0)),  // ASSERT_QUIET_EVAL (deprecated)
-        5 => Ok(Value::Null),     // ASSERT_CALLBACK (deprecated)
-        6 => Ok(Value::Long(1)),  // ASSERT_EXCEPTION
-        _ => Ok(Value::False),
+
+    _vm.emit_deprecated("Function assert_options() is deprecated since 8.3");
+
+    // INI key mapping for assert options
+    let ini_key = match option {
+        1 => Some(b"assert.active".as_ref()),
+        2 => Some(b"assert.warning".as_ref()),
+        3 => Some(b"assert.bail".as_ref()),
+        4 => Some(b"assert.quiet_eval".as_ref()),
+        5 => Some(b"assert.callback".as_ref()),
+        6 => Some(b"assert.exception".as_ref()),
+        _ => None,
+    };
+
+    // Get previous value
+    let prev = if let Some(key) = ini_key {
+        if option == 5 {
+            // ASSERT_CALLBACK returns the callback value or null
+            _vm.constants.get(key).cloned().unwrap_or(Value::Null)
+        } else {
+            // Others return int
+            let val = _vm.constants.get(key).map(|v| v.to_long()).unwrap_or(match option {
+                1 => 1, // ASSERT_ACTIVE default
+                6 => 1, // ASSERT_EXCEPTION default
+                _ => 0,
+            });
+            Value::Long(val)
+        }
+    } else {
+        return Ok(Value::False);
+    };
+
+    // Set new value if provided
+    if let (Some(new_val), Some(key)) = (new_value, ini_key) {
+        _vm.constants.insert(key.to_vec(), new_val.clone());
     }
+
+    Ok(prev)
 }
 
 fn ftruncate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -10401,6 +10442,11 @@ fn getmyuid_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn getmygid_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(1000))
+}
+
+fn getlastmod_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Returns the time the script was last modified, or false on failure
+    Ok(Value::False)
 }
 
 fn get_current_user_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -11044,7 +11090,7 @@ fn umask_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn exec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let command = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let output = std::process::Command::new("sh")
         .arg("-c")
@@ -11053,13 +11099,41 @@ fn exec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            let lines: Vec<&str> = stdout.trim_end_matches('\n').split('\n').collect();
-            // If $output array ref is provided (args[1]), fill it
-            // For now, just return the last line
+            let raw_lines: Vec<&str> = stdout.split('\n').collect();
+            // Remove trailing empty element from final newline
+            let lines: Vec<&str> = if raw_lines.last() == Some(&"") && raw_lines.len() > 1 {
+                raw_lines[..raw_lines.len()-1].to_vec()
+            } else {
+                raw_lines
+            };
             let last_line = lines.last().map(|s| s.to_string()).unwrap_or_default();
-            // If $result_code ref is provided (args[2]), set it
-            // For now just return the last line
-            let _ = vm;
+
+            // If $output array ref is provided (args[1]), fill it
+            if let Some(output_ref) = args.get(1) {
+                if let Value::Reference(r) = output_ref {
+                    let inner = r.borrow().clone();
+                    let arr = match inner {
+                        Value::Array(a) => a,
+                        _ => {
+                            let a = Rc::new(RefCell::new(PhpArray::new()));
+                            *r.borrow_mut() = Value::Array(a.clone());
+                            a
+                        }
+                    };
+                    let mut arr_mut = arr.borrow_mut();
+                    for line in &lines {
+                        arr_mut.push(Value::String(PhpString::from_string(line.to_string())));
+                    }
+                }
+            }
+
+            // If $result_code ref is provided (args[2]), set the exit code
+            if let Some(code_ref) = args.get(2) {
+                if let Value::Reference(r) = code_ref {
+                    *r.borrow_mut() = Value::Long(out.status.code().unwrap_or(-1) as i64);
+                }
+            }
+
             Ok(Value::String(PhpString::from_string(last_line)))
         }
         Err(_) => Ok(Value::False),
@@ -11847,6 +11921,7 @@ fn output_add_rewrite_var_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
 fn output_reset_rewrite_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn dns_check_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn dns_get_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn getmxrr_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn getservbyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn getservbyport_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn getprotobyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(-1)) }

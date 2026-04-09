@@ -27,6 +27,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"sha1_file", sha1_file_fn);
     vm.register_function(b"hash_hmac_file", hash_hmac_file_fn);
     vm.register_function(b"hash_update_stream", hash_update_stream_fn);
+    vm.register_function(b"hash_update_file", hash_update_file_fn);
 }
 
 fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1685,4 +1686,10 @@ fn hash_update_stream_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
     // hash_update_stream(HashContext $context, resource $stream, int $length = -1): int
     // Stub: file handle access is in a different crate, so we can't read from streams here
     Ok(Value::Long(0))
+}
+
+fn hash_update_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // hash_update_file(HashContext $context, string $filename, ?resource $stream_context = null): bool
+    // Stub
+    Ok(Value::False)
 }

@@ -1529,21 +1529,21 @@ impl Parser {
         match self.peek() {
             TokenKind::Interface => {
                 if modifiers.is_readonly {
-                    return Err(ParseError { message: "Cannot use the readonly modifier on an interface".into(), span: self.span() });
+                    return Err(ParseError { message: "syntax error, unexpected token \"interface\", expecting \"abstract\" or \"final\" or \"readonly\" or \"class\"".into(), span: self.span() });
                 }
                 modifiers.is_interface = true;
                 self.advance();
             }
             TokenKind::Trait => {
                 if modifiers.is_readonly {
-                    return Err(ParseError { message: "Cannot use the readonly modifier on a trait".into(), span: self.span() });
+                    return Err(ParseError { message: "syntax error, unexpected token \"trait\", expecting \"abstract\" or \"final\" or \"readonly\" or \"class\"".into(), span: self.span() });
                 }
                 modifiers.is_trait = true;
                 self.advance();
             }
             TokenKind::Enum => {
                 if modifiers.is_readonly {
-                    return Err(ParseError { message: "Cannot use the readonly modifier on an enum".into(), span: self.span() });
+                    return Err(ParseError { message: "syntax error, unexpected token \"enum\", expecting \"abstract\" or \"final\" or \"readonly\" or \"class\"".into(), span: self.span() });
                 }
                 modifiers.is_enum = true;
                 self.advance();
