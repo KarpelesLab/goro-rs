@@ -1188,10 +1188,22 @@ impl<'a, 'b> JsonParser<'a, 'b> {
         }
     }
 }
-fn json_last_error(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn json_last_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if !args.is_empty() {
+        let msg = format!("json_last_error() expects exactly 0 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     Ok(Value::Long(vm.json_last_error))
 }
-fn json_last_error_msg(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn json_last_error_msg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if !args.is_empty() {
+        let msg = format!("json_last_error_msg() expects exactly 0 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let msg = json_error_msg(vm.json_last_error);
     Ok(Value::String(PhpString::from_bytes(msg.as_bytes())))
 }

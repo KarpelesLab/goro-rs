@@ -23152,14 +23152,14 @@ impl Vm {
             Value::Long(n) => ArrayKey::Int(n),
             Value::String(s) => {
                 // PHP converts numeric strings to integer keys
-                let bytes = s.as_bytes();
+                // In PHP 8, only strings that are exactly integer representations
+                // (no leading/trailing whitespace) are converted to integer keys
                 let s_str = s.to_string_lossy();
-                let trimmed = s_str.trim();
-                if !trimmed.is_empty()
-                    && let Ok(n) = trimmed.parse::<i64>()
+                if !s_str.is_empty()
+                    && let Ok(n) = s_str.parse::<i64>()
                 {
                     // Only convert if the string is exactly the integer representation
-                    if n.to_string() == trimmed {
+                    if n.to_string() == s_str.as_ref() {
                         return ArrayKey::Int(n);
                     }
                 }

@@ -724,6 +724,10 @@ fn next_prime(n: &BigInt) -> BigInt {
 /// Extended GCD: returns (gcd, x, y) such that a*x + b*y = gcd
 fn extended_gcd(a: &BigInt, b: &BigInt) -> (BigInt, BigInt, BigInt) {
     if b.is_zero() {
+        // Ensure GCD is always positive (PHP behavior)
+        if a.sign() == Sign::Minus {
+            return (a.abs(), -BigInt::one(), BigInt::zero());
+        }
         return (a.clone(), BigInt::one(), BigInt::zero());
     }
     let (q, r) = a.div_rem(b);

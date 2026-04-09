@@ -852,9 +852,11 @@ fn func_num_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     if let Some((_name, _file, _line, args, _is_method)) = vm.call_stack.last() {
         Ok(Value::Long(args.len() as i64))
     } else {
-        // Called from global scope
-        vm.emit_warning("func_num_args(): Called from the global scope - no function context");
-        Ok(Value::Long(-1))
+        // PHP 8.4: calling from global scope throws Error
+        let msg = "func_num_args() cannot be called from the global scope";
+        let exc = vm.create_exception(b"Error", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        Err(VmError { message: msg.to_string(), line: vm.current_line })
     }
 }
 fn func_get_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -866,9 +868,11 @@ fn func_get_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         }
         Ok(Value::Array(Rc::new(RefCell::new(arr))))
     } else {
-        // Called from global scope
-        vm.emit_warning("func_get_args(): Called from the global scope - no function context");
-        Ok(Value::False)
+        // PHP 8.4: calling from global scope throws Error
+        let msg = "func_get_args() cannot be called from the global scope";
+        let exc = vm.create_exception(b"Error", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        Err(VmError { message: msg.to_string(), line: vm.current_line })
     }
 }
 fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -881,8 +885,11 @@ fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(caller_args[index as usize].clone())
         }
     } else {
-        vm.emit_warning("func_get_arg(): Called from the global scope - no function context");
-        Ok(Value::False)
+        // PHP 8.4: calling from global scope throws Error
+        let msg = "func_get_arg() cannot be called from the global scope";
+        let exc = vm.create_exception(b"Error", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        Err(VmError { message: msg.to_string(), line: vm.current_line })
     }
 }
 fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -5344,19 +5351,115 @@ fn parse_url_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn http_build_query_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null);
+    let _numeric_prefix = args.get(1).and_then(|v| {
+        if matches!(v, Value::Null | Value::Undef) { None }
+        else { Some(v.to_php_string().to_string_lossy()) }
+    });
     let separator = args
         .get(2)
-        .map(|v| v.to_php_string().to_string_lossy())
+        .and_then(|v| {
+            if matches!(v, Value::Null | Value::Undef) { None }
+            else { Some(v.to_php_string().to_string_lossy()) }
+        })
         .unwrap_or_else(|| "&".to_string());
+    let enc_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // PHP_QUERY_RFC1738 = 1
     let mut parts = Vec::new();
+
+    fn url_encode(s: &str, enc_type: i64) -> String {
+        let mut result = String::new();
+        for byte in s.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                    result.push(byte as char);
+                }
+                b'~' if enc_type == 2 => {
+                    // RFC3986 doesn't encode ~
+                    result.push('~');
+                }
+                b' ' if enc_type == 1 => {
+                    // RFC1738: space -> +
+                    result.push('+');
+                }
+                _ => {
+                    result.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+        result
+    }
+
+    fn build_query_recursive(
+        parts: &mut Vec<String>,
+        prefix: &str,
+        val: &Value,
+        separator: &str,
+        enc_type: i64,
+        numeric_prefix: &Option<String>,
+    ) {
+        match val {
+            Value::Array(arr) => {
+                for (key, v) in arr.borrow().iter() {
+                    let k = match key {
+                        goro_core::array::ArrayKey::Int(n) => {
+                            if prefix.is_empty() {
+                                if let Some(np) = numeric_prefix {
+                                    format!("{}{}", np, n)
+                                } else {
+                                    n.to_string()
+                                }
+                            } else {
+                                n.to_string()
+                            }
+                        }
+                        goro_core::array::ArrayKey::String(s) => s.to_string_lossy(),
+                    };
+                    let new_prefix = if prefix.is_empty() {
+                        url_encode(&k, enc_type)
+                    } else {
+                        format!("{}%5B{}%5D", prefix, url_encode(&k, enc_type))
+                    };
+                    build_query_recursive(parts, &new_prefix, v, separator, enc_type, numeric_prefix);
+                }
+            }
+            Value::Null | Value::Undef => {
+                // PHP's http_build_query encodes null as empty string
+                parts.push(format!("{}=", prefix));
+            }
+            Value::True => {
+                parts.push(format!("{}=1", prefix));
+            }
+            Value::False => {
+                parts.push(format!("{}=0", prefix));
+            }
+            _ => {
+                let v = url_encode(&val.to_php_string().to_string_lossy(), enc_type);
+                parts.push(format!("{}={}", prefix, v));
+            }
+        }
+    }
+
     if let Value::Array(arr) = data {
         for (key, val) in arr.borrow().iter() {
             let k = match key {
-                goro_core::array::ArrayKey::Int(n) => n.to_string(),
+                goro_core::array::ArrayKey::Int(n) => {
+                    if let Some(np) = &_numeric_prefix {
+                        format!("{}{}", np, n)
+                    } else {
+                        n.to_string()
+                    }
+                }
                 goro_core::array::ArrayKey::String(s) => s.to_string_lossy(),
             };
-            let v = val.to_php_string().to_string_lossy();
-            parts.push(format!("{}={}", k, v));
+            let prefix = url_encode(&k, enc_type);
+            build_query_recursive(&mut parts, &prefix, &val, &separator, enc_type, &_numeric_prefix);
+        }
+    } else if let Value::Object(obj) = data {
+        // Also handle objects - get public properties
+        let obj = obj.borrow();
+        for (prop_name, prop_val) in &obj.properties {
+            let k = String::from_utf8_lossy(prop_name).to_string();
+            let prefix = url_encode(&k, enc_type);
+            build_query_recursive(&mut parts, &prefix, prop_val, &separator, enc_type, &_numeric_prefix);
         }
     }
     Ok(Value::String(PhpString::from_string(
@@ -5409,9 +5512,40 @@ fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn file_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::read(&*path.to_string_lossy() as &str) {
-        Ok(data) => Ok(Value::String(PhpString::from_vec(data))),
-        Err(_) => Ok(Value::False),
+    let _use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let _context = args.get(2);
+    let offset = args.get(3).map(|v| v.to_long()).unwrap_or(0);
+    let length = args.get(4).map(|v| v.to_long());
+
+    // Validate length parameter
+    if let Some(len) = length {
+        if len < 0 {
+            let msg = "file_get_contents(): Argument #5 ($length) must be greater than or equal to 0";
+            let exc = _vm.create_exception(b"ValueError", msg, _vm.current_line);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.to_string(), line: _vm.current_line });
+        }
+    }
+
+    let path_str = path.to_string_lossy();
+    match std::fs::read(&*path_str as &str) {
+        Ok(data) => {
+            let start = if offset >= 0 { offset as usize } else { 0 };
+            if start >= data.len() && start > 0 {
+                return Ok(Value::String(PhpString::empty()));
+            }
+            let slice = &data[start.min(data.len())..];
+            let result = if let Some(len) = length {
+                &slice[..slice.len().min(len as usize)]
+            } else {
+                slice
+            };
+            Ok(Value::String(PhpString::from_vec(result.to_vec())))
+        }
+        Err(_) => {
+            _vm.emit_warning(&format!("file_get_contents({}): Failed to open stream: No such file or directory", path_str));
+            Ok(Value::False)
+        }
     }
 }
 fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -9017,20 +9151,45 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    match std::fs::read_to_string(&*path.to_string_lossy()) {
+    let ignore_new_lines = flags & 2 != 0; // FILE_IGNORE_NEW_LINES
+    let skip_empty = flags & 4 != 0; // FILE_SKIP_EMPTY_LINES
+    match std::fs::read(&*path.to_string_lossy()) {
         Ok(content) => {
             let mut result = PhpArray::new();
-            for line in content.split('\n') {
-                let mut l = line.to_string();
-                if flags & 2 == 0 {
-                    // FILE_IGNORE_NEW_LINES not set - include newline
-                    l.push('\n');
+            if content.is_empty() {
+                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+            }
+            // Split content into lines preserving line endings
+            let mut lines: Vec<Vec<u8>> = Vec::new();
+            let mut current = Vec::new();
+            for &b in &content {
+                current.push(b);
+                if b == b'\n' {
+                    lines.push(current);
+                    current = Vec::new();
                 }
-                if flags & 4 != 0 && l.trim().is_empty() {
-                    // FILE_SKIP_EMPTY_LINES
-                    continue;
+            }
+            // If there's remaining content (no trailing newline), add it
+            if !current.is_empty() {
+                lines.push(current);
+            }
+            for line in &lines {
+                let mut l = line.clone();
+                if ignore_new_lines {
+                    // Strip trailing \r\n or \n
+                    if l.ends_with(b"\r\n") {
+                        l.truncate(l.len() - 2);
+                    } else if l.ends_with(b"\n") {
+                        l.truncate(l.len() - 1);
+                    }
                 }
-                result.push(Value::String(PhpString::from_string(l)));
+                if skip_empty {
+                    let trimmed: Vec<u8> = l.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                }
+                result.push(Value::String(PhpString::from_vec(l)));
             }
             Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
@@ -10371,7 +10530,17 @@ fn str_increment_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
     if bytes.is_empty() {
-        return Err(VmError { message: "str_increment(): Argument #1 ($string) must not be empty".to_string(), line: vm.current_line });
+        let msg = "str_increment(): Argument #1 ($string) must not be empty";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+    }
+    // Validate all characters are alphanumeric first
+    if !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
+        let msg = "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: vm.current_line });
     }
     // PHP string increment: like spreadsheet columns
     let mut result: Vec<u8> = bytes.to_vec();
@@ -10386,7 +10555,10 @@ fn str_increment_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'A'..=b'Y' => { result[i] += 1; carry = false; }
             b'0'..=b'8' => { result[i] += 1; carry = false; }
             _ => {
-                return Err(VmError { message: "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters".to_string(), line: vm.current_line });
+                let msg = "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
+                let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.to_string(), line: vm.current_line });
             }
         }
     }
@@ -10409,11 +10581,35 @@ fn str_decrement_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
     if bytes.is_empty() {
-        return Err(VmError { message: "str_decrement(): Argument #1 ($string) must not be empty".to_string(), line: vm.current_line });
+        let msg = "str_decrement(): Argument #1 ($string) must not be empty";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: vm.current_line });
     }
-    // Cannot decrement 'a', 'A', or '0'
-    if bytes.len() == 1 && (bytes[0] == b'a' || bytes[0] == b'A' || bytes[0] == b'0') {
-        return Err(VmError { message: "str_decrement(): Argument #1 ($string) \"".to_string() + &String::from_utf8_lossy(bytes) + "\" is out of decrement range", line: vm.current_line });
+    // Validate all characters are alphanumeric first
+    if !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
+        let msg = "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+    }
+    // Check if string is out of decrement range:
+    // - Single char: 'a', 'A', '0' are out of range (can't go lower)
+    // - Multi-char starting with '0': if all chars are minimums (a/A/0), out of range
+    //   because the numeric leading zero removal would produce an invalid result
+    // - Multi-char starting with 'a'/'A': even if all chars are minimums,
+    //   the leading char is just removed (underflow is allowed)
+    {
+        let all_min = bytes.iter().all(|&b| b == b'a' || b == b'A' || b == b'0');
+        if all_min {
+            let first = bytes[0];
+            if bytes.len() == 1 || first == b'0' {
+                let msg = format!("str_decrement(): Argument #1 ($string) \"{}\" is out of decrement range", String::from_utf8_lossy(bytes));
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
     }
     let mut result: Vec<u8> = bytes.to_vec();
     let mut borrow = true;
@@ -10427,13 +10623,30 @@ fn str_decrement_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'B'..=b'Z' => { result[i] -= 1; borrow = false; }
             b'1'..=b'9' => { result[i] -= 1; borrow = false; }
             _ => {
-                return Err(VmError { message: "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters".to_string(), line: vm.current_line });
+                let msg = "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
+                let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.to_string(), line: vm.current_line });
             }
         }
     }
-    // Remove leading zero/a/A if result starts with it and has more chars
-    if result.len() > 1 && (result[0] == b'0' || result[0] == b'a' || result[0] == b'A') && borrow {
+    // If borrow propagated past the first character, remove the leading character
+    if borrow && result.len() > 1 {
         result.remove(0);
+    } else if !borrow && result.len() > 1 {
+        // After decrementing, strip the leading character if it became the minimum
+        // for its type and the original first char was NOT this minimum.
+        // E.g., "10" -> "09" -> strip '0' -> "9"
+        // E.g., "1A" -> "0Z" -> strip '0' -> "Z"  (wait, '1' decrements to '0')
+        // Actually for "1A": i=1 'A' -> borrow, result='Z', then i=0 '1' -> '0', no borrow
+        // For "Ba": i=1 'a' -> borrow, result='z', then i=0 'B' -> 'A', no borrow
+        // For "bA": i=1 'A' -> borrow, result='Z', then i=0 'b' -> 'a', no borrow
+        // So when first char decremented to its minimum AND it wasn't already that minimum:
+        let new_first = result[0];
+        let old_first = bytes[0];
+        if new_first != old_first && (new_first == b'0' || new_first == b'a' || new_first == b'A') {
+            result.remove(0);
+        }
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }

@@ -367,7 +367,17 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             },
             "null" => Value::Null,
-            _ => return Ok(Value::False),
+            "resource" => {
+                let msg = "Cannot convert to resource type";
+                _vm.emit_warning(msg);
+                return Ok(Value::False);
+            }
+            _ => {
+                let msg = "settype(): Argument #2 ($type) must be a valid type";
+                let exc = _vm.create_exception(b"ValueError", msg, _vm.current_line);
+                _vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.to_string(), line: _vm.current_line });
+            }
         };
         *r.borrow_mut() = new_val;
         Ok(Value::True)
@@ -506,10 +516,23 @@ fn is_countable(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn is_iterable(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn is_iterable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     Ok(match val {
         Value::Array(_) | Value::Generator(_) => Value::True,
+        Value::Object(obj) => {
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Check if object implements Traversable (which includes Iterator, IteratorAggregate)
+            if let Some(class_def) = vm.get_class_def(&class_lower) {
+                let implements_traversable = class_def.interfaces.iter().any(|iface| {
+                    let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    matches!(iface_lower.as_slice(), b"traversable" | b"iterator" | b"iteratoraggregate")
+                });
+                if implements_traversable { Value::True } else { Value::False }
+            } else {
+                Value::False
+            }
+        }
         _ => Value::False,
     })
 }
