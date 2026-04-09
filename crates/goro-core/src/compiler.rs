@@ -3381,7 +3381,7 @@ impl Compiler {
                                 // Check for promoted properties in non-constructors
                                 if mn_lower != b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some() || param.readonly || param.is_final {
+                                        if param.visibility.is_some() || param.readonly || param.is_final || param.get_hook.is_some() || param.set_hook.is_some() {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property outside a constructor".to_string(),
                                                 line: stmt.span.line,
@@ -3392,7 +3392,7 @@ impl Compiler {
                                 // Check for promoted properties in abstract constructors
                                 if mn_lower == b"__construct" && *is_abstract {
                                     for param in params {
-                                        if param.visibility.is_some() || param.readonly || param.is_final {
+                                        if param.visibility.is_some() || param.readonly || param.is_final || param.get_hook.is_some() || param.set_hook.is_some() {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property in an abstract constructor".to_string(),
                                                 line: stmt.span.line,
@@ -3402,7 +3402,7 @@ impl Compiler {
                                 }
                                 if mn_lower == b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some() || param.set_visibility.is_some() || param.is_final {
+                                        if param.visibility.is_some() || param.set_visibility.is_some() || param.is_final || param.get_hook.is_some() || param.set_hook.is_some() {
                                             let prop_vis = match param.visibility.as_ref().unwrap_or(&Visibility::Public) {
                                                 Visibility::Public => {
                                                     crate::object::Visibility::Public
@@ -3473,20 +3473,125 @@ impl Compiler {
                                             } else {
                                                 Value::Null
                                             };
+                                            let prom_has_get_hook = param.get_hook.is_some();
+                                            let prom_has_set_hook = param.set_hook.is_some();
+                                            // Determine if promoted property with hooks is virtual
+                                            let prom_is_virtual = if prom_has_get_hook || prom_has_set_hook {
+                                                let get_uses_backing = param.get_hook.as_ref()
+                                                    .map(|body| stmts_reference_backing_store(body, &param.name))
+                                                    .unwrap_or(false);
+                                                let set_uses_backing = param.set_hook.as_ref()
+                                                    .map(|(_, body)| stmts_reference_backing_store(body, &param.name))
+                                                    .unwrap_or(false);
+                                                !get_uses_backing && !set_uses_backing
+                                            } else {
+                                                false
+                                            };
                                             class.properties.push(PropertyDef {
                                                 name: param.name.clone(),
                                                 default: promoted_default,
                                                 is_static: false,
                                                 visibility: prop_vis,
                                                 set_visibility: obj_set_vis_cpp,
-                                                declaring_class: declaring_class_lower,
+                                                declaring_class: declaring_class_lower.clone(),
                                                 is_readonly: param.readonly || modifiers.is_readonly,
                                                 property_type: promoted_prop_type,
-                                                has_get_hook: false,
-                                                has_set_hook: false,
-                                                is_virtual: false,
+                                                has_get_hook: prom_has_get_hook,
+                                                has_set_hook: prom_has_set_hook,
+                                                is_virtual: prom_is_virtual,
                                                 attributes: pa,
                                             });
+                                            // Compile promoted property get hook
+                                            if let Some(hook_body) = &param.get_hook {
+                                                let hook_method_name = format!("__property_get_{}", String::from_utf8_lossy(&param.name));
+                                                let hook_display_name = format!("${}::get", String::from_utf8_lossy(&param.name));
+                                                let mut hook_compiler = Compiler::new();
+                                                hook_compiler.current_namespace = self.current_namespace.clone();
+                                                hook_compiler.use_map = self.use_map.clone();
+                                                hook_compiler.use_function_map = self.use_function_map.clone();
+                                                hook_compiler.use_const_map = self.use_const_map.clone();
+                                                hook_compiler.op_array.name = hook_display_name.into_bytes();
+                                                hook_compiler.op_array.decl_line = *method_line;
+                                                hook_compiler.op_array.strict_types = self.op_array.strict_types;
+                                                hook_compiler.source_file = self.source_file.clone();
+                                                hook_compiler.current_class = Some(qualified_name.clone());
+                                                hook_compiler.current_parent_class = class.parent.clone();
+                                                hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                                hook_compiler.anon_class_name_map = self.anon_class_name_map.clone();
+                                                hook_compiler.op_array.get_or_create_cv(b"this");
+                                                hook_compiler.op_array.param_count = 1;
+                                                hook_compiler.op_array.required_param_count = 0;
+                                                for s in hook_body.iter() {
+                                                    hook_compiler.compile_stmt(s)?;
+                                                }
+                                                let null_idx = hook_compiler.op_array.add_literal(Value::Null);
+                                                hook_compiler.op_array.emit(Op {
+                                                    opcode: OpCode::Return,
+                                                    op1: OperandType::Const(null_idx),
+                                                    op2: OperandType::Unused,
+                                                    result: OperandType::Unused,
+                                                    line: 0,
+                                                });
+                                                let lower_hook_name: Vec<u8> = hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                                                class.methods.insert(lower_hook_name, MethodDef {
+                                                    name: hook_method_name.into_bytes(),
+                                                    op_array: hook_compiler.op_array,
+                                                    param_count: 0,
+                                                    is_static: false,
+                                                    is_abstract: false,
+                                                    is_final: false,
+                                                    visibility: ObjVisibility::Public,
+                                                    declaring_class: declaring_class_lower.clone(),
+                                                    doc_comment: None,
+                                                    attributes: Vec::new(),
+                                                });
+                                            }
+                                            // Compile promoted property set hook
+                                            if let Some((set_param_name, hook_body)) = &param.set_hook {
+                                                let hook_method_name = format!("__property_set_{}", String::from_utf8_lossy(&param.name));
+                                                let hook_display_name = format!("${}::set", String::from_utf8_lossy(&param.name));
+                                                let mut hook_compiler = Compiler::new();
+                                                hook_compiler.current_namespace = self.current_namespace.clone();
+                                                hook_compiler.use_map = self.use_map.clone();
+                                                hook_compiler.use_function_map = self.use_function_map.clone();
+                                                hook_compiler.use_const_map = self.use_const_map.clone();
+                                                hook_compiler.op_array.name = hook_display_name.into_bytes();
+                                                hook_compiler.op_array.decl_line = *method_line;
+                                                hook_compiler.op_array.strict_types = self.op_array.strict_types;
+                                                hook_compiler.source_file = self.source_file.clone();
+                                                hook_compiler.current_class = Some(qualified_name.clone());
+                                                hook_compiler.current_parent_class = class.parent.clone();
+                                                hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                                hook_compiler.anon_class_name_map = self.anon_class_name_map.clone();
+                                                hook_compiler.op_array.get_or_create_cv(b"this");
+                                                hook_compiler.op_array.get_or_create_cv(set_param_name);
+                                                hook_compiler.op_array.param_count = 2;
+                                                hook_compiler.op_array.required_param_count = 1;
+                                                for s in hook_body.iter() {
+                                                    hook_compiler.compile_stmt(s)?;
+                                                }
+                                                let null_idx = hook_compiler.op_array.add_literal(Value::Null);
+                                                hook_compiler.op_array.emit(Op {
+                                                    opcode: OpCode::Return,
+                                                    op1: OperandType::Const(null_idx),
+                                                    op2: OperandType::Unused,
+                                                    result: OperandType::Unused,
+                                                    line: 0,
+                                                });
+                                                let lower_hook_name: Vec<u8> = hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                                                class.methods.insert(lower_hook_name, MethodDef {
+                                                    name: hook_method_name.into_bytes(),
+                                                    op_array: hook_compiler.op_array,
+                                                    param_count: 1,
+                                                    is_static: false,
+                                                    is_abstract: false,
+                                                    is_final: false,
+                                                    visibility: ObjVisibility::Public,
+                                                    declaring_class: declaring_class_lower.clone(),
+                                                    doc_comment: None,
+                                                    attributes: Vec::new(),
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -3711,7 +3816,7 @@ impl Compiler {
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if method_name_lower == b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some() {
+                                        if param.visibility.is_some() || param.get_hook.is_some() || param.set_hook.is_some() {
                                             // Promoted param: assign to $this->name
                                             let this_cv = 0u32; // $this is always CV 0
                                             let param_cv = method_compiler
@@ -4010,7 +4115,23 @@ impl Compiler {
                                     }
                                     ExprKind::Identifier(name) => {
                                         let name_lower_lc: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                        self.resolve_class_const_magic(&name_lower_lc, &qualified_name, const_expr.span.line)
+                                        let magic_val = self.resolve_class_const_magic(&name_lower_lc, &qualified_name, const_expr.span.line);
+                                        if !matches!(magic_val, Value::Null) {
+                                            magic_val
+                                        } else {
+                                            // Unknown identifier - create a deferred global constant lookup marker
+                                            let resolved_name = if self.current_namespace.is_empty() {
+                                                name.clone()
+                                            } else {
+                                                let mut fqn = self.current_namespace.clone();
+                                                fqn.push(b'\\');
+                                                fqn.extend_from_slice(name);
+                                                fqn
+                                            };
+                                            let mut marker = b"__deferred_global_const__::".to_vec();
+                                            marker.extend_from_slice(&resolved_name);
+                                            Value::String(PhpString::from_vec(marker))
+                                        }
                                     }
                                     ExprKind::Array(elements) => {
                                         // Handle arrays containing class constant references
@@ -8831,6 +8952,37 @@ impl Compiler {
                     b"php_int_size" => Some(Value::Long(8)),
                     b"php_major_version" => Some(Value::Long(8)),
                     b"php_minor_version" => Some(Value::Long(5)),
+                    b"php_float_dig" => Some(Value::Long(15)),
+                    b"php_float_epsilon" => Some(Value::Double(f64::EPSILON)),
+                    b"php_float_max" => Some(Value::Double(f64::MAX)),
+                    b"php_float_min" => Some(Value::Double(f64::MIN_POSITIVE)),
+                    b"php_float_inf" => Some(Value::Double(f64::INFINITY)),
+                    b"php_float_nan" => Some(Value::Double(f64::NAN)),
+                    b"php_maxpathlen" => Some(Value::Long(4096)),
+                    b"php_prefix" => Some(Value::String(PhpString::from_bytes(b"/usr"))),
+                    b"php_os" => Some(Value::String(PhpString::from_bytes(b"Linux"))),
+                    b"php_os_family" => Some(Value::String(PhpString::from_bytes(b"Linux"))),
+                    b"php_sapi" => Some(Value::String(PhpString::from_bytes(b"cli"))),
+                    b"php_version" => Some(Value::String(PhpString::from_bytes(b"8.5.0-goro"))),
+                    b"php_version_id" => Some(Value::Long(80500)),
+                    b"php_release_version" => Some(Value::Long(0)),
+                    b"php_extra_version" => Some(Value::String(PhpString::from_bytes(b"-goro"))),
+                    b"php_debug" => Some(Value::Long(0)),
+                    b"php_zts" => Some(Value::Long(0)),
+                    b"php_binary" => Some(Value::String(PhpString::from_bytes(b"/usr/bin/php"))),
+                    b"php_bindir" => Some(Value::String(PhpString::from_bytes(b"/usr/bin"))),
+                    b"php_libdir" => Some(Value::String(PhpString::from_bytes(b"/usr/lib"))),
+                    b"php_datadir" => Some(Value::String(PhpString::from_bytes(b"/usr/share"))),
+                    b"php_sysconfdir" => Some(Value::String(PhpString::from_bytes(b"/etc"))),
+                    b"php_localstatedir" => Some(Value::String(PhpString::from_bytes(b"/var"))),
+                    b"php_config_file_path" => Some(Value::String(PhpString::from_bytes(b"/etc"))),
+                    b"php_config_file_scan_dir" => Some(Value::String(PhpString::from_bytes(b""))),
+                    b"php_extension_dir" => Some(Value::String(PhpString::from_bytes(b"."))),
+                    b"directory_separator" | b"dirsep" => Some(Value::String(PhpString::from_bytes(b"/"))),
+                    b"path_separator" => Some(Value::String(PhpString::from_bytes(b":"))),
+                    b"stdin" | b"stdout" | b"stderr" => None, // resources can't be const
+                    b"nan" => Some(Value::Double(f64::NAN)),
+                    b"inf" => Some(Value::Double(f64::INFINITY)),
                     _ => None,
                 }
             }
@@ -8852,6 +9004,47 @@ impl Compiler {
                     }
                 } else {
                     Some(Value::Null) // accessing array offset on non-array
+                }
+            }
+            // Cast expressions in constant contexts
+            ExprKind::Cast(cast_type, operand) => {
+                let val = Self::eval_const_expr(operand)?;
+                match cast_type {
+                    CastType::Int => Some(Value::Long(val.to_long())),
+                    CastType::Float => Some(Value::Double(val.to_double())),
+                    CastType::String => Some(Value::String(val.to_php_string())),
+                    CastType::Bool => Some(if val.is_truthy() { Value::True } else { Value::False }),
+                    CastType::Array => {
+                        match val {
+                            Value::Array(_) => Some(val),
+                            Value::Null => Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(crate::array::PhpArray::new())))),
+                            other => {
+                                let mut arr = crate::array::PhpArray::new();
+                                arr.push(other);
+                                Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            // FunctionCall in const expr (limited support for common functions)
+            ExprKind::FunctionCall { name, args } => {
+                if let ExprKind::Identifier(func_name) = &name.kind {
+                    let lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    match lower.as_slice() {
+                        b"strlen" if args.len() == 1 => {
+                            let val = Self::eval_const_expr(&args[0].value)?;
+                            if let Value::String(s) = val {
+                                Some(Value::Long(s.len() as i64))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
                 }
             }
             _ => None,

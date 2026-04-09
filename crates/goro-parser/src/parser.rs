@@ -305,7 +305,7 @@ impl Parser {
                     span,
                 })
             }
-            TokenKind::AttributeOpen => { let attributes = self.parse_attributes()?; match self.peek() { TokenKind::Function => self.parse_function_decl_with_attrs(attributes), TokenKind::Class | TokenKind::Abstract | TokenKind::Final | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => self.parse_class_decl_with_attrs(attributes), TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface) => self.parse_class_decl_with_attrs(attributes), _ => self.parse_statement(), } }
+            TokenKind::AttributeOpen => { let attributes = self.parse_attributes()?; match self.peek() { TokenKind::Function => self.parse_function_decl_with_attrs(attributes), TokenKind::Class | TokenKind::Abstract | TokenKind::Final | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => self.parse_class_decl_with_attrs(attributes), TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface | TokenKind::Readonly) => self.parse_class_decl_with_attrs(attributes), _ => self.parse_statement(), } }
             TokenKind::Function => self.parse_function_decl_with_attrs(Vec::new()),
             TokenKind::Class
             | TokenKind::Abstract
@@ -316,7 +316,7 @@ impl Parser {
             TokenKind::Readonly => {
                 // readonly can be a class modifier (readonly class Foo {}) or a function call
                 // Check if followed by class/enum/abstract/final/function
-                if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface) {
+                if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface | TokenKind::Readonly) {
                     self.parse_class_decl_with_attrs(Vec::new())
                 } else {
                     // Treat 'readonly' as identifier for function call etc.
@@ -1238,6 +1238,14 @@ impl Parser {
                 None
             };
 
+            // Parse property hooks for promoted properties: public int $x { get => ...; set => ...; }
+            // Hooks can appear even without explicit visibility modifier (implicit promotion in PHP 8.4)
+            let (param_get_hook, param_set_hook) = if matches!(self.peek(), TokenKind::OpenBrace) {
+                self.parse_property_hooks(&name)?
+            } else {
+                (None, None)
+            };
+
             params.push(Param {
                 name,
                 type_hint,
@@ -1249,6 +1257,8 @@ impl Parser {
                 readonly,
                 is_final,
                 attributes: param_attributes,
+                get_hook: param_get_hook,
+                set_hook: param_set_hook,
             });
 
             if !self.eat(&TokenKind::Comma) {
@@ -1510,6 +1520,12 @@ impl Parser {
                     self.advance();
                 }
                 TokenKind::Readonly => {
+                    if modifiers.is_readonly {
+                        return Err(ParseError {
+                            message: "Multiple readonly modifiers are not allowed".into(),
+                            span: self.span(),
+                        });
+                    }
                     modifiers.is_readonly = true;
                     self.advance();
                 }
@@ -4084,6 +4100,50 @@ impl Parser {
             TokenKind::New => {
                 self.advance();
                 let _anon_attrs = if matches!(self.peek(), TokenKind::AttributeOpen) { self.parse_attributes()? } else { Vec::new() };
+                // Check for class modifiers before anonymous class: new readonly class, new abstract class, etc.
+                let mut anon_modifiers = ClassModifiers::default();
+                let mut has_anon_modifiers = false;
+                loop {
+                    match self.peek() {
+                        TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Readonly | TokenKind::Abstract | TokenKind::Final) => {
+                            if anon_modifiers.is_readonly {
+                                return Err(ParseError {
+                                    message: "Multiple readonly modifiers are not allowed".into(),
+                                    span: self.span(),
+                                });
+                            }
+                            anon_modifiers.is_readonly = true;
+                            has_anon_modifiers = true;
+                            self.advance();
+                        }
+                        TokenKind::Abstract if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Readonly | TokenKind::Abstract | TokenKind::Final) => {
+                            anon_modifiers.is_abstract = true;
+                            has_anon_modifiers = true;
+                            self.advance();
+                        }
+                        TokenKind::Final if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Readonly | TokenKind::Abstract | TokenKind::Final) => {
+                            anon_modifiers.is_final = true;
+                            has_anon_modifiers = true;
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
+                // Validate modifier combinations for anonymous classes
+                if has_anon_modifiers && matches!(self.peek(), TokenKind::Class) {
+                    if anon_modifiers.is_abstract {
+                        return Err(ParseError {
+                            message: "Cannot use the abstract modifier on an anonymous class".into(),
+                            span: self.span(),
+                        });
+                    }
+                    if anon_modifiers.is_final {
+                        return Err(ParseError {
+                            message: "Cannot use the final modifier on an anonymous class".into(),
+                            span: self.span(),
+                        });
+                    }
+                }
                 // Parse class name (not a full primary expression - don't consume parens)
                 let class_span = self.span();
                 let class = match self.peek().clone() {
@@ -4256,7 +4316,7 @@ impl Parser {
                         let class_stmt = Statement {
                             kind: StmtKind::ClassDecl {
                                 name: anon_name.as_bytes().to_vec(),
-                                modifiers: ClassModifiers::default(),
+                                modifiers: anon_modifiers,
                                 extends,
                                 implements,
                                 body,

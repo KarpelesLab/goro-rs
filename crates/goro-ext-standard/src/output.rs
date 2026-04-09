@@ -717,7 +717,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
             let obj_borrow = obj.borrow();
             // Check if this is an enum case object
             if obj_borrow.has_property(b"__enum_case") {
-                let class_name = String::from_utf8_lossy(&obj_borrow.class_name).into_owned();
+                let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
                 let prefix = " ".repeat(indent);
                 // Determine backing type from stored property
                 let has_backing = obj_borrow.has_property(b"__enum_backing_type");
@@ -743,7 +743,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
                 buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
                 return;
             }
-            let class_name = String::from_utf8_lossy(&obj_borrow.class_name).into_owned();
+            let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
             let class_lower: Vec<u8> = obj_borrow
                 .class_name
                 .iter()
@@ -972,7 +972,7 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             let obj_borrow = obj.borrow();
             // Check if this is an enum case
             if obj_borrow.has_property(b"__enum_case") {
-                let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+                let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
                 let case_name = obj_borrow.get_property(b"name");
                 let case_name_str = case_name.to_php_string().to_string_lossy();
                 // PHP always adds a leading \ to enum class names in var_export
@@ -980,7 +980,7 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                 buf.extend_from_slice(format!("{}{}::{}", prefix_backslash, class_name, case_name_str).as_bytes());
                 return;
             }
-            let class_name = String::from_utf8_lossy(&obj_borrow.class_name);
+            let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
             let class_lower = class_name.to_ascii_lowercase();
             if class_lower == "stdclass" {
                 // PHP 8.2+: stdClass uses (object) array(...) format

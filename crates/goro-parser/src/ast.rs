@@ -60,7 +60,7 @@ pub enum IncludeKind { Include, IncludeOnce, Require, RequireOnce }
 #[derive(Debug, Clone)]
 pub struct Argument { pub name: Option<Vec<u8>>, pub value: Expr, pub unpack: bool }
 #[derive(Debug, Clone)]
-pub struct Param { pub name: Vec<u8>, pub type_hint: Option<TypeHint>, pub default: Option<Expr>, pub by_ref: bool, pub variadic: bool, pub visibility: Option<Visibility>, pub set_visibility: Option<Visibility>, pub readonly: bool, pub is_final: bool, pub attributes: Vec<Attribute> }
+pub struct Param { pub name: Vec<u8>, pub type_hint: Option<TypeHint>, pub default: Option<Expr>, pub by_ref: bool, pub variadic: bool, pub visibility: Option<Visibility>, pub set_visibility: Option<Visibility>, pub readonly: bool, pub is_final: bool, pub attributes: Vec<Attribute>, pub get_hook: Option<Vec<Statement>>, pub set_hook: Option<(Vec<u8>, Vec<Statement>)> }
 #[derive(Debug, Clone)]
 pub enum TypeHint { Simple(Vec<u8>), Nullable(Box<TypeHint>), Union(Vec<TypeHint>), Intersection(Vec<TypeHint>) }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

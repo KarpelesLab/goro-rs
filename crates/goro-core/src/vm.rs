@@ -1671,14 +1671,14 @@ impl Vm {
         };
         match (&a_inner, &b_inner) {
             (Value::Object(obj), Value::Long(_)) | (Value::Long(_), Value::Object(obj)) => {
-                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                let class_name = crate::value::display_class_name(&obj.borrow().class_name);
                 self.emit_notice_at(
                     &format!("Object of class {} could not be converted to int", class_name),
                     line,
                 );
             }
             (Value::Object(obj), Value::Double(_)) | (Value::Double(_), Value::Object(obj)) => {
-                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                let class_name = crate::value::display_class_name(&obj.borrow().class_name);
                 self.emit_notice_at(
                     &format!("Object of class {} could not be converted to float", class_name),
                     line,
@@ -1764,7 +1764,7 @@ impl Vm {
             Value::Double(_) => "float".to_string(),
             Value::String(_) => "string".to_string(),
             Value::Array(_) => "array".to_string(),
-            Value::Object(obj) => String::from_utf8_lossy(&obj.borrow().class_name).into_owned(),
+            Value::Object(obj) => crate::value::display_class_name(&obj.borrow().class_name),
             Value::Generator(_) => "Generator".to_string(),
             Value::Reference(r) => Self::value_type_name(&r.borrow()),
         }
@@ -3718,12 +3718,12 @@ impl Vm {
             Value::Object(obj) => {
                 let obj_ref = obj.borrow();
                 if obj_ref.has_property(b"__enum_case") {
-                    let class_name = String::from_utf8_lossy(&obj_ref.class_name);
+                    let class_name = crate::value::display_class_name(&obj_ref.class_name);
                     let case_name = obj_ref.get_property(b"name");
                     let case_name_str = case_name.to_php_string().to_string_lossy();
                     format!("{}::{}", class_name, case_name_str)
                 } else {
-                    format!("Object({})", String::from_utf8_lossy(&obj_ref.class_name))
+                    format!("Object({})", crate::value::display_class_name(&obj_ref.class_name))
                 }
             }
             Value::Reference(r) => {
@@ -6446,7 +6446,7 @@ impl Vm {
                             // Validate $flags parameter type
                             if let Some(flags_val) = args.get(1) {
                                 if matches!(flags_val, Value::String(_)) {
-                                    let class_display = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                    let class_display = crate::value::display_class_name(&obj.borrow().class_name);
                                     let msg = format!("{}::ksort(): Argument #1 ($flags) must be of type int, string given", class_display);
                                     let exc = self.create_exception(b"TypeError", &msg, 0);
                                     self.current_exception = Some(exc);
@@ -6478,7 +6478,7 @@ impl Vm {
                             // Validate $flags parameter type
                             if let Some(flags_val) = args.get(1) {
                                 if matches!(flags_val, Value::String(_)) {
-                                    let class_display = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                    let class_display = crate::value::display_class_name(&obj.borrow().class_name);
                                     let msg = format!("{}::asort(): Argument #1 ($flags) must be of type int, string given", class_display);
                                     let exc = self.create_exception(b"TypeError", &msg, 0);
                                     self.current_exception = Some(exc);
@@ -6505,7 +6505,7 @@ impl Vm {
                             // Validate argument count: natsort() takes 0 arguments
                             let extra_args = args.len().saturating_sub(1); // exclude $this
                             if extra_args > 0 {
-                                let class_display = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
                                 let msg = format!("{}::natsort() expects exactly 0 arguments, {} given", class_display, extra_args);
                                 let exc = self.create_exception(b"ArgumentCountError", &msg, 0);
                                 self.current_exception = Some(exc);
@@ -6532,7 +6532,7 @@ impl Vm {
                             // Validate argument count: natcasesort() takes 0 arguments
                             let extra_args = args.len().saturating_sub(1);
                             if extra_args > 0 {
-                                let class_display = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
                                 let msg = format!("{}::natcasesort() expects exactly 0 arguments, {} given", class_display, extra_args);
                                 let exc = self.create_exception(b"ArgumentCountError", &msg, 0);
                                 self.current_exception = Some(exc);
@@ -6559,7 +6559,7 @@ impl Vm {
                             // Validate: uasort() expects exactly 1 argument
                             let extra_args = args.len().saturating_sub(1);
                             if extra_args != 1 {
-                                let class_display = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
                                 let msg = format!("{}::uasort() expects exactly 1 argument, {} given", class_display, extra_args);
                                 let exc = self.create_exception(b"ArgumentCountError", &msg, 0);
                                 self.current_exception = Some(exc);
@@ -6601,7 +6601,7 @@ impl Vm {
                             // Validate: uksort() expects exactly 1 argument
                             let extra_args = args.len().saturating_sub(1);
                             if extra_args != 1 {
-                                let class_display = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
                                 let msg = format!("{}::uksort() expects exactly 1 argument, {} given", class_display, extra_args);
                                 let exc = self.create_exception(b"ArgumentCountError", &msg, 0);
                                 self.current_exception = Some(exc);
@@ -10042,6 +10042,23 @@ impl Vm {
                     return Value::String(PhpString::from_vec(closure_name.to_vec()));
                 }
             }
+            if s_bytes.starts_with(b"__deferred_global_const__::") {
+                let const_name = &s_bytes[b"__deferred_global_const__::".len()..];
+                // Look up in the global constants table
+                if let Some(v) = self.constants.get(const_name) {
+                    return v.clone();
+                }
+                // Try the unqualified name as fallback
+                if const_name.contains(&b'\\') {
+                    if let Some(last_sep) = const_name.iter().rposition(|&b| b == b'\\') {
+                        let global_name = &const_name[last_sep + 1..];
+                        if let Some(v) = self.constants.get(global_name) {
+                            return v.clone();
+                        }
+                    }
+                }
+                return Value::Null;
+            }
             if s_bytes.starts_with(b"__deferred_const__::") {
                 let rest = &s_bytes[b"__deferred_const__::".len()..];
                 if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
@@ -10072,6 +10089,21 @@ impl Vm {
 
     /// Resolve a single deferred value reference (either a deferred const or a literal)
     fn resolve_single_deferred_operand(&self, s: &[u8], self_class_lower: &[u8], class: &ClassEntry) -> Value {
+        if s.starts_with(b"__deferred_global_const__::") {
+            let const_name = &s[b"__deferred_global_const__::".len()..];
+            if let Some(v) = self.constants.get(const_name) {
+                return v.clone();
+            }
+            if const_name.contains(&b'\\') {
+                if let Some(last_sep) = const_name.iter().rposition(|&b| b == b'\\') {
+                    let global_name = &const_name[last_sep + 1..];
+                    if let Some(v) = self.constants.get(global_name) {
+                        return v.clone();
+                    }
+                }
+            }
+            return Value::Null;
+        }
         if s.starts_with(b"__deferred_const__::") {
             let rest = &s[b"__deferred_const__::".len()..];
             if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
@@ -12380,7 +12412,7 @@ impl Vm {
                             } else {
                                 let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
                                     let ob = obj.borrow();
-                                    let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                    let class = crate::value::display_class_name(&ob.class_name);
                                     let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
                                     format!("Uncaught {}: {}", class, msg)
                                 } else {
@@ -13148,7 +13180,7 @@ impl Vm {
                                     }
                                     let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
                                         let ob = obj.borrow();
-                                        let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                        let class = crate::value::display_class_name(&ob.class_name);
                                         let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
                                         format!("Uncaught {}: {}", class, msg)
                                     } else { "Uncaught exception".to_string() };
@@ -13172,7 +13204,7 @@ impl Vm {
                                 }
                                 let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
                                     let ob = obj.borrow();
-                                    let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                    let class = crate::value::display_class_name(&ob.class_name);
                                     let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
                                     format!("Uncaught {}: {}", class, msg)
                                 } else { "Uncaught exception".to_string() };
@@ -13214,7 +13246,7 @@ impl Vm {
 
                             if !is_throwable {
                                 let type_name = if let Value::Object(obj) = &exception {
-                                    String::from_utf8_lossy(&obj.borrow().class_name).to_string()
+                                    crate::value::display_class_name(&obj.borrow().class_name)
                                 } else {
                                     Vm::value_type_name(&exception).to_string()
                                 };
@@ -13240,7 +13272,7 @@ impl Vm {
                                 }
                                 let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
                                     let ob = obj.borrow();
-                                    let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                    let class = crate::value::display_class_name(&ob.class_name);
                                     let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
                                     format!("Uncaught {}: {}", class, msg)
                                 } else { "Uncaught exception".to_string() };
@@ -13260,7 +13292,7 @@ impl Vm {
                                     }
                                     let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
                                         let ob = obj.borrow();
-                                        let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                        let class = crate::value::display_class_name(&ob.class_name);
                                         let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
                                         format!("Uncaught {}: {}", class, msg)
                                     } else { "Uncaught exception".to_string() };
@@ -13581,7 +13613,7 @@ impl Vm {
                                         // Extract exception message for uncaught error
                                         let msg = if let Some(Value::Object(exc_obj)) = &self.current_exception {
                                             let exc = exc_obj.borrow();
-                                            let class = String::from_utf8_lossy(&exc.class_name).to_string();
+                                            let class = crate::value::display_class_name(&exc.class_name);
                                             let message = exc.get_property(b"message").to_php_string().to_string_lossy();
                                             format!("Uncaught {}: {}", class, message)
                                         } else {
@@ -14522,7 +14554,7 @@ impl Vm {
                                                         obj_mut = obj.borrow_mut();
                                                     }
                                                     Value::Object(o) => {
-                                                        let class = String::from_utf8_lossy(&o.borrow().class_name).to_string();
+                                                        let class = crate::value::display_class_name(&o.borrow().class_name);
                                                         drop(obj_mut);
                                                         let msg = format!("SplFixedArray::__construct(): Argument #1 ($size) must be of type int, {} given", class);
                                                         let exc = self.throw_type_error(msg.clone());
@@ -15441,7 +15473,7 @@ impl Vm {
                     if let Value::Object(obj) = &val {
                         let class_name = {
                             let borrowed = obj.borrow();
-                            String::from_utf8_lossy(&borrowed.class_name).into_owned()
+                            crate::value::display_class_name(&borrowed.class_name)
                         };
                         self.emit_warning_at(
                             &format!(
@@ -15464,7 +15496,7 @@ impl Vm {
                     if let Value::Object(obj) = &val {
                         let class_name = {
                             let borrowed = obj.borrow();
-                            String::from_utf8_lossy(&borrowed.class_name).into_owned()
+                            crate::value::display_class_name(&borrowed.class_name)
                         };
                         self.emit_warning_at(
                             &format!(
@@ -15928,7 +15960,7 @@ impl Vm {
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[$key] -> offsetGet($key)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let class_name_orig = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                        let class_name_orig = crate::value::display_class_name(&obj.borrow().class_name);
                         // Check if class implements ArrayAccess
                         let is_spl_array = matches!(class_lower.as_slice(),
                             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
@@ -16048,7 +16080,7 @@ impl Vm {
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[$key] -> offsetGet($key)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let class_name_orig = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                        let class_name_orig = crate::value::display_class_name(&obj.borrow().class_name);
                         let is_spl_array = matches!(class_lower.as_slice(),
                             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
                             b"splfixedarray" | b"splobjectstorage" |
@@ -17202,7 +17234,7 @@ impl Vm {
                         // Store exception and return error
                         let msg = if let Value::Object(obj) = &exc_val {
                             let obj = obj.borrow();
-                            let class = String::from_utf8_lossy(&obj.class_name).to_string();
+                            let class = crate::value::display_class_name(&obj.class_name);
                             let message = obj.get_property(b"message");
                             format!(
                                 "Uncaught {}: {}",
@@ -17384,7 +17416,23 @@ impl Vm {
                                     }
                                 }
                             }
-                            let raw_val = raw_val_opt.unwrap_or(Value::Null);
+                            let mut raw_val = raw_val_opt.unwrap_or(Value::Null);
+                            // Check if this is a deferred global constant marker
+                            if let Value::String(ref s) = raw_val {
+                                if s.as_bytes().starts_with(b"__deferred_global_const__::") {
+                                    let const_name = s.as_bytes()[b"__deferred_global_const__::".len()..].to_vec();
+                                    if let Some(v) = self.constants.get(const_name.as_slice()) {
+                                        raw_val = v.clone();
+                                    } else if const_name.contains(&b'\\') {
+                                        if let Some(last_sep) = const_name.iter().rposition(|&b| b == b'\\') {
+                                            let global_name = &const_name[last_sep + 1..];
+                                            if let Some(v) = self.constants.get(global_name) {
+                                                raw_val = v.clone();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             // Check if this is a deferred (unresolved) constant marker
                             if let Value::String(s) = &raw_val {
                                 if s.as_bytes().starts_with(b"__deferred_const__::") {
@@ -17993,7 +18041,7 @@ impl Vm {
                             // Check if this is an uncloneable object
                             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if class_lower == b"generator" || class_lower == b"closure" || obj_borrow.has_property(b"__enum_case") {
-                                let class_name = String::from_utf8_lossy(&obj_borrow.class_name).to_string();
+                                let class_name = crate::value::display_class_name(&obj_borrow.class_name);
                                 drop(obj_borrow);
                                 let msg = format!("Trying to clone an uncloneable object of class {}", class_name);
                                 let exc_val = self.create_exception(b"Error", &msg, op.line);
@@ -18026,7 +18074,7 @@ impl Vm {
                             let new_obj_val = Value::Object(Rc::new(RefCell::new(new_obj)));
                             // Call __clone() if defined
                             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let class_name_display = String::from_utf8_lossy(&obj_borrow.class_name).to_string();
+                            let class_name_display = crate::value::display_class_name(&obj_borrow.class_name);
                             drop(obj_borrow);
                             if let Some(class_def) = self.classes.get(&class_lower) {
                                 if let Some(clone_method) = class_def.get_method(b"__clone") {
@@ -18084,7 +18132,7 @@ impl Vm {
                                         let exc = self.current_exception.clone().unwrap();
                                         let msg = if let Value::Object(e) = &exc {
                                             let e_borrow = e.borrow();
-                                            let class_name = String::from_utf8_lossy(&e_borrow.class_name).to_string();
+                                            let class_name = crate::value::display_class_name(&e_borrow.class_name);
                                             let message = e_borrow.get_property(b"message").to_php_string().to_string_lossy();
                                             format!("Uncaught {}: {}", class_name, message)
                                         } else {
@@ -18318,7 +18366,7 @@ impl Vm {
                             let is_readonly = prop_str == "name"
                                 || (prop_str == "value" && obj.borrow().has_property(b"__enum_backing_type"));
                             if is_readonly {
-                                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let class_name = crate::value::display_class_name(&obj.borrow().class_name);
                                 let msg = format!("Cannot unset readonly property {}::${}", class_name, prop_str);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
@@ -18328,7 +18376,7 @@ impl Vm {
                                 }
                                 return Err(VmError { message: msg, line: op.line });
                             } else {
-                                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let class_name = crate::value::display_class_name(&obj.borrow().class_name);
                                 let msg = format!("Cannot unset dynamic property {}::${}", class_name, prop_str);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
@@ -18347,7 +18395,7 @@ impl Vm {
                         // Check readonly property unset protection
                         if let Some((_vis, _dc, prop_is_readonly, _pt, _sv)) = self.find_property_def_for_scope(&class_lower_u, prop_name.as_bytes(), caller_scope_u.as_deref()) {
                             if prop_is_readonly && !matches!(obj.borrow().get_property(b"__clone_window"), Value::True) {
-                                let class_display = String::from_utf8_lossy(&class_name_orig_u).to_string();
+                                let class_display = crate::value::display_class_name(&class_name_orig_u);
                                 let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
                                 let msg = format!("Cannot unset readonly property {}::${}", class_display, prop_str);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
@@ -18382,8 +18430,8 @@ impl Vm {
                                         };
                                         let declaring_lower_u: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         let class_display = self.classes.get(&declaring_lower_u)
-                                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                                            .unwrap_or_else(|| String::from_utf8_lossy(&declaring_class).to_string());
+                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .unwrap_or_else(|| crate::value::display_class_name(&declaring_class));
                                         let scope_str = if let Some(cs) = caller_scope.as_deref() {
                                             format!("scope {}", String::from_utf8_lossy(cs))
                                         } else {
@@ -18594,7 +18642,7 @@ impl Vm {
                         let exc = self.current_exception.as_ref().unwrap();
                         let msg = if let Value::Object(obj) = exc {
                             let obj = obj.borrow();
-                            let class = String::from_utf8_lossy(&obj.class_name).to_string();
+                            let class = crate::value::display_class_name(&obj.class_name);
                             let message = obj.get_property(b"message");
                             format!(
                                 "Uncaught {}: {}",
@@ -18941,7 +18989,7 @@ impl Vm {
                             } else {
                                 let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
                                     let ob = obj.borrow();
-                                    let class = String::from_utf8_lossy(&ob.class_name).to_string();
+                                    let class = crate::value::display_class_name(&ob.class_name);
                                     let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
                                     format!("Uncaught {}: {}", class, msg)
                                 } else {
@@ -19047,7 +19095,7 @@ impl Vm {
                         Value::Array(_) => "of type array".to_string(),
                         Value::Object(obj) => {
                             let obj_borrow = obj.borrow();
-                            let name = String::from_utf8_lossy(&obj_borrow.class_name);
+                            let name = crate::value::display_class_name(&obj_borrow.class_name);
                             if obj_borrow.has_property(b"__enum_case") {
                                 // For enums, show ClassName::CaseName
                                 if let Value::String(case_name) = obj_borrow.get_property(b"name") {
@@ -19077,7 +19125,7 @@ impl Vm {
                         self.current_exception = Some(exc_val.clone());
                         let msg = if let Value::Object(obj) = &exc_val {
                             let obj = obj.borrow();
-                            let class = String::from_utf8_lossy(&obj.class_name).to_string();
+                            let class = crate::value::display_class_name(&obj.class_name);
                             let message = obj.get_property(b"message");
                             format!(
                                 "Uncaught {}: {}",
@@ -21545,7 +21593,7 @@ impl Vm {
                                 .map(|p| p.has_set_hook && !p.has_get_hook && p.is_virtual)
                                 .unwrap_or(false);
                             if is_virtual_write_only {
-                                let class_display = String::from_utf8_lossy(&class_name_orig);
+                                let class_display = crate::value::display_class_name(&class_name_orig);
                                 let prop_display = String::from_utf8_lossy(prop_name_bytes);
                                 let msg = format!("Property {}::${} is write-only", class_display, prop_display);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
@@ -21730,7 +21778,7 @@ impl Vm {
                                             .map(|c| !c.properties.is_empty() || !c.methods.is_empty())
                                             .unwrap_or(false);
                                     if has_declared_props {
-                                        let class_display = String::from_utf8_lossy(&class_name_orig);
+                                        let class_display = crate::value::display_class_name(&class_name_orig);
                                         let prop_display = prop_name.to_string_lossy();
                                         self.emit_warning_at(&format!(
                                             "Undefined property: {}::${}",
@@ -21816,7 +21864,7 @@ impl Vm {
                                 .map(|p| p.has_get_hook && !p.has_set_hook && p.is_virtual)
                                 .unwrap_or(false);
                             if is_virtual_read_only {
-                                let class_display = String::from_utf8_lossy(&class_name_orig);
+                                let class_display = crate::value::display_class_name(&class_name_orig);
                                 let prop_display = String::from_utf8_lossy(prop_name_bytes_set);
                                 let msg = format!("Property {}::${} is read-only", class_display, prop_display);
                                 let exc = self.create_exception(b"Error", &msg, op.line);
@@ -21848,15 +21896,26 @@ impl Vm {
                             self.called_class_stack.pop();
                             self.class_scope_stack.pop();
                             self.property_hook_stack.pop();
-                            if let Err(e) = hook_result {
-                                if self.current_exception.is_some() {
-                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
-                                        exception_handlers.pop();
-                                        ip = catch_target as usize;
-                                        continue;
+                            match hook_result {
+                                Err(e) => {
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
+                                            exception_handlers.pop();
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                    }
+                                    return Err(e);
+                                }
+                                Ok(return_val) => {
+                                    // If the set hook returned a non-null value (short arrow syntax),
+                                    // assign it to the backing property
+                                    if !matches!(return_val, Value::Null) {
+                                        if let Value::Object(ref obj) = obj_val {
+                                            obj.borrow_mut().set_property(prop_name.as_bytes().to_vec(), return_val);
+                                        }
                                     }
                                 }
-                                return Err(e);
                             }
                             continue;
                         }
@@ -21877,7 +21936,7 @@ impl Vm {
 
                         // Enums cannot have properties set
                         if obj.borrow().has_property(b"__enum_case") {
-                            let class_name = String::from_utf8_lossy(&class_name_orig).to_string();
+                            let class_name = crate::value::display_class_name(&class_name_orig);
                             let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
                             // name and value are readonly properties on enums
                             let is_readonly_prop = prop_str == "name"
@@ -21901,7 +21960,7 @@ impl Vm {
                             if class_def.is_readonly {
                                 let prop_exists_in_def = class_def.properties.iter().any(|p| p.name == prop_name.as_bytes());
                                 if !prop_exists_in_def {
-                                    let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
+                                    let class_display = crate::value::display_class_name(&class_name_orig);
                                     let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
                                     let msg = format!("Cannot create dynamic property {}::${}", class_display, prop_str);
                                     let exc = self.create_exception(b"Error", &msg, op.line);
@@ -21946,8 +22005,8 @@ impl Vm {
                                         // Use declaring class original name for error display
                                         let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         let class_display = self.classes.get(&declaring_lower)
-                                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                                            .unwrap_or_else(|| String::from_utf8_lossy(&declaring_class).to_string());
+                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .unwrap_or_else(|| crate::value::display_class_name(&declaring_class));
                                         let scope_str = if let Some(cs) = caller_scope.as_deref() {
                                             format!("scope {}", String::from_utf8_lossy(cs))
                                         } else {
@@ -21977,8 +22036,8 @@ impl Vm {
                                         // Use declaring class name for the error message
                                         let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         let class_display = self.classes.get(&declaring_lower)
-                                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                                            .unwrap_or_else(|| String::from_utf8_lossy(&declaring_class).to_string());
+                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .unwrap_or_else(|| crate::value::display_class_name(&declaring_class));
                                         let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
                                         // If property has asymmetric set visibility, include it in the error
                                         if set_vis.is_some() && visibility_error.is_some() {
@@ -22009,7 +22068,7 @@ impl Vm {
                                         Self::coerce_value_to_type(&mut value, pt, false);
                                     }
                                     if !self.value_matches_type(&value, pt) {
-                                        let class_display = String::from_utf8_lossy(&class_name_orig).to_string();
+                                        let class_display = crate::value::display_class_name(&class_name_orig);
                                         let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
                                         let expected = self.param_type_name(pt);
                                         let given = Self::value_type_name(&value);
@@ -22491,7 +22550,7 @@ impl Vm {
                                     })
                                 }
                                 b"__tostring" => {
-                                    let class_display = String::from_utf8_lossy(&obj_borrow.class_name).to_string();
+                                    let class_display = crate::value::display_class_name(&obj_borrow.class_name);
                                     let message = obj_borrow.get_property(b"message").to_php_string().to_string_lossy();
                                     let file = obj_borrow.get_property(b"file").to_php_string().to_string_lossy();
                                     let line = obj_borrow.get_property(b"line").to_long();
@@ -23215,7 +23274,7 @@ impl Vm {
                 || self.class_extends(&class_lower, b"error");
             if is_throwable {
                 let obj_borrow = obj.borrow();
-                let class_display = String::from_utf8_lossy(&obj_borrow.class_name).to_string();
+                let class_display = crate::value::display_class_name(&obj_borrow.class_name);
                 let message = obj_borrow.get_property(b"message").to_php_string().to_string_lossy();
                 let file = obj_borrow.get_property(b"file").to_php_string().to_string_lossy();
                 let line = obj_borrow.get_property(b"line").to_long();
@@ -23365,7 +23424,7 @@ impl Vm {
             let is_gmp = class_lower == b"gmp";
             let is_simplexml = class_lower == b"simplexmlelement";
             if !has_tostring && !is_throwable && !is_reflection && !is_gmp && !is_simplexml {
-                let class_display = String::from_utf8_lossy(&class_name).to_string();
+                let class_display = crate::value::display_class_name(&class_name);
                 let msg = format!("Object of class {} could not be converted to string", class_display);
                 let exc = self.create_exception(b"Error", &msg, self.current_line);
                 self.current_exception = Some(exc);
@@ -23681,7 +23740,7 @@ impl Vm {
                         drop(gen_borrow);
                         let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
                             let ob = obj.borrow();
-                            format!("Uncaught {}: {}", String::from_utf8_lossy(&ob.class_name), ob.get_property(b"message").to_php_string().to_string_lossy())
+                            format!("Uncaught {}: {}", crate::value::display_class_name(&ob.class_name), ob.get_property(b"message").to_php_string().to_string_lossy())
                         } else { "Uncaught exception".to_string() };
                         return Err(VmError { message: exc_msg, line });
                     }
@@ -24700,7 +24759,7 @@ fn check_inc_dec_type(val: &Value, is_increment: bool) -> Option<String> {
         Value::Object(obj) => {
             let class_name = {
                 let o = obj.borrow();
-                String::from_utf8_lossy(&o.class_name).to_string()
+                crate::value::display_class_name(&o.class_name)
             };
             let op = if is_increment { "increment" } else { "decrement" };
             Some(format!("Cannot {} {}", op, class_name))

@@ -6312,7 +6312,7 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
             // Default serialization - use VM to look up property visibility
             {
                 let obj = obj.borrow();
-                let class_name_str = String::from_utf8_lossy(&obj.class_name);
+                let class_name_str = std::borrow::Cow::<str>::Owned(goro_core::value::display_class_name(&obj.class_name));
                 let class_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 let visible_props: Vec<_> = obj.properties.iter()
                     .filter(|(name, _)| !is_serialize_internal_property(name))
@@ -6431,7 +6431,7 @@ fn serialize_value_depth(val: &Value, depth: usize) -> String {
         }
         Value::Object(obj) => {
             let obj = obj.borrow();
-            let class_name = String::from_utf8_lossy(&obj.class_name);
+            let class_name = std::borrow::Cow::<str>::Owned(goro_core::value::display_class_name(&obj.class_name));
             // Filter out internal properties (same list as var_dump)
             let visible_props: Vec<_> = obj.properties.iter()
                 .filter(|(name, _)| !is_serialize_internal_property(name))
@@ -8756,7 +8756,7 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Err(VmError { message: msg, line: vm.current_line });
         }
         Value::Object(obj) => {
-            let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+            let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
             let msg = format!("Cannot access offset of type {} on array", class_name);
             let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
             vm.current_exception = Some(exc);

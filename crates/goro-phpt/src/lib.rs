@@ -808,7 +808,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                     let mut chain = Vec::new();
                     {
                         let obj_ref = obj.borrow();
-                        let class = String::from_utf8_lossy(&obj_ref.class_name).to_string();
+                        let class = goro_core::value::display_class_name(&obj_ref.class_name);
                         let msg_str = obj_ref.get_property(b"message").to_php_string().to_string_lossy();
                         let exc_file = obj_ref.get_property(b"file").to_php_string().to_string_lossy();
                         let exc_line = obj_ref.get_property(b"line").to_long();
@@ -824,7 +824,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                             let next_prev;
                             if let goro_core::value::Value::Object(prev_obj) = &prev {
                                 let prev_ref = prev_obj.borrow();
-                                let pc = String::from_utf8_lossy(&prev_ref.class_name).to_string();
+                                let pc = goro_core::value::display_class_name(&prev_ref.class_name);
                                 let pm = prev_ref.get_property(b"message").to_php_string().to_string_lossy();
                                 let pf = prev_ref.get_property(b"file").to_php_string().to_string_lossy();
                                 let pl = prev_ref.get_property(b"line").to_long();
