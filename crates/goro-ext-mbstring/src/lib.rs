@@ -1752,7 +1752,9 @@ fn mb_decode_mimeheader_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
 
 fn mb_encode_mimeheader_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let charset = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "UTF-8".to_string());
+    let charset_raw = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "UTF-8".to_string());
+    // Normalize charset to canonical form (uppercase for standard encodings)
+    let charset = charset_raw.to_ascii_uppercase();
     let transfer_enc = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "B".to_string());
 
     let bytes = s.as_bytes();

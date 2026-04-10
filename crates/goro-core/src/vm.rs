@@ -2075,7 +2075,16 @@ impl Vm {
                 }
                 String::from_utf8_lossy(name).to_string()
             }
-            ParamType::Nullable(inner) => format!("?{}", self.param_type_name_inner(inner, false)),
+            ParamType::Nullable(inner) => {
+                // If the inner type expands to a union (e.g., iterable -> Traversable|array),
+                // we need to append |null instead of using ? prefix
+                let inner_str = self.param_type_name_inner(inner, false);
+                if inner_str.contains('|') {
+                    format!("{}|null", inner_str)
+                } else {
+                    format!("?{}", inner_str)
+                }
+            }
             ParamType::Union(types) => {
                 // PHP normalizes union types: null/false/true go to the end,
                 // everything else preserves source order
@@ -2428,7 +2437,16 @@ impl Vm {
                 }
                 String::from_utf8_lossy(name).to_string()
             }
-            ParamType::Nullable(inner) => format!("?{}", self.param_type_display_inner(inner, false)),
+            ParamType::Nullable(inner) => {
+                // If the inner type expands to a union (e.g., iterable -> Traversable|array),
+                // we need to append |null instead of using ? prefix
+                let inner_str = self.param_type_display_inner(inner, false);
+                if inner_str.contains('|') {
+                    format!("{}|null", inner_str)
+                } else {
+                    format!("?{}", inner_str)
+                }
+            }
             ParamType::Union(types) => {
                 // PHP normalizes union types: null/false/true go to the end,
                 // everything else preserves source order
@@ -17421,15 +17439,30 @@ impl Vm {
                             if let Value::String(ref s) = raw_val {
                                 if s.as_bytes().starts_with(b"__deferred_global_const__::") {
                                     let const_name = s.as_bytes()[b"__deferred_global_const__::".len()..].to_vec();
+                                    let mut resolved = false;
                                     if let Some(v) = self.constants.get(const_name.as_slice()) {
                                         raw_val = v.clone();
+                                        resolved = true;
                                     } else if const_name.contains(&b'\\') {
                                         if let Some(last_sep) = const_name.iter().rposition(|&b| b == b'\\') {
                                             let global_name = &const_name[last_sep + 1..];
                                             if let Some(v) = self.constants.get(global_name) {
                                                 raw_val = v.clone();
+                                                resolved = true;
                                             }
                                         }
+                                    }
+                                    if !resolved {
+                                        // Constant not found - throw Undefined constant error (PHP 8+)
+                                        let const_display = String::from_utf8_lossy(&const_name).to_string();
+                                        let err_msg = format!("Undefined constant \"{}\"", const_display);
+                                        let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
                                     }
                                 }
                             }
@@ -21719,19 +21752,53 @@ impl Vm {
                             // Check for typed property accessed before initialization
                             // Skip this check when error reporting is suppressed (empty(), @)
                             if matches!(prop, Value::Undef) && obj.borrow().has_property(prop_name.as_bytes()) && self.error_reporting != 0 {
-                                // This is a typed property that hasn't been initialized
-                                let class_display = crate::value::display_class_name(&class_name_orig);
-                                let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
-                                let msg = format!("Typed property {}::${} must not be accessed before initialization", class_display, prop_display);
-                                let exc = self.create_exception(b"Error", &msg, op.line);
-                                self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
-                                    let ct = *catch_target;
-                                    ip = ct as usize;
-                                    continue;
+                                // Try __get magic method first before throwing error
+                                let has_get = self.magic_depth < 5 && self
+                                    .classes
+                                    .get(&class_lower)
+                                    .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                    .unwrap_or(false);
+                                if has_get {
+                                    self.magic_depth += 1;
+                                    let magic_method_def = self
+                                        .classes
+                                        .get(&class_lower)
+                                        .unwrap()
+                                        .get_method(b"__get")
+                                        .unwrap();
+                                    let method = magic_method_def.op_array.clone();
+                                    let magic_declaring = magic_method_def.declaring_class.clone();
+                                    let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+                                    if !fn_cvs.is_empty() {
+                                        fn_cvs[0] = obj_val.clone();
+                                    } // $this
+                                    if fn_cvs.len() > 1 {
+                                        fn_cvs[1] = Value::String(prop_name.clone());
+                                    } // $name
+                                    self.class_scope_stack.push(magic_declaring);
+                                    self.called_class_stack.push(class_name_orig.clone());
+                                    let result = self
+                                        .execute_op_array(&method, fn_cvs)
+                                        .unwrap_or(Value::Null);
+                                    self.called_class_stack.pop();
+                                    self.class_scope_stack.pop();
+                                    self.magic_depth -= 1;
+                                    result
+                                } else {
+                                    // No __get - throw the uninitialized error
+                                    let class_display = crate::value::display_class_name(&class_name_orig);
+                                    let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
+                                    let msg = format!("Typed property {}::${} must not be accessed before initialization", class_display, prop_display);
+                                    let exc = self.create_exception(b"Error", &msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        let ct = *catch_target;
+                                        ip = ct as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
                                 }
-                                return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
-                            }
+                            } else
                             if matches!(prop, Value::Null)
                                 && !obj.borrow().has_property(prop_name.as_bytes())
                                 && self.magic_depth < 5

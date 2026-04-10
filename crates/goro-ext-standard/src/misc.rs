@@ -5074,7 +5074,11 @@ fn parse_str_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             // Navigate/create nested arrays
-            let base_arr_key = goro_core::array::ArrayKey::String(PhpString::from_string(base_key.to_string()));
+            let base_arr_key = if let Ok(n) = base_key.parse::<i64>() {
+                goro_core::array::ArrayKey::Int(n)
+            } else {
+                goro_core::array::ArrayKey::String(PhpString::from_string(base_key.to_string()))
+            };
             if !matches!(result.get(&base_arr_key), Some(Value::Array(_))) {
                 result.set(base_arr_key.clone(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
             }

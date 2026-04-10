@@ -1676,7 +1676,6 @@ impl Compiler {
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| {
                         let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
-                        // Implicitly nullable: if default is null and type is not already nullable/mixed
                         let mut is_implicitly_nullable = false;
                         if let Some(default_expr) = &param.default {
                             if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
@@ -3755,15 +3754,30 @@ impl Compiler {
                                     }
 
                                     // Store parameter type info
+                                    // Constructor-promoted properties: fatal error for null default with non-nullable type
+                                    if param.visibility.is_some() {
+                                        if let Some(hint) = &param.type_hint {
+                                            if let Some(default_expr) = &param.default {
+                                                let pt_tmp = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                                if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt_tmp) {
+                                                    return Err(CompileError {
+                                                        message: format!("Cannot use null as default value for parameter ${} of type {}", String::from_utf8_lossy(&param.name), type_hint_display(hint)),
+                                                        line: default_expr.span.line,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
                                     let type_info =
                                         param.type_hint.as_ref().map(|hint| {
                                             let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
-                                            // Implicitly nullable: if default is null and type is not already nullable/mixed
                                             let mut is_implicitly_nullable = false;
-                                            if let Some(default_expr) = &param.default {
-                                                if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
-                                                    pt = ParamType::Nullable(Box::new(pt));
-                                                    is_implicitly_nullable = true;
+                                            if param.visibility.is_none() {
+                                                if let Some(default_expr) = &param.default {
+                                                    if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                                                        pt = ParamType::Nullable(Box::new(pt));
+                                                        is_implicitly_nullable = true;
+                                                    }
                                                 }
                                             }
                                             ParamTypeInfo {
@@ -4111,7 +4125,20 @@ impl Compiler {
                                         // Handle magic constants and known constants in class constant context
                                         let name_lower: Vec<u8> = parts.iter().flat_map(|p| p.iter()).copied().collect();
                                         let name_lower_lc: Vec<u8> = name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                        self.resolve_class_const_magic(&name_lower_lc, &qualified_name, const_expr.span.line)
+                                        let magic_val = self.resolve_class_const_magic(&name_lower_lc, &qualified_name, const_expr.span.line);
+                                        if !matches!(magic_val, Value::Null) {
+                                            magic_val
+                                        } else {
+                                            // Build the full constant name from parts
+                                            let mut full_name = Vec::new();
+                                            for (i, part) in parts.iter().enumerate() {
+                                                if i > 0 { full_name.push(b'\\'); }
+                                                full_name.extend_from_slice(part);
+                                            }
+                                            let mut marker = b"__deferred_global_const__::".to_vec();
+                                            marker.extend_from_slice(&full_name);
+                                            Value::String(PhpString::from_vec(marker))
+                                        }
                                     }
                                     ExprKind::Identifier(name) => {
                                         let name_lower_lc: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
@@ -8500,13 +8527,38 @@ impl Compiler {
             }
 
             ExprKind::ConstantAccess(parts) => {
-                // Qualified constant - just return the last part as a string
-                let empty = vec![];
-                let name = parts.last().unwrap_or(&empty);
-                let idx = self
-                    .op_array
-                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
-                Ok(OperandType::Const(idx))
+                // Qualified constant - build fully-qualified name and emit ConstLookup
+                let mut full_name = Vec::new();
+                for (i, part) in parts.iter().enumerate() {
+                    if i > 0 { full_name.push(b'\\'); }
+                    full_name.extend_from_slice(part);
+                }
+                // Check if it's a known compile-time constant first
+                let lower: Vec<u8> = full_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                // Try to resolve as a known constant (using the Identifier path)
+                let known = match lower.as_slice() {
+                    b"true" => Some(Value::True),
+                    b"false" => Some(Value::False),
+                    b"null" => Some(Value::Null),
+                    _ => None,
+                };
+                if let Some(val) = known {
+                    let idx = self.op_array.add_literal(val);
+                    Ok(OperandType::Const(idx))
+                } else {
+                    let name_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(full_name)));
+                    let tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ConstLookup,
+                        op1: OperandType::Const(name_idx),
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(tmp),
+                        line: expr.span.line,
+                    });
+                    Ok(OperandType::Tmp(tmp))
+                }
             }
 
             _ => Err(CompileError {
@@ -9224,6 +9276,16 @@ fn is_type_nullable_or_mixed(pt: &ParamType) -> bool {
             }))
         }
         ParamType::Intersection(_) => false,
+    }
+}
+
+/// Format a TypeHint as a display string for error messages
+fn type_hint_display(hint: &TypeHint) -> String {
+    match hint {
+        TypeHint::Simple(name) => String::from_utf8_lossy(name).to_string(),
+        TypeHint::Nullable(inner) => format!("?{}", type_hint_display(inner)),
+        TypeHint::Union(types) => types.iter().map(|t| type_hint_display(t)).collect::<Vec<_>>().join("|"),
+        TypeHint::Intersection(types) => types.iter().map(|t| type_hint_display(t)).collect::<Vec<_>>().join("&"),
     }
 }
 

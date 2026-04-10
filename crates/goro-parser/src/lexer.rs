@@ -317,7 +317,7 @@ impl<'a> Lexer<'a> {
             let next = self.peek_at(1);
             // Allow "12." (dot followed by non-digit) and "12.5" (dot followed by digit)
             // But NOT "12.method" (dot followed by letter/underscore - that's a method call on int)
-            let is_method_call = next.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_');
+            let is_method_call = next.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80);
             // Also not ".." (range operator)
             let is_double_dot = next == Some(b'.');
             if !is_method_call && !is_double_dot {
@@ -454,7 +454,7 @@ impl<'a> Lexer<'a> {
                 Some(b'$')
                     if self
                         .peek_at(1)
-                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') =>
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
                 {
                     // Variable interpolation
                     // Always emit the current result as an InterpolatedStringPart
@@ -480,7 +480,7 @@ impl<'a> Lexer<'a> {
                         ));
                         if self
                             .peek()
-                            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80)
                         {
                             let prop_name = self.scan_identifier();
                             self.pending.push(Token::new(
@@ -520,7 +520,7 @@ impl<'a> Lexer<'a> {
                                 // Bare identifier as key
                                 if self
                                     .peek()
-                                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80)
                                 {
                                     let key = self.scan_identifier();
                                     self.pending.push(Token::new(
@@ -544,7 +544,7 @@ impl<'a> Lexer<'a> {
                         .peek_at(1)
                         .is_some_and(|c| c == b'{') && self
                         .peek_at(2)
-                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') =>
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
                 {
                     // ${variable} interpolation (deprecated syntax, equivalent to {$variable})
                     self.pending.push(Token::new(
@@ -569,7 +569,7 @@ impl<'a> Lexer<'a> {
                         .peek_at(1)
                         .is_some_and(|c| c == b'$') && self
                         .peek_at(2)
-                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') =>
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
                 {
                     // {$variable} interpolation - same as $variable but with curly braces
                     self.pending.push(Token::new(
@@ -593,7 +593,7 @@ impl<'a> Lexer<'a> {
                                 TokenKind::Arrow,
                                 Span::new(self.pos as u32, self.pos as u32, self.line),
                             ));
-                            if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
+                            if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) {
                                 let prop_name = self.scan_identifier();
                                 self.pending.push(Token::new(
                                     TokenKind::Identifier(prop_name),
@@ -673,7 +673,7 @@ impl<'a> Lexer<'a> {
                                     ));
                                 }
                                 _ => {
-                                    if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
+                                    if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) {
                                         let key = self.scan_identifier();
                                         self.pending.push(Token::new(
                                             TokenKind::Identifier(key),
@@ -925,7 +925,7 @@ impl<'a> Lexer<'a> {
                 self.advance(); // skip second $
                 if self
                     .peek()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80)
                 {
                     let name = self.scan_identifier();
                     TokenKind::VariableVariable(name)
@@ -936,7 +936,7 @@ impl<'a> Lexer<'a> {
             }
             b'$' if self
                 .peek_at(1)
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') =>
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
             {
                 self.advance(); // skip $
                 let name = self.scan_identifier();
@@ -959,7 +959,7 @@ impl<'a> Lexer<'a> {
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | 0x80..=0xFF => {
                 let ident = self.scan_identifier();
 
-                // Handle b"..." and b'...' binary string prefix (PHP treats them as regular strings)
+                // Handle b"...", b'...', and b<<< binary string prefix (PHP treats them as regular strings)
                 if (ident == b"b" || ident == b"B") && self.pos < self.source.len() {
                     if self.source[self.pos] == b'"' {
                         self.advance();
@@ -969,6 +969,13 @@ impl<'a> Lexer<'a> {
                         self.advance();
                         let s = self.scan_single_quoted_string();
                         return Token::new(TokenKind::ConstantString(s), Span::new(self.pos as u32, self.pos as u32, start_line));
+                    } else if self.remaining().starts_with(b"<<<") {
+                        // b<<< heredoc/nowdoc - skip the <<< and parse as heredoc
+                        self.advance(); // <
+                        self.advance(); // <
+                        self.advance(); // <
+                        let tok = self.scan_heredoc_start();
+                        return Token::new(tok, Span::new(start as u32, self.pos as u32, start_line));
                     }
                 }
 
@@ -985,7 +992,7 @@ impl<'a> Lexer<'a> {
                         if next4 == b"from"
                             && self
                                 .peek_at(4)
-                                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != b'_')
+                                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != b'_' && c < 0x80)
                         {
                             self.pos += 4;
                             return Token::new(
@@ -1531,7 +1538,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'$' if i + 1 < len
-                    && (content[i + 1].is_ascii_alphabetic() || content[i + 1] == b'_') =>
+                    && (content[i + 1].is_ascii_alphabetic() || content[i + 1] == b'_' || content[i + 1] >= 0x80) =>
                 {
                     // Variable interpolation
                     self.pending.push(Token::new(
@@ -1563,7 +1570,7 @@ impl<'a> Lexer<'a> {
                             TokenKind::Arrow,
                             Span::new(self.pos as u32, self.pos as u32, self.line),
                         ));
-                        if i < len && (content[i].is_ascii_alphabetic() || content[i] == b'_') {
+                        if i < len && (content[i].is_ascii_alphabetic() || content[i] == b'_' || content[i] >= 0x80) {
                             let prop_start = i;
                             while i < len
                                 && (content[i].is_ascii_alphanumeric()
@@ -1618,7 +1625,7 @@ impl<'a> Lexer<'a> {
                                         Span::new(self.pos as u32, self.pos as u32, self.line),
                                     ));
                                 }
-                                c if c.is_ascii_alphabetic() || c == b'_' => {
+                                c if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
                                     let key_start = i;
                                     while i < len
                                         && (content[i].is_ascii_alphanumeric()
@@ -1647,7 +1654,7 @@ impl<'a> Lexer<'a> {
                 }
                 b'$' if i + 2 < len
                     && content[i + 1] == b'{'
-                    && (content[i + 2].is_ascii_alphabetic() || content[i + 2] == b'_') =>
+                    && (content[i + 2].is_ascii_alphabetic() || content[i + 2] == b'_' || content[i + 2] >= 0x80) =>
                 {
                     // ${variable} interpolation (deprecated syntax)
                     self.pending.push(Token::new(
@@ -1677,7 +1684,7 @@ impl<'a> Lexer<'a> {
                 }
                 b'{' if i + 2 < len
                     && content[i + 1] == b'$'
-                    && (content[i + 2].is_ascii_alphabetic() || content[i + 2] == b'_') =>
+                    && (content[i + 2].is_ascii_alphabetic() || content[i + 2] == b'_' || content[i + 2] >= 0x80) =>
                 {
                     // {$variable} interpolation
                     self.pending.push(Token::new(
@@ -1709,7 +1716,7 @@ impl<'a> Lexer<'a> {
                                 TokenKind::Arrow,
                                 Span::new(self.pos as u32, self.pos as u32, self.line),
                             ));
-                            if i < len && (content[i].is_ascii_alphabetic() || content[i] == b'_') {
+                            if i < len && (content[i].is_ascii_alphabetic() || content[i] == b'_' || content[i] >= 0x80) {
                                 let prop_start = i;
                                 while i < len
                                     && (content[i].is_ascii_alphanumeric()
@@ -1804,7 +1811,7 @@ impl<'a> Lexer<'a> {
                                             Span::new(self.pos as u32, self.pos as u32, self.line),
                                         ));
                                     }
-                                    c if c.is_ascii_alphabetic() || c == b'_' => {
+                                    c if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
                                         let key_start = i;
                                         while i < len
                                             && (content[i].is_ascii_alphanumeric()

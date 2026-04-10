@@ -196,7 +196,7 @@ fn date_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (offset_secs, tz_abbrev) = timezone_offset_and_abbrev(&tz_name, secs);
     let local_secs = secs + offset_secs;
 
-    let result = format_timestamp_with_tz(&format, local_secs, &tz_abbrev, offset_secs);
+    let result = format_timestamp_with_tz(&format, local_secs, &tz_name, &tz_abbrev, offset_secs);
     Ok(Value::String(PhpString::from_string(result)))
 }
 
@@ -334,7 +334,7 @@ fn gmdate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     });
 
     // Always use UTC for gmdate
-    let result = format_timestamp_with_tz(&format, secs, "GMT", 0);
+    let result = format_timestamp_with_tz(&format, secs, "GMT", "GMT", 0);
     Ok(Value::String(PhpString::from_string(result)))
 }
 
@@ -948,7 +948,7 @@ fn date_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let (offset_secs, tz_abbrev) = timezone_offset_and_abbrev(&tz_name, timestamp);
-    let result = format_timestamp_with_tz(&format, timestamp + offset_secs, &tz_abbrev, offset_secs);
+    let result = format_timestamp_with_tz(&format, timestamp + offset_secs, &tz_name, &tz_abbrev, offset_secs);
     Ok(Value::String(PhpString::from_string(result)))
 }
 
@@ -1166,7 +1166,7 @@ fn format_tz_offset(offset_secs: i64) -> String {
 }
 
 /// Format timestamp with timezone-aware output
-pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_abbrev: &str, offset_secs: i64) -> String {
+pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_name: &str, tz_abbrev: &str, offset_secs: i64) -> String {
     // This is format_timestamp but using the local time and timezone info
     let days_since_epoch = if local_secs >= 0 {
         local_secs / 86400
@@ -1211,7 +1211,7 @@ pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_abbrev: &str, 
             b'a' => result.push_str(if hours >= 12 { "pm" } else { "am" }),
             b'g' => result.push_str(&format!("{}", if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours })),
             b'h' => result.push_str(&format!("{:02}", if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours })),
-            b'e' => result.push_str(tz_abbrev),
+            b'e' => result.push_str(tz_name),
             b'T' => result.push_str(tz_abbrev),
             b'O' => {
                 let sign = if offset_secs < 0 { '-' } else { '+' };
@@ -2478,9 +2478,15 @@ fn date_timestamp_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     let obj = args.first().unwrap_or(&Value::Null);
     let ts = args.get(1).unwrap_or(&Value::Null).to_long();
     if let Value::Object(o) = obj {
+        let tz_name = {
+            let ob = o.borrow();
+            let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+            if tz.is_empty() { get_default_tz(_vm) } else { tz }
+        };
+        let (offset, _tz_abbrev) = timezone_offset_and_abbrev(&tz_name, ts);
         let mut ob = o.borrow_mut();
         ob.set_property(b"__timestamp".to_vec(), Value::Long(ts));
-        let date_str = format_timestamp("Y-m-d H:i:s", ts) + ".000000";
+        let date_str = format_timestamp("Y-m-d H:i:s", ts + offset) + ".000000";
         ob.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
         drop(ob);
         Ok(obj.clone())
