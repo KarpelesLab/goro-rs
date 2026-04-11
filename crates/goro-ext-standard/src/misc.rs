@@ -612,20 +612,23 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         512 => {
             // E_USER_WARNING
-            if !vm.call_user_error_handler(512, &message, 0) {
-                vm.emit_warning_raw(&message);
+            let call_line = vm.current_line;
+            if !vm.call_user_error_handler(512, &message, call_line) {
+                vm.emit_warning_at(&message, call_line);
             }
         }
         1024 => {
             // E_USER_NOTICE
-            if !vm.call_user_error_handler(1024, &message, 0) {
-                vm.emit_notice_raw(&message, 0);
+            let call_line = vm.current_line;
+            if !vm.call_user_error_handler(1024, &message, call_line) {
+                vm.emit_notice_raw(&message, call_line);
             }
         }
         16384 => {
             // E_USER_DEPRECATED
-            if !vm.call_user_error_handler(16384, &message, 0) {
-                vm.emit_deprecated_raw(&message, 0);
+            let call_line = vm.current_line;
+            if !vm.call_user_error_handler(16384, &message, call_line) {
+                vm.emit_deprecated_raw(&message, call_line);
             }
         }
         _ => {
