@@ -5643,11 +5643,14 @@ fn chdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(_) => Ok(Value::False),
     }
 }
-fn filesize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     match std::fs::metadata(&*path.to_string_lossy() as &str) {
         Ok(m) => Ok(Value::Long(m.len() as i64)),
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!("filesize(): stat failed for {}", path.to_string_lossy()));
+            Ok(Value::False)
+        }
     }
 }
 fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -8973,14 +8976,17 @@ fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn fileperms_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         match std::fs::metadata(&*path.to_string_lossy()) {
             Ok(m) => Ok(Value::Long(m.mode() as i64)),
-            Err(_) => Ok(Value::False),
+            Err(_) => {
+                vm.emit_warning(&format!("fileperms(): stat failed for {}", path.to_string_lossy()));
+                Ok(Value::False)
+            }
         }
     }
     #[cfg(not(unix))]
