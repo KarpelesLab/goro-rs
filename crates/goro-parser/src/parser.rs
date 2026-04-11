@@ -2660,6 +2660,18 @@ impl Parser {
         Ok(left)
     }
 
+    /// Check if an expression is a valid assignment target (l-value)
+    fn is_lvalue(expr: &Expr) -> bool {
+        matches!(
+            &expr.kind,
+            ExprKind::Variable(_)
+                | ExprKind::ArrayAccess { .. }
+                | ExprKind::PropertyAccess { .. }
+                | ExprKind::StaticPropertyAccess { .. }
+                | ExprKind::DynamicVariable(_)
+        )
+    }
+
     fn parse_assignment(&mut self) -> ParseResult<Expr> {
         let left = self.parse_null_coalesce()?;
 
@@ -2677,6 +2689,30 @@ impl Parser {
                     })
                 } else {
                     let right = self.parse_assignment()?;
+                    // If left side is not a valid l-value but is a binary op whose right operand is,
+                    // restructure: (expr OP $var) = val → expr OP ($var = val)
+                    // This handles patterns like: null !== $key = key($arr)
+                    let should_restructure = !Self::is_lvalue(&left)
+                        && matches!(&left.kind, ExprKind::BinaryOp { right: r, .. } if Self::is_lvalue(r));
+                    if should_restructure {
+                        if let ExprKind::BinaryOp { op, left: bin_left, right: bin_right } = left.kind {
+                            let assign = Expr {
+                                span: bin_right.span.merge(right.span),
+                                kind: ExprKind::Assign {
+                                    target: bin_right,
+                                    value: Box::new(right),
+                                },
+                            };
+                            return Ok(Expr {
+                                span: bin_left.span.merge(assign.span),
+                                kind: ExprKind::BinaryOp {
+                                    op,
+                                    left: bin_left,
+                                    right: Box::new(assign),
+                                },
+                            });
+                        }
+                    }
                     Ok(Expr {
                         span: left.span.merge(right.span),
                         kind: ExprKind::Assign {
@@ -3006,9 +3042,6 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            // Right side should be comparison-level (higher precedence than equality)
-            // This ensures `$x === 'a' || $x === 'b'` parses as `($x === 'a') || ($x === 'b')`
-            // not as `$x === ('a' || $x === 'b')`
             let right = self.parse_comparison()?;
             left = Expr {
                 span: left.span.merge(right.span),
