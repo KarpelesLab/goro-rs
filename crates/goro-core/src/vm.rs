@@ -3878,6 +3878,9 @@ impl Vm {
                 | b"outeriterator" | b"recursiveiterator" | b"seekableiterator"
                 | b"throwable" | b"backedenum" | b"unitenum"
                 | b"reflector"
+                | b"random\\engine" | b"random\\cryptosafeengine"
+                | b"sessionhandlerinterface" | b"sessionidinterface"
+                | b"sessionupdatetimestamphandlerinterface"
         )
     }
 
@@ -8823,6 +8826,13 @@ impl Vm {
                 | b"curlhandle" | b"curlmultihandle" | b"curlsharehandle"
                 | b"socket"
                 | b"xmlparser"
+                | b"random\\engine" | b"random\\cryptosafeengine"
+                | b"random\\randomizer" | b"random\\engine\\mt19937"
+                | b"random\\engine\\pcgoneseq128xslrr64" | b"random\\engine\\xoshiro256starstar"
+                | b"random\\engine\\secure" | b"random\\randomexception" | b"random\\randomerror"
+                | b"random\\brokenrandomengineerror" | b"random\\intervalerror"
+                | b"sessionhandlerinterface" | b"sessionidinterface"
+                | b"sessionupdatetimestamphandlerinterface"
         )
     }
 
@@ -19629,6 +19639,9 @@ impl Vm {
                                     b"dateinterface", b"datetimeinterface",
                                     b"fiber",
                                     b"seekableiterator", b"recursiveiterator", b"outeriterator",
+                                    b"random\\engine", b"random\\cryptosafeengine",
+                                    b"sessionhandlerinterface", b"sessionidinterface",
+                                    b"sessionupdatetimestamphandlerinterface",
                                 ];
                                 if !known_builtin_interfaces.contains(&iface_lower.as_slice()) {
                                     let iface_display = crate::value::display_class_name(iface_name);
