@@ -10164,7 +10164,7 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(fid))
 }
 
-fn filemtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     match std::fs::metadata(&*path.to_string_lossy()) {
         Ok(meta) => {
@@ -10175,11 +10175,14 @@ fn filemtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Ok(Value::False)
             }
         }
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!("filemtime(): stat failed for {}", path.to_string_lossy()));
+            Ok(Value::False)
+        }
     }
 }
 
-fn fileatime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     match std::fs::metadata(&*path.to_string_lossy()) {
         Ok(meta) => {
@@ -10190,7 +10193,10 @@ fn fileatime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Ok(Value::False)
             }
         }
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!("fileatime(): stat failed for {}", path.to_string_lossy()));
+            Ok(Value::False)
+        }
     }
 }
 
@@ -10198,42 +10204,51 @@ fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     filemtime_fn(vm, args)
 }
 
-fn fileinode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         match std::fs::metadata(&*path.to_string_lossy()) {
             Ok(meta) => Ok(Value::Long(meta.ino() as i64)),
-            Err(_) => Ok(Value::False),
+            Err(_) => {
+                vm.emit_warning(&format!("fileinode(): stat failed for {}", path.to_string_lossy()));
+                Ok(Value::False)
+            }
         }
     }
     #[cfg(not(unix))]
     Ok(Value::False)
 }
 
-fn fileowner_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         match std::fs::metadata(&*path.to_string_lossy()) {
             Ok(meta) => Ok(Value::Long(meta.uid() as i64)),
-            Err(_) => Ok(Value::False),
+            Err(_) => {
+                vm.emit_warning(&format!("fileowner(): stat failed for {}", path.to_string_lossy()));
+                Ok(Value::False)
+            }
         }
     }
     #[cfg(not(unix))]
     Ok(Value::Long(0))
 }
 
-fn filegroup_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn filegroup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         match std::fs::metadata(&*path.to_string_lossy()) {
             Ok(meta) => Ok(Value::Long(meta.gid() as i64)),
-            Err(_) => Ok(Value::False),
+            Err(_) => {
+                vm.emit_warning(&format!("filegroup(): stat failed for {}", path.to_string_lossy()));
+                Ok(Value::False)
+            }
         }
     }
     #[cfg(not(unix))]
