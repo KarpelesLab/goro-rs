@@ -317,7 +317,7 @@ impl<'a> Lexer<'a> {
             let next = self.peek_at(1);
             // Allow "12." (dot followed by non-digit) and "12.5" (dot followed by digit)
             // But NOT "12.method" (dot followed by letter/underscore - that's a method call on int)
-            let is_method_call = next.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80);
+            let is_method_call = next.is_some_and(|c| (c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) && c != b'e' && c != b'E');
             // Also not ".." (range operator)
             let is_double_dot = next == Some(b'.');
             if !is_method_call && !is_double_dot {
