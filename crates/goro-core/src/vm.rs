@@ -19350,8 +19350,9 @@ impl Vm {
                                                     Visibility::Protected => "protected",
                                                     Visibility::Private => "private",
                                                 };
+                                                let suffix = if method.visibility == Visibility::Public { "" } else { " or weaker" };
                                                 return Err(VmError {
-                                                    message: format!("Access level to {}::{}() must be {} (as in class {}) or weaker", child_display, method_display, vis_str, parent_display),
+                                                    message: format!("Access level to {}::{}() must be {} (as in class {}){}", child_display, method_display, vis_str, parent_display, suffix),
                                                     line: op.line,
                                                 });
                                             }
@@ -19429,8 +19430,9 @@ impl Vm {
                                                     Visibility::Protected => "protected",
                                                     Visibility::Private => "private",
                                                 };
+                                                let suffix = if parent_prop.visibility == Visibility::Public { "" } else { " or weaker" };
                                                 return Err(VmError {
-                                                    message: format!("Access level to {}::${} must be {} (as in class {}) or weaker", child_display, prop_display, vis_str, parent_display),
+                                                    message: format!("Access level to {}::${} must be {} (as in class {}){}", child_display, prop_display, vis_str, parent_display, suffix),
                                                     line: op.line,
                                                 });
                                             }

@@ -707,7 +707,13 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line });
     }
-    if let Some(val) = vm.constants.get(name.as_bytes()) {
+    // Strip leading backslash for fully-qualified constant names
+    let lookup_name = if name.as_bytes().starts_with(b"\\") {
+        &name.as_bytes()[1..]
+    } else {
+        name.as_bytes()
+    };
+    if let Some(val) = vm.constants.get(lookup_name) {
         return Ok(val.clone());
     }
     let msg = format!("Undefined constant \"{}\"", name_str);
