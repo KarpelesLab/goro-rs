@@ -2689,28 +2689,67 @@ impl Parser {
                     })
                 } else {
                     let right = self.parse_assignment()?;
-                    // If left side is not a valid l-value but is a binary op whose right operand is,
-                    // restructure: (expr OP $var) = val → expr OP ($var = val)
-                    // This handles patterns like: null !== $key = key($arr)
-                    let should_restructure = !Self::is_lvalue(&left)
-                        && matches!(&left.kind, ExprKind::BinaryOp { right: r, .. } if Self::is_lvalue(r));
-                    if should_restructure {
-                        if let ExprKind::BinaryOp { op, left: bin_left, right: bin_right } = left.kind {
-                            let assign = Expr {
-                                span: bin_right.span.merge(right.span),
-                                kind: ExprKind::Assign {
-                                    target: bin_right,
-                                    value: Box::new(right),
-                                },
-                            };
-                            return Ok(Expr {
-                                span: bin_left.span.merge(assign.span),
-                                kind: ExprKind::BinaryOp {
-                                    op,
-                                    left: bin_left,
-                                    right: Box::new(assign),
-                                },
-                            });
+                    // If left side is not a valid l-value, try to restructure the AST
+                    // to allow assignment to inner l-values. This handles PHP patterns like:
+                    //   null !== $key = expr  →  null !== ($key = expr)
+                    //   !$stmt = expr          →  !($stmt = expr)
+                    //   @$x = expr             →  @($x = expr)
+                    if !Self::is_lvalue(&left) {
+                        // Binary op: (expr OP $var) = val → expr OP ($var = val)
+                        if matches!(&left.kind, ExprKind::BinaryOp { right: r, .. } if Self::is_lvalue(r)) {
+                            if let ExprKind::BinaryOp { op, left: bin_left, right: bin_right } = left.kind {
+                                let assign = Expr {
+                                    span: bin_right.span.merge(right.span),
+                                    kind: ExprKind::Assign {
+                                        target: bin_right,
+                                        value: Box::new(right),
+                                    },
+                                };
+                                return Ok(Expr {
+                                    span: bin_left.span.merge(assign.span),
+                                    kind: ExprKind::BinaryOp {
+                                        op,
+                                        left: bin_left,
+                                        right: Box::new(assign),
+                                    },
+                                });
+                            }
+                        }
+                        // Unary prefix: (!$var) = val → !($var = val)
+                        if matches!(&left.kind, ExprKind::UnaryOp { operand: o, prefix: true, .. } if Self::is_lvalue(o)) {
+                            if let ExprKind::UnaryOp { op, operand, prefix } = left.kind {
+                                let assign = Expr {
+                                    span: operand.span.merge(right.span),
+                                    kind: ExprKind::Assign {
+                                        target: operand,
+                                        value: Box::new(right),
+                                    },
+                                };
+                                return Ok(Expr {
+                                    span: left.span.merge(assign.span),
+                                    kind: ExprKind::UnaryOp {
+                                        op,
+                                        operand: Box::new(assign),
+                                        prefix,
+                                    },
+                                });
+                            }
+                        }
+                        // Suppress: (@$var) = val → @($var = val)
+                        if matches!(&left.kind, ExprKind::Suppress(o) if Self::is_lvalue(o)) {
+                            if let ExprKind::Suppress(operand) = left.kind {
+                                let assign = Expr {
+                                    span: operand.span.merge(right.span),
+                                    kind: ExprKind::Assign {
+                                        target: operand,
+                                        value: Box::new(right),
+                                    },
+                                };
+                                return Ok(Expr {
+                                    span: left.span.merge(assign.span),
+                                    kind: ExprKind::Suppress(Box::new(assign)),
+                                });
+                            }
                         }
                     }
                     Ok(Expr {
