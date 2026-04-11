@@ -144,6 +144,37 @@ impl Compiler {
                     (b"fsockopen", 3) => true,
                     (b"pfsockopen", 2) => true,
                     (b"pfsockopen", 3) => true,
+                    // stream_socket_client($address, &$errno, &$errstr, ...)
+                    (b"stream_socket_client", 1) => true,
+                    (b"stream_socket_client", 2) => true,
+                    // stream_socket_server($address, &$errno, &$errstr, ...)
+                    (b"stream_socket_server", 1) => true,
+                    (b"stream_socket_server", 2) => true,
+                    // mb_ereg($pattern, $string, &$regs)
+                    (b"mb_ereg", 2) => true,
+                    (b"mb_eregi", 2) => true,
+                    // openssl functions with output params
+                    (b"openssl_seal", 1) => true,
+                    (b"openssl_seal", 2) => true,
+                    (b"openssl_open", 0) => true,
+                    (b"openssl_sign", 1) => true,
+                    (b"openssl_private_encrypt", 1) => true,
+                    (b"openssl_private_decrypt", 1) => true,
+                    (b"openssl_public_encrypt", 1) => true,
+                    (b"openssl_public_decrypt", 1) => true,
+                    (b"openssl_csr_export", 1) => true,
+                    (b"openssl_x509_export", 1) => true,
+                    (b"openssl_pkey_export", 1) => true,
+                    (b"openssl_pkcs12_export", 1) => true,
+                    // socket functions with output params
+                    (b"socket_create_pair", 3) => true,
+                    (b"socket_getpeername", 1) => true,
+                    (b"socket_getpeername", 2) => true,
+                    (b"socket_getsockname", 1) => true,
+                    (b"socket_getsockname", 2) => true,
+                    (b"socket_recvfrom", 1) => true,
+                    (b"socket_recvfrom", 4) => true,
+                    (b"socket_recvfrom", 5) => true,
                     _ => false,
                 }
             }
