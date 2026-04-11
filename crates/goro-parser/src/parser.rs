@@ -655,6 +655,7 @@ impl Parser {
                 self.expect(&TokenKind::OpenParen)?;
                 let mut exprs = vec![self.parse_expression()?];
                 while self.eat(&TokenKind::Comma) {
+                    if matches!(self.peek(), TokenKind::CloseParen) { break; }
                     exprs.push(self.parse_expression()?);
                 }
                 self.expect(&TokenKind::CloseParen)?;
@@ -4460,6 +4461,7 @@ impl Parser {
                 self.expect(&TokenKind::OpenParen)?;
                 let mut exprs = vec![self.parse_expression()?];
                 while self.eat(&TokenKind::Comma) {
+                    if matches!(self.peek(), TokenKind::CloseParen) { break; }
                     exprs.push(self.parse_expression()?);
                 }
                 self.expect(&TokenKind::CloseParen)?;
