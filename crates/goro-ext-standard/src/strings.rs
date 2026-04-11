@@ -2702,21 +2702,21 @@ fn strnatcmp_impl(a: &[u8], b: &[u8], case_insensitive: bool) -> i64 {
     }
 }
 
-fn strnatcmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+fn strnatcmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = vm.value_to_string(args.first().unwrap_or(&Value::Null));
+    let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
     Ok(Value::Long(strnatcmp_impl(a.as_bytes(), b.as_bytes(), false)))
 }
 
-fn strnatcasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+fn strnatcasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = vm.value_to_string(args.first().unwrap_or(&Value::Null));
+    let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
     Ok(Value::Long(strnatcmp_impl(a.as_bytes(), b.as_bytes(), true)))
 }
 
-fn strcmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+fn strcmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = vm.value_to_string(args.first().unwrap_or(&Value::Null));
+    let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
     Ok(Value::Long(match a.as_bytes().cmp(b.as_bytes()) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -2725,8 +2725,8 @@ fn strcmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let a = vm.value_to_string(args.first().unwrap_or(&Value::Null));
+    let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
     let len_raw = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     if len_raw < 0 {
         let msg = "strncmp(): Argument #3 ($length) must be greater than or equal to 0".to_string();
@@ -2752,9 +2752,9 @@ fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(a_sub_len as i64 - b_sub_len as i64))
 }
 
-fn strcasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+fn strcasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let a = vm.value_to_string(args.first().unwrap_or(&Value::Null));
+    let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
     let min_len = a_bytes.len().min(b_bytes.len());
@@ -2769,8 +2769,8 @@ fn strcasecmp_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let a = vm.value_to_string(args.first().unwrap_or(&Value::Null));
+    let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
     let len_raw = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     if len_raw < 0 {
         let msg = "strncasecmp(): Argument #3 ($length) must be greater than or equal to 0".to_string();
