@@ -8818,6 +8818,11 @@ impl Vm {
                 | b"reflectiontype" | b"reflectionreference" | b"reflectionconstant"
                 | b"fiber" | b"fibererror"
                 | b"attribute"
+                | b"mysqli" | b"mysqli_driver" | b"mysqli_result" | b"mysqli_stmt"
+                | b"mysqli_warning" | b"mysqli_sql_exception"
+                | b"curlhandle" | b"curlmultihandle" | b"curlsharehandle"
+                | b"socket"
+                | b"xmlparser"
         )
     }
 
@@ -22293,7 +22298,8 @@ impl Vm {
                                     if !prop_declared {
                                         let is_internal = is_builtin_subclass(&class_lower, b"stdclass")
                                             || class_lower == b"stdclass"
-                                            || class_lower == b"__php_incomplete_class";
+                                            || class_lower == b"__php_incomplete_class"
+                                            || !self.classes.contains_key(&class_lower);
                                         let allows_dynamic = self.classes.get(&class_lower)
                                             .map(|c| c.allow_dynamic_properties)
                                             .unwrap_or(false);
