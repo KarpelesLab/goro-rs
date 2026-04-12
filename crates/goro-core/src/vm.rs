@@ -18228,6 +18228,24 @@ impl Vm {
                     self.write_operand(&op.result, cloned, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::CloneWithProps => {
+                    // Set properties on a cloned object from an array
+                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let props_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Value::Object(obj) = &obj_val {
+                        if let Value::Array(arr) = &props_val {
+                            let entries: Vec<_> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            for (key, value) in entries {
+                                let prop_name = match key {
+                                    crate::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                                    crate::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+                                };
+                                obj.borrow_mut().set_property(prop_name, value);
+                            }
+                        }
+                    }
+                }
+
                 OpCode::GetClassName => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let class_name = match &val {

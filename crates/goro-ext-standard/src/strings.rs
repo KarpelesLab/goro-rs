@@ -340,8 +340,8 @@ fn rtrim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(bytes[..end].to_vec())))
 }
 
-fn substr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn substr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let bytes = s.as_bytes();
     let len = bytes.len() as i64;
 
@@ -425,8 +425,8 @@ fn strpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
-fn str_contains(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+fn str_contains(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
 
     if needle.is_empty() {
@@ -449,8 +449,8 @@ fn str_contains(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
-fn str_starts_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+fn str_starts_with(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let prefix = args.get(1).unwrap_or(&Value::Null).to_php_string();
     Ok(if haystack.as_bytes().starts_with(prefix.as_bytes()) {
         Value::True
@@ -459,8 +459,8 @@ fn str_starts_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn str_ends_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+fn str_ends_with(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let suffix = args.get(1).unwrap_or(&Value::Null).to_php_string();
     Ok(if haystack.as_bytes().ends_with(suffix.as_bytes()) {
         Value::True
@@ -1209,8 +1209,8 @@ fn php_fix_exponent(s: &str) -> String {
     }
 }
 
-fn nl2br(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn nl2br(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let is_xhtml = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     let br = if is_xhtml { b"<br />" as &[u8] } else { b"<br>" };
     let bytes = s.as_bytes();
@@ -1349,15 +1349,15 @@ fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn str_word_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn str_word_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let s_str = s.to_string_lossy();
     let count = s_str.split_whitespace().count();
     Ok(Value::Long(count as i64))
 }
 
-fn ucfirst(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn ucfirst(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let mut bytes = s.as_bytes().to_vec();
     if let Some(first) = bytes.first_mut() {
         *first = first.to_ascii_uppercase();
@@ -1365,8 +1365,8 @@ fn ucfirst(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(bytes)))
 }
 
-fn lcfirst(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn lcfirst(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let mut bytes = s.as_bytes().to_vec();
     if let Some(first) = bytes.first_mut() {
         *first = first.to_ascii_lowercase();
@@ -1374,8 +1374,8 @@ fn lcfirst(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(bytes)))
 }
 
-fn ucwords(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn ucwords(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let delimiters = args.get(1).map(|v| v.to_php_string());
     let mut bytes = s.as_bytes().to_vec();
     let mut capitalize_next = true;
@@ -2552,12 +2552,12 @@ fn count_chars(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn str_split_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn str_split_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use goro_core::array::PhpArray;
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let len = args.get(1).map(|v| v.to_long()).unwrap_or(1).max(1) as usize;
     let bytes = s.as_bytes();
     let mut result = PhpArray::new();
@@ -2571,8 +2571,8 @@ fn str_split_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn strstr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+fn strstr_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     if needle.is_empty() {
@@ -2840,8 +2840,8 @@ fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(s_bytes.len() as i64))
 }
 
-fn strrchr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
+fn strrchr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let haystack = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let needle = args.get(1).unwrap_or(&Value::Null);
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     let needle_byte = match needle {
@@ -3585,8 +3585,8 @@ fn bin2hex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(hex)))
 }
 
-fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn crc32_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     // CRC-32 implementation
     let mut crc: u32 = 0xFFFFFFFF;
     for &byte in s.as_bytes() {

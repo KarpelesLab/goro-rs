@@ -3356,11 +3356,45 @@ impl Parser {
             }
             TokenKind::Clone => {
                 self.advance();
-                let operand = self.parse_unary()?;
-                Ok(Expr {
-                    span: span.merge(operand.span),
-                    kind: ExprKind::Clone(Box::new(operand)),
-                })
+                // PHP 8.5: clone($expr, [...]) function call syntax
+                if self.eat(&TokenKind::OpenParen) {
+                    let operand = self.parse_expression()?;
+                    if self.eat(&TokenKind::Comma) {
+                        // clone($expr, ...) with property overrides
+                        if matches!(self.peek(), TokenKind::CloseParen) {
+                            // Trailing comma: clone($expr,)
+                            self.expect(&TokenKind::CloseParen)?;
+                            Ok(Expr {
+                                span: span.merge(operand.span),
+                                kind: ExprKind::Clone(Box::new(operand)),
+                            })
+                        } else {
+                            let with_expr = self.parse_expression()?;
+                            if self.eat(&TokenKind::Comma) {
+                                // Ignore trailing comma
+                            }
+                            self.expect(&TokenKind::CloseParen)?;
+                            Ok(Expr {
+                                span,
+                                kind: ExprKind::CloneWith { object: Box::new(operand), with_args: vec![(vec![], with_expr)] },
+                            })
+                        }
+                    } else {
+                        // clone($expr) - regular clone with parens
+                        self.expect(&TokenKind::CloseParen)?;
+                        Ok(Expr {
+                            span: span.merge(operand.span),
+                            kind: ExprKind::Clone(Box::new(operand)),
+                        })
+                    }
+                } else {
+                    // clone $expr - traditional syntax
+                    let operand = self.parse_unary()?;
+                    Ok(Expr {
+                        span: span.merge(operand.span),
+                        kind: ExprKind::Clone(Box::new(operand)),
+                    })
+                }
             }
             TokenKind::Print => {
                 self.advance();

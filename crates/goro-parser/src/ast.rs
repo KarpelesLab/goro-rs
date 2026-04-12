@@ -39,7 +39,7 @@ pub enum ExprKind {
     New { class: Box<Expr>, args: Vec<Argument> }, Instanceof { expr: Box<Expr>, class: Box<Expr> },
     Cast(CastType, Box<Expr>), Print(Box<Expr>), Exit(Option<Box<Expr>>), Empty(Box<Expr>), Isset(Vec<Expr>), Eval(Box<Expr>),
     Include { kind: IncludeKind, path: Box<Expr> }, Yield(Option<Box<Expr>>, Option<Box<Expr>>), YieldFrom(Box<Expr>),
-    Clone(Box<Expr>), Spread(Box<Expr>), Pipe { value: Box<Expr>, callable: Box<Expr> },
+    Clone(Box<Expr>), CloneWith { object: Box<Expr>, with_args: Vec<(Vec<u8>, Expr)> }, Spread(Box<Expr>), Pipe { value: Box<Expr>, callable: Box<Expr> },
     ConstantAccess(Vec<Vec<u8>>), ClassConstAccess { class: Box<Expr>, constant: Vec<u8> }, DynamicClassConstAccess { class: Box<Expr>, constant: Box<Expr> },
     ThrowExpr(Box<Expr>), Suppress(Box<Expr>), Identifier(Vec<u8>), FirstClassCallable(CallableTarget),
 }

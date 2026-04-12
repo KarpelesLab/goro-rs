@@ -227,6 +227,8 @@ pub enum OpCode {
     // ---- Clone ----
     /// Clone an object: op1 = source, result = cloned copy
     CloneObj,
+    /// Clone object with property overrides: op1 = cloned object, op2 = array of properties to set
+    CloneWithProps,
     /// Get class name from object: op1 = object, result = class name string
     GetClassName,
     /// Check if object property is set (calls __isset if available)

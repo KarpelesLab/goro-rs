@@ -7775,6 +7775,33 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
+            ExprKind::CloneWith { object, with_args } => {
+                // Clone the object first
+                let val = self.compile_expr(object)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::CloneObj,
+                    op1: val,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(tmp),
+                    line: expr.span.line,
+                });
+                // The with_args contains a single expression (the array/args)
+                // Set properties on the cloned object from the array
+                for (_, with_expr) in with_args {
+                    let arr_op = self.compile_expr(with_expr)?;
+                    // Emit a CloneWithProps opcode to set properties
+                    self.op_array.emit(Op {
+                        opcode: OpCode::CloneWithProps,
+                        op1: OperandType::Tmp(tmp),
+                        op2: arr_op,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                }
+                Ok(OperandType::Tmp(tmp))
+            }
+
             ExprKind::Spread(inner) => self.compile_expr(inner),
 
             ExprKind::ThrowExpr(inner) => {
@@ -9827,6 +9854,10 @@ fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
         ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::ThrowExpr(e) => {
             collect_expr_variables(e, vars);
         }
+        ExprKind::CloneWith { object, with_args } => {
+            collect_expr_variables(object, vars);
+            for (_, e) in with_args { collect_expr_variables(e, vars); }
+        }
         ExprKind::PropertyAccess { object, .. } => {
             collect_expr_variables(object, vars);
         }
@@ -9895,6 +9926,7 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         }
         ExprKind::Cast(_, e) => expr_contains_yield(e),
         ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::ThrowExpr(e) => expr_contains_yield(e),
+        ExprKind::CloneWith { object, with_args } => expr_contains_yield(object) || with_args.iter().any(|(_, e)| expr_contains_yield(e)),
         ExprKind::PropertyAccess { object, .. } => expr_contains_yield(object),
         ExprKind::Include { path, .. } => expr_contains_yield(path),
         _ => false,
@@ -9977,6 +10009,9 @@ fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
         }
         ExprKind::NullCoalesce { left, right } => {
             expr_references_backing_store(left, prop_name) || expr_references_backing_store(right, prop_name)
+        }
+        ExprKind::CloneWith { object, with_args } => {
+            expr_references_backing_store(object, prop_name) || with_args.iter().any(|(_, e)| expr_references_backing_store(e, prop_name))
         }
         ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) => {
             expr_references_backing_store(e, prop_name)
@@ -10174,6 +10209,9 @@ fn expr_to_source_string(expr: &Expr) -> String {
         }
         ExprKind::Clone(inner) => {
             format!("clone {}", expr_to_source_string(inner))
+        }
+        ExprKind::CloneWith { object, .. } => {
+            format!("clone({})", expr_to_source_string(object))
         }
         ExprKind::Print(inner) => {
             format!("print {}", expr_to_source_string(inner))
