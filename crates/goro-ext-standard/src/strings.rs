@@ -166,13 +166,13 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"str_decrement", vec![s()]);
 }
 
-fn strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn strlen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     Ok(Value::Long(s.len() as i64))
 }
 
-fn strtolower(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn strtolower(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let lower: Vec<u8> = s
         .as_bytes()
         .iter()
@@ -181,8 +181,8 @@ fn strtolower(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(lower)))
 }
 
-fn strtoupper(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+fn strtoupper(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let upper: Vec<u8> = s
         .as_bytes()
         .iter()
