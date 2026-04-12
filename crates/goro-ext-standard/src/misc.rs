@@ -3672,18 +3672,9 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut current = class_lower.clone();
     for _ in 0..50 {
         if let Some(class) = vm.classes.get(&current) {
-            if let Some(method) = class.methods.get(&method_lower) {
-                // Private methods are only visible in their declaring class
-                if method.visibility == goro_core::object::Visibility::Private {
-                    // Check if the declaring class matches the requested class
-                    let declaring_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if declaring_lower == class_lower {
-                        return Ok(Value::True);
-                    }
-                    // Private method from parent - not accessible
-                } else {
-                    return Ok(Value::True);
-                }
+            if class.methods.contains_key(&method_lower) {
+                // method_exists() returns true regardless of visibility
+                return Ok(Value::True);
             }
             if let Some(ref parent) = class.parent {
                 current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
