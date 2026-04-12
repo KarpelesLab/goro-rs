@@ -2122,53 +2122,25 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
 
-        // Get callback info
-        let (func_name, captured_args) = match &callback {
-            Value::String(s) => (s.as_bytes().to_vec(), vec![]),
-            Value::Array(cb_arr) => {
-                let cb = cb_arr.borrow();
-                let vals: Vec<Value> = cb.values().cloned().collect();
-                if vals.is_empty() {
-                    return Ok(Value::Array(Rc::new(RefCell::new(result))));
+        if matches!(callback, Value::Null) {
+            // null callback with multiple arrays: create arrays of corresponding elements
+            for i in 0..max_len {
+                let mut sub = PhpArray::new();
+                for arr in &arrays {
+                    sub.push(arr.get(i).cloned().unwrap_or(Value::Null));
                 }
-                (
-                    vals[0].to_php_string().as_bytes().to_vec(),
-                    vals[1..].to_vec(),
-                )
+                result.push(Value::Array(Rc::new(RefCell::new(sub))));
             }
-            Value::Null => {
-                // null callback with multiple arrays: create arrays of corresponding elements
-                for i in 0..max_len {
-                    let mut sub = PhpArray::new();
-                    for arr in &arrays {
-                        sub.push(arr.get(i).cloned().unwrap_or(Value::Null));
-                    }
-                    result.push(Value::Array(Rc::new(RefCell::new(sub))));
-                }
-                return Ok(Value::Array(Rc::new(RefCell::new(result))));
-            }
-            _ => return Ok(Value::Array(Rc::new(RefCell::new(result)))),
-        };
-        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+        }
 
         for i in 0..max_len {
-            let mut cb_args: Vec<Value> = captured_args.clone();
+            let mut cb_args: Vec<Value> = Vec::new();
             for arr in &arrays {
                 cb_args.push(arr.get(i).cloned().unwrap_or(Value::Null));
             }
-            if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-                let mapped = builtin(vm, &cb_args)?;
-                result.push(mapped);
-            } else if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                for (j, arg) in cb_args.iter().enumerate() {
-                    if j < fn_cvs.len() {
-                        fn_cvs[j] = arg.clone();
-                    }
-                }
-                let mapped = vm.execute_fn(&user_fn, fn_cvs)?;
-                result.push(mapped);
-            }
+            let mapped = vm.call_callback(&callback, &cb_args)?;
+            result.push(mapped);
         }
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
     }
