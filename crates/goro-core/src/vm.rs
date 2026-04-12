@@ -21797,12 +21797,29 @@ impl Vm {
                                     } // $name
                                     self.class_scope_stack.push(magic_declaring);
                                     self.called_class_stack.push(class_name_orig.clone());
-                                    let result = self
+                                    let mut result = self
                                         .execute_op_array(&method, fn_cvs)
                                         .unwrap_or(Value::Null);
                                     self.called_class_stack.pop();
                                     self.class_scope_stack.pop();
                                     self.magic_depth -= 1;
+                                    // Cast result to property's declared type if typed
+                                    if let Some(class) = self.classes.get(&class_lower) {
+                                        if let Some(prop_def) = class.properties.iter().find(|p| p.name == prop_name.as_bytes()) {
+                                            if let Some(ref pt) = prop_def.property_type {
+                                                match pt {
+                                                    ParamType::Simple(t) => match t.as_slice() {
+                                                        b"int" | b"integer" => { result = Value::Long(result.to_long()); }
+                                                        b"float" | b"double" => { result = Value::Double(result.to_double()); }
+                                                        b"string" => { result = Value::String(result.to_php_string()); }
+                                                        b"bool" | b"boolean" => { result = if result.is_truthy() { Value::True } else { Value::False }; }
+                                                        _ => {}
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                    }
                                     result
                                 } else {
                                     // No __get - throw the uninitialized error
