@@ -2213,6 +2213,33 @@ pub fn apply_relative_modification(s: &str, ts: i64) -> Option<i64> {
             if i + 1 < tokens.len() {
                 let unit = tokens[i + 1];
                 let amount: i64 = if token == "next" { 1 } else if token == "last" { -1 } else { 0 };
+                // Check if unit is a day name first
+                let day_names_lookup = [
+                    ("sunday", 0i64), ("monday", 1), ("tuesday", 2), ("wednesday", 3),
+                    ("thursday", 4), ("friday", 5), ("saturday", 6),
+                    ("sun", 0), ("mon", 1), ("tue", 2), ("wed", 3),
+                    ("thu", 4), ("fri", 5), ("sat", 6),
+                ];
+                if let Some(&(_, target_dow)) = day_names_lookup.iter().find(|(name, _)| *name == unit) {
+                    let current_days = result / 86400;
+                    let tod = ((result % 86400) + 86400) % 86400;
+                    let current_dow = (((current_days % 7) + 4) % 7 + 7) % 7; // 0=Sun
+                    let diff = if token == "next" {
+                        let d = target_dow - current_dow;
+                        if d <= 0 { d + 7 } else { d }
+                    } else if token == "last" {
+                        let d = current_dow - target_dow;
+                        -(if d <= 0 { d + 7 } else { d })
+                    } else {
+                        // "this" - go to the occurrence in the current week
+                        let d = target_dow - current_dow;
+                        d
+                    };
+                    result = (current_days + diff) * 86400 + tod;
+                    any_match = true;
+                    i += 2;
+                    continue;
+                }
                 if let Some(new_ts) = apply_unit_modification(result, amount, unit) {
                     result = new_ts;
                     any_match = true;
