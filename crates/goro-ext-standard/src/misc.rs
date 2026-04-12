@@ -8035,60 +8035,28 @@ fn str_contains_builtin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 
 fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
+        let callback = callback.clone();
         let mut arr_mut = arr.borrow_mut();
         let mut entries: Vec<Value> = arr_mut.values().cloned().collect();
+        drop(arr_mut);
 
-        let (func_name, captured) = match callback {
-            Value::String(s) => (s.as_bytes().to_vec(), vec![]),
-            Value::Array(cb) => {
-                let cb = cb.borrow();
-                let vals: Vec<Value> = cb.values().cloned().collect();
-                if vals.is_empty() {
-                    return Ok(Value::True);
-                }
-                (
-                    vals[0].to_php_string().as_bytes().to_vec(),
-                    vals[1..].to_vec(),
-                )
+        entries.sort_by(|a, b| {
+            let result = vm.call_callback(&callback, &[a.clone(), b.clone()]).unwrap_or(Value::Long(0));
+            let cmp = result.to_long();
+            if cmp < 0 {
+                std::cmp::Ordering::Less
+            } else if cmp > 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
             }
-            _ => return Ok(Value::True),
-        };
-        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-        if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-            entries.sort_by(|a, b| {
-                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                let mut idx = 0;
-                for cv in &captured {
-                    if idx < fn_cvs.len() {
-                        fn_cvs[idx] = cv.clone();
-                        idx += 1;
-                    }
-                }
-                if idx < fn_cvs.len() {
-                    fn_cvs[idx] = a.clone();
-                    idx += 1;
-                }
-                if idx < fn_cvs.len() {
-                    fn_cvs[idx] = b.clone();
-                }
-                let result = vm.execute_fn(&user_fn, fn_cvs).unwrap_or(Value::Long(0));
-                let cmp = result.to_long();
-                if cmp < 0 {
-                    std::cmp::Ordering::Less
-                } else if cmp > 0 {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            });
-        }
+        });
 
         let mut new_arr = PhpArray::new();
         for val in entries {
             new_arr.push(val);
         }
-        *arr_mut = new_arr;
+        arr.borrow_mut().clone_from(&new_arr);
     }
     Ok(Value::True)
 }
@@ -8159,53 +8127,15 @@ fn array_reduce_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::Array(a)) => a.borrow(),
         _ => return Ok(Value::Null),
     };
-    let callback = args.get(1);
+    let callback = args.get(1).cloned().unwrap_or(Value::Null);
     let initial = args.get(2).cloned().unwrap_or(Value::Null);
 
     let entries: Vec<Value> = arr.values().cloned().collect();
     drop(arr);
 
-    let (func_name, captured) = match callback {
-        Some(Value::String(s)) => (s.as_bytes().to_vec(), vec![]),
-        Some(Value::Array(cb)) => {
-            let cb = cb.borrow();
-            let vals: Vec<Value> = cb.values().cloned().collect();
-            if vals.is_empty() {
-                return Ok(initial);
-            }
-            (
-                vals[0].to_php_string().as_bytes().to_vec(),
-                vals[1..].to_vec(),
-            )
-        }
-        _ => return Ok(initial),
-    };
-    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
     let mut carry = initial;
-    if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-        for val in entries {
-            let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-            let mut idx = 0;
-            for cv in &captured {
-                if idx < fn_cvs.len() {
-                    fn_cvs[idx] = cv.clone();
-                    idx += 1;
-                }
-            }
-            if idx < fn_cvs.len() {
-                fn_cvs[idx] = carry;
-                idx += 1;
-            }
-            if idx < fn_cvs.len() {
-                fn_cvs[idx] = val;
-            }
-            carry = vm.execute_fn(&user_fn, fn_cvs)?;
-        }
-    } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-        for val in entries {
-            carry = builtin(vm, &[carry, val])?;
-        }
+    for val in entries {
+        carry = vm.call_callback(&callback, &[carry, val])?;
     }
 
     Ok(carry)
