@@ -136,6 +136,9 @@ pub enum OpCode {
     InitDynamicStaticCall,
     /// Send argument: op1 = value, op2 = arg position
     SendVal,
+    /// Send argument preserving Reference wrapper: op1 = value, op2 = arg position
+    /// Used for var_dump/print_r so they can display & prefix for references
+    SendValRaw,
     /// Send named argument: op1 = value, op2 = argument name (const)
     SendNamedVal,
     /// Unpack array argument: op1 = array value (each element becomes a separate arg)

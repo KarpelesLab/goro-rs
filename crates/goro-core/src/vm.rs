@@ -1713,6 +1713,48 @@ impl Vm {
         }
     }
 
+    /// Check if attributes contain #[\Deprecated] and return the message
+    pub fn get_deprecated_message(&mut self, attrs: &[crate::object::RuntimeAttribute]) -> Option<String> {
+        for attr in attrs {
+            let lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if lower == b"deprecated" {
+                // Evaluate attribute args to get message
+                if attr.args_op_array.ops.is_empty() {
+                    return Some(String::new());
+                }
+                let args_val = self.execute_op_array_pub(&attr.args_op_array, vec![]).unwrap_or(Value::Null);
+                if let Value::Array(arr) = &args_val {
+                    let arr = arr.borrow();
+                    // First positional arg or "message" named arg
+                    let msg = arr.iter().next().map(|(_, v)| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                    return Some(msg);
+                }
+                return Some(String::new());
+            }
+        }
+        None
+    }
+
+    /// Check if attributes contain #[\NoDiscard] and return the message
+    pub fn get_nodiscard_message(&mut self, attrs: &[crate::object::RuntimeAttribute]) -> Option<String> {
+        for attr in attrs {
+            let lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if lower == b"nodiscard" {
+                if attr.args_op_array.ops.is_empty() {
+                    return Some(String::new());
+                }
+                let args_val = self.execute_op_array_pub(&attr.args_op_array, vec![]).unwrap_or(Value::Null);
+                if let Value::Array(arr) = &args_val {
+                    let arr = arr.borrow();
+                    let msg = arr.iter().next().map(|(_, v)| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                    return Some(msg);
+                }
+                return Some(String::new());
+            }
+        }
+        None
+    }
+
     /// Emit deprecation for optional parameters before required parameters.
     fn emit_optional_before_required_deprecation(&mut self, op_array: &crate::opcode::OpArray, func_display: &str) {
         let param_count = op_array.param_has_default.len();
@@ -12226,6 +12268,35 @@ impl Vm {
                         }
                     }
                 }
+                OpCode::SendValRaw => {
+                    // Like SendVal but preserves Reference wrappers (for var_dump etc.)
+                    let val = if let OperandType::Cv(idx) = &op.op1 {
+                        let i = *idx as usize;
+                        if let Some(v) = cvs.get(i) {
+                            let is_undef = match v {
+                                Value::Undef => true,
+                                Value::Reference(r) => matches!(*r.borrow(), Value::Undef),
+                                _ => false,
+                            };
+                            if is_undef {
+                                if let Some(name) = op_array.cv_names.get(i) {
+                                    self.emit_warning_at(&format!("Undefined variable ${}", String::from_utf8_lossy(name)), op.line);
+                                }
+                                Value::Null
+                            } else {
+                                v.clone() // Keep Reference wrapper intact!
+                            }
+                        } else {
+                            Value::Null
+                        }
+                    } else {
+                        // For Tmp/Const operands, just read normally (no reference to preserve)
+                        self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                    };
+                    if let Some(call) = self.pending_calls.last_mut() {
+                        call.args.push(val);
+                    }
+                }
                 OpCode::SendNamedVal => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
@@ -13691,6 +13762,29 @@ impl Vm {
                         }
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
                     {
+                        // Check for #[\Deprecated] attribute on the user function
+                        if !user_fn.attributes.is_empty() {
+                            let attrs_clone = user_fn.attributes.clone();
+                            if let Some(custom_msg) = self.get_deprecated_message(&attrs_clone) {
+                                let fn_display = call.name.to_string_lossy();
+                                // Determine if it's a method or function
+                                let msg = if fn_display.contains("::") {
+                                    if custom_msg.is_empty() {
+                                        format!("Method {}() is deprecated", fn_display)
+                                    } else {
+                                        format!("Method {}() is deprecated, {}", fn_display, custom_msg)
+                                    }
+                                } else {
+                                    if custom_msg.is_empty() {
+                                        format!("Function {}() is deprecated", fn_display)
+                                    } else {
+                                        format!("Function {}() is deprecated, {}", fn_display, custom_msg)
+                                    }
+                                };
+                                self.emit_deprecated_at(&msg, op.line);
+                            }
+                        }
+
                         // Check visibility and abstract for static method calls (ClassName::method)
                         if let Some(sep_pos) = func_name_lower.windows(2).position(|w| w == b"::") {
                             {
