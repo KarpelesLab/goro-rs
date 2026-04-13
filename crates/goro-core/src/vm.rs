@@ -13808,12 +13808,11 @@ impl Vm {
                         }
                     } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
                     {
-                        // Check for #[\Deprecated] attribute on the user function
+                        // Check for #[\Deprecated] and #[\NoDiscard] attributes
                         if !user_fn.attributes.is_empty() {
                             let attrs_clone = user_fn.attributes.clone();
                             if let Some(custom_msg) = self.get_deprecated_message(&attrs_clone) {
                                 let fn_display = call.name.to_string_lossy();
-                                // Determine if it's a method or function
                                 let msg = if fn_display.contains("::") {
                                     if custom_msg.is_empty() {
                                         format!("Method {}() is deprecated", fn_display)
@@ -13828,6 +13827,18 @@ impl Vm {
                                     }
                                 };
                                 self.emit_deprecated_at(&msg, op.line);
+                            }
+                            // #[\NoDiscard] - warn if result is discarded
+                            if matches!(op.op1, OperandType::Const(_)) {
+                                if let Some(custom_msg) = self.get_nodiscard_message(&attrs_clone) {
+                                    let fn_display = call.name.to_string_lossy();
+                                    let msg = if custom_msg.is_empty() {
+                                        format!("The return value of function {}() should either be used or intentionally ignored by casting it as (void)", fn_display)
+                                    } else {
+                                        format!("The return value of function {}() should either be used or intentionally ignored by casting it as (void), {}", fn_display, custom_msg)
+                                    };
+                                    self.emit_warning_at(&msg, op.line);
+                                }
                             }
                         }
 

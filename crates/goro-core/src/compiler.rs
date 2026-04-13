@@ -91,6 +91,8 @@ pub struct Compiler {
     is_in_trait: bool,
     /// Compile-time warnings (message, line)
     pub warnings: Vec<(String, u32)>,
+    /// Whether the current expression's result will be discarded (for #[\NoDiscard])
+    is_discarding_result: bool,
 }
 
 impl Default for Compiler {
@@ -201,6 +203,7 @@ impl Compiler {
             anon_class_name_map: HashMap::new(),
             is_in_trait: false,
             warnings: Vec::new(),
+            is_discarding_result: false,
         }
     }
 
@@ -783,7 +786,17 @@ impl Compiler {
             }
 
             StmtKind::Expression(expr) => {
+                // Set flag when expression result is discarded (for #[\NoDiscard] checking)
+                let is_call = matches!(expr.kind,
+                    ExprKind::FunctionCall { .. } |
+                    ExprKind::MethodCall { .. } |
+                    ExprKind::StaticMethodCall { .. }
+                );
+                if is_call {
+                    self.is_discarding_result = true;
+                }
                 self.compile_expr(expr)?;
+                self.is_discarding_result = false;
                 Ok(())
             }
 
@@ -5858,11 +5871,17 @@ impl Compiler {
                 };
                 self.compile_send_args_with_name(args, expr.span.line, func_name_for_ref)?;
 
-                // Do the call
+                // Do the call (op1 signals if result is being discarded for #[\NoDiscard])
                 let tmp = self.op_array.alloc_temp();
+                let discard_flag = if self.is_discarding_result {
+                    let idx = self.op_array.add_literal(Value::True);
+                    OperandType::Const(idx)
+                } else {
+                    OperandType::Unused
+                };
                 self.op_array.emit(Op {
                     opcode: OpCode::DoFCall,
-                    op1: OperandType::Unused,
+                    op1: discard_flag,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
