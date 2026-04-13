@@ -1755,6 +1755,52 @@ impl Vm {
         None
     }
 
+    /// Check open_basedir restriction. Returns true if path is allowed, false if blocked.
+    pub fn check_open_basedir(&mut self, func_name: &str, path: &str) -> bool {
+        let basedir_val = self.constants.get(b"open_basedir".as_ref())
+            .cloned()
+            .unwrap_or(Value::String(crate::string::PhpString::from_bytes(b"")));
+        let basedir_str = basedir_val.to_php_string().to_string_lossy();
+        if basedir_str.is_empty() {
+            return true;
+        }
+        if path.contains("://") {
+            return true;
+        }
+        let abs_path = if std::path::Path::new(path).is_absolute() {
+            path.to_string()
+        } else {
+            std::env::current_dir()
+                .map(|d| d.join(path).to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.to_string())
+        };
+        let canonical = std::fs::canonicalize(&abs_path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| abs_path.clone());
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        for dir in basedir_str.split(separator) {
+            let dir = dir.trim();
+            if dir.is_empty() { continue; }
+            let dir_canonical = std::fs::canonicalize(dir)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| dir.to_string());
+            let check = if dir_canonical.ends_with('/') {
+                dir_canonical.clone()
+            } else {
+                format!("{}/", dir_canonical)
+            };
+            if canonical.starts_with(&check) || canonical == dir_canonical
+                || abs_path.starts_with(&check) || abs_path == dir_canonical {
+                return true;
+            }
+        }
+        self.emit_warning(&format!(
+            "{}(): open_basedir restriction in effect. File({}) is not within the allowed path(s): ({})",
+            func_name, path, basedir_str
+        ));
+        false
+    }
+
     /// Emit deprecation for optional parameters before required parameters.
     fn emit_optional_before_required_deprecation(&mut self, op_array: &crate::opcode::OpArray, func_display: &str) {
         let param_count = op_array.param_has_default.len();
@@ -17737,6 +17783,25 @@ impl Vm {
                                 return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
                             }
                         };
+                        // Check for #[\Deprecated] attribute on class constants
+                        if prop_name.as_bytes() != b"class" {
+                            let dep_msg = self.classes.get(&class_lower)
+                                .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
+                                .filter(|meta| !meta.attributes.is_empty())
+                                .map(|meta| meta.attributes.clone());
+                            if let Some(attrs) = dep_msg {
+                                if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
+                                    let class_display = String::from_utf8_lossy(&resolved_class).to_string();
+                                    let const_display = prop_name.to_string_lossy();
+                                    let msg = if custom_msg.is_empty() {
+                                        format!("Constant {}::{} is deprecated", class_display, const_display)
+                                    } else {
+                                        format!("Constant {}::{} is deprecated, {}", class_display, const_display, custom_msg)
+                                    };
+                                    self.emit_deprecated_at(&msg, op.line);
+                                }
+                            }
+                        }
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     }
                 }
@@ -21343,6 +21408,22 @@ impl Vm {
                     // Try autoload if class not found
                     if !self.classes.contains_key(&name_lower) {
                         self.try_autoload_class(class_name.as_bytes());
+                    }
+
+                    // Check for #[\Deprecated] attribute on the class
+                    if let Some(class) = self.classes.get(&name_lower) {
+                        if !class.attributes.is_empty() {
+                            let attrs_clone = class.attributes.clone();
+                            if let Some(custom_msg) = self.get_deprecated_message(&attrs_clone) {
+                                let class_display = crate::value::display_class_name(class_name.as_bytes());
+                                let msg = if custom_msg.is_empty() {
+                                    format!("Class {} is deprecated", class_display)
+                                } else {
+                                    format!("Class {} is deprecated, {}", class_display, custom_msg)
+                                };
+                                self.emit_deprecated_at(&msg, op.line);
+                            }
+                        }
                     }
 
                     // Check for reserved internal classes

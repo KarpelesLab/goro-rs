@@ -5448,24 +5448,33 @@ fn http_build_query_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 // JSON functions moved to goro-ext-json
 
 // === File stubs ===
-fn file_exists_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn file_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("file_exists", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
         Value::True
     } else {
         Value::False
     })
 }
-fn is_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn is_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("is_file", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     Ok(if std::path::Path::new(&path.to_string_lossy()).is_file() {
         Value::True
     } else {
         Value::False
     })
 }
-fn is_dir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn is_dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("is_dir", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     Ok(if std::path::Path::new(&path.to_string_lossy()).is_dir() {
         Value::True
     } else {
@@ -5488,7 +5497,7 @@ fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::False
     })
 }
-fn file_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let _use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let _context = args.get(2);
@@ -5499,13 +5508,18 @@ fn file_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     if let Some(len) = length {
         if len < 0 {
             let msg = "file_get_contents(): Argument #5 ($length) must be greater than or equal to 0";
-            let exc = _vm.create_exception(b"ValueError", msg, _vm.current_line);
-            _vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.to_string(), line: _vm.current_line });
+            let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg.to_string(), line: vm.current_line });
         }
     }
 
     let path_str = path.to_string_lossy();
+    if !path_str.starts_with("php://") && !path_str.starts_with("http://") && !path_str.starts_with("data://") {
+        if !vm.check_open_basedir("file_get_contents", &path_str) {
+            return Ok(Value::False);
+        }
+    }
     match std::fs::read(&*path_str as &str) {
         Ok(data) => {
             let start = if offset >= 0 { offset as usize } else { 0 };
@@ -5521,13 +5535,16 @@ fn file_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
             Ok(Value::String(PhpString::from_vec(result.to_vec())))
         }
         Err(_) => {
-            _vm.emit_warning(&format!("file_get_contents({}): Failed to open stream: No such file or directory", path_str));
+            vm.emit_warning(&format!("file_get_contents({}): Failed to open stream: No such file or directory", path_str));
             Ok(Value::False)
         }
     }
 }
 fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("file_put_contents", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     let data_val = args.get(1).unwrap_or(&Value::Null);
     let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let append = flags & 8 != 0; // FILE_APPEND
@@ -5608,6 +5625,9 @@ fn chdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("filesize", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     match std::fs::metadata(&*path.to_string_lossy() as &str) {
         Ok(m) => Ok(Value::Long(m.len() as i64)),
         Err(_) => {
@@ -5619,6 +5639,9 @@ fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
+    if !vm.check_open_basedir("touch", &path_str) {
+        return Ok(Value::False);
+    }
     let p = std::path::Path::new(&*path_str);
     if !p.exists() {
         if let Some(parent) = p.parent() {
@@ -8871,6 +8894,9 @@ fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("fileperms", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -10065,6 +10091,9 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("filemtime", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     match std::fs::metadata(&*path.to_string_lossy()) {
         Ok(meta) => {
             if let Ok(modified) = meta.modified() {
@@ -10083,6 +10112,9 @@ fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("fileatime", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     match std::fs::metadata(&*path.to_string_lossy()) {
         Ok(meta) => {
             if let Ok(accessed) = meta.accessed() {
@@ -10105,6 +10137,9 @@ fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("fileinode", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -10122,6 +10157,9 @@ fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("fileowner", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -10139,6 +10177,9 @@ fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn filegroup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if !vm.check_open_basedir("filegroup", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
