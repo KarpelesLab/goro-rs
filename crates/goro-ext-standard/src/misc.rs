@@ -7010,8 +7010,19 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let original_lower: Vec<u8> = original.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
     let alias_lower: Vec<u8> = alias.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
     if let Some(class) = vm.classes.get(&original_lower).cloned() {
-        vm.classes.insert(alias_lower.clone(), class);
+        // Use the original class name (not alias) for the class entry
+        let mut aliased_class = class;
+        // Keep original class name so get_class() returns the canonical name
+        vm.classes.insert(alias_lower.clone(), aliased_class);
         // Register bidirectional alias mappings so instanceof works correctly
+        vm.class_aliases.insert(alias_lower.clone(), original_lower.clone());
+        vm.class_aliases.insert(original_lower, alias_lower);
+        Ok(Value::True)
+    } else if vm.is_known_builtin_class(&original_lower) {
+        // Create a ClassEntry for the alias pointing to the builtin
+        let mut class = goro_core::object::ClassEntry::new(original.as_bytes().to_vec());
+        class.allow_dynamic_properties = true; // builtins generally allow this
+        vm.classes.insert(alias_lower.clone(), class);
         vm.class_aliases.insert(alias_lower.clone(), original_lower.clone());
         vm.class_aliases.insert(original_lower, alias_lower);
         Ok(Value::True)
