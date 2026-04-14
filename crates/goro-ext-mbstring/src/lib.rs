@@ -387,7 +387,23 @@ fn mb_internal_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         // Set the internal encoding
         let enc = args[0].to_php_string().to_string_lossy();
-        if resolve_encoding(&enc).is_some() || enc.to_ascii_lowercase() == "utf-8" || enc.to_ascii_lowercase() == "ascii" {
+        let enc_lower = enc.to_ascii_lowercase();
+        // Accept encoding_rs encodings + known PHP mbstring encodings
+        let is_valid = resolve_encoding(&enc).is_some()
+            || matches!(enc_lower.as_str(),
+                "utf-8" | "ascii" | "jis" | "utf-7" | "utf7"
+                | "ucs-4" | "ucs-4be" | "ucs-4le" | "ucs-2" | "ucs-2be" | "ucs-2le"
+                | "utf-16" | "utf-16be" | "utf-16le" | "utf-32" | "utf-32be" | "utf-32le"
+                | "cp50220" | "cp50221" | "cp50222" | "iso-2022-jp-ms"
+                | "uuencode" | "qprint" | "quoted-printable" | "html" | "html-entities"
+                | "7bit" | "8bit" | "base64" | "auto"
+                | "euc-jp-2004" | "macjapanese" | "cp932" | "cp51932"
+                | "iso-8859-1" | "iso-8859-2" | "iso-8859-3" | "iso-8859-4"
+                | "iso-8859-5" | "iso-8859-6" | "iso-8859-7" | "iso-8859-8"
+                | "iso-8859-9" | "iso-8859-10" | "iso-8859-13" | "iso-8859-14"
+                | "iso-8859-15" | "iso-8859-16"
+            );
+        if is_valid {
             vm.constants.insert(b"mbstring.internal_encoding".to_vec(), Value::String(PhpString::from_string(enc)));
             Ok(Value::True)
         } else {
