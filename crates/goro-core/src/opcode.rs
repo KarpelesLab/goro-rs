@@ -271,6 +271,10 @@ pub enum OpCode {
     SendRef,
     /// Append to array without deref (preserves Reference wrapper): op1 = array, op2 = CV
     ArrayAppendRef,
+    /// Set array element as reference: op1 = array CV, op2 = value CV, result = key
+    ArraySetRef,
+    /// Get or create a reference for an array element: op1 = array CV, op2 = key, result = Reference tmp
+    ArrayGetRef,
     /// Dynamic variable read: op1 = name expr, result = value
     VarVarGet,
     /// Dynamic variable write: op1 = name expr, op2 = value

@@ -557,6 +557,30 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
                 var_dump_value(vm, value, indent + 2, seen);
             }
+            // Show class-declared typed properties that were unset (removed from instance)
+            if let Some(ref ci) = class_info {
+                for prop_def in &ci.properties {
+                    if prop_def.property_type.is_none() || prop_def.is_static {
+                        continue;
+                    }
+                    // Skip if already shown (exists on instance)
+                    if props.iter().any(|(n, _)| *n == prop_def.name) {
+                        continue;
+                    }
+                    let name_str = String::from_utf8_lossy(&prop_def.name);
+                    let display_name = match prop_def.visibility {
+                        goro_core::object::Visibility::Protected => format!("\"{}\":protected", name_str),
+                        goro_core::object::Visibility::Private => {
+                            let class_name = goro_core::value::display_class_name(&obj_class_name);
+                            format!("\"{}\":\"{}\":private", name_str, class_name)
+                        }
+                        _ => format!("\"{}\"", name_str),
+                    };
+                    let type_name = vm.param_type_name(prop_def.property_type.as_ref().unwrap());
+                    vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
+                    vm.write_output(format!("{}  uninitialized({})\n", prefix, type_name).as_bytes());
+                }
+            }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
             seen.remove(&oid);
         }
@@ -580,14 +604,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
         Value::Reference(r) => {
-            // PHP only shows & prefix when reference count >= 2
+            // In PHP, any value stored as a reference always shows & prefix in var_dump
             let inner = r.borrow().clone();
-            if std::rc::Rc::strong_count(r) >= 2 {
-                var_dump_value_ref(vm, &inner, indent, &prefix, seen);
-            } else {
-                // Single reference - show without & prefix
-                var_dump_value(vm, &inner, indent, seen);
-            }
+            var_dump_value_ref(vm, &inner, indent, &prefix, seen);
         }
     }
 }
@@ -640,8 +659,72 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, see
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
+        Value::Object(obj) => {
+            let obj_borrow = obj.borrow();
+            // Handle enum case with & prefix
+            if obj_borrow.has_property(b"__enum_case") {
+                let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
+                let case_name = obj_borrow.get_property(b"name");
+                let case_name_str = case_name.to_php_string().to_string_lossy();
+                vm.write_output(format!("{}&enum({}::{})\n", prefix, class_name, case_name_str).as_bytes());
+                return;
+            }
+            // For regular objects, show &object(...) prefix
+            let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
+            let oid = obj_borrow.object_id;
+            let prop_count = obj_borrow.properties.iter()
+                .filter(|(name, val)| {
+                    if is_internal_property(name) { return false; }
+                    if matches!(val, Value::Undef) { return false; }
+                    true
+                })
+                .count();
+            vm.write_output(
+                format!("{}&object({})#{} ({}) {{\n", prefix, class_name, oid, prop_count).as_bytes(),
+            );
+            if !seen.insert(oid) {
+                vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                return;
+            }
+            let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_info = vm.classes.get(&class_lower).cloned();
+            let props: Vec<_> = obj_borrow.properties.clone();
+            let obj_class_name = obj_borrow.class_name.clone();
+            drop(obj_borrow);
+            for (name, value) in &props {
+                if is_internal_property(name) { continue; }
+                let name_str = String::from_utf8_lossy(name);
+                let vis = class_info.as_ref().and_then(|c| {
+                    c.properties.iter().find(|p| p.name == *name).map(|p| p.visibility)
+                });
+                let display_name = match vis {
+                    Some(goro_core::object::Visibility::Protected) => format!("\"{}\":protected", name_str),
+                    Some(goro_core::object::Visibility::Private) => {
+                        let cn = goro_core::value::display_class_name(&obj_class_name);
+                        format!("\"{}\":\"{}\":private", name_str, cn)
+                    }
+                    _ => format!("\"{}\"", name_str),
+                };
+                if matches!(value, Value::Undef) {
+                    let prop_type = class_info.as_ref().and_then(|c| {
+                        c.properties.iter().find(|p| p.name == *name).and_then(|p| p.property_type.as_ref())
+                    });
+                    if let Some(ptype) = prop_type {
+                        let type_name = vm.param_type_name(ptype);
+                        vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
+                        vm.write_output(format!("{}  uninitialized({})\n", prefix, type_name).as_bytes());
+                    }
+                    continue;
+                }
+                vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
+                var_dump_value(vm, value, indent + 2, seen);
+            }
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
+            seen.remove(&oid);
+        }
         _ => {
-            // For other types (Object, nested Reference), just dump normally
+            // For other types (nested Reference), just dump normally
             var_dump_value(vm, val, indent, seen);
         }
     }

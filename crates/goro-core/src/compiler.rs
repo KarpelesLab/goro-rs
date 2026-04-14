@@ -8548,6 +8548,36 @@ impl Compiler {
                         });
                         Ok(OperandType::Cv(target_cv))
                     }
+                    (ExprKind::Variable(target_name), ExprKind::ArrayAccess { array: value_arr, index: value_idx }) => {
+                        // $var = &$arr[key] — get/create reference in array, assign to variable
+                        let src_arr = self.compile_expr(value_arr)?;
+                        let ref_tmp = self.op_array.alloc_temp();
+                        if let Some(src_idx_expr) = value_idx {
+                            let src_idx = self.compile_expr(src_idx_expr)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayGetRef,
+                                op1: src_arr,
+                                op2: src_idx,
+                                result: OperandType::Tmp(ref_tmp),
+                                line: expr.span.line,
+                            });
+                        } else {
+                            return Err(CompileError {
+                                message: "Cannot use [] for reading".into(),
+                                line: expr.span.line,
+                            });
+                        }
+                        let target_cv = self.op_array.get_or_create_cv(target_name);
+                        // Assign the reference directly to the CV
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Cv(target_cv),
+                            op2: OperandType::Tmp(ref_tmp),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Cv(target_cv))
+                    }
                     (ExprKind::Variable(target_name), _) => {
                         // $target = &<expr> — evaluate expr, assign to target, then make both reference
                         let val = self.compile_expr(value)?;
@@ -8560,6 +8590,103 @@ impl Compiler {
                             line: expr.span.line,
                         });
                         Ok(OperandType::Cv(target_cv))
+                    }
+                    (ExprKind::ArrayAccess { array, index }, ExprKind::Variable(value_name)) => {
+                        // $arr[key] = &$var — store reference into array element
+                        let arr = self.compile_expr(array)?;
+                        let value_cv = self.op_array.get_or_create_cv(value_name);
+                        if let Some(idx_expr) = index {
+                            let idx = self.compile_expr(idx_expr)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArraySetRef,
+                                op1: arr,
+                                op2: OperandType::Cv(value_cv),
+                                result: idx,
+                                line: expr.span.line,
+                            });
+                        } else {
+                            // $arr[] = &$var — append reference
+                            self.op_array.emit(Op {
+                                opcode: OpCode::MakeRef,
+                                op1: OperandType::Cv(value_cv),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppendRef,
+                                op1: arr,
+                                op2: OperandType::Cv(value_cv),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                        }
+                        Ok(arr)
+                    }
+                    (ExprKind::ArrayAccess { array: target_arr, index: target_idx },
+                     ExprKind::ArrayAccess { array: value_arr, index: value_idx }) => {
+                        // $arr1[k1] = &$arr2[k2] — get/create reference in source, store in target
+                        let src_arr = self.compile_expr(value_arr)?;
+                        let ref_tmp = self.op_array.alloc_temp();
+                        if let Some(src_idx_expr) = value_idx {
+                            let src_idx = self.compile_expr(src_idx_expr)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayGetRef,
+                                op1: src_arr,
+                                op2: src_idx,
+                                result: OperandType::Tmp(ref_tmp),
+                                line: expr.span.line,
+                            });
+                        } else {
+                            return Err(CompileError {
+                                message: "Cannot use [] for reading".into(),
+                                line: expr.span.line,
+                            });
+                        }
+                        let dst_arr = self.compile_expr(target_arr)?;
+                        if let Some(dst_idx_expr) = target_idx {
+                            let dst_idx = self.compile_expr(dst_idx_expr)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArraySetRef,
+                                op1: dst_arr,
+                                op2: OperandType::Tmp(ref_tmp),
+                                result: dst_idx,
+                                line: expr.span.line,
+                            });
+                        } else {
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppendRef,
+                                op1: dst_arr,
+                                op2: OperandType::Tmp(ref_tmp),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                        }
+                        Ok(dst_arr)
+                    }
+                    (ExprKind::ArrayAccess { array, index }, _) => {
+                        // $arr[key] = &<expr> — evaluate expr and store reference
+                        let arr = self.compile_expr(array)?;
+                        let val = self.compile_expr(value)?;
+                        if let Some(idx_expr) = index {
+                            let idx = self.compile_expr(idx_expr)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArraySetRef,
+                                op1: arr,
+                                op2: val,
+                                result: idx,
+                                line: expr.span.line,
+                            });
+                        } else {
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppendRef,
+                                op1: arr,
+                                op2: val,
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                        }
+                        Ok(arr)
                     }
                     _ => {
                         let idx = self.op_array.add_literal(Value::Null);

@@ -1228,10 +1228,19 @@ impl Vm {
                     if caller_lower == declaring_lower {
                         None
                     } else {
-                        Some(Self::format_access_error("private", target_class_display, member_name, is_property, Some(caller)))
+                        // PHP reports the declaring class in private method errors, not the runtime class
+                        // Look up the original-case class name from ClassEntry
+                        let display_class = self.classes.get(&declaring_lower)
+                            .map(|ce| ce.name.as_slice())
+                            .unwrap_or(declaring_class);
+                        Some(Self::format_access_error("private", display_class, member_name, is_property, Some(caller)))
                     }
                 } else {
-                    Some(Self::format_access_error("private", target_class_display, member_name, is_property, None))
+                    let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let display_class = self.classes.get(&declaring_lower)
+                        .map(|ce| ce.name.as_slice())
+                        .unwrap_or(declaring_class);
+                    Some(Self::format_access_error("private", display_class, member_name, is_property, None))
                 }
             }
         }
@@ -18169,9 +18178,16 @@ impl Vm {
                                         eval_result
                                     }
                                     Err(e) => {
-                                        // Compile error in eval - output as parse error
-                                        let msg = format!("\nParse error: {} in {}({}) : eval()'d code on line {}\n",
-                                            e.message, self.current_file, op.line, e.line);
+                                        // Compile error in eval - determine error type
+                                        // Semantic errors like "Cannot use [] for reading" are Fatal errors
+                                        // Syntax errors are Parse errors
+                                        let error_type = if e.message.contains("syntax error") || e.message.contains("unexpected") {
+                                            "Parse error"
+                                        } else {
+                                            "Fatal error"
+                                        };
+                                        let msg = format!("\n{}: {} in {}({}) : eval()'d code on line {}\n",
+                                            error_type, e.message, self.current_file, op.line, e.line);
                                         self.output.extend_from_slice(msg.as_bytes());
                                         Value::False
                                     }
@@ -18685,24 +18701,11 @@ impl Vm {
                                 }
                                 return Err(VmError { message: msg, line: op.line });
                             }
-                            // For typed properties: set to Undef (uninitialized) instead of removing
-                            // For untyped properties: remove entirely
-                            let is_typed = self.classes.get(&class_lower_u)
-                                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
-                                .map(|p| p.property_type.is_some())
-                                .unwrap_or(false);
-                            if is_typed {
-                                let mut obj_mut = obj.borrow_mut();
-                                for (name, val) in obj_mut.properties.iter_mut() {
-                                    if name == prop_name.as_bytes() {
-                                        *val = Value::Undef;
-                                        break;
-                                    }
-                                }
-                            } else {
-                                obj.borrow_mut().properties
-                                    .retain(|(name, _)| name != prop_name.as_bytes());
-                            }
+                            // Remove the property from the object entirely.
+                            // For typed properties: this allows __set/__get to be triggered on subsequent access.
+                            // var_dump reconstructs uninitialized typed properties from the class definition.
+                            obj.borrow_mut().properties
+                                .retain(|(name, _)| name != prop_name.as_bytes());
                         } else {
                             // Try __unset magic method (or throw avis error if no __unset)
                             let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -18710,7 +18713,18 @@ impl Vm {
                             let has_unset = self.classes.get(&class_lower)
                                 .map(|c| c.methods.contains_key(&b"__unset".to_vec()))
                                 .unwrap_or(false);
-                            if has_unset && self.magic_depth < 5 {
+                            // If there's an avis error and we're already inside a magic method,
+                            // throw the error instead of recursing into __unset again
+                            if avis_error.is_some() && self.magic_depth > 0 {
+                                let msg = avis_error.unwrap();
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: msg, line: op.line });
+                            } else if has_unset && self.magic_depth < 5 {
                                 self.magic_depth += 1;
                                 let magic_method_def = self.classes.get(&class_lower).unwrap().get_method(b"__unset").unwrap();
                                 let method = magic_method_def.op_array.clone();
@@ -18724,6 +18738,21 @@ impl Vm {
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
                                 self.magic_depth -= 1;
+                                // Propagate any exception thrown inside __unset
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                            let ob = obj.borrow();
+                                            let class = crate::value::display_class_name(&ob.class_name);
+                                            let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                            format!("Uncaught {}: {}", class, msg)
+                                        } else { "Uncaught exception".to_string() };
+                                        return Err(VmError { message: exc_msg, line: op.line });
+                                    }
+                                }
                             } else if let Some(msg) = avis_error {
                                 // Property was unset but still has asymmetric visibility restriction
                                 let exc = self.create_exception(b"Error", &msg, op.line);
@@ -18898,6 +18927,100 @@ impl Vm {
                     let raw_val = Self::read_operand_raw(&cvs, &op.op2);
                     if let Value::Array(arr) = arr_val {
                         arr.borrow_mut().push(raw_val);
+                    }
+                }
+
+                OpCode::ArraySetRef => {
+                    // $arr[key] = &$var — set array element as reference
+                    // op1 = array CV, op2 = value CV (to be made ref), result = key
+                    let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+
+                    // Get or create a reference for the value CV
+                    let ref_val = if let OperandType::Cv(vi) = &op.op2 {
+                        let i = *vi as usize;
+                        if let Some(Value::Reference(r)) = cvs.get(i) {
+                            Value::Reference(r.clone())
+                        } else {
+                            let current = cvs.get(i).cloned().unwrap_or(Value::Null);
+                            let r = Rc::new(RefCell::new(current));
+                            cvs[i] = Value::Reference(r.clone());
+                            Value::Reference(r)
+                        }
+                    } else {
+                        self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                    };
+
+                    // Get the array from op1 (may be a CV holding a reference to an array)
+                    let arr_val = if let OperandType::Cv(ai) = &op.op1 {
+                        let i = *ai as usize;
+                        match cvs.get(i) {
+                            Some(Value::Reference(r)) => r.borrow().clone(),
+                            Some(v) => v.clone(),
+                            None => Value::Null,
+                        }
+                    } else {
+                        self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                    };
+
+                    if let Value::Array(arr) = &arr_val {
+                        let key = Self::value_to_array_key(key_val);
+                        arr.borrow_mut().set(key, ref_val);
+                    } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
+                        // Auto-initialize null/undef/false to array
+                        if matches!(&arr_val, Value::False) {
+                            self.emit_deprecated_at("Automatic conversion of false to array is deprecated", op.line);
+                        }
+                        let mut arr = PhpArray::new();
+                        let key = Self::value_to_array_key(key_val);
+                        arr.set(key, ref_val);
+                        let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
+                        if let OperandType::Cv(cv_idx) = &op.op1 {
+                            let i = *cv_idx as usize;
+                            if let Some(cv_val) = cvs.get_mut(i) {
+                                match cv_val {
+                                    Value::Reference(r) => { *r.borrow_mut() = new_arr; }
+                                    _ => { *cv_val = new_arr; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                OpCode::ArrayGetRef => {
+                    // Get or create a reference to an array element: $arr[key]
+                    // op1 = array CV, op2 = key, result = tmp to store Reference
+                    let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+
+                    // Get the array, working through references
+                    let arr_val = if let OperandType::Cv(ai) = &op.op1 {
+                        let i = *ai as usize;
+                        match cvs.get(i) {
+                            Some(Value::Reference(r)) => r.borrow().clone(),
+                            Some(v) => v.clone(),
+                            None => Value::Null,
+                        }
+                    } else {
+                        self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                    };
+
+                    if let Value::Array(arr) = &arr_val {
+                        let key = Self::value_to_array_key(key_val);
+                        let mut arr_mut = arr.borrow_mut();
+                        // Check if the element is already a Reference
+                        let existing = arr_mut.get(&key).cloned();
+                        let ref_val = if let Some(Value::Reference(r)) = existing {
+                            Value::Reference(r)
+                        } else {
+                            // Create a new Reference wrapping the existing value (or Null)
+                            let inner = existing.unwrap_or(Value::Null);
+                            let r = Rc::new(RefCell::new(inner));
+                            arr_mut.set(key, Value::Reference(r.clone()));
+                            Value::Reference(r)
+                        };
+                        drop(arr_mut);
+                        self.write_operand(&op.result, ref_val, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else {
+                        self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
                     }
                 }
 
@@ -22073,6 +22196,26 @@ impl Vm {
                                     self.magic_depth -= 1;
                                     result
                                 } else {
+                                    // Check if property was declared as typed in the class (unset typed property)
+                                    let typed_prop = self.classes.get(&class_lower)
+                                        .and_then(|c| c.properties.iter().find(|p| {
+                                            p.name == prop_name.as_bytes() && p.property_type.is_some() && !p.is_static
+                                        }));
+                                    if let Some(tp) = typed_prop {
+                                        // Typed property was unset — throw Error
+                                        let class_display = crate::value::display_class_name(&class_name_orig);
+                                        let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
+                                        let type_name = self.param_type_name(tp.property_type.as_ref().unwrap());
+                                        let msg = format!("Typed property {}::${} must not be accessed before initialization",
+                                            class_display, prop_display);
+                                        let exc = self.create_exception(b"Error", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                    }
                                     // Emit "Undefined property" warning, but only for user-defined classes
                                     // that have declared properties in the class table.
                                     // Internal classes (Reflection*, Exception, etc.) use dynamic properties.
@@ -22429,8 +22572,10 @@ impl Vm {
                                 .map(|c| c.methods.contains_key(&b"__set".to_vec()))
                                 .unwrap_or(false);
                             let should_try_set = if is_avis_error {
-                                // Asymmetric visibility: only fall through to __set if property was unset
-                                has_set && self.magic_depth < 5 && !prop_exists_on_instance
+                                // Asymmetric visibility: fall through to __set only if:
+                                // 1. Property was unset (not on instance)
+                                // 2. Not already inside a magic method (prevents infinite recursion)
+                                has_set && !prop_exists_on_instance && self.magic_depth == 0
                             } else {
                                 // Regular visibility: always try __set
                                 has_set && self.magic_depth < 5
@@ -22461,6 +22606,21 @@ impl Vm {
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
                                 self.magic_depth -= 1;
+                                // Propagate any exception thrown inside __set
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                            let ob = obj.borrow();
+                                            let class = crate::value::display_class_name(&ob.class_name);
+                                            let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                            format!("Uncaught {}: {}", class, msg)
+                                        } else { "Uncaught exception".to_string() };
+                                        return Err(VmError { message: exc_msg, line: op.line });
+                                    }
+                                }
                             } else {
                                 // No __set - throw the error
                                 let err_id = self.next_object_id;
