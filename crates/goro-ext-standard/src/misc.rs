@@ -1237,22 +1237,44 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
                         if let Some(class) = vm.classes.get(&resolved_class_lower).cloned() {
                             if let Some(method) = class.methods.get(&method_lower) {
-                                let op = method.op_array.clone();
-                                let declaring = method.declaring_class.clone();
-                                if is_forwarding {
-                                    // Forward: keep current called_class
-                                } else {
-                                    vm.called_class_stack.push(class.name.clone());
+                                // Check visibility
+                                let accessible = match method.visibility {
+                                    goro_core::object::Visibility::Public => true,
+                                    goro_core::object::Visibility::Protected | goro_core::object::Visibility::Private => {
+                                        if let Some(caller) = vm.current_class_scope() {
+                                            let caller_lower: Vec<u8> = caller.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            let declaring_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            if method.visibility == goro_core::object::Visibility::Private {
+                                                caller_lower == declaring_lower
+                                            } else {
+                                                caller_lower == declaring_lower
+                                                    || vm.class_extends(&caller_lower, &declaring_lower)
+                                                    || vm.class_extends(&declaring_lower, &caller_lower)
+                                            }
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                };
+                                if accessible {
+                                    let op = method.op_array.clone();
+                                    let declaring = method.declaring_class.clone();
+                                    if is_forwarding {
+                                        // Forward: keep current called_class
+                                    } else {
+                                        vm.called_class_stack.push(class.name.clone());
+                                    }
+                                    vm.push_class_scope(declaring);
+                                    let result = vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                                    vm.pop_class_scope();
+                                    if !is_forwarding {
+                                        vm.called_class_stack.pop();
+                                    }
+                                    return result;
                                 }
-                                vm.push_class_scope(declaring);
-                                let result = vm.execute_fn_with_named_args(&op, call_args, named_args, None);
-                                vm.pop_class_scope();
-                                if !is_forwarding {
-                                    vm.called_class_stack.pop();
-                                }
-                                return result;
+                                // Method not accessible - fall through to __callStatic
                             }
-                            // Method not found - check for __callStatic magic method
+                            // Method not found or not accessible - check for __callStatic magic method
                             if let Some(call_static) = class.get_method(b"__callstatic") {
                                 let op = call_static.op_array.clone();
                                 let mut args_array = goro_core::array::PhpArray::new();
@@ -1280,10 +1302,34 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     if let Some(class) = vm.classes.get(&class_lower).cloned() {
                         if let Some(method) = class.methods.get(&method_lower) {
-                            let op = method.op_array.clone();
-                            return vm.execute_fn_with_named_args(&op, call_args, named_args, Some(Value::Object(obj.clone())));
+                            // Check visibility before executing
+                            let accessible = match method.visibility {
+                                goro_core::object::Visibility::Public => true,
+                                goro_core::object::Visibility::Protected | goro_core::object::Visibility::Private => {
+                                    // Check if caller scope has access
+                                    if let Some(caller) = vm.current_class_scope() {
+                                        let caller_lower: Vec<u8> = caller.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let declaring_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if method.visibility == goro_core::object::Visibility::Private {
+                                            caller_lower == declaring_lower
+                                        } else {
+                                            // Protected: caller must be same or related class
+                                            caller_lower == declaring_lower
+                                                || vm.class_extends(&caller_lower, &declaring_lower)
+                                                || vm.class_extends(&declaring_lower, &caller_lower)
+                                        }
+                                    } else {
+                                        false // Global scope can't access protected/private
+                                    }
+                                }
+                            };
+                            if accessible {
+                                let op = method.op_array.clone();
+                                return vm.execute_fn_with_named_args(&op, call_args, named_args, Some(Value::Object(obj.clone())));
+                            }
+                            // Method exists but not accessible - fall through to __call
                         }
-                        // Method not found - check for __call magic method
+                        // Method not found or not accessible - check for __call magic method
                         if let Some(call_method) = class.get_method(b"__call") {
                             let op = call_method.op_array.clone();
                             // __call($name, $arguments) - pack call_args into an array for the second param

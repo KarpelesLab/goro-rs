@@ -1685,10 +1685,16 @@ impl Compiler {
                     }
                 }
 
-                // Check for duplicate parameter names
+                // Check for duplicate parameter names and reserved names
                 {
                     let mut seen_params = std::collections::HashSet::new();
                     for param in params {
+                        if param.name == b"this" {
+                            return Err(CompileError {
+                                message: "Cannot use $this as parameter".into(),
+                                line: func_compiler.op_array.decl_line,
+                            });
+                        }
                         if !seen_params.insert(&param.name) {
                             return Err(CompileError {
                                 message: format!("Redefinition of parameter ${}", String::from_utf8_lossy(&param.name)),
@@ -1942,6 +1948,12 @@ impl Compiler {
 
             StmtKind::StaticVar(vars) => {
                 for (name, default) in vars {
+                    if name == b"this" {
+                        return Err(CompileError {
+                            message: "Cannot use $this as static variable".into(),
+                            line: stmt.span.line,
+                        });
+                    }
                     let cv = self.op_array.get_or_create_cv(name);
                     let default_val = if let Some(expr) = default {
                         self.compile_expr(expr)?
@@ -1969,6 +1981,12 @@ impl Compiler {
 
             StmtKind::Global(vars) => {
                 for name in vars {
+                    if name == b"this" {
+                        return Err(CompileError {
+                            message: "Cannot use $this as global variable".into(),
+                            line: stmt.span.line,
+                        });
+                    }
                     let cv = self.op_array.get_or_create_cv(name);
                     let name_idx = self
                         .op_array
@@ -2192,6 +2210,12 @@ impl Compiler {
 
                     // Assign exception to variable if specified
                     if let Some(var_name) = &catch.variable {
+                        if var_name == b"this" {
+                            return Err(CompileError {
+                                message: "Cannot re-assign $this".into(),
+                                line: stmt.span.line,
+                            });
+                        }
                         let cv = self.op_array.get_or_create_cv(var_name);
                         self.op_array.emit(Op {
                             opcode: OpCode::Assign,
@@ -3764,6 +3788,13 @@ impl Compiler {
                                 method_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
 
                                 for param in params {
+                                    // Check for $this as parameter name
+                                    if param.name == b"this" {
+                                        return Err(CompileError {
+                                            message: "Cannot use $this as parameter".into(),
+                                            line: *method_line,
+                                        });
+                                    }
                                     // Validate parameter type hint
                                     if let Some(hint) = &param.type_hint {
                                         // Check for parent type in a class/interface with no parent (not traits)
@@ -7396,6 +7427,12 @@ impl Compiler {
 
                 // Set up use vars as the first CVs (before params)
                 for use_var in use_vars {
+                    if use_var.variable == b"this" {
+                        return Err(CompileError {
+                            message: "Cannot use $this as lexical variable".into(),
+                            line: expr.span.line,
+                        });
+                    }
                     closure_compiler
                         .op_array
                         .get_or_create_cv(&use_var.variable);
