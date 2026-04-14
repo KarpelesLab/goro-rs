@@ -1988,16 +1988,12 @@ impl Vm {
         self.create_exception(b"TypeError", &message, self.current_line)
     }
 
-    /// Allocate a new object ID, reusing freed IDs if available
+    /// Allocate a new object ID (monotonically increasing, never reused - matches PHP behavior)
     #[inline]
     pub fn alloc_object_id(&mut self) -> u64 {
-        if let Some(id) = self.free_object_ids.pop() {
-            id
-        } else {
-            let id = self.next_object_id;
-            self.next_object_id += 1;
-            id
-        }
+        let id = self.next_object_id;
+        self.next_object_id += 1;
+        id
     }
 
     /// Recycle an object ID if the Rc has only one strong reference left (about to be dropped)
