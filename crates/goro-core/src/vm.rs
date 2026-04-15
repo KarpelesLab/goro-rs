@@ -12435,6 +12435,33 @@ impl Vm {
                     // back into self).
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
 
+                    // Look up callee's by_ref_params for by-reference unpacking
+                    let (callee_by_ref, callee_variadic_is_ref): (Option<Vec<bool>>, bool) = self.pending_calls.last().and_then(|call| {
+                        let name_lower: Vec<u8> = call.name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        self.user_functions.get(&name_lower).map(|f| {
+                            let var_is_ref = f.variadic_param.is_some()
+                                && f.by_ref_params.last().copied().unwrap_or(false);
+                            (f.by_ref_params.clone(), var_is_ref)
+                        })
+                    }).map(|(br, vr)| (Some(br), vr)).unwrap_or((None, false));
+                    let current_arg_offset = self.pending_calls.last().map(|c| c.args.len()).unwrap_or(0);
+
+                    // Get source array Rc for by-ref modifications
+                    let source_arr_rc = if let Value::Array(arr) = &val {
+                        Some(arr.clone())
+                    } else {
+                        // Also check if the operand is a CV pointing to an array through a reference
+                        if let OperandType::Cv(idx) = &op.op1 {
+                            match cvs.get(*idx as usize) {
+                                Some(Value::Array(arr)) => Some(arr.clone()),
+                                Some(Value::Reference(r)) => {
+                                    if let Value::Array(arr) = &*r.borrow() { Some(arr.clone()) } else { None }
+                                }
+                                _ => None,
+                            }
+                        } else { None }
+                    };
+
                     let collected: Result<Vec<(bool, Vec<u8>, Value)>, String> = match &val {
                         Value::Array(arr) => {
                             let arr = arr.borrow();
@@ -12632,6 +12659,7 @@ impl Vm {
                             if let Some(call) = self.pending_calls.last_mut() {
                                 let mut had_named = false;
                                 let mut result = Ok(());
+                                let mut unpack_idx = 0usize;
                                 for (is_named, name_bytes, v) in pairs {
                                     if is_named {
                                         had_named = true;
@@ -12648,7 +12676,27 @@ impl Vm {
                                             result = Err("Cannot use positional argument after named argument during unpacking".into());
                                             break;
                                         }
-                                        call.args.push(v);
+                                        let arg_pos = current_arg_offset + call.args.len();
+                                        // Check if callee expects by-ref at this position
+                                        let is_by_ref = callee_by_ref.as_ref()
+                                            .and_then(|br| br.get(arg_pos).copied())
+                                            .unwrap_or(callee_variadic_is_ref);
+                                        if is_by_ref {
+                                            // Create a shared reference between the source array element and the arg
+                                            if let Some(ref src_arr) = source_arr_rc {
+                                                let r = Rc::new(RefCell::new(v));
+                                                // Update the source array element to point to this reference
+                                                let key = crate::array::ArrayKey::Int(unpack_idx as i64);
+                                                src_arr.borrow_mut().set(key, Value::Reference(r.clone()));
+                                                call.args.push(Value::Reference(r));
+                                            } else {
+                                                // No source array to write back to (e.g., literal array)
+                                                call.args.push(v);
+                                            }
+                                        } else {
+                                            call.args.push(v);
+                                        }
+                                        unpack_idx += 1;
                                     }
                                 }
                                 result
