@@ -3589,20 +3589,38 @@ impl Vm {
                 // But this is complex (class types), be permissive
                 true
             }
-            // Different simple built-in types are definitely incompatible
+            // Different simple types
             (ParamType::Simple(a), ParamType::Simple(b)) => {
-                // Only flag incompatibility for clearly different primitive types
-                let primitives = [b"int".as_slice(), b"float", b"string", b"bool", b"array", b"null"];
                 let a_lower: Vec<u8> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
                 let b_lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let primitives = [b"int".as_slice(), b"float", b"string", b"bool", b"array", b"null", b"callable", b"iterable", b"object"];
                 let a_is_prim = primitives.iter().any(|p| *p == a_lower.as_slice());
                 let b_is_prim = primitives.iter().any(|p| *p == b_lower.as_slice());
-                if a_is_prim && b_is_prim {
-                    // Both are primitives and different -> incompatible
-                    false
+                if a_is_prim || b_is_prim {
+                    // If either is a primitive type and they're different -> incompatible
+                    // Exception: child is a class and parent is 'object' -> compatible (covariant)
+                    if b_lower == b"object" && !a_is_prim {
+                        true // any class is compatible with 'object' return
+                    } else if b_lower == b"iterable" && a_lower == b"array" {
+                        true // array is compatible with iterable
+                    } else if b_lower == b"self" || b_lower == b"static" || b_lower == b"parent" {
+                        true // special types, can't check statically
+                    } else if a_lower == b"self" || a_lower == b"static" || a_lower == b"parent" {
+                        true // special types, can't check statically
+                    } else {
+                        false
+                    }
                 } else {
-                    // At least one is a class type - could be subclass, be permissive
-                    true
+                    // Both are class names - check if they could be compatible
+                    // We can't resolve self/parent/static without class hierarchy access here
+                    if a_lower == b"self" || a_lower == b"static" || a_lower == b"parent"
+                        || b_lower == b"self" || b_lower == b"static" || b_lower == b"parent" {
+                        true // can't check statically
+                    } else {
+                        // Different concrete class names are incompatible
+                        // unless child class extends parent class
+                        false
+                    }
                 }
             }
             _ => true,
@@ -3630,15 +3648,25 @@ impl Vm {
             (ParamType::Intersection(_), _) | (_, ParamType::Intersection(_)) => true,
             // Different simple types
             (ParamType::Simple(a), ParamType::Simple(b)) => {
-                let primitives = [b"int".as_slice(), b"float", b"string", b"bool", b"array", b"null", b"object", b"callable", b"iterable"];
                 let a_lower: Vec<u8> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
                 let b_lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
-                let a_is_prim = primitives.iter().any(|p| *p == a_lower.as_slice());
-                let b_is_prim = primitives.iter().any(|p| *p == b_lower.as_slice());
-                if a_is_prim && b_is_prim {
-                    false // Different primitives are incompatible
+                // self/parent/static can't be resolved statically
+                if a_lower == b"self" || a_lower == b"static" || a_lower == b"parent"
+                    || b_lower == b"self" || b_lower == b"static" || b_lower == b"parent" {
+                    true
                 } else {
-                    true // Class types - be permissive
+                    let primitives = [b"int".as_slice(), b"float", b"string", b"bool", b"array", b"null", b"object", b"callable", b"iterable"];
+                    let a_is_prim = primitives.iter().any(|p| *p == a_lower.as_slice());
+                    let b_is_prim = primitives.iter().any(|p| *p == b_lower.as_slice());
+                    if a_is_prim || b_is_prim {
+                        // child is 'object' and parent is a class -> compatible (contravariant widening)
+                        if a_lower == b"object" && !b_is_prim { true }
+                        else if a_lower == b"iterable" && b_lower == b"array" { true }
+                        else { false }
+                    } else {
+                        // Both are class names - different class names are incompatible
+                        false
+                    }
                 }
             }
             _ => true,
@@ -19685,13 +19713,11 @@ impl Vm {
                                             }
                                         }
                                         // Skip __construct compatibility checks
-                                        // Check compatibility when:
-                                        // 1. Parent method is non-abstract and not private
-                                        // 2. Both methods are abstract (interface extending interface)
+                                        // Check compatibility for all method overrides except:
+                                        // - constructors
+                                        // - private parent methods (not inherited for override checking)
                                         let should_check = mn_lower != b"__construct"
-                                            && method.visibility != Visibility::Private
-                                            && child_method.visibility != Visibility::Private
-                                            && (!method.is_abstract || child_method.is_abstract);
+                                            && method.visibility != Visibility::Private;
                                         if should_check {
                                             // Check method signature compatibility
                                             if let Some(err_msg) = Self::check_method_compatibility(
