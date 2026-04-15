@@ -543,6 +543,19 @@ impl Compiler {
     /// `break` and `break 1` both return 1 (innermost loop).
     /// `break 2` returns 2 (two levels out), etc.
     /// Returns (level, is_non_integer). level=0 means invalid (0 literal), is_non_integer=true means variable/expr operand.
+    /// Check if an expression contains a nullsafe property/method access (?->)
+    fn expr_contains_nullsafe(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::PropertyAccess { nullsafe, object, .. } => {
+                *nullsafe || Self::expr_contains_nullsafe(object)
+            }
+            ExprKind::MethodCall { nullsafe, object, .. } => {
+                *nullsafe || Self::expr_contains_nullsafe(object)
+            }
+            _ => false,
+        }
+    }
+
     fn extract_break_continue_level(level_expr: &Option<Expr>) -> (usize, bool) {
         match level_expr {
             Some(expr) => match &expr.kind {
@@ -8555,6 +8568,13 @@ impl Compiler {
             }
 
             ExprKind::AssignRef { target, value } => {
+                // Check for nullsafe chain in reference context
+                if Self::expr_contains_nullsafe(value) {
+                    return Err(CompileError {
+                        message: "Cannot take reference of a nullsafe chain".into(),
+                        line: expr.span.line,
+                    });
+                }
                 // Check for $this = &$value
                 if let ExprKind::Variable(target_name) = &target.kind {
                     if target_name == b"this" && self.current_class.is_some() {
