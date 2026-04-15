@@ -19778,6 +19778,87 @@ impl Vm {
                                         }
                                     }
                                 }
+                                // Check readonly property mismatch
+                                for parent_prop in &parent.properties {
+                                    if parent_prop.visibility == Visibility::Private {
+                                        continue;
+                                    }
+                                    if let Some(child_prop) = class.properties.iter().find(|p| p.name == parent_prop.name) {
+                                        if parent_prop.is_readonly && !child_prop.is_readonly {
+                                            let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                            let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                            let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                            return Err(VmError {
+                                                message: format!("Cannot redeclare readonly property {}::${} as non-readonly {}::${}",
+                                                    parent_display, prop_display, child_display, prop_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                        if !parent_prop.is_readonly && child_prop.is_readonly {
+                                            let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                            let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                            let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                            return Err(VmError {
+                                                message: format!("Cannot redeclare non-readonly property {}::${} as readonly {}::${}",
+                                                    parent_display, prop_display, child_display, prop_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                }
+                                // Check private(set) properties are implicitly final + set visibility compatibility
+                                for parent_prop in &parent.properties {
+                                    if parent_prop.visibility == Visibility::Private {
+                                        continue;
+                                    }
+                                    if let Some(child_prop) = class.properties.iter().find(|p| p.name == parent_prop.name) {
+                                        // private(set) property is implicitly final
+                                        if let Some(sv) = parent_prop.set_visibility {
+                                            if sv == Visibility::Private {
+                                                let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                                let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                                return Err(VmError {
+                                                    message: format!("Cannot override final property {}::${}",
+                                                        parent_display, prop_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                        // Check set-visibility compatibility
+                                        let parent_set_vis = parent_prop.set_visibility;
+                                        let child_set_vis = child_prop.set_visibility;
+                                        if parent_set_vis != child_set_vis {
+                                            let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                            let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                            let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                            // Parent has no set-vis (symmetric) but child adds one
+                                            if parent_set_vis.is_none() && child_set_vis.is_some() {
+                                                return Err(VmError {
+                                                    message: format!("Set access level of {}::${} must be omitted (as in class {})",
+                                                        child_display, prop_display, parent_display),
+                                                    line: op.line,
+                                                });
+                                            }
+                                            // Parent has set-vis but child restricts it more
+                                            if let (Some(p_sv), Some(c_sv)) = (parent_set_vis, child_set_vis) {
+                                                let p_level = match p_sv { Visibility::Public => 0, Visibility::Protected => 1, Visibility::Private => 2 };
+                                                let c_level = match c_sv { Visibility::Public => 0, Visibility::Protected => 1, Visibility::Private => 2 };
+                                                if c_level > p_level {
+                                                    let vis_str = match p_sv {
+                                                        Visibility::Public => "public(set)",
+                                                        Visibility::Protected => "protected(set)",
+                                                        Visibility::Private => "private(set)",
+                                                    };
+                                                    return Err(VmError {
+                                                        message: format!("Set access level of {}::${} must be {} (as in class {}) or weaker",
+                                                            child_display, prop_display, vis_str, parent_display),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 let mut new_props = Vec::new();
                                 for prop in &parent.properties {
                                     if !child_prop_names.contains(&prop.name) {
