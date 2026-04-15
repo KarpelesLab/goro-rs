@@ -15962,7 +15962,7 @@ impl Vm {
                     let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
                     if let Value::Array(arr) = &arr_val {
-                        let key = Self::value_to_array_key(key_val);
+                        let key = self.value_to_array_key_checked(&key_val, op.line);
                         arr.borrow_mut().set(key, val);
                     } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
                         // Auto-initialize null/undef/false to array
@@ -15970,7 +15970,7 @@ impl Vm {
                             self.emit_deprecated_at("Automatic conversion of false to array is deprecated", op.line);
                         }
                         let mut arr = PhpArray::new();
-                        let key = Self::value_to_array_key(key_val);
+                        let key = self.value_to_array_key_checked(&key_val, op.line);
                         arr.set(key, val);
                         let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
                         // Write back to the CV or reference
@@ -16106,7 +16106,7 @@ impl Vm {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let result = if let Value::Array(arr) = &arr_val {
-                        let key = Self::value_to_array_key(key_val.clone());
+                        let key = self.value_to_array_key_checked(&key_val, op.line);
                         match arr.borrow().get(&key).cloned() {
                             Some(v) => v,
                             None => {
@@ -23771,6 +23771,23 @@ impl Vm {
     }
 
     /// Convert a value to an array key (PHP coerces numeric strings to int keys)
+    /// Convert a value to an array key, emitting deprecation for null offset
+    pub fn value_to_array_key_checked(&mut self, val: &Value, line: u32) -> ArrayKey {
+        match val {
+            Value::Null | Value::Undef => {
+                self.emit_deprecated_at("Using null as an array offset is deprecated, use an empty string instead", line);
+            }
+            Value::Reference(r) => {
+                let inner = r.borrow();
+                if matches!(&*inner, Value::Null | Value::Undef) {
+                    self.emit_deprecated_at("Using null as an array offset is deprecated, use an empty string instead", line);
+                }
+            }
+            _ => {}
+        }
+        Self::value_to_array_key(val.clone())
+    }
+
     pub fn value_to_array_key(val: Value) -> ArrayKey {
         match val {
             Value::Long(n) => ArrayKey::Int(n),

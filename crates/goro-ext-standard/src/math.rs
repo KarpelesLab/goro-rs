@@ -1346,7 +1346,13 @@ fn fpow_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double(base.powf(exp)))
 }
 
-fn srand_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn srand_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Check for MT_RAND_PHP mode deprecation (second argument = 1)
+    if let Some(mode) = args.get(1) {
+        if mode.to_long() == 1 {
+            vm.emit_deprecated_at("The MT_RAND_PHP variant of Mt19937 is deprecated", vm.current_line);
+        }
+    }
     // srand/mt_srand is a no-op in our implementation since we use the system RNG
     Ok(Value::Null)
 }
