@@ -3423,6 +3423,11 @@ impl Vm {
                     }
                 }
 
+                // Check if by-ref
+                if op.by_ref_params.get(cv_idx).copied().unwrap_or(false) {
+                    part.push('&');
+                }
+
                 // Check if variadic
                 if op.variadic_param == Some(cv_idx as u32) {
                     part.push_str("...");
