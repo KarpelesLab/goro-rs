@@ -237,6 +237,9 @@ pub struct Vm {
     pending_finally_jump: Option<u32>,
     /// User error handler callback (from set_error_handler)
     pub error_handler: Option<Value>,
+    /// Set when a user error handler throws an exception during warning/notice emission.
+    /// The main execution loop checks this after each opcode to dispatch the exception.
+    pub error_handler_threw: bool,
     /// User exception handler callback (from set_exception_handler)
     pub exception_handler: Option<Value>,
     /// Stack of previous exception handlers (for restore_exception_handler)
@@ -349,6 +352,7 @@ impl Vm {
             pending_return: None,
             pending_finally_jump: None,
             error_handler: None,
+            error_handler_threw: false,
             exception_handler: None,
             exception_handler_stack: Vec::new(),
             next_bound_closure_id: 0,
@@ -1386,6 +1390,7 @@ impl Vm {
                         let result = self.execute_op_array(&user_fn, cvs);
                         // If the error handler threw an exception, it's already in current_exception
                         if result.is_err() || self.current_exception.is_some() {
+                            self.error_handler_threw = true;
                             return true;
                         }
                         return true;
@@ -1415,6 +1420,9 @@ impl Vm {
                                         }
                                     }
                                     let _ = self.execute_op_array(&op, cvs);
+                                    if self.current_exception.is_some() {
+                                        self.error_handler_threw = true;
+                                    }
                                     return true;
                                 }
                             }
@@ -1430,6 +1438,9 @@ impl Vm {
                                         }
                                     }
                                     let _ = self.execute_op_array(&op, cvs);
+                                    if self.current_exception.is_some() {
+                                        self.error_handler_threw = true;
+                                    }
                                     return true;
                                 }
                             }
@@ -23795,6 +23806,31 @@ impl Vm {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // After each opcode: check if a user error handler threw an exception
+            // during warning/notice/deprecation emission. If so, dispatch to exception handling.
+            if self.error_handler_threw {
+                self.error_handler_threw = false;
+                if self.current_exception.is_some() {
+                    if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() {
+                        pending_calls_catch_depth = Some(saved_pc);
+                        if catch_target > 0 {
+                            ip = catch_target as usize;
+                        } else if finally_target > 0 {
+                            ip = finally_target as usize;
+                        }
+                        continue;
+                    } else {
+                        let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                            let ob = obj.borrow();
+                            let class = crate::value::display_class_name(&ob.class_name);
+                            let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                            format!("Uncaught {}: {}", class, msg)
+                        } else { "Uncaught exception".to_string() };
+                        return Err(VmError { message: exc_msg, line: self.current_line });
                     }
                 }
             }
