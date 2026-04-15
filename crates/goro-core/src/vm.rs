@@ -13733,11 +13733,8 @@ impl Vm {
                                 }
                             }
                         }
-                        // Type checking for builtin function parameters
-                        // In strict mode: exact type matching with TypeError
-                        // In non-strict mode: reject incompatible types, deprecation for null→non-nullable
-                        {
-                            let is_strict = op_array.strict_types;
+                        // Strict type checking for builtin function parameters
+                        if op_array.strict_types {
                             if let Some(param_types) = self.builtin_param_types.get(&func_name_lower).cloned() {
                                 for (i, arg) in call.args.iter().enumerate() {
                                     if i >= param_types.len() {
@@ -13745,11 +13742,7 @@ impl Vm {
                                     }
                                     if let Some(ref pt) = param_types[i] {
                                         let val = arg.deref();
-                                        // In non-strict mode: null is handled by individual functions
-                                        // (they emit their own deprecation notice), skip here
-                                        if !is_strict && matches!(val, Value::Null) {
-                                            // Skip - let the function handle null coercion/deprecation
-                                        } else if !self.value_matches_type_mode(&val, pt, is_strict) {
+                                        if !self.value_matches_type_mode(&val, pt, true) {
                                             let expected = self.param_type_display(pt);
                                             let given = Self::value_type_name(&val);
                                             let display_name = call.name.to_string_lossy();
