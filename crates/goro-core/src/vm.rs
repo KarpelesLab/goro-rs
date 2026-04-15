@@ -14038,6 +14038,19 @@ impl Vm {
                         let early_call_display = if raw_display.starts_with("__closure_") && !raw_display.starts_with("__closure_fcc_") {
                             let file = String::from_utf8_lossy(&user_fn.filename).to_string();
                             format!("{{closure:{}:{}}}", file, user_fn.decl_line)
+                        } else if let Some(ref scope) = user_fn.scope_class {
+                            // Use the method's declaring class (scope_class) for the stack trace
+                            // instead of the runtime class, matching PHP behavior
+                            let method_name = if let Some(pos) = raw_display.find("::") {
+                                &raw_display[pos + 2..]
+                            } else {
+                                &raw_display
+                            };
+                            // Look up original-case class name
+                            let class_display = self.classes.get(scope)
+                                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                .unwrap_or_else(|| String::from_utf8_lossy(scope).to_string());
+                            format!("{}::{}", class_display, method_name)
                         } else {
                             raw_display
                         };
@@ -23337,8 +23350,6 @@ impl Vm {
                                     // Use the method's declaring class to ensure private method
                                     // resolution works correctly through DoCall.
                                     let func_class = if method.visibility == Visibility::Private {
-                                        // For private methods, use the declaring class name
-                                        // so DoCall resolves the correct method (not the runtime class)
                                         method.declaring_class.clone()
                                     } else {
                                         class_name_orig.clone()
