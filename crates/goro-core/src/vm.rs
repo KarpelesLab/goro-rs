@@ -9650,7 +9650,7 @@ impl Vm {
     }
 
     /// Compare two PHP values (for sorting)
-    fn php_compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    pub fn php_compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         match (a, b) {
             (Value::Long(a), Value::Long(b)) => a.cmp(b),
             (Value::Double(a), Value::Double(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),

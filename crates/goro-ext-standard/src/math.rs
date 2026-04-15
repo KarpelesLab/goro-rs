@@ -37,6 +37,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"fmod", fmod_fn);
     vm.register_function(b"rand", rand_fn);
     vm.register_function(b"mt_rand", mt_rand);
+    vm.register_function(b"clamp", clamp_fn);
     vm.register_function(b"array_sum", array_sum);
     vm.register_function(b"php_uname", php_uname);
     vm.register_function(b"phpversion", phpversion);
@@ -559,6 +560,52 @@ fn rand_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Simple pseudo-random (not cryptographic)
     let val = simple_random(min, max);
     Ok(Value::Long(val))
+}
+
+fn clamp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 3 {
+        let msg = format!("clamp() expects exactly 3 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let value = &args[0];
+    let min = &args[1];
+    let max = &args[2];
+
+    // Check for NaN in min/max
+    if let Value::Double(f) = min { if f.is_nan() {
+        let msg = "clamp(): Argument #2 ($min) must not be NAN".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }}
+    if let Value::Double(f) = max { if f.is_nan() {
+        let msg = "clamp(): Argument #3 ($max) must not be NAN".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }}
+
+    // Compare min > max
+    let cmp_min_max = Vm::php_compare_values(min, max);
+    if cmp_min_max == std::cmp::Ordering::Greater {
+        let msg = "clamp(): Argument #2 ($min) must be smaller than or equal to argument #3 ($max)".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
+    // clamp: if value < min, return min; if value > max, return max; else return value
+    let cmp_val_min = Vm::php_compare_values(value, min);
+    if cmp_val_min == std::cmp::Ordering::Less {
+        return Ok(min.clone());
+    }
+    let cmp_val_max = Vm::php_compare_values(value, max);
+    if cmp_val_max == std::cmp::Ordering::Greater {
+        return Ok(max.clone());
+    }
+    Ok(value.clone())
 }
 
 fn mt_rand(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
