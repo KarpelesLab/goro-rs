@@ -1734,8 +1734,15 @@ impl Vm {
                 let args_val = self.execute_op_array_pub(&attr.args_op_array, vec![]).unwrap_or(Value::Null);
                 if let Value::Array(arr) = &args_val {
                     let arr = arr.borrow();
-                    // First positional arg or "message" named arg
-                    let msg = arr.iter().next().map(|(_, v)| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                    // Look for "message" named arg first, then first positional arg
+                    let msg = arr.get(&crate::array::ArrayKey::String(crate::string::PhpString::from_bytes(b"message")))
+                        .map(|v| v.to_php_string().to_string_lossy())
+                        .or_else(|| {
+                            // First positional (integer-keyed) arg
+                            arr.get(&crate::array::ArrayKey::Int(0))
+                                .map(|v| v.to_php_string().to_string_lossy())
+                        })
+                        .unwrap_or_default();
                     return Some(msg);
                 }
                 return Some(String::new());

@@ -699,8 +699,22 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let const_name = &name_str[pos+2..];
         let class_name_stripped = class_name.strip_prefix('\\').unwrap_or(class_name);
         let class_lower: Vec<u8> = class_name_stripped.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-        if let Some(class) = vm.classes.get(&class_lower) {
+        if let Some(class) = vm.classes.get(&class_lower).cloned() {
             if let Some(val) = class.constants.get(const_name.as_bytes()) {
+                // Check for #[\Deprecated] attribute on class constant
+                if let Some(meta) = class.constants_meta.get(const_name.as_bytes()) {
+                    if !meta.attributes.is_empty() {
+                        if let Some(custom_msg) = vm.get_deprecated_message(&meta.attributes) {
+                            let class_display = String::from_utf8_lossy(&class.name).to_string();
+                            let msg = if custom_msg.is_empty() {
+                                format!("Constant {}::{} is deprecated", class_display, const_name)
+                            } else {
+                                format!("Constant {}::{} is deprecated, {}", class_display, const_name, custom_msg)
+                            };
+                            vm.emit_deprecated_at(&msg, vm.current_line);
+                        }
+                    }
+                }
                 return Ok(val.clone());
             }
         }
