@@ -19098,6 +19098,12 @@ impl Vm {
                     }
                 }
 
+                OpCode::EmitNotice => {
+                    let msg_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let msg = msg_val.to_php_string().to_string_lossy();
+                    self.emit_notice_at(&msg, op.line);
+                }
+
                 OpCode::ArrayGetRef => {
                     // Get or create a reference to an array element: $arr[key]
                     // op1 = array CV, op2 = key, result = tmp to store Reference

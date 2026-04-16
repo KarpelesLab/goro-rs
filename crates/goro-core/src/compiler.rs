@@ -523,9 +523,24 @@ impl Compiler {
                         line,
                     });
                 }
-                let val = self.compile_expr(&arg.value)?;
                 // Check if this argument position is by-ref for known builtins
                 let is_byref = Self::is_builtin_byref_param(func_name, i);
+                // If by-ref, check that the arg is a variable/writable expression
+                // (not a function call, method call, constant, etc.)
+                if is_byref && !Self::is_writable_lvalue(&arg.value) {
+                    // Emit a NoticeAt opcode with the warning message
+                    let msg_idx = self.op_array.add_literal(Value::String(
+                        crate::string::PhpString::from_bytes(b"Only variables should be passed by reference")
+                    ));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::EmitNotice,
+                        op1: OperandType::Const(msg_idx),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                }
+                let val = self.compile_expr(&arg.value)?;
                 let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
                 self.op_array.emit(Op {
                     opcode: if is_byref { OpCode::SendRef } else { OpCode::SendVal },
@@ -543,6 +558,18 @@ impl Compiler {
     /// `break` and `break 1` both return 1 (innermost loop).
     /// `break 2` returns 2 (two levels out), etc.
     /// Returns (level, is_non_integer). level=0 means invalid (0 literal), is_non_integer=true means variable/expr operand.
+    /// Check if an expression is a writable lvalue (variable, property access, array access)
+    /// Used to determine if a by-ref argument should emit "Only variables should be passed by reference"
+    fn is_writable_lvalue(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Variable(_) => true,
+            ExprKind::PropertyAccess { nullsafe, .. } => !nullsafe,
+            ExprKind::StaticPropertyAccess { .. } => true,
+            ExprKind::ArrayAccess { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Check if an expression contains a nullsafe property/method access (?->)
     fn expr_contains_nullsafe(expr: &Expr) -> bool {
         match &expr.kind {

@@ -275,6 +275,8 @@ pub enum OpCode {
     ArraySetRef,
     /// Get or create a reference for an array element: op1 = array CV, op2 = key, result = Reference tmp
     ArrayGetRef,
+    /// Emit a Notice: op1 = message string literal
+    EmitNotice,
     /// Dynamic variable read: op1 = name expr, result = value
     VarVarGet,
     /// Dynamic variable write: op1 = name expr, op2 = value
