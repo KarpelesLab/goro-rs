@@ -4060,7 +4060,7 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let prefix = if num < 0.0 { "-" } else { "" };
             return Ok(Value::String(PhpString::from_string(format!("{}INF", prefix))));
         }
-        let places = (-decimals_raw).min(100) as u32;
+        let places = decimals_raw.checked_neg().unwrap_or(i64::MAX).min(100) as u32;
         let factor = 10f64.powi(places as i32);
         let rounded = (num / factor).round() * factor;
         // Check if result is effectively zero
