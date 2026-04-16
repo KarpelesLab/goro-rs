@@ -10418,6 +10418,27 @@ fn expr_to_source_string(expr: &Expr) -> String {
         ExprKind::Assign { target, value } => {
             format!("{} = {}", expr_to_source_string(target), expr_to_source_string(value))
         }
+        ExprKind::CompoundAssign { op, target, value } => {
+            let op_str = match op {
+                BinaryOp::Add => "+=",
+                BinaryOp::Sub => "-=",
+                BinaryOp::Mul => "*=",
+                BinaryOp::Div => "/=",
+                BinaryOp::Mod => "%=",
+                BinaryOp::Pow => "**=",
+                BinaryOp::Concat => ".=",
+                BinaryOp::BitwiseAnd => "&=",
+                BinaryOp::BitwiseOr => "|=",
+                BinaryOp::BitwiseXor => "^=",
+                BinaryOp::ShiftLeft => "<<=",
+                BinaryOp::ShiftRight => ">>=",
+                _ => "?=",
+            };
+            format!("({} {} {})", expr_to_source_string(target), op_str, expr_to_source_string(value))
+        }
+        ExprKind::AssignRef { target, value } => {
+            format!("{} = &{}", expr_to_source_string(target), expr_to_source_string(value))
+        }
         ExprKind::Ternary { condition, if_true, if_false } => {
             match if_true {
                 Some(t) => format!("{} ? {} : {}",
