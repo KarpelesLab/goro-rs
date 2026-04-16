@@ -4976,15 +4976,24 @@ pub fn str_getcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn str_word_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn str_word_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let format = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+
+    // Validate format - PHP throws ValueError for invalid formats
+    if format < 0 || format > 2 {
+        let msg = "str_word_count(): Argument #2 ($format) must be a valid format value".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
     let input = s.to_string_lossy();
-    
+
     let words: Vec<&str> = input.split(|c: char| !c.is_alphabetic() && c != '-' && c != '\'')
         .filter(|w| !w.is_empty())
         .collect();
-    
+
     match format {
         0 => Ok(Value::Long(words.len() as i64)),
         1 => {
@@ -4997,7 +5006,6 @@ fn str_word_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         2 => {
             let mut arr = PhpArray::new();
             let mut pos = 0;
-            let input_bytes = input.as_bytes();
             for word in &words {
                 if let Some(idx) = input[pos..].find(word) {
                     arr.set(
@@ -5009,7 +5017,7 @@ fn str_word_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             Ok(Value::Array(Rc::new(RefCell::new(arr))))
         }
-        _ => Ok(Value::False),
+        _ => unreachable!(),
     }
 }
 
