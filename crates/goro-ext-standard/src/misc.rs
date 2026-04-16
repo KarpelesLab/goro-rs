@@ -902,10 +902,19 @@ fn func_get_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let index = args.first().unwrap_or(&Value::Null).to_long();
+    // PHP 8.0+: validate argument before checking call stack
+    if index < 0 {
+        let msg = "func_get_arg(): Argument #1 ($position) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     if let Some((_name, _file, _line, caller_args, _is_method)) = vm.call_stack.last() {
-        if index < 0 || index as usize >= caller_args.len() {
-            vm.emit_warning(&format!("func_get_arg(): Argument #{} not passed to function", index));
-            Ok(Value::False)
+        if index as usize >= caller_args.len() {
+            let msg = "func_get_arg(): Argument #1 ($position) must be less than the number of the arguments passed to the currently executed function".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
         } else {
             Ok(caller_args[index as usize].clone())
         }
