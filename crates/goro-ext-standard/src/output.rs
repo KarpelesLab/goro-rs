@@ -604,9 +604,15 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
         Value::Reference(r) => {
-            // In PHP, any value stored as a reference always shows & prefix in var_dump
+            // PHP shows & prefix only when reference is shared (refcount >= 2).
+            // After function with by-ref params returns, local refs are dropped,
+            // so a single holder (the array element) shouldn't show &.
             let inner = r.borrow().clone();
-            var_dump_value_ref(vm, &inner, indent, &prefix, seen);
+            if std::rc::Rc::strong_count(r) >= 2 {
+                var_dump_value_ref(vm, &inner, indent, &prefix, seen);
+            } else {
+                var_dump_value(vm, &inner, indent, seen);
+            }
         }
     }
 }
