@@ -10455,8 +10455,18 @@ fn expr_to_source_string(expr: &Expr) -> String {
         }
         ExprKind::New { class, args } => {
             let class_str = expr_to_source_string(class);
+            // For anonymous classes, show "class" placeholder
+            let class_str = if class_str.starts_with("__anonymous_class_") {
+                "class".to_string()
+            } else {
+                class_str
+            };
             let args_str = args_to_source_string(args);
-            format!("new {}({})", class_str, args_str)
+            if args_str.is_empty() {
+                format!("new {}()", class_str)
+            } else {
+                format!("new {}({})", class_str, args_str)
+            }
         }
         ExprKind::Clone(inner) => {
             format!("clone {}", expr_to_source_string(inner))
