@@ -10493,6 +10493,48 @@ fn expr_to_source_string(expr: &Expr) -> String {
         ExprKind::Suppress(inner) => {
             format!("@{}", expr_to_source_string(inner))
         }
+        ExprKind::Exit(arg) => {
+            match arg {
+                Some(e) => format!("\\exit({})", expr_to_source_string(e)),
+                None => "\\exit()".to_string(),
+            }
+        }
+        ExprKind::Eval(inner) => {
+            format!("eval({})", expr_to_source_string(inner))
+        }
+        ExprKind::Include { kind, path } => {
+            let kind_str = match kind {
+                IncludeKind::Include => "include",
+                IncludeKind::IncludeOnce => "include_once",
+                IncludeKind::Require => "require",
+                IncludeKind::RequireOnce => "require_once",
+            };
+            format!("{} {}", kind_str, expr_to_source_string(path))
+        }
+        ExprKind::Yield(key, val) => {
+            match (key, val) {
+                (Some(k), Some(v)) => format!("yield {} => {}", expr_to_source_string(k), expr_to_source_string(v)),
+                (None, Some(v)) => format!("yield {}", expr_to_source_string(v)),
+                _ => "yield".to_string(),
+            }
+        }
+        ExprKind::YieldFrom(inner) => {
+            format!("yield from {}", expr_to_source_string(inner))
+        }
+        ExprKind::Spread(inner) => {
+            format!("...{}", expr_to_source_string(inner))
+        }
+        ExprKind::ArrayAccess { array, index } => {
+            match index {
+                Some(idx) => format!("{}[{}]", expr_to_source_string(array), expr_to_source_string(idx)),
+                None => format!("{}[]", expr_to_source_string(array)),
+            }
+        }
+        ExprKind::Identifier(name) => String::from_utf8_lossy(name).to_string(),
+        ExprKind::ConstantAccess(parts) => {
+            parts.iter().map(|p| String::from_utf8_lossy(p).to_string()).collect::<Vec<_>>().join("\\")
+        }
+        ExprKind::DynamicVariable(inner) => format!("${{{}}}", expr_to_source_string(inner)),
         // For complex expressions we can't easily represent, use a placeholder
         _ => "...".to_string(),
     }
