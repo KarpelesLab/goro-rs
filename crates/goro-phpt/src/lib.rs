@@ -771,6 +771,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 if !func_name.is_empty() {
                     let lower: Vec<u8> = func_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
                     vm.functions.remove(&lower);
+                    vm.disabled_functions.insert(lower);
                 }
             }
             continue;
