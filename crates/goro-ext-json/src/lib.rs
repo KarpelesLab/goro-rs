@@ -42,7 +42,27 @@ const JSON_THROW_ON_ERROR: i64 = 4194304;
 const JSON_OBJECT_AS_ARRAY: i64 = 1; // for json_decode
 
 fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
+    // For lazy objects, trigger initialization and redirect proxy to real
+    // before encoding. This ensures json_encode sees the realized state.
+    let original = args.first().cloned().unwrap_or(Value::Null);
+    let val_owned: Value = if let Value::Object(obj) = original.deref() {
+        let is_lazy = matches!(
+            obj.borrow().get_property(b"__lazy_state"),
+            Value::String(ref s) if s.as_bytes() == b"ghost" || s.as_bytes() == b"proxy"
+        );
+        if is_lazy {
+            vm.maybe_run_lazy_init(&obj);
+            if vm.current_exception.is_some() {
+                return Err(VmError { message: "Uncaught exception".to_string(), line: 0 });
+            }
+            Value::Object(vm.proxy_redirect(&obj))
+        } else {
+            original.clone()
+        }
+    } else {
+        original.clone()
+    };
+    let val = &val_owned;
     let flags = match args.get(1) {
         Some(v) => v.to_long(),
         None => 0,
@@ -423,6 +443,7 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, max_de
                     !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_")
                     && !name.starts_with(b"__timestamp") && !name.starts_with(b"__enum_")
                     && !name.starts_with(b"__fiber_") && !name.starts_with(b"__ctor_")
+                    && !name.starts_with(b"__lazy_") && !name.starts_with(b"__uri_")
                     && !matches!(val, Value::Undef)
                 })
                 .collect();

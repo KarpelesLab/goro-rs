@@ -1045,8 +1045,27 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     let return_output = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    // For lazy objects, trigger init and redirect proxy to real first.
+    let original = args[0].clone();
+    let val_owned: Value = if let Value::Object(obj) = original.deref() {
+        let is_lazy = matches!(
+            obj.borrow().get_property(b"__lazy_state"),
+            Value::String(ref s) if s.as_bytes() == b"ghost" || s.as_bytes() == b"proxy"
+        );
+        if is_lazy {
+            vm.maybe_run_lazy_init(&obj);
+            if vm.current_exception.is_some() {
+                return Err(VmError { message: "Uncaught exception".to_string(), line: 0 });
+            }
+            Value::Object(vm.proxy_redirect(&obj))
+        } else {
+            original
+        }
+    } else {
+        original
+    };
     let mut buf = Vec::new();
-    var_export_value(&args[0], &mut buf, 0);
+    var_export_value(&val_owned, &mut buf, 0);
 
     if return_output {
         Ok(Value::String(PhpString::from_vec(buf)))

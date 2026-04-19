@@ -2273,6 +2273,22 @@ pub fn reflection_property_docall(
             b"setrawvaluewithoutlazyinitialization" => {
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 let value = args.get(2).cloned().unwrap_or(Value::Null);
+                // If the target is an initialized lazy proxy, write directly
+                // to the backing real object.
+                if let Value::Object(target_obj) = &target {
+                    let is_init_proxy = {
+                        let ob = target_obj.borrow();
+                        matches!(ob.get_property(b"__lazy_state"),
+                            Value::String(ref s) if s.as_bytes() == b"proxy")
+                            && ob.has_property(b"__lazy_real")
+                    };
+                    if is_init_proxy {
+                        if let Value::Object(real) = target_obj.borrow().get_property(b"__lazy_real") {
+                            real.borrow_mut().set_property(prop_name.as_bytes().to_vec(), value);
+                            return Some(Value::Null);
+                        }
+                    }
+                }
                 mark_prop_skipped(vm, &target, &class_lower, prop_name.as_bytes(), Some(value));
                 Some(Value::Null)
             }

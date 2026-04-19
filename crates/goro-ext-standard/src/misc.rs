@@ -1867,7 +1867,7 @@ fn array_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_splice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     let arr_opt = match first {
         Value::Array(a) => Some(a.clone()),
@@ -1881,7 +1881,12 @@ fn array_splice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Some(Value::Null) | None => None,
             Some(v) => Some(v.to_long()),
         };
-        let replacement = args.get(3);
+        // If replacement is an object, convert it to an array (as (array)$obj).
+        let replacement_converted: Option<Value> = match args.get(3) {
+            Some(Value::Object(obj)) => Some(Value::Array(vm.object_to_array(obj))),
+            _ => None,
+        };
+        let replacement = replacement_converted.as_ref().or_else(|| args.get(3));
 
         let mut arr_mut = arr.borrow_mut();
         let entries: Vec<(goro_core::array::ArrayKey, Value)> =
@@ -2430,7 +2435,7 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // For objects, convert properties to entries with PHP-style mangled names
     if is_object {
-        let obj = match first {
+        let outer = match first {
             Value::Object(o) => o.clone(),
             Value::Reference(r) => {
                 if let Value::Object(o) = &*r.borrow() {
@@ -2441,7 +2446,12 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             _ => return Ok(Value::True),
         };
-        let entries: Vec<(ArrayKey, Value)> = {
+        // Trigger lazy initialization so all declared props exist, and
+        // redirect proxies to the real backing object (so iteration sees
+        // the real instance).
+        vm.maybe_run_lazy_init(&outer);
+        let obj = vm.proxy_redirect(&outer);
+        let entries: Vec<(ArrayKey, Vec<u8>, Value)> = {
             let obj_borrow = obj.borrow();
             let class_name_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             // Map property name -> (visibility, declaring_class_original_case)
@@ -2460,20 +2470,24 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     std::collections::HashMap::new()
                 };
             obj_borrow.properties.iter()
-                .filter(|(k, _)| !k.starts_with(b"__spl_") && !k.starts_with(b"__reflection_")
+                .filter(|(k, v)| {
+                    !k.starts_with(b"__spl_") && !k.starts_with(b"__reflection_")
                     && !k.starts_with(b"__enum_") && !k.starts_with(b"__ctor_")
                     && !k.starts_with(b"__clone_") && !k.starts_with(b"__destructed")
-                    && !k.starts_with(b"__fiber_") && !k.starts_with(b"__timestamp"))
+                    && !k.starts_with(b"__fiber_") && !k.starts_with(b"__timestamp")
+                    && !k.starts_with(b"__lazy_") && !k.starts_with(b"__uri_")
+                    && !matches!(v, Value::Undef)
+                })
                 .map(|(k, v)| {
                     let (vis, declaring_class) = prop_info.get(k)
                         .map(|(v, dc)| (Some(*v), dc.as_slice()))
                         .unwrap_or((None, &[]));
                     let mangled_key = mangle_property_name(k, declaring_class, vis);
-                    (ArrayKey::String(PhpString::from_vec(mangled_key)), v.clone())
+                    (ArrayKey::String(PhpString::from_vec(mangled_key)), k.clone(), v.clone())
                 }).collect()
         };
         let extra_data = args.get(2);
-        return array_walk_entries(vm, callback, &entries, extra_data, None);
+        return array_walk_object_entries(vm, callback, &entries, extra_data, &obj);
     }
 
     // Array case
@@ -2490,6 +2504,119 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     Ok(Value::True)
+}
+
+/// array_walk for objects: iterates props, calls callback with &$value,
+/// and writes the modified value back to the actual property name.
+fn array_walk_object_entries(
+    vm: &mut Vm,
+    callback: &Value,
+    entries: &[(ArrayKey, Vec<u8>, Value)],
+    extra_data: Option<&Value>,
+    obj: &Rc<RefCell<goro_core::object::PhpObject>>,
+) -> Result<Value, VmError> {
+    let (func_name, captured) = match callback {
+        Value::String(s) => (s.as_bytes().to_vec(), vec![]),
+        Value::Array(cb) => {
+            let cb = cb.borrow();
+            let vals: Vec<Value> = cb.values().cloned().collect();
+            if vals.is_empty() {
+                return Ok(Value::True);
+            }
+            (
+                vals[0].to_php_string().as_bytes().to_vec(),
+                vals[1..].to_vec(),
+            )
+        }
+        _ => return Ok(Value::True),
+    };
+    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+    if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+        for (key, prop_name, val) in entries {
+            let val_ref = Rc::new(RefCell::new(val.clone()));
+            let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+            let mut idx = 0;
+            for cv in &captured {
+                if idx < fn_cvs.len() {
+                    fn_cvs[idx] = cv.clone();
+                    idx += 1;
+                }
+            }
+            if idx < fn_cvs.len() {
+                fn_cvs[idx] = Value::Reference(val_ref.clone());
+                idx += 1;
+            }
+            if idx < fn_cvs.len() {
+                let key_val = match key {
+                    ArrayKey::Int(n) => Value::Long(*n),
+                    ArrayKey::String(s) => Value::String(s.clone()),
+                };
+                fn_cvs[idx] = key_val;
+                idx += 1;
+            }
+            if let Some(extra) = extra_data {
+                if idx < fn_cvs.len() {
+                    fn_cvs[idx] = extra.clone();
+                }
+            }
+            vm.execute_fn(&user_fn, fn_cvs)?;
+            // Write modified value back to the object property.
+            // Type coercion: if the property has a declared type and the
+            // value is incompatible, throw a TypeError (matches PHP's
+            // reference-held-by-typed-property behaviour).
+            let new_val = val_ref.borrow().clone();
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter()
+                .map(|b| b.to_ascii_lowercase()).collect();
+            let type_check_failed: Option<String> = {
+                if let Some(class_def) = vm.get_class_def(&class_lower) {
+                    if let Some(p) = class_def.properties.iter()
+                        .find(|p| !p.is_static && p.name == *prop_name)
+                    {
+                        if let Some(t) = &p.property_type {
+                            if !vm.value_matches_type(&new_val, t) {
+                                let type_name = vm.param_type_name(t);
+                                let val_type = value_type_for_error(&new_val);
+                                let class_display = goro_core::value::display_class_name(
+                                    &obj.borrow().class_name);
+                                let prop_display = String::from_utf8_lossy(prop_name);
+                                Some(format!(
+                                    "Cannot assign {} to reference held by property {}::${} of type {}",
+                                    val_type, class_display, prop_display, type_name
+                                ))
+                            } else { None }
+                        } else { None }
+                    } else { None }
+                } else { None }
+            };
+            if let Some(msg) = type_check_failed {
+                let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                // Don't write back, continue to next entry
+                continue;
+            }
+            obj.borrow_mut().set_property(prop_name.clone(), new_val);
+        }
+    } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+        for (_, _, val) in entries {
+            builtin(vm, &[val.clone()])?;
+        }
+    }
+    Ok(Value::True)
+}
+
+fn value_type_for_error(v: &Value) -> &'static str {
+    let v = v.deref();
+    match &v {
+        Value::Null | Value::Undef => "null",
+        Value::True | Value::False => "bool",
+        Value::Long(_) => "int",
+        Value::Double(_) => "float",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+        _ => "mixed",
+    }
 }
 
 fn array_walk_entries(
@@ -6095,8 +6222,15 @@ fn gc_enable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Object(obj)) = args.first() {
-        let obj = obj.borrow();
+    if let Some(Value::Object(outer)) = args.first() {
+        // Trigger lazy init first so properties are visible.
+        vm.maybe_run_lazy_init(outer);
+        if vm.current_exception.is_some() {
+            return Err(VmError { message: "Uncaught exception".to_string(), line: vm.current_line });
+        }
+        // Redirect lazy proxy to real backing object.
+        let obj_rc = vm.proxy_redirect(outer);
+        let obj = obj_rc.borrow();
         let class_name_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
         // Get the calling class context to determine visibility
@@ -6131,11 +6265,17 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
                 || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
                 || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
-                || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_") {
+                || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
+                || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
+                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
                 continue;
             }
             // Skip uninitialized typed properties
             if matches!(val, Value::Undef) && typed_props.contains(name) {
+                continue;
+            }
+            // Skip any other uninitialized (Undef) props too.
+            if matches!(val, Value::Undef) {
                 continue;
             }
             // Check visibility
@@ -6228,7 +6368,26 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
+    let original = args.first().cloned().unwrap_or(Value::Null);
+    // For lazy objects, trigger init and redirect to real before serializing.
+    let val_owned: Value = if let Value::Object(obj) = original.deref() {
+        let is_lazy = matches!(
+            obj.borrow().get_property(b"__lazy_state"),
+            Value::String(ref s) if s.as_bytes() == b"ghost" || s.as_bytes() == b"proxy"
+        );
+        if is_lazy {
+            _vm.maybe_run_lazy_init(&obj);
+            if _vm.current_exception.is_some() {
+                return Err(VmError { message: "Uncaught exception".to_string(), line: _vm.current_line });
+            }
+            Value::Object(_vm.proxy_redirect(&obj))
+        } else {
+            original.clone()
+        }
+    } else {
+        original.clone()
+    };
+    let val = &val_owned;
     // Check for non-serializable classes
     if let Value::Object(obj) = val {
         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -8354,19 +8513,50 @@ fn debug_zval_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
             let obj_borrow = obj.borrow();
             let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
             let oid = obj_borrow.object_id;
+            // Lazy object prefix: "lazy ghost " / "lazy proxy " before object(...)
+            let lazy_prefix: &str = match obj_borrow.get_property(b"__lazy_state") {
+                Value::String(s) if s.as_bytes() == b"ghost" => "lazy ghost ",
+                Value::String(s) if s.as_bytes() == b"proxy" => "lazy proxy ",
+                _ => "",
+            };
+            // Initialized proxy: show as `lazy proxy object(C)#N (1) { ["instance"]=> <real> }`
+            if lazy_prefix == "lazy proxy " {
+                if let Value::Object(real) = obj_borrow.get_property(b"__lazy_real") {
+                    drop(obj_borrow);
+                    vm.write_output(
+                        format!("{}lazy proxy object({})#{} (1) refcount({}){{\n", prefix, class_name, oid, 2).as_bytes(),
+                    );
+                    vm.write_output(format!("{}  [\"instance\"]=>\n", prefix).as_bytes());
+                    debug_zval_dump_value(vm, &Value::Object(real), indent + 2);
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    return;
+                }
+            }
             let prop_count = obj_borrow.properties.iter()
                 .filter(|(name, val)| !name.starts_with(b"__") && !matches!(val, Value::Undef))
                 .count();
             vm.write_output(
-                format!("{}object({})#{} ({}) refcount({}){{\n", prefix, class_name, oid, prop_count, 2).as_bytes(),
+                format!("{}{}object({})#{} ({}) refcount({}){{\n", prefix, lazy_prefix, class_name, oid, prop_count, 2).as_bytes(),
             );
             for (name, value) in &obj_borrow.properties {
-                if name.starts_with(b"__") || matches!(value, Value::Undef) {
+                if name.starts_with(b"__") {
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);
                 vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, name_str).as_bytes());
-                debug_zval_dump_value(vm, value, indent + 2);
+                if matches!(value, Value::Undef) {
+                    // Emit a PHP-style uninitialized marker for typed props.
+                    // We look up the class to get the property's type.
+                    let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let prop_type = vm.classes.get(&class_lower)
+                        .and_then(|c| c.properties.iter().find(|p| p.name == *name))
+                        .and_then(|p| p.property_type.as_ref())
+                        .map(|t| vm.param_type_name(t))
+                        .unwrap_or_else(|| String::from("mixed"));
+                    vm.write_output(format!("{}  uninitialized({})\n", prefix, prop_type).as_bytes());
+                } else {
+                    debug_zval_dump_value(vm, value, indent + 2);
+                }
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
@@ -11012,8 +11202,10 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Object(obj)) = args.first() {
-        let obj = obj.borrow();
+    if let Some(Value::Object(outer)) = args.first() {
+        // For initialized lazy proxy, redirect to the real backing object.
+        let obj_rc = vm.proxy_redirect(outer);
+        let obj = obj_rc.borrow();
         let class_name_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
         let prop_info: std::collections::HashMap<Vec<u8>, (goro_core::object::Visibility, Vec<u8>)> =
             if let Some(class_def) = vm.get_class_def(&class_name_lower) {
@@ -11033,7 +11225,14 @@ fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         for (name, val) in &obj.properties {
             if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__enum_")
                 || name.starts_with(b"__ctor_") || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
-                || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp") {
+                || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp")
+                || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
+                || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
+                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                continue;
+            }
+            // Skip uninitialized properties (Undef).
+            if matches!(val, Value::Undef) {
                 continue;
             }
             let (vis, declaring_class) = prop_info.get(name)
