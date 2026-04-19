@@ -8,28 +8,45 @@ Active development. Core language features, OOP, generators, exceptions, closure
 
 **Test Suite Progress** (PHP 8.5.4 official tests):
 
-| Test Directory | Pass | Total | Rate |
+| Metric | Count |
+|---|---|
+| Total tests | 21281 |
+| Pass | 5940 (27.9%) |
+| Fail | 7753 |
+| Skip | 7428 |
+| Error | 160 |
+
+**Recently completed features:**
+
+| Feature (PHP version) | Pass | Total | Rate |
 |---|---|---|---|
-| Zend/tests (top-level) | 329 | 871 | 37.8% |
-| All tests (Zend+ext+standard) | ~3762 | ~11950 | ~31.5% |
+| PhpToken / tokenizer | 34 | 53 | 64% |
+| Uri\WhatWg\Url + Uri\Rfc3986\Uri (8.5) | 117 | 117 runnable | 100% |
+| Property hooks (8.4) | 110 | 211 | 52% |
+| Lazy objects (8.4) | 107 | 213 | 50% |
+| SPL ArrayObject | 53 | 108 | 49% |
 
 **Key directory pass rates:**
 - ext/standard/array: 473/842 (56.2%)
 - ext/standard/strings: 323/730 (44.2%)
 - ext/standard/math: 112/171 (65.5%)
-- ext/spl: 152/781 (19.5%)
+- ext/spl: 293/781 (37.5%)
 - ext/date: 111/688 (16.1%)
 - ext/reflection: 97/493 (19.7%)
 - ext/pcre: 63/163 (38.7%)
 - ext/hash: 16/80 (20.0%)
 - ext/json: 32/88 (36.4%)
 - ext/ctype: 38/49 (77.6%)
+- ext/uri: 117/117 runnable (100%)
+- ext/tokenizer: 34/53 (64.1%)
 - Zend/type_declarations: 138/496 (27.8%)
 - Zend/traits: 85/216 (39.4%)
 - Zend/enum: 80/151 (53.0%)
 - Zend/namespaces: 76/114 (66.7%)
 - Zend/generators: 51/184 (27.7%)
 - Zend/closures: 45/135 (33.3%)
+- Zend/lazy_objects: 107/213 (50.2%)
+- Zend/property_hooks: 110/211 (52.1%)
 
 *Test runner supports recursive directories, SKIPIF sections, EXPECTF pattern matching with backtracking, and timeout protection.*
 
@@ -66,16 +83,20 @@ Active development. Core language features, OOP, generators, exceptions, closure
 - Memory limit tracking with allocation/deallocation
 - 500+ built-in functions, 300+ constants
 - CLI SAPI, PHPT test runner
+- **PhpToken** class (PHP 8): `PhpToken::tokenize()`, `is()`, `getTokenName()`, `isIgnorable()`, `__toString()`. Lexer emits T_WHITESPACE, T_COMMENT, T_DOC_COMMENT when trivia preservation is enabled.
+- **Uri classes (PHP 8.5)**: `Uri\WhatWg\Url` and `Uri\Rfc3986\Uri` with `parse`, `toString`, `toAsciiString`, `toUnicodeString` (IDN), `toRawString`, `equals` (IncludeFragment / ExcludeFragment modes), `resolve`, `withScheme/withHost/…`. Backed by the `url` and `idna` crates. WhatWg error codes (HostMissing, PortInvalid, DomainInvalidCodePoint, Ipv6InvalidCodePoint, MissingSchemeNonRelativeUrl). `Uri\WhatWg\InvalidUrlException`, `Uri\InvalidUriException`, `Uri\UriComparisonMode` enum. Base URL can be a string or another Uri object; errors array output parameter supported.
+- **Property hooks (PHP 8.4)**: `get` / `set` with short (`get => expr`) and block forms, `&get` and set parameter type hints. Abstract / final on hook and property. `parent::$prop::get()` and `::set()` with backing-store fallback. `isset()` on write-only throws `Property is write-only`; `unset()` on hooked property throws `Cannot unset hooked property`. Trait hook composition. Inheritance validation: final override, abstract-unimplemented, LSP-contravariant set param types. `ReflectionProperty::isVirtual/isAbstract/isFinal/hasHooks`.
+- **Lazy objects (PHP 8.4)**: `ReflectionClass::newLazyGhost`, `newLazyProxy`, `resetAsLazyGhost`, `resetAsLazyProxy`, `initializeLazyObject`, `markLazyObjectAsInitialized`, `isUninitializedLazyObject`, `getLazyInitializer`, `getLazyProxyInstance`. `ReflectionProperty::skipLazyInitialization`, `setRawValueWithoutLazyInitialization`, `getRawValue`. Initializer recursion guard, snapshot/restore on init exception, proxy forwarding, clone with deep-copy of proxy instance, array cast, destructor on initialized objects. `var_dump` shows `lazy ghost` / `lazy proxy` prefix with correct PHP formatting.
+- **Resource type registry**: `is_resource`, `gettype`, `get_resource_type` work for `fopen`, `tmpfile`, `popen`, `fsockopen`, `STDIN`/`STDOUT`/`STDERR`.
+- **Object handle recycling**: `PhpObject::Drop` returns freed ids to a thread-local pool so `alloc_object_id` reuses them, matching PHP's handle reuse behavior that tests with literal `#N` object numbers rely on.
 
 ### Not Yet Implemented
 - Fibers (PHP 8.1)
-- Property hooks (PHP 8.4)
 - Pipe operator (PHP 8.5)
-- Lazy objects (PHP 8.4)
-- Asymmetric visibility (PHP 8.4)
+- Asymmetric visibility (PHP 8.4) (parser recognizes but VM enforcement partial)
 - Stream wrappers / file resources
 - `declare(strict_types=1)` enforcement
-- Many extensions (pdo, curl, etc.)
+- Many extensions (pdo, curl via object-handle protocol, etc.)
 
 ## Building
 
@@ -110,6 +131,9 @@ Workspace crates:
 - `goro-ext-json` - JSON extension (json_encode/decode)
 - `goro-ext-ctype` - Character type extension
 - `goro-ext-hash` - Hash extension (MD5, SHA, CRC32, HMAC)
+- `goro-ext-reflection` - Reflection extension (stub; most logic lives in `goro-core::reflection`)
+- `goro-ext-spl` - SPL extension (autoload helpers; SPL classes are compiled into `goro-core`)
+- `goro-ext-{bz2,curl,gmp,mbstring,mysqli,openssl,session,sockets,xml,zlib}` - misc extensions
 - `goro-phpt` - PHPT test file runner
 
 ## Design Goals
