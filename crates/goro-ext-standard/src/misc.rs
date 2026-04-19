@@ -12062,7 +12062,8 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
     let source = args[0].to_php_string();
-    let _flags = if args.len() > 1 { args[1].to_long() } else { 0 };
+    let flags = if args.len() > 1 { args[1].to_long() } else { 0 };
+    let token_parse = (flags & 1) != 0; // TOKEN_PARSE
 
     let mut lexer = goro_parser::Lexer::new(source.as_bytes());
     lexer.set_preserve_trivia(true);
@@ -12071,11 +12072,27 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     let src = source.as_bytes();
 
+    // Track context for TOKEN_PARSE semi-reserved handling:
+    // after `::` or `->` or `const`, a reserved keyword should tokenize as T_STRING.
+    let mut last_meaningful_id: i64 = 0;
+
     for token in &tokens {
         if matches!(token.kind, goro_parser::token::TokenKind::Eof) {
             continue;
         }
-        let token_id = goro_parser::token::token_kind_to_php_id(&token.kind);
+        let mut token_id = goro_parser::token::token_kind_to_php_id(&token.kind);
+
+        // In TOKEN_PARSE mode, demote a keyword to T_STRING when it follows
+        // `::` (T_DOUBLE_COLON=397), `->` (T_OBJECT_OPERATOR=384), `?->`
+        // (T_NULLSAFE_OBJECT_OPERATOR=385), or `const` (T_CONST=312).
+        if token_parse
+            && token_id >= 272
+            && token_id <= 342
+            && matches!(last_meaningful_id, 397 | 384 | 385 | 312)
+        {
+            // Keyword in reserved/semi-reserved range -> T_STRING
+            token_id = 262;
+        }
 
         if token_id == 0 {
             let start = token.span.start as usize;
@@ -12083,6 +12100,11 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if start < src.len() && end <= src.len() && start < end {
                 let text = &src[start..end];
                 result.push(Value::String(PhpString::from_bytes(text)));
+                // Remember char token as last meaningful (but only certain chars
+                // reset the class-member context). `;` and `{` definitely reset.
+                if text == b";" || text == b"{" || text == b"}" {
+                    last_meaningful_id = 0;
+                }
             }
         } else {
             let start = token.span.start as usize;
@@ -12097,6 +12119,10 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             token_arr.set(ArrayKey::Int(1), Value::String(PhpString::from_bytes(text)));
             token_arr.set(ArrayKey::Int(2), Value::Long(token.span.line as i64));
             result.push(Value::Array(Rc::new(RefCell::new(token_arr))));
+            // Track non-ignorable tokens for the TOKEN_PARSE context.
+            if !goro_parser::token::token_id_is_ignorable(token_id) {
+                last_meaningful_id = token_id;
+            }
         }
     }
 
