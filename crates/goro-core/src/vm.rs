@@ -18329,29 +18329,28 @@ impl Vm {
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
                     let key = key_val.to_php_string().as_bytes().to_vec();
 
-                    if let Some(existing) = self.static_vars.get(&key) {
-                        self.write_operand(
-                            &op.op1,
-                            existing.clone(),
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
+                    // Get (or initialize) the static value. We bypass write_operand's
+                    // copy-on-write logic for arrays so that mutations through the CV
+                    // (e.g. $foo[] = X on a static array) persist across calls by
+                    // sharing the same Rc<RefCell<PhpArray>> between the CV and
+                    // self.static_vars.
+                    let value = if let Some(existing) = self.static_vars.get(&key) {
+                        existing.clone()
                     } else {
                         let default = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                        self.write_operand(
-                            &op.op1,
-                            default.clone(),
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
-                        self.static_vars.insert(key.clone(), default);
-                    }
+                        self.static_vars.insert(key.clone(), default.clone());
+                        default
+                    };
 
-                    // Register this CV as static so writes are persisted
-                    if let OperandType::Cv(cv_idx) = op.op1 {
-                        static_cv_keys.insert(cv_idx, key);
+                    if let OperandType::Cv(idx) = op.op1 {
+                        if let Some(slot) = cvs.get_mut(idx as usize) {
+                            if let Value::Reference(r) = slot {
+                                *r.borrow_mut() = value;
+                            } else {
+                                *slot = value;
+                            }
+                        }
+                        static_cv_keys.insert(idx, key);
                     }
                 }
 
@@ -19832,6 +19831,48 @@ impl Vm {
                     // Check if object property is set (with __isset support)
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
+                    // For hooked properties, isset() behaves like a get access:
+                    //  - a get-hook is called (its return value determines the result)
+                    //  - if only a set hook is defined (write-only) -> throw Error
+                    // We handle the write-only case explicitly here; the get-hook
+                    // invocation for isset() is still implemented below via the
+                    // regular property read path in higher-level code.
+                    if let Value::Object(obj) = &obj_val {
+                        let class_lower_wo: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_name_orig_wo = obj.borrow().class_name.clone();
+                        // Walk self + ancestors to detect a write-only hooked property
+                        let mut cur = class_lower_wo.clone();
+                        let mut is_virtual_write_only = false;
+                        loop {
+                            if let Some(cd) = self.classes.get(&cur) {
+                                if let Some(p) = cd.properties.iter().find(|p| p.name == prop_name.as_bytes()) {
+                                    if p.has_set_hook && !p.has_get_hook && p.is_virtual {
+                                        is_virtual_write_only = true;
+                                    }
+                                    break;
+                                }
+                                match &cd.parent {
+                                    Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
+                                    None => break,
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if is_virtual_write_only {
+                            let class_display = crate::value::display_class_name(&class_name_orig_wo);
+                            let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
+                            let msg = format!("Property {}::${} is write-only", class_display, prop_display);
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
+                                exception_handlers.pop();
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                        }
+                    }
                     let result = if let Value::Object(obj) = &obj_val {
                         let ob = obj.borrow();
                         let class_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -20014,6 +20055,53 @@ impl Vm {
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
                     if let Value::Object(obj) = &obj_val {
+                        // Hooked properties cannot be unset
+                        {
+                            let class_lower_hk: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let caller_scope_hk = self.current_class_scope()
+                                .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                            let is_hooked = self.find_property_def_for_scope(&class_lower_hk, prop_name.as_bytes(), caller_scope_hk.as_deref())
+                                .map(|_| {
+                                    // Check the actual class property def for has_get_hook/has_set_hook
+                                    let cdef = self.classes.get(&class_lower_hk);
+                                    cdef.map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes() && (p.has_get_hook || p.has_set_hook))).unwrap_or(false)
+                                })
+                                .unwrap_or(false);
+                            // Also check ancestor classes
+                            let is_hooked_in_ancestor = {
+                                let mut cur_lower = class_lower_hk.clone();
+                                let mut found = is_hooked;
+                                while !found {
+                                    let parent = self.classes.get(&cur_lower).and_then(|c| c.parent.clone());
+                                    match parent {
+                                        Some(p) => {
+                                            let pl: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            if let Some(pc) = self.classes.get(&pl) {
+                                                if pc.properties.iter().any(|pp| pp.name == prop_name.as_bytes() && (pp.has_get_hook || pp.has_set_hook)) {
+                                                    found = true;
+                                                    break;
+                                                }
+                                            }
+                                            cur_lower = pl;
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                found
+                            };
+                            if is_hooked_in_ancestor {
+                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
+                                let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
+                                let msg = format!("Cannot unset hooked property {}::${}", class_display, prop_str);
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                            }
+                        }
                         // Enum readonly property protection
                         if obj.borrow().has_property(b"__enum_case") {
                             let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -21077,11 +21165,28 @@ impl Vm {
                                 for (method_name, method) in &parent.methods {
                                     // Check if parent method is final and child overrides it
                                     if let Some(child_method) = class.methods.get(method_name) {
+                                        let _ = child_method;
                                         if method.is_final {
                                             let parent_display = String::from_utf8_lossy(parent_name).to_string();
-                                            let method_display = String::from_utf8_lossy(&method.name).to_string();
+                                            // Property hooks have special name/error format
+                                            let is_hook = method_name.starts_with(b"__property_get_")
+                                                || method_name.starts_with(b"__property_set_");
+                                            let msg = if is_hook {
+                                                let (hook_kind, prop_name) = if method_name.starts_with(b"__property_get_") {
+                                                    ("get", &method_name[b"__property_get_".len()..])
+                                                } else {
+                                                    ("set", &method_name[b"__property_set_".len()..])
+                                                };
+                                                format!("Cannot override final property hook {}::${}::{}()",
+                                                    parent_display,
+                                                    String::from_utf8_lossy(prop_name),
+                                                    hook_kind)
+                                            } else {
+                                                let method_display = String::from_utf8_lossy(&method.name).to_string();
+                                                format!("Cannot override final method {}::{}()", parent_display, method_display)
+                                            };
                                             return Err(VmError {
-                                                message: format!("Cannot override final method {}::{}()", parent_display, method_display),
+                                                message: msg,
                                                 line: op.line,
                                             });
                                         }
@@ -21136,6 +21241,22 @@ impl Vm {
                                         class.methods.insert(method_name.clone(), method.clone());
                                     }
                                 }
+                                // If the child redeclares a property as plain (no hooks, not abstract),
+                                // remove any inherited abstract hook methods for that property so they
+                                // don't appear as unimplemented.
+                                let child_plain_prop_names: Vec<Vec<u8>> = class.properties.iter()
+                                    .filter(|p| !p.is_abstract && !p.has_get_hook && !p.has_set_hook)
+                                    .map(|p| p.name.clone()).collect();
+                                for cp_name in &child_plain_prop_names {
+                                    let mut get_key: Vec<u8> = b"__property_get_".to_vec();
+                                    get_key.extend_from_slice(cp_name);
+                                    let mut set_key: Vec<u8> = b"__property_set_".to_vec();
+                                    set_key.extend_from_slice(cp_name);
+                                    let get_key_lower: Vec<u8> = get_key.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let set_key_lower: Vec<u8> = set_key.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    class.methods.remove(&get_key_lower);
+                                    class.methods.remove(&set_key_lower);
+                                }
                                 // Inherit properties (parent properties come first, child overrides take precedence)
                                 let child_prop_names: Vec<Vec<u8>> =
                                     class.properties.iter().map(|p| p.name.clone()).collect();
@@ -21152,11 +21273,29 @@ impl Vm {
                                         if !child_is_concrete {
                                             let parent_display = String::from_utf8_lossy(parent_name);
                                             let prop_display = String::from_utf8_lossy(&parent_prop.name);
+                                            // Only report hooks that are genuinely abstract
+                                            // (i.e. `get;` / `set;` form, not `get {}` / `set {}`).
+                                            let mut get_key: Vec<u8> = b"__property_get_".to_vec();
+                                            get_key.extend_from_slice(&parent_prop.name);
+                                            let mut set_key: Vec<u8> = b"__property_set_".to_vec();
+                                            set_key.extend_from_slice(&parent_prop.name);
+                                            let get_key_lower: Vec<u8> = get_key.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            let set_key_lower: Vec<u8> = set_key.iter().map(|b| b.to_ascii_lowercase()).collect();
                                             if parent_prop.has_get_hook {
-                                                unimplemented.push(format!("{}::${}::get", parent_display, prop_display));
+                                                let is_get_abstract = parent.methods.get(&get_key_lower)
+                                                    .map(|m| m.is_abstract)
+                                                    .unwrap_or(true);
+                                                if is_get_abstract {
+                                                    unimplemented.push(format!("{}::${}::get", parent_display, prop_display));
+                                                }
                                             }
                                             if parent_prop.has_set_hook {
-                                                unimplemented.push(format!("{}::${}::set", parent_display, prop_display));
+                                                let is_set_abstract = parent.methods.get(&set_key_lower)
+                                                    .map(|m| m.is_abstract)
+                                                    .unwrap_or(true);
+                                                if is_set_abstract {
+                                                    unimplemented.push(format!("{}::${}::set", parent_display, prop_display));
+                                                }
                                             }
                                         }
                                     }
@@ -21937,6 +22076,19 @@ impl Vm {
                                     if own_prop_names.contains(&prop.name) {
                                         // Class directly defines this property - check compatibility
                                         if let Some(class_prop) = class.properties.iter().find(|p| p.name == prop.name) {
+                                            // Hooked properties cannot be merged with trait hooked properties
+                                            let trait_has_hooks = prop.has_get_hook || prop.has_set_hook;
+                                            let class_has_hooks = class_prop.has_get_hook || class_prop.has_set_hook;
+                                            if trait_has_hooks || class_has_hooks {
+                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
+                                                let prop_display = String::from_utf8_lossy(&prop.name).to_string();
+                                                return Err(VmError {
+                                                    message: format!("{} and {} define the same hooked property (${}) in the composition of {}. Conflict resolution between hooked properties is currently not supported. Class was composed",
+                                                        class_display, trait_display, prop_display, class_display),
+                                                    line: op.line,
+                                                });
+                                            }
                                             // Check: static vs non-static mismatch
                                             if prop.is_static != class_prop.is_static {
                                                 let class_display = String::from_utf8_lossy(&class.name).to_string();
@@ -22221,8 +22373,19 @@ impl Vm {
                                             .to_string();
                                         }
                                     }
-                                    let method_name_str =
-                                        String::from_utf8_lossy(&method.name).to_string();
+                                    // Format property hook methods as $prop::get / $prop::set
+                                    let method_name_str = {
+                                        let mn = &method.name;
+                                        if mn.starts_with(b"__property_get_") {
+                                            let prop = String::from_utf8_lossy(&mn[b"__property_get_".len()..]);
+                                            format!("${}::get", prop)
+                                        } else if mn.starts_with(b"__property_set_") {
+                                            let prop = String::from_utf8_lossy(&mn[b"__property_set_".len()..]);
+                                            format!("${}::set", prop)
+                                        } else {
+                                            String::from_utf8_lossy(mn).to_string()
+                                        }
+                                    };
                                     abstract_methods
                                         .push(format!("{}::{}", iface_origin, method_name_str));
                                 }

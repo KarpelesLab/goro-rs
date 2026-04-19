@@ -2536,6 +2536,10 @@ impl Compiler {
                             is_final: prop_is_final,
                             get_hook,
                             set_hook,
+                            get_hook_final,
+                            set_hook_final,
+                            get_hook_abstract,
+                            set_hook_abstract,
                             attributes,
                         } => {
                             // Enums cannot include properties
@@ -3119,31 +3123,58 @@ impl Compiler {
                                     line: stmt.span.line,
                                 });
                             }
-                            // Abstract property in non-abstract, non-interface class
-                            if *prop_is_abstract && !modifiers.is_abstract && !modifiers.is_interface {
-                                let has_g = get_hook.is_some();
-                                let has_s = set_hook.is_some();
-                                let count = (has_g as usize) + (has_s as usize);
-                                let (plural, is_plural) = if count == 1 { ("method", false) } else { ("methods", true) };
-                                let mut parts: Vec<String> = Vec::new();
-                                if has_g {
-                                    parts.push(format!("{}::${}::get", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)));
-                                }
-                                if has_s {
-                                    parts.push(format!("{}::${}::set", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)));
-                                }
-                                let remaining_word = if is_plural { "remaining methods" } else { "remaining method" };
+                            // Hook-level checks: final+private, final+abstract, abstract+private
+                            // `final+private` must be checked before `final+abstract` because the test
+                            // `private $prop { final get; }` is both, but the expected error is
+                            // "cannot be both final and private".
+                            if (*get_hook_final || *set_hook_final)
+                                && matches!(visibility, goro_parser::ast::Visibility::Private) {
                                 return Err(CompileError {
-                                    message: format!(
-                                        "Class {} contains {} abstract {} and must therefore be declared abstract or implement the {} ({})",
-                                        String::from_utf8_lossy(name),
-                                        count,
-                                        plural,
-                                        remaining_word,
-                                        parts.join(", "),
-                                    ),
+                                    message: "Property hook cannot be both final and private".to_string(),
                                     line: stmt.span.line,
                                 });
+                            }
+                            if (*get_hook_final && *get_hook_abstract) || (*set_hook_final && *set_hook_abstract) {
+                                return Err(CompileError {
+                                    message: "Property hook cannot be both abstract and final".to_string(),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            if *prop_is_abstract && matches!(visibility, goro_parser::ast::Visibility::Private) {
+                                return Err(CompileError {
+                                    message: "Property hook cannot be both abstract and private".to_string(),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            // Abstract property in non-abstract, non-interface, non-trait class
+                            // Only the hooks declared with `;` (no body) are actually abstract;
+                            // `get { }` / `set { }` with an empty body are concrete.
+                            if *prop_is_abstract && !modifiers.is_abstract && !modifiers.is_interface && !modifiers.is_trait {
+                                let has_g = *get_hook_abstract;
+                                let has_s = *set_hook_abstract;
+                                let count = (has_g as usize) + (has_s as usize);
+                                if count > 0 {
+                                    let (plural, is_plural) = if count == 1 { ("method", false) } else { ("methods", true) };
+                                    let mut parts: Vec<String> = Vec::new();
+                                    if has_g {
+                                        parts.push(format!("{}::${}::get", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)));
+                                    }
+                                    if has_s {
+                                        parts.push(format!("{}::${}::set", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)));
+                                    }
+                                    let remaining_word = if is_plural { "remaining methods" } else { "remaining method" };
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Class {} contains {} abstract {} and must therefore be declared abstract or implement the {} ({})",
+                                            String::from_utf8_lossy(name),
+                                            count,
+                                            plural,
+                                            remaining_word,
+                                            parts.join(", "),
+                                        ),
+                                        line: stmt.span.line,
+                                    });
+                                }
                             }
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
@@ -3208,8 +3239,8 @@ impl Compiler {
                                         op_array: hook_compiler.op_array,
                                         param_count: 0,
                                         is_static: false,
-                                        is_abstract: false,
-                                        is_final: false,
+                                        is_abstract: *get_hook_abstract,
+                                        is_final: *get_hook_final,
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower.clone(),
                                         doc_comment: None,
@@ -3265,8 +3296,8 @@ impl Compiler {
                                         op_array: hook_compiler.op_array,
                                         param_count: 1, // $value
                                         is_static: false,
-                                        is_abstract: false,
-                                        is_final: false,
+                                        is_abstract: *set_hook_abstract,
+                                        is_final: *set_hook_final,
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower,
                                         doc_comment: None,
@@ -3692,7 +3723,7 @@ impl Compiler {
                                                     param_count: 0,
                                                     is_static: false,
                                                     is_abstract: false,
-                                                    is_final: false,
+                                                    is_final: param.get_hook_final,
                                                     visibility: ObjVisibility::Public,
                                                     declaring_class: declaring_class_lower.clone(),
                                                     doc_comment: None,
@@ -3738,7 +3769,7 @@ impl Compiler {
                                                     param_count: 1,
                                                     is_static: false,
                                                     is_abstract: false,
-                                                    is_final: false,
+                                                    is_final: param.set_hook_final,
                                                     visibility: ObjVisibility::Public,
                                                     declaring_class: declaring_class_lower.clone(),
                                                     doc_comment: None,

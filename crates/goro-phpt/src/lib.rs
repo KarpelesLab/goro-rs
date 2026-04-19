@@ -696,7 +696,19 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 || err_msg.contains("Readonly property")
                 || err_msg.contains("Static property")
                 || err_msg.contains("constant must")
-                || err_msg.contains("class must");
+                || err_msg.contains("class must")
+                || err_msg.starts_with("Unknown hook")
+                || err_msg.starts_with("Cannot override final property hook")
+                || err_msg.starts_with("Type of parameter")
+                || err_msg.contains("define the same hooked property")
+                || err_msg.starts_with("Parameter $")
+                || err_msg.starts_with("set hook parameter")
+                || err_msg.starts_with("Cannot use the static modifier on a property hook")
+                || err_msg.starts_with("Property hooks cannot have visibility")
+                || err_msg.starts_with("Property hook cannot be")
+                || err_msg.starts_with("Property hook list must")
+                || err_msg.starts_with("Property hook cannot have")
+                || err_msg.starts_with("Final promoted property");
             let msg = if is_fatal {
                 format!(
                     "\nFatal error: {} in {} on line {}\n",
