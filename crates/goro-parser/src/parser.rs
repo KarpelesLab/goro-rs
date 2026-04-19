@@ -36,6 +36,7 @@ pub struct Parser {
     pending_extra_constants: Vec<ClassMember>,
     /// Pending extra properties from comma-separated property declarations
     pending_extra_properties: Vec<ClassMember>,
+    class_name_stack: Vec<Vec<u8>>,
 }
 
 const MAX_PARSE_DEPTH: u32 = 512;
@@ -51,6 +52,7 @@ impl Parser {
             first_class_callable_flag: false,
             pending_extra_constants: Vec::new(),
             pending_extra_properties: Vec::new(),
+            class_name_stack: Vec::new(),
         }
     }
 
@@ -1241,10 +1243,10 @@ impl Parser {
 
             // Parse property hooks for promoted properties: public int $x { get => ...; set => ...; }
             // Hooks can appear even without explicit visibility modifier (implicit promotion in PHP 8.4)
-            let (param_get_hook, param_set_hook) = if matches!(self.peek(), TokenKind::OpenBrace) {
-                self.parse_property_hooks(&name)?
+            let (param_get_hook, param_set_hook, param_get_hook_final, param_set_hook_final, param_get_hook_abstract, param_set_hook_abstract) = if matches!(self.peek(), TokenKind::OpenBrace) {
+                self.parse_property_hooks(&name, type_hint.as_ref())?
             } else {
-                (None, None)
+                (None, None, false, false, false, false)
             };
 
             params.push(Param {
@@ -1260,6 +1262,10 @@ impl Parser {
                 attributes: param_attributes,
                 get_hook: param_get_hook,
                 set_hook: param_set_hook,
+                get_hook_final: param_get_hook_final,
+                set_hook_final: param_set_hook_final,
+                get_hook_abstract: param_get_hook_abstract,
+                set_hook_abstract: param_set_hook_abstract,
             });
 
             if !self.eat(&TokenKind::Comma) {
@@ -1654,8 +1660,17 @@ impl Parser {
 
         self.expect(&TokenKind::OpenBrace)?;
         let mut body = Vec::new();
+        self.class_name_stack.push(name.clone());
+        let mut parse_err: Option<ParseError> = None;
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
-            body.extend(self.parse_class_members()?);
+            match self.parse_class_members() {
+                Ok(members) => body.extend(members),
+                Err(e) => { parse_err = Some(e); break; }
+            }
+        }
+        self.class_name_stack.pop();
+        if let Some(e) = parse_err {
+            return Err(e);
         }
         self.expect(&TokenKind::CloseBrace)?;
 
@@ -2219,8 +2234,8 @@ impl Parser {
                     None
                 };
                 // Check for property hooks { get { ... } set(...) { ... } }
-                let (get_hook, set_hook) = if matches!(self.peek(), TokenKind::OpenBrace) {
-                    self.parse_property_hooks(&name)?
+                let (get_hook, set_hook, get_hook_final, set_hook_final, get_hook_abstract, set_hook_abstract) = if matches!(self.peek(), TokenKind::OpenBrace) {
+                    self.parse_property_hooks(&name, None)?
                 } else {
                     // Parse comma-separated additional properties
                     self.pending_extra_properties.clear();
@@ -2244,6 +2259,10 @@ impl Parser {
                                 is_final: false,
                                 get_hook: None,
                                 set_hook: None,
+                                get_hook_final: false,
+                                set_hook_final: false,
+                                get_hook_abstract: false,
+                                set_hook_abstract: false,
                                 attributes: member_attributes.clone(),
                             });
                         } else {
@@ -2251,7 +2270,7 @@ impl Parser {
                         }
                     }
                     self.expect_semicolon()?;
-                    (None, None)
+                    (None, None, false, false, false, false)
                 };
                 // Abstract properties must have hooks
                 if is_abstract && get_hook.is_none() && set_hook.is_none() {
@@ -2272,6 +2291,10 @@ impl Parser {
                     is_final,
                     get_hook,
                     set_hook,
+                    get_hook_final,
+                    set_hook_final,
+                    get_hook_abstract,
+                    set_hook_abstract,
                     attributes: member_attributes.clone(),
                 })
             }
@@ -2296,8 +2319,8 @@ impl Parser {
                     None
                 };
                 // Check for property hooks { get { ... } set(...) { ... } }
-                let (get_hook, set_hook) = if matches!(self.peek(), TokenKind::OpenBrace) {
-                    self.parse_property_hooks(&name)?
+                let (get_hook, set_hook, get_hook_final, set_hook_final, get_hook_abstract, set_hook_abstract) = if matches!(self.peek(), TokenKind::OpenBrace) {
+                    self.parse_property_hooks(&name, Some(&type_hint))?
                 } else {
                     // Parse comma-separated additional properties (they share the same type)
                     while self.eat(&TokenKind::Comma) {
@@ -2320,6 +2343,10 @@ impl Parser {
                                 is_final: false,
                                 get_hook: None,
                                 set_hook: None,
+                                get_hook_final: false,
+                                set_hook_final: false,
+                                get_hook_abstract: false,
+                                set_hook_abstract: false,
                                 attributes: member_attributes.clone(),
                             });
                         } else {
@@ -2327,7 +2354,7 @@ impl Parser {
                         }
                     }
                     self.expect_semicolon()?;
-                    (None, None)
+                    (None, None, false, false, false, false)
                 };
                 // Abstract properties must have hooks
                 if is_abstract && get_hook.is_none() && set_hook.is_none() {
@@ -2348,6 +2375,10 @@ impl Parser {
                     is_final,
                     get_hook,
                     set_hook,
+                    get_hook_final,
+                    set_hook_final,
+                    get_hook_abstract,
+                    set_hook_abstract,
                     attributes: member_attributes,
                 })
             }
@@ -2356,10 +2387,14 @@ impl Parser {
 
     /// Parse property hooks: { get { ... } set($value) { ... } }
     /// Returns (get_hook, set_hook)
-    fn parse_property_hooks(&mut self, prop_name: &[u8]) -> ParseResult<(Option<Vec<Statement>>, Option<(Vec<u8>, Vec<Statement>)>)> {
+    fn parse_property_hooks(&mut self, prop_name: &[u8], prop_type_hint: Option<&TypeHint>) -> ParseResult<(Option<Vec<Statement>>, Option<(Vec<u8>, Vec<Statement>)>, bool, bool, bool, bool)> {
         self.expect(&TokenKind::OpenBrace)?;
         let mut get_hook = None;
         let mut set_hook = None;
+        let mut get_hook_final = false;
+        let mut set_hook_final = false;
+        let mut get_hook_abstract = false;
+        let mut set_hook_abstract = false;
 
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
             // Skip optional attributes and modifiers: #[...] final, public, protected, private, &
@@ -2367,9 +2402,34 @@ impl Parser {
                 // Parse and discard attributes for now
                 let _ = self.parse_attributes()?;
             }
-            while matches!(self.peek(), TokenKind::Final | TokenKind::Public | TokenKind::Protected | TokenKind::Private | TokenKind::Ampersand) {
-                self.advance();
+            let mut hook_is_final = false;
+            let mut hook_is_static = false;
+            let mut hook_is_private = false;
+            let mut hook_has_visibility = false;
+            loop {
+                match self.peek() {
+                    TokenKind::Final => { hook_is_final = true; self.advance(); }
+                    TokenKind::Static => { hook_is_static = true; self.advance(); }
+                    TokenKind::Private => { hook_is_private = true; hook_has_visibility = true; self.advance(); }
+                    TokenKind::Public | TokenKind::Protected => { hook_has_visibility = true; self.advance(); }
+                    TokenKind::Ampersand => { self.advance(); }
+                    _ => break,
+                }
             }
+            // Reject invalid combinations
+            if hook_is_static {
+                return Err(ParseError {
+                    message: "Cannot use the static modifier on a property hook".into(),
+                    span: self.span(),
+                });
+            }
+            if hook_has_visibility {
+                return Err(ParseError {
+                    message: "Property hooks cannot have visibility".into(),
+                    span: self.span(),
+                });
+            }
+            let _ = hook_is_private;
             // Look for "get" or "set" identifier
             let hook_name = match self.peek().clone() {
                 TokenKind::Identifier(name) => name,
@@ -2388,6 +2448,7 @@ impl Parser {
                         span: self.span(),
                     });
                 }
+                if hook_is_final { get_hook_final = true; }
                 self.advance(); // consume 'get'
                 if matches!(self.peek(), TokenKind::OpenBrace) {
                     // get { ... }
@@ -2406,6 +2467,7 @@ impl Parser {
                 } else if self.eat(&TokenKind::Semicolon) {
                     // get; (abstract hook)
                     get_hook = Some(vec![]);
+                    get_hook_abstract = true;
                 } else {
                     return Err(ParseError {
                         message: "expected '{' or '=>' after 'get' in property hook".into(),
@@ -2419,56 +2481,111 @@ impl Parser {
                         span: self.span(),
                     });
                 }
+                if hook_is_final { set_hook_final = true; }
                 self.advance(); // consume 'set'
                 // Optional parameter: set(Type $value) or set($value) or just set
-                let param_name = if self.eat(&TokenKind::OpenParen) {
-                    // Skip optional type hint before $value
+                let had_paren = matches!(self.peek(), TokenKind::OpenParen);
+                let (param_name, param_type_hint) = if self.eat(&TokenKind::OpenParen) {
                     // We need to handle: set($value), set(string $value), set(Type $value)
-                    let pname = loop {
-                        match self.peek().clone() {
-                            TokenKind::Variable(name) => {
-                                self.advance();
-                                break name;
-                            }
-                            TokenKind::CloseParen => {
-                                // set() with no param -- use default "value"
-                                break b"value".to_vec();
-                            }
-                            TokenKind::Ampersand => {
-                                return Err(ParseError {
-                                    message: "set hook parameter must not be by-reference".into(),
-                                    span: self.span(),
-                                });
-                            }
-                            TokenKind::Ellipsis => {
-                                return Err(ParseError {
-                                    message: "set hook parameter must not be variadic".into(),
-                                    span: self.span(),
-                                });
-                            }
-                            _ => {
-                                // Skip type hint tokens
-                                self.advance();
-                            }
+                    // Detect by-ref / variadic before or after type hint.
+                    let mut got_by_ref = matches!(self.peek(), TokenKind::Ampersand);
+                    let mut got_variadic = matches!(self.peek(), TokenKind::Ellipsis);
+                    // If the next token is a variable, no type hint; else parse type hint.
+                    let type_hint = if matches!(self.peek(), TokenKind::Variable(_) | TokenKind::CloseParen | TokenKind::Ampersand | TokenKind::Ellipsis) {
+                        None
+                    } else {
+                        Some(self.parse_type_hint()?)
+                    };
+                    if !got_by_ref && matches!(self.peek(), TokenKind::Ampersand) {
+                        got_by_ref = true;
+                        self.advance();
+                    } else if got_by_ref {
+                        self.advance();
+                    }
+                    if !got_variadic && matches!(self.peek(), TokenKind::Ellipsis) {
+                        got_variadic = true;
+                        self.advance();
+                    } else if got_variadic {
+                        self.advance();
+                    }
+                    let pname = match self.peek().clone() {
+                        TokenKind::Variable(name) => {
+                            self.advance();
+                            name
+                        }
+                        TokenKind::CloseParen => {
+                            b"value".to_vec()
+                        }
+                        _ => {
+                            return Err(ParseError {
+                                message: "expected parameter name in set hook".into(),
+                                span: self.span(),
+                            });
                         }
                     };
+                    if got_by_ref || got_variadic {
+                        let class_name = self.class_name_stack.last()
+                            .map(|n| String::from_utf8_lossy(n).into_owned())
+                            .unwrap_or_else(|| "?".to_string());
+                        let kind = if got_by_ref { "pass-by-reference" } else { "variadic" };
+                        return Err(ParseError {
+                            message: format!(
+                                "Parameter ${} of set hook {}::${} must not be {}",
+                                String::from_utf8_lossy(&pname),
+                                class_name,
+                                String::from_utf8_lossy(prop_name),
+                                kind,
+                            ),
+                            span: self.span(),
+                        });
+                    }
                     // No default value allowed: `set($value = null)` → error
                     if matches!(self.peek(), TokenKind::Assign) {
+                        let class_name = self.class_name_stack.last()
+                            .map(|n| String::from_utf8_lossy(n).into_owned())
+                            .unwrap_or_else(|| "?".to_string());
                         return Err(ParseError {
                             message: format!(
                                 "Parameter ${} of set hook {}::${} must not have a default value",
                                 String::from_utf8_lossy(&pname),
-                                "?",
+                                class_name,
                                 String::from_utf8_lossy(prop_name),
                             ),
                             span: self.span(),
                         });
                     }
                     self.expect(&TokenKind::CloseParen)?;
-                    pname
+                    (pname, type_hint)
                 } else {
-                    b"value".to_vec()
+                    (b"value".to_vec(), None)
                 };
+                // Enforce set $value parameter type variance. PHP requires the set hook's
+                // parameter type to be compatible (LSP contravariant) with the property type.
+                // We only emit the error when the user explicitly wrote a parameter list
+                // (so `set => expr;` and `set { ... }` without parens are not checked,
+                // because in those forms the implicit $value inherits the property type).
+                if had_paren {
+                    let mismatch = match (prop_type_hint, &param_type_hint) {
+                        (Some(_), None) => true,
+                        (None, Some(_)) => true,
+                        (Some(pt), Some(pht)) => !set_param_type_compatible(pt, pht),
+                        (None, None) => false,
+                    };
+                    if mismatch {
+                        let class_name = self.class_name_stack.last()
+                            .map(|n| String::from_utf8_lossy(n).into_owned())
+                            .unwrap_or_else(|| "?".to_string());
+                        return Err(ParseError {
+                            message: format!(
+                                "Type of parameter ${} of hook {}::${}::set must be compatible with property type",
+                                String::from_utf8_lossy(&param_name),
+                                class_name,
+                                String::from_utf8_lossy(prop_name),
+                            ),
+                            span: self.span(),
+                        });
+                    }
+                }
                 if matches!(self.peek(), TokenKind::OpenBrace) {
                     // set { ... } or set($value) { ... }
                     let body = self.parse_block()?;
@@ -2504,6 +2621,7 @@ impl Parser {
                 } else if self.eat(&TokenKind::Semicolon) {
                     // set; (abstract hook)
                     set_hook = Some((param_name, vec![]));
+                    set_hook_abstract = true;
                 } else {
                     return Err(ParseError {
                         message: "expected '{' or '=>' after 'set' in property hook".into(),
@@ -2511,10 +2629,13 @@ impl Parser {
                     });
                 }
             } else {
+                let class_name = self.class_name_stack.last()
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .unwrap_or_else(|| "?".to_string());
                 return Err(ParseError {
                     message: format!("Unknown hook \"{}\" for property {}::${}, expected \"get\" or \"set\"",
                         String::from_utf8_lossy(&hook_name),
-                        "?",
+                        class_name,
                         String::from_utf8_lossy(prop_name)),
                     span: self.span(),
                 });
@@ -2522,7 +2643,7 @@ impl Parser {
         }
 
         self.expect(&TokenKind::CloseBrace)?;
-        Ok((get_hook, set_hook))
+        Ok((get_hook, set_hook, get_hook_final, set_hook_final, get_hook_abstract, set_hook_abstract))
     }
 
     fn parse_try_catch(&mut self) -> ParseResult<Statement> {
@@ -4498,11 +4619,14 @@ impl Parser {
                                 }
                             }
                         }
-                        // Parse class body
-                        let body = self.parse_class_body()?;
                         // Generate unique anonymous class name
                         self.anon_counter += 1;
                         let anon_name = format!("__anonymous_class_{}", self.anon_counter);
+                        // Parse class body with class name on stack for error messages
+                        self.class_name_stack.push(anon_name.as_bytes().to_vec());
+                        let body_result = self.parse_class_body();
+                        self.class_name_stack.pop();
+                        let body = body_result?;
                         // Create the class declaration as a statement that needs to be
                         // prepended before this expression. We embed it in the New expression.
                         // The compiler handles this by checking for class@anonymous prefix.
@@ -5451,6 +5575,75 @@ impl Parser {
             _ => vec![],
         }
     }
+}
+
+/// Check whether a set-hook parameter type is compatible with a property type
+/// for the purposes of PHP's LSP-contravariance rule for property hooks.
+///
+/// Returns true if the parameter type is equal to or a supertype of the
+/// property type (which is what PHP requires). We use a conservative
+/// structural-equality + widening heuristic that is correct for the common
+/// cases at parse time, when we don't yet have access to the class hierarchy.
+fn set_param_type_compatible(prop: &TypeHint, param: &TypeHint) -> bool {
+    fn type_display(t: &TypeHint) -> String {
+        match t {
+            TypeHint::Simple(n) => String::from_utf8_lossy(n).to_ascii_lowercase(),
+            TypeHint::Nullable(inner) => format!("?{}", type_display(inner)),
+            TypeHint::Union(types) => {
+                let mut parts: Vec<String> = types.iter().map(type_display).collect();
+                parts.sort();
+                parts.join("|")
+            }
+            TypeHint::Intersection(types) => {
+                let mut parts: Vec<String> = types.iter().map(type_display).collect();
+                parts.sort();
+                parts.join("&")
+            }
+        }
+    }
+
+    // Identical types are always compatible
+    if type_display(prop) == type_display(param) {
+        return true;
+    }
+
+    // `mixed` parameter always accepts any property type
+    if matches!(param, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"mixed")) {
+        return true;
+    }
+
+    // Property is nullable T, param is also nullable (or T?) - same base type
+    if let (TypeHint::Nullable(pi), TypeHint::Nullable(pai)) = (prop, param) {
+        return set_param_type_compatible(pi, pai);
+    }
+
+    // Helper: collapse a type to the list of its alternatives.
+    fn alternatives(t: &TypeHint) -> Vec<&TypeHint> {
+        match t {
+            TypeHint::Union(parts) => parts.iter().collect(),
+            _ => vec![t],
+        }
+    }
+
+    // For the param type to be compatible, every alternative of the property type
+    // must also appear in the param type (so the set hook can accept every
+    // possible stored value). We match alternatives structurally.
+    let prop_alts = alternatives(prop);
+    let param_alts = alternatives(param);
+    for pa in &prop_alts {
+        let pa_disp = type_display(pa);
+        if !param_alts.iter().any(|pp| type_display(pp) == pa_disp) {
+            // For simple class-name vs simple class-name we can't tell
+            // without the class hierarchy: allow it to avoid false positives.
+            if prop_alts.len() == 1 && param_alts.len() == 1 {
+                if let (TypeHint::Simple(_), TypeHint::Simple(_)) = (prop, param) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
