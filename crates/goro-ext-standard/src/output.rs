@@ -16,6 +16,7 @@ fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
         || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
         || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
+        || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -303,6 +304,55 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
             );
 
+            // Uri classes: expose __uri_* properties as scheme/username/... for var_dump
+            let is_uri_class = matches!(
+                class_lower.as_slice(),
+                b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri"
+            );
+            if is_uri_class {
+                // Define property display order (matches PHP Uri class layout).
+                let order: &[(&[u8], &[u8])] = &[
+                    (b"scheme", b"__uri_scheme"),
+                    (b"username", b"__uri_user"),
+                    (b"password", b"__uri_pass"),
+                    (b"host", b"__uri_host"),
+                    (b"port", b"__uri_port"),
+                    (b"path", b"__uri_path"),
+                    (b"query", b"__uri_query"),
+                    (b"fragment", b"__uri_fragment"),
+                ];
+                let class_name_owned = class_name.to_string();
+                // Collect display values upfront
+                let display: Vec<(Vec<u8>, Value)> = order
+                    .iter()
+                    .map(|(pub_name, int_name)| {
+                        (pub_name.to_vec(), obj_borrow.get_property(int_name))
+                    })
+                    .collect();
+                let prop_count = display.len();
+                drop(obj_borrow);
+                vm.write_output(
+                    format!(
+                        "{}object({})#{} ({}) {{\n",
+                        prefix, class_name_owned, oid, prop_count
+                    )
+                    .as_bytes(),
+                );
+                if !seen.insert(oid) {
+                    vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    return;
+                }
+                for (name, value) in &display {
+                    let name_str = String::from_utf8_lossy(name);
+                    vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, name_str).as_bytes());
+                    var_dump_value(vm, value, indent + 2, seen);
+                }
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
+
             if is_array_object_class {
                 let spl_arr = obj_borrow.get_property(b"__spl_array");
                 let flags = obj_borrow.get_property(b"__spl_flags");
@@ -496,10 +546,37 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     true
                 })
                 .count();
+            // Lazy object prefix: "lazy ghost " / "lazy proxy " before object(...)
+            let lazy_prefix: &str = match obj_borrow.get_property(b"__lazy_state") {
+                Value::String(s) if s.as_bytes() == b"ghost" => "lazy ghost ",
+                Value::String(s) if s.as_bytes() == b"proxy" => "lazy proxy ",
+                _ => "",
+            };
+
+            // Initialized proxy: show as `lazy proxy object(C)#N (1) { ["instance"]=> <real> }`
+            if lazy_prefix == "lazy proxy " {
+                if let Value::Object(real) = obj_borrow.get_property(b"__lazy_real") {
+                    drop(obj_borrow);
+                    vm.write_output(
+                        format!("{}lazy proxy object({})#{} (1) {{\n", prefix, class_name, oid).as_bytes(),
+                    );
+                    if !seen.insert(oid) {
+                        vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                        vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                        return;
+                    }
+                    vm.write_output(format!("{}  [\"instance\"]=>\n", prefix).as_bytes());
+                    var_dump_value(vm, &Value::Object(real), indent + 2, seen);
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    seen.remove(&oid);
+                    return;
+                }
+            }
+
             vm.write_output(
                 format!(
-                    "{}object({})#{} ({}) {{\n",
-                    prefix, class_name, oid, prop_count
+                    "{}{}object({})#{} ({}) {{\n",
+                    prefix, lazy_prefix, class_name, oid, prop_count
                 )
                 .as_bytes(),
             );

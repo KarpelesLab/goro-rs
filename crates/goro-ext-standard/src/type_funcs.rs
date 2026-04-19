@@ -60,6 +60,14 @@ pub fn register(vm: &mut Vm) {
 
 fn gettype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    if val.is_resource() {
+        let label = if goro_core::value::is_open_resource(val.resource_id()) {
+            "resource"
+        } else {
+            "resource (closed)"
+        };
+        return Ok(Value::String(PhpString::from_bytes(label.as_bytes())));
+    }
     let type_name = match val {
         Value::Undef | Value::Null => "NULL",
         Value::True | Value::False => "boolean",
@@ -503,9 +511,14 @@ fn is_scalar(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn is_resource(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // We don't have resource type, always false
-    Ok(Value::False)
+fn is_resource(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().unwrap_or(&Value::Null);
+    // is_resource returns false for closed resources (matches PHP semantics)
+    Ok(if val.is_resource() && goro_core::value::is_open_resource(val.resource_id()) {
+        Value::True
+    } else {
+        Value::False
+    })
 }
 
 fn is_countable(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

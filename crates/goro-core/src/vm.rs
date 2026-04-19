@@ -206,6 +206,9 @@ pub struct Vm {
     next_object_id: u64,
     /// Recycled object IDs (freed when object's Rc drops to 1)
     free_object_ids: Vec<u64>,
+    /// Set of object IDs currently running their lazy initializer. Prevents
+    /// infinite recursion when the initializer accesses properties on $this.
+    lazy_init_in_progress: std::collections::HashSet<u64>,
     /// Pending class definitions (from compiler, indexed by position)
     pending_classes: Vec<ClassEntry>,
     /// Whether we're executing the top-level script (vs a function)
@@ -338,6 +341,7 @@ impl Vm {
             classes: IndexMap::new(),
             next_object_id: 1,
             free_object_ids: Vec::new(),
+            lazy_init_in_progress: std::collections::HashSet::new(),
             pending_classes: Vec::new(),
             is_global_scope: true,
             current_exception: None,
@@ -486,6 +490,9 @@ impl Vm {
                 c.insert(b"STDIN".to_vec(), Value::Long(1));
                 c.insert(b"STDOUT".to_vec(), Value::Long(2));
                 c.insert(b"STDERR".to_vec(), Value::Long(3));
+                crate::value::register_resource(1, b"stream");
+                crate::value::register_resource(2, b"stream");
+                crate::value::register_resource(3, b"stream");
                 c.insert(
                     b"DIRECTORY_SEPARATOR".to_vec(),
                     Value::String(PhpString::from_bytes(b"/")),
@@ -1116,6 +1123,19 @@ impl Vm {
                 c.insert(b"T_OPEN_TAG_WITH_ECHO".to_vec(), Value::Long(393));
                 c.insert(b"T_HALT_COMPILER".to_vec(), Value::Long(378));
                 c.insert(b"T_BAD_CHARACTER".to_vec(), Value::Long(403));
+                // Comments + whitespace (used by PhpToken::tokenize output)
+                c.insert(b"T_COMMENT".to_vec(), Value::Long(377));
+                c.insert(b"T_DOC_COMMENT".to_vec(), Value::Long(392));
+                c.insert(b"T_WHITESPACE".to_vec(), Value::Long(397));
+                c.insert(b"T_INLINE_HTML".to_vec(), Value::Long(312));
+                c.insert(b"T_NUM_STRING".to_vec(), Value::Long(322));
+                c.insert(b"T_STRING_VARNAME".to_vec(), Value::Long(321));
+                // Additional (for tokenizer tests)
+                c.insert(b"TOKEN_PARSE".to_vec(), Value::Long(1));
+                c.insert(b"T_PAAMAYIM_NEKUDOTAYIM".to_vec(), Value::Long(398));
+                c.insert(b"T_PUBLIC_SET".to_vec(), Value::Long(407));
+                c.insert(b"T_PROTECTED_SET".to_vec(), Value::Long(408));
+                c.insert(b"T_PRIVATE_SET".to_vec(), Value::Long(409));
                 // Boolean constants
                 c.insert(b"TRUE".to_vec(), Value::True);
                 c.insert(b"FALSE".to_vec(), Value::False);
@@ -1124,6 +1144,9 @@ impl Vm {
                 c.insert(b"STDIN".to_vec(), Value::Long(1));
                 c.insert(b"STDOUT".to_vec(), Value::Long(2));
                 c.insert(b"STDERR".to_vec(), Value::Long(3));
+                crate::value::register_resource(1, b"stream");
+                crate::value::register_resource(2, b"stream");
+                crate::value::register_resource(3, b"stream");
                 c
 
 
@@ -2015,9 +2038,18 @@ impl Vm {
         self.create_exception(b"TypeError", &message, self.current_line)
     }
 
-    /// Allocate a new object ID (monotonically increasing, never reused - matches PHP behavior)
+    /// Allocate an object ID. Prefers a recently freed ID (via the global
+    /// `FREED_OBJECT_IDS` pool populated by `PhpObject::drop`) to match
+    /// PHP's handle-recycling behavior, falling back to a fresh increment.
     #[inline]
     pub fn alloc_object_id(&mut self) -> u64 {
+        // Try global drop-recycled pool first (most PHP-accurate).
+        if let Some(id) = crate::object::FREED_OBJECT_IDS.with(|ids| ids.borrow_mut().pop()) {
+            return id;
+        }
+        if let Some(id) = self.free_object_ids.pop() {
+            return id;
+        }
         let id = self.next_object_id;
         self.next_object_id += 1;
         id
@@ -2957,6 +2989,143 @@ impl Vm {
     /// Register a class (from the compiler's compiled_classes list)
     pub fn register_class(&mut self, class: ClassEntry) {
         self.pending_classes.push(class);
+    }
+
+    /// If `obj` is an uninitialized lazy object (ghost / proxy), run its
+    /// initializer.
+    ///
+    /// - **Ghost**: the initializer mutates `$this`. After init, `__lazy_state`
+    ///   and `__lazy_initializer` are removed; the object behaves normally.
+    /// - **Proxy**: the initializer returns a new object. The proxy keeps its
+    ///   `__lazy_state = "proxy"` but gains `__lazy_real` pointing to the
+    ///   returned object. Property/method access forwards to `__lazy_real`.
+    ///
+    /// Returns true if initialization happened.
+    pub fn maybe_run_lazy_init(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        let (state, initializer, already_real, class_name, object_id) = {
+            let ob = obj.borrow();
+            let s = ob.get_property(b"__lazy_state");
+            let i = ob.get_property(b"__lazy_initializer");
+            let r = ob.has_property(b"__lazy_real");
+            let c = ob.class_name.clone();
+            let id = ob.object_id;
+            (s, i, r, c, id)
+        };
+        let state_bytes = match &state {
+            Value::String(s) => s.as_bytes().to_vec(),
+            _ => return false,
+        };
+        // Proxy: if already initialized, don't re-init.
+        if state_bytes == b"proxy" && already_real {
+            return false;
+        }
+        // Recursion guard: don't re-enter initialization for the same object.
+        if self.lazy_init_in_progress.contains(&object_id) {
+            return false;
+        }
+        self.lazy_init_in_progress.insert(object_id);
+        // Snapshot properties so we can roll back if the initializer throws.
+        let snapshot: Vec<(Vec<u8>, Value)> = obj.borrow().properties.clone();
+        if state_bytes == b"ghost" {
+            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let defaults: Vec<(Vec<u8>, Value)> = self.classes.get(&class_lower)
+                .map(|ce| {
+                    ce.properties.iter()
+                        .filter(|p| !p.is_static)
+                        .map(|p| (p.name.clone(), p.default.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut ob = obj.borrow_mut();
+            for (name, default) in defaults {
+                if !matches!(default, Value::Undef) {
+                    ob.set_property(name, default);
+                }
+            }
+            ob.remove_property(b"__lazy_state");
+        }
+        let this_val = Value::Object(obj.clone());
+        let exc_before = self.current_exception.is_some();
+        let result = self.call_closure_value(&initializer, vec![this_val.clone()]);
+        let threw = !exc_before && self.current_exception.is_some();
+        self.lazy_init_in_progress.remove(&object_id);
+        if threw {
+            // Restore properties to pre-init state so the object remains lazy.
+            let mut ob = obj.borrow_mut();
+            ob.properties = snapshot;
+            return false;
+        }
+        if state_bytes == b"proxy" {
+            if let Some(Value::Object(real)) = result {
+                let mut ob = obj.borrow_mut();
+                ob.set_property(b"__lazy_real".to_vec(), Value::Object(real));
+            }
+        }
+        // Clear initializer so it can be garbage-collected
+        {
+            let mut ob = obj.borrow_mut();
+            ob.remove_property(b"__lazy_initializer");
+        }
+        true
+    }
+
+    /// If `obj` is an initialized proxy, return the real backing object.
+    /// Otherwise returns the original object.
+    pub fn proxy_redirect(&self, obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpObject>> {
+        let ob = obj.borrow();
+        let state = ob.get_property(b"__lazy_state");
+        if matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy") {
+            if let Value::Object(real) = ob.get_property(b"__lazy_real") {
+                return real;
+            }
+        }
+        obj.clone()
+    }
+
+    /// Call a closure-like Value with the given args. Returns None if the
+    /// callable cannot be invoked.
+    fn call_closure_value(&mut self, callable: &Value, args: Vec<Value>) -> Option<Value> {
+        let callable = callable.deref();
+        // Convert closure Value to a callable name
+        let name = match &callable {
+            Value::String(s) => s.as_bytes().to_vec(),
+            Value::Array(a) => {
+                // Array callable [$obj, 'method']
+                let a = a.borrow();
+                if a.len() != 2 {
+                    return None;
+                }
+                let first = a.values().next().cloned().unwrap_or(Value::Null);
+                let second = a.values().nth(1).cloned().unwrap_or(Value::Null);
+                let method = second.to_php_string().to_string_lossy();
+                if let Value::Object(obj) = &first {
+                    let class_name = obj.borrow().class_name.clone();
+                    drop(a);
+                    return self.call_object_method(
+                        &Value::Object(obj.clone()),
+                        method.as_bytes(),
+                        &args.iter().skip(1).cloned().collect::<Vec<_>>(),
+                    );
+                }
+                let class_name = first.to_php_string().to_string_lossy();
+                format!("{}::{}", class_name, method).into_bytes()
+            }
+            _ => return None,
+        };
+        let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        if let Some(op_array) = self.user_functions.get(&lower).cloned() {
+            let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
+            for (i, v) in args.iter().enumerate() {
+                if i < cvs.len() {
+                    cvs[i] = v.clone();
+                }
+            }
+            return self.execute_op_array_pub(&op_array, cvs).ok();
+        }
+        if let Some(f) = self.functions.get(&lower).copied() {
+            return f(self, &args).ok();
+        }
+        None
     }
 
     /// Register a user-defined function
@@ -4129,6 +4298,10 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
     ) -> Option<Value> {
         match class_lower {
+            b"phptoken" => self.phptoken_method(method_lower, obj),
+            b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
+                crate::uri::uri_dispatch_noarg(class_lower, method_lower, obj)
+            }
             b"arrayobject" | b"arrayiterator" => {
                 self.spl_array_method(method_lower, obj)
             }
@@ -4448,6 +4621,46 @@ impl Vm {
         result
     }
 
+    /// Dispatch no-arg PhpToken methods. `is()` takes arguments so it's handled
+    /// in handle_spl_docall(). `tokenize()` is a static method handled elsewhere.
+    fn phptoken_method(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        match method {
+            b"gettokenname" => {
+                let ob = obj.borrow();
+                let id = ob.get_property(b"id").to_long();
+                match goro_parser::token::token_id_to_name(id) {
+                    Some(name) => Some(Value::String(PhpString::from_bytes(name.as_bytes()))),
+                    None => {
+                        // For single-char tokens, PHP returns null
+                        if id > 0 && id < 256 {
+                            Some(Value::Null)
+                        } else {
+                            Some(Value::Null)
+                        }
+                    }
+                }
+            }
+            b"isignorable" => {
+                let ob = obj.borrow();
+                let id = ob.get_property(b"id").to_long();
+                Some(if goro_parser::token::token_id_is_ignorable(id) {
+                    Value::True
+                } else {
+                    Value::False
+                })
+            }
+            b"__tostring" => {
+                let ob = obj.borrow();
+                Some(Value::String(ob.get_property(b"text").to_php_string()))
+            }
+            _ => None,
+        }
+    }
+
     fn spl_array_method(
         &mut self,
         method: &[u8],
@@ -4574,6 +4787,35 @@ impl Vm {
                 Some(Value::Null)
             }
             b"seek" => None,     // handled in handle_spl_docall
+            b"__serialize" => {
+                // MVP format: ['flags' => ..., 'storage' => [...], 'iteratorClass' => ...]
+                let ob = obj.borrow();
+                let flags = ob.get_property(b"__spl_flags");
+                let storage = ob.get_property(b"__spl_array");
+                let iter_class = ob.get_property(b"__spl_iterator_class");
+                let iter_class = if matches!(iter_class, Value::Null | Value::Undef) {
+                    Value::String(PhpString::from_bytes(b"ArrayIterator"))
+                } else {
+                    iter_class
+                };
+                drop(ob);
+                let mut arr = PhpArray::new();
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"flags")),
+                    if matches!(flags, Value::Null | Value::Undef) { Value::Long(0) } else { flags },
+                );
+                arr.set(ArrayKey::String(PhpString::from_bytes(b"storage")), storage);
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"iteratorClass")),
+                    iter_class,
+                );
+                // PHP also stores remaining public properties under 'properties'
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"properties")),
+                    Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                );
+                Some(Value::Array(Rc::new(RefCell::new(arr))))
+            }
             _ => None,
         }
     }
@@ -6416,13 +6658,15 @@ impl Vm {
     /// Check if this is an SPL method that needs call arguments
     fn is_spl_args_method(&self, class: &[u8], method: &[u8]) -> bool {
         match class {
+            b"phptoken" => matches!(method, b"is"),
+            b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => crate::uri::uri_is_args_method(method),
             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(
                 method,
                 b"offsetget" | b"offsetset" | b"offsetexists" | b"offsetunset"
                     | b"append" | b"exchangearray" | b"setflags"
                     | b"ksort" | b"asort" | b"natsort" | b"natcasesort"
                     | b"uasort" | b"uksort" | b"setiteratorclass"
-                    | b"seek"
+                    | b"seek" | b"__unserialize"
             ),
             b"spldoublylinkedlist" | b"splstack" | b"splqueue" => matches!(
                 method,
@@ -6474,6 +6718,11 @@ impl Vm {
                     | b"hasmethod" | b"hasproperty" | b"issubclassof"
                     | b"implementsinterface" | b"isinstance"
                     | b"newinstance" | b"newinstanceargs"
+                    | b"newlazyghost" | b"newlazyproxy"
+                    | b"initializelazyobject" | b"marklazyobjectasinitialized"
+                    | b"isuninitializedlazyobject" | b"getlazyinitializer"
+                    | b"getlazyproxyinstance"
+                    | b"resetaslazyghost" | b"resetaslazyproxy"
                     | b"getstaticpropertyvalue" | b"setstaticpropertyvalue"
                     | b"getmethods" | b"getproperties"
                     | b"getreflectionconstant" | b"getreflectionconstants"
@@ -6497,6 +6746,9 @@ impl Vm {
                 method,
                 b"getvalue" | b"setvalue"
                     | b"getattributes"
+                    | b"skiplazyinitialization"
+                    | b"setrawvaluewithoutlazyinitialization"
+                    | b"getrawvalue"
             ),
             b"reflectionparameter" => matches!(
                 method,
@@ -6530,6 +6782,22 @@ impl Vm {
         let this = args.first()?;
         if let Value::Object(obj) = this {
             match class {
+                b"phptoken" => {
+                    match method {
+                        b"is" => {
+                            let kind = args.get(1)?;
+                            let ob = obj.borrow();
+                            let id = ob.get_property(b"id").to_long();
+                            let text = ob.get_property(b"text").to_php_string();
+                            drop(ob);
+                            Some(phptoken_is_match(kind, id, text.as_bytes()))
+                        }
+                        _ => None,
+                    }
+                }
+                b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
+                    crate::uri::uri_dispatch_with_args(class, method, args, &mut self.next_object_id)
+                }
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
                     match method {
                         b"offsetget" => {
@@ -6605,6 +6873,27 @@ impl Vm {
                             let class_name = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"ArrayIterator")));
                             let mut ob = obj.borrow_mut();
                             ob.set_property(b"__spl_iterator_class".to_vec(), class_name);
+                            Some(Value::Null)
+                        }
+                        b"__unserialize" => {
+                            // Restore from the ['flags' => ..., 'storage' => [...], 'iteratorClass' => ...] format
+                            let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            if let Value::Array(a) = &data {
+                                let a = a.borrow();
+                                let flags_key = ArrayKey::String(PhpString::from_bytes(b"flags"));
+                                let storage_key = ArrayKey::String(PhpString::from_bytes(b"storage"));
+                                let iter_key = ArrayKey::String(PhpString::from_bytes(b"iteratorClass"));
+                                let mut ob = obj.borrow_mut();
+                                if let Some(v) = a.get(&flags_key) {
+                                    ob.set_property(b"__spl_flags".to_vec(), v.clone());
+                                }
+                                if let Some(v) = a.get(&storage_key) {
+                                    ob.set_property(b"__spl_array".to_vec(), v.clone());
+                                }
+                                if let Some(v) = a.get(&iter_key) {
+                                    ob.set_property(b"__spl_iterator_class".to_vec(), v.clone());
+                                }
+                            }
                             Some(Value::Null)
                         }
                         b"ksort" => {
@@ -8977,6 +9266,12 @@ impl Vm {
                 | b"random\\brokenrandomengineerror" | b"random\\intervalerror"
                 | b"sessionhandlerinterface" | b"sessionidinterface"
                 | b"sessionupdatetimestamphandlerinterface"
+                | b"phptoken"
+                | b"uri\\whatwg\\url"
+                | b"uri\\rfc3986\\uri"
+                | b"uri\\whatwg\\invalidurlexception"
+                | b"uri\\invaliduriexception"
+                | b"uri\\uricomparisonmode"
         )
     }
 
@@ -9073,6 +9368,12 @@ impl Vm {
             b"datetimeimmutable" => "DateTimeImmutable",
             b"dateinterval" => "DateInterval",
             b"datetimezone" => "DateTimeZone",
+            b"phptoken" => "PhpToken",
+            b"uri\\whatwg\\url" => "Uri\\WhatWg\\Url",
+            b"uri\\rfc3986\\uri" => "Uri\\Rfc3986\\Uri",
+            b"uri\\whatwg\\invalidurlexception" => "Uri\\WhatWg\\InvalidUrlException",
+            b"uri\\invaliduriexception" => "Uri\\InvalidUriException",
+            b"uri\\uricomparisonmode" => "Uri\\UriComparisonMode",
             _ => return String::from_utf8_lossy(class_lower).to_string(),
         };
         canonical.to_string()
@@ -9134,6 +9435,30 @@ impl Vm {
                     b"IS_PROTECTED" => Some(Value::Long(2)),
                     b"IS_PRIVATE" => Some(Value::Long(4)),
                     b"IS_FINAL" => Some(Value::Long(0x20)),
+                    _ => None,
+                }
+            }
+            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
+                match const_name {
+                    b"STD_PROP_LIST" => Some(Value::Long(1)),
+                    b"ARRAY_AS_PROPS" => Some(Value::Long(2)),
+                    _ => None,
+                }
+            }
+            b"uri\\uricomparisonmode" => {
+                match const_name {
+                    b"IncludeFragment" | b"ExcludeFragment" => {
+                        // Return an enum-like object so instance comparison works.
+                        // Callers don't need to distinguish the value yet — our
+                        // `equals` compares serialized URIs regardless of mode.
+                        Some(Value::String(PhpString::from_bytes(
+                            if const_name == b"IncludeFragment" {
+                                b"IncludeFragment"
+                            } else {
+                                b"ExcludeFragment"
+                            },
+                        )))
+                    }
                     _ => None,
                 }
             }
@@ -13178,6 +13503,73 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
+                    } else if func_name_lower == b"uri\\whatwg\\url::parse"
+                        || func_name_lower == b"uri\\rfc3986\\uri::parse" {
+                        // static parse(string $uri, ?string $baseUrl = null): ?static
+                        let is_whatwg = func_name_lower.starts_with(b"uri\\whatwg");
+                        let uri_val = call.args.first().cloned().unwrap_or(Value::Null);
+                        let uri_str = uri_val.to_php_string().to_string_lossy();
+                        let base_str = call.args.get(1).and_then(|v| match v {
+                            Value::Null | Value::Undef => None,
+                            other => Some(other.to_php_string().to_string_lossy()),
+                        });
+                        let obj_id = self.next_object_id();
+                        let class_name: Vec<u8> = if is_whatwg {
+                            b"Uri\\WhatWg\\Url".to_vec()
+                        } else {
+                            b"Uri\\Rfc3986\\Uri".to_vec()
+                        };
+                        let mut new_obj = PhpObject::new(class_name, obj_id);
+                        let ok = crate::uri::parse_into(&mut new_obj, &uri_str, base_str.as_deref(), !is_whatwg);
+                        let result = if ok {
+                            Value::Object(Rc::new(RefCell::new(new_obj)))
+                        } else {
+                            Value::Null
+                        };
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower == b"phptoken::tokenize" {
+                        // PhpToken::tokenize(string $code, int $flags = 0): array
+                        let source = call.args.first().cloned().unwrap_or(Value::Null).to_php_string();
+                        let _flags = call.args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                        let mut lexer = goro_parser::Lexer::new(source.as_bytes());
+                        lexer.set_preserve_trivia(true);
+                        let tokens = lexer.tokenize();
+                        let src = source.as_bytes();
+                        let mut result = PhpArray::new();
+                        for token in &tokens {
+                            if matches!(token.kind, goro_parser::token::TokenKind::Eof) {
+                                continue;
+                            }
+                            let token_id = goro_parser::token::token_kind_to_php_id(&token.kind);
+                            let start = token.span.start as usize;
+                            let end = token.span.end as usize;
+                            let text = if start < src.len() && end <= src.len() && start < end {
+                                &src[start..end]
+                            } else {
+                                b""
+                            };
+                            let (id_val, text_val) = if token_id == 0 {
+                                // Single-char token: id is the ASCII codepoint of the char
+                                let c = text.first().copied().unwrap_or(0) as i64;
+                                (c, text)
+                            } else {
+                                (token_id, text)
+                            };
+                            let obj_id = self.next_object_id();
+                            let mut tok_obj = PhpObject::new(b"PhpToken".to_vec(), obj_id);
+                            tok_obj.set_property(b"id".to_vec(), Value::Long(id_val));
+                            tok_obj.set_property(b"text".to_vec(), Value::String(PhpString::from_bytes(text_val)));
+                            tok_obj.set_property(b"line".to_vec(), Value::Long(token.span.line as i64));
+                            tok_obj.set_property(b"pos".to_vec(), Value::Long(token.span.start as i64));
+                            result.push(Value::Object(Rc::new(RefCell::new(tok_obj))));
+                        }
+                        self.write_operand(
+                            &op.result,
+                            Value::Array(Rc::new(RefCell::new(result))),
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
                     } else if func_name_lower == b"datetime::createfromformat"
                         || func_name_lower == b"datetimeimmutable::createfromformat" {
                         let is_immutable = func_name_lower.starts_with(b"datetimeimmutable");
@@ -14163,14 +14555,19 @@ impl Vm {
 
                         // Check argument count (too few arguments)
                         {
-                            let implicit_args = if user_fn.cv_names.first().map(|n| n.as_slice())
-                                == Some(b"this")
+                            let method_expects_this = user_fn.cv_names.first().map(|n| n.as_slice())
+                                == Some(b"this");
+                            // If the method expects $this as cv[0], count whether args already
+                            // contain $this (instance call) or not (parent:: style, will be
+                            // auto-injected later).
+                            let implicit_args = if method_expects_this
+                                && matches!(call.args.first(), Some(Value::Object(_)))
                             {
                                 1
                             } else {
                                 0
                             };
-                            let provided = call.args.len() as u32 - implicit_args as u32;
+                            let provided = (call.args.len() as u32).saturating_sub(implicit_args as u32);
                             let required = user_fn.required_param_count;
                             // Don't check for __call/__callStatic/constructors
                             let is_special = func_name_lower.ends_with(b"::__call")
@@ -14808,27 +15205,18 @@ impl Vm {
                                             if call.args.len() > 1 {
                                                 if let Value::Array(_) = &call.args[1] {
                                                     obj_mut.set_property(b"__spl_array".to_vec(), call.args[1].clone());
-                                                } else if let Value::Object(src) = &call.args[1] {
+                                                } else if let Value::Object(_) = &call.args[1] {
                                                     emit_deprecation = true;
-                                                    let src = src.borrow();
-                                                    // If src has __spl_array (e.g. ArrayObject), use it
-                                                    let spl_inner = src.get_property(b"__spl_array");
-                                                    if let Value::Array(_) = &spl_inner {
-                                                        obj_mut.set_property(b"__spl_array".to_vec(), spl_inner);
-                                                    } else {
-                                                        // Copy properties as array
-                                                        let mut arr = PhpArray::new();
-                                                        for (name, val) in &src.properties {
-                                                            if !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") {
-                                                                arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
-                                                            }
-                                                        }
-                                                        obj_mut.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(arr))));
-                                                    }
+                                                    // Store the object as-is (PHP semantics: ArrayObject
+                                                    // can wrap an object and var_dump preserves it).
+                                                    obj_mut.set_property(b"__spl_array".to_vec(), call.args[1].clone());
                                                 }
                                             }
                                             if call.args.len() > 2 {
                                                 obj_mut.set_property(b"__spl_flags".to_vec(), call.args[2].clone());
+                                            }
+                                            if call.args.len() > 3 {
+                                                obj_mut.set_property(b"__spl_iterator_class".to_vec(), call.args[3].clone());
                                             }
                                             if emit_deprecation {
                                                 drop(obj_mut);
@@ -15407,6 +15795,50 @@ impl Vm {
                                                 }
                                             }
                                         }
+                                        b"phptoken" => {
+                                            // PhpToken::__construct(int $id, string $text, int $line = -1, int $pos = -1)
+                                            let id_val = call.args.get(1).cloned().unwrap_or(Value::Long(0));
+                                            let text_val = call.args.get(2).cloned().unwrap_or(Value::String(PhpString::empty()));
+                                            let line_val = call.args.get(3).cloned().unwrap_or(Value::Long(-1));
+                                            let pos_val = call.args.get(4).cloned().unwrap_or(Value::Long(-1));
+                                            obj_mut.set_property(b"id".to_vec(), Value::Long(id_val.to_long()));
+                                            obj_mut.set_property(b"text".to_vec(), Value::String(text_val.to_php_string()));
+                                            obj_mut.set_property(b"line".to_vec(), Value::Long(line_val.to_long()));
+                                            obj_mut.set_property(b"pos".to_vec(), Value::Long(pos_val.to_long()));
+                                        }
+                                        b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
+                                            // __construct(string $uri, ?string $baseUrl = null)
+                                            let uri_val = call.args.get(1).cloned().unwrap_or(Value::Null);
+                                            let uri_str = uri_val.to_php_string().to_string_lossy();
+                                            let base_str = call.args.get(2).and_then(|v| match v {
+                                                Value::Null | Value::Undef => None,
+                                                other => Some(other.to_php_string().to_string_lossy()),
+                                            });
+                                            let ok = crate::uri::parse_into(
+                                                &mut obj_mut,
+                                                &uri_str,
+                                                base_str.as_deref(),
+                                                class_lower != b"uri\\whatwg\\url",
+                                            );
+                                            if !ok {
+                                                drop(obj_mut);
+                                                let (exc_class, msg) = if class_lower == b"uri\\whatwg\\url" {
+                                                    let code = crate::uri::whatwg_error_code(&uri_str);
+                                                    (b"Uri\\WhatWg\\InvalidUrlException" as &[u8],
+                                                     format!("The specified URI is malformed ({})", code))
+                                                } else {
+                                                    (b"Uri\\InvalidUriException" as &[u8],
+                                                     format!("The specified URI is malformed"))
+                                                };
+                                                let exc = self.create_exception(exc_class, &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError { message: msg, line: op.line });
+                                            }
+                                        }
                                         b"fiber" => {
                                             // Fiber::__construct(callable $callback)
                                             // Check if constructor has already been called
@@ -15711,6 +16143,38 @@ impl Vm {
                                                 self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                                                 handled = true;
                                             }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Property hook parent fallback: parent::$prop::get()
+                            // When parent has no hook method, fall back to reading
+                            // or writing the backing property directly.
+                            if !handled {
+                                let name_bytes = call.name.as_bytes();
+                                if let Some(sep_pos) = name_bytes.windows(2).position(|w| w == b"::") {
+                                    let method_part = &name_bytes[sep_pos + 2..];
+                                    let is_get = method_part.starts_with(b"__property_get_");
+                                    let is_set = method_part.starts_with(b"__property_set_");
+                                    if is_get || is_set {
+                                        let prop = if is_get {
+                                            &method_part[b"__property_get_".len()..]
+                                        } else {
+                                            &method_part[b"__property_set_".len()..]
+                                        };
+                                        let this_val = cvs.first().cloned().unwrap_or(Value::Null);
+                                        if let Value::Object(obj) = &this_val {
+                                            if is_get {
+                                                let v = obj.borrow().get_property(prop);
+                                                self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                                            } else {
+                                                let new_val = call.args.first().cloned().unwrap_or(Value::Null);
+                                                obj.borrow_mut().set_property(prop.to_vec(), new_val.clone());
+                                                // parent::$prop::set($v) returns the assigned value
+                                                self.write_operand(&op.result, new_val, &mut cvs, &mut tmps, &static_cv_keys);
+                                            }
+                                            handled = true;
                                         }
                                     }
                                 }
@@ -16082,6 +16546,21 @@ impl Vm {
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[$key] = $val -> offsetSet($key, $val)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if matches!(class_lower.as_slice(),
+                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator")
+                            && matches!(&key_val, Value::Array(_) | Value::Object(_))
+                        {
+                            let t = if matches!(&key_val, Value::Array(_)) { "array" } else { "object" };
+                            let msg = format!("Cannot access offset of type {} on ArrayObject", t);
+                            let exc = self.create_exception(b"TypeError", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                let ct = *catch_target;
+                                ip = ct as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
+                        }
                         let spl_args = vec![arr_val.clone(), key_val.clone(), val.clone()];
                         if self.handle_spl_docall(&class_lower, b"offsetset", &spl_args).is_none() {
                             self.call_object_method(&arr_val, b"offsetset", &[key_val, val]);
@@ -16315,6 +16794,29 @@ impl Vm {
                                 message: format!("Uncaught Error: {}", msg),
                                 line: op.line,
                             });
+                        }
+                        // Type-check the key for ArrayObject/ArrayIterator: arrays and
+                        // objects are not valid offsets.
+                        if matches!(class_lower.as_slice(),
+                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator")
+                        {
+                            let bad = matches!(&key_val, Value::Array(_) | Value::Object(_));
+                            if bad {
+                                let t = match &key_val {
+                                    Value::Array(_) => "array",
+                                    Value::Object(_) => "object",
+                                    _ => "?",
+                                };
+                                let msg = format!("Cannot access offset of type {} on ArrayObject", t);
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    let ct = *catch_target;
+                                    ip = ct as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
+                            }
                         }
                         let args = vec![arr_val.clone(), key_val.clone()];
                         let offsetget_result = self.handle_spl_docall(&class_lower, b"offsetget", &args)
@@ -18377,6 +18879,32 @@ impl Vm {
 
                 OpCode::CloneObj => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // Lazy init on clone: ghosts are fully initialized, then cloned.
+                    // Proxies initialize their backing object; the clone is a fresh
+                    // proxy with a cloned instance.
+                    if let Value::Object(obj) = &val {
+                        let is_proxy = matches!(
+                            obj.borrow().get_property(b"__lazy_state"),
+                            Value::String(ref s) if s.as_bytes() == b"proxy"
+                        );
+                        self.maybe_run_lazy_init(obj);
+                        // If the lazy initializer threw, propagate and skip cloning.
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            let msg = match &self.current_exception {
+                                Some(Value::Object(o)) => {
+                                    let ob = o.borrow();
+                                    ob.get_property(b"message").to_php_string().to_string_lossy()
+                                }
+                                _ => "Uncaught exception".to_string(),
+                            };
+                            return Err(VmError { message: msg, line: op.line });
+                        }
+                        let _ = is_proxy;
+                    }
                     let cloned = match &val {
                         Value::Object(obj) => {
                             let obj_borrow = obj.borrow();
@@ -18399,14 +18927,31 @@ impl Vm {
                             let mut new_obj =
                                 PhpObject::new(obj_borrow.class_name.clone(), clone_id);
                             // Copy all properties, deep-cloning arrays for SPL classes
+                            // and deep-cloning __lazy_real for lazy proxies.
                             for (name, value) in &obj_borrow.properties {
                                 let cloned_value = if name.starts_with(b"__spl_") {
-                                    // Deep clone SPL internal array properties
                                     match value {
                                         Value::Array(a) => {
                                             Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
                                         }
                                         other => other.clone(),
+                                    }
+                                } else if name == b"__lazy_real" {
+                                    // Deep-clone the proxy's real backing object
+                                    if let Value::Object(inner) = value {
+                                        let inner_b = inner.borrow();
+                                        let new_inner_id = self.next_object_id;
+                                        self.next_object_id += 1;
+                                        let mut cloned_inner = PhpObject::new(
+                                            inner_b.class_name.clone(),
+                                            new_inner_id,
+                                        );
+                                        for (n, v) in &inner_b.properties {
+                                            cloned_inner.set_property(n.clone(), v.clone());
+                                        }
+                                        Value::Object(Rc::new(RefCell::new(cloned_inner)))
+                                    } else {
+                                        value.clone()
                                     }
                                 } else {
                                     value.clone()
@@ -19807,6 +20352,54 @@ impl Vm {
                                 // Inherit properties (parent properties come first, child overrides take precedence)
                                 let child_prop_names: Vec<Vec<u8>> =
                                     class.properties.iter().map(|p| p.name.clone()).collect();
+                                // If the child is not abstract/interface and the parent has
+                                // abstract property hooks, the child must implement them.
+                                if !class.is_abstract && !class.is_interface {
+                                    let mut unimplemented: Vec<String> = Vec::new();
+                                    for parent_prop in &parent.properties {
+                                        if !parent_prop.is_abstract {
+                                            continue;
+                                        }
+                                        let child_has = class.properties.iter().find(|p| p.name == parent_prop.name);
+                                        let child_is_concrete = child_has.map(|p| !p.is_abstract).unwrap_or(false);
+                                        if !child_is_concrete {
+                                            let parent_display = String::from_utf8_lossy(parent_name);
+                                            let prop_display = String::from_utf8_lossy(&parent_prop.name);
+                                            if parent_prop.has_get_hook {
+                                                unimplemented.push(format!("{}::${}::get", parent_display, prop_display));
+                                            }
+                                            if parent_prop.has_set_hook {
+                                                unimplemented.push(format!("{}::${}::set", parent_display, prop_display));
+                                            }
+                                        }
+                                    }
+                                    if !unimplemented.is_empty() {
+                                        let n = unimplemented.len();
+                                        let (word, remain) = if n == 1 { ("method", "remaining method") } else { ("methods", "remaining methods") };
+                                        return Err(VmError {
+                                            message: format!(
+                                                "Class {} contains {} abstract {} and must therefore be declared abstract or implement the {} ({})",
+                                                String::from_utf8_lossy(&class.name),
+                                                n, word, remain, unimplemented.join(", "),
+                                            ),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
+                                // Check final-property overrides: if parent has a final property,
+                                // the child cannot redeclare it.
+                                for parent_prop in &parent.properties {
+                                    if parent_prop.is_final && parent_prop.visibility != Visibility::Private {
+                                        if class.properties.iter().any(|p| p.name == parent_prop.name) {
+                                            let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                            let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                            return Err(VmError {
+                                                message: format!("Cannot override final property {}::${}", parent_display, prop_display),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                }
                                 // Check property static/non-static mismatch (must come before visibility check)
                                 for parent_prop in &parent.properties {
                                     if parent_prop.visibility != Visibility::Private {
@@ -21919,6 +22512,11 @@ impl Vm {
                             b"reflectionfunctionabstract" => b"ReflectionFunctionAbstract".to_vec(),
                             b"weakreference" => b"WeakReference".to_vec(),
                             b"weakmap" => b"WeakMap".to_vec(),
+                            b"phptoken" => b"PhpToken".to_vec(),
+                            b"uri\\whatwg\\url" => b"Uri\\WhatWg\\Url".to_vec(),
+                            b"uri\\rfc3986\\uri" => b"Uri\\Rfc3986\\Uri".to_vec(),
+                            b"uri\\whatwg\\invalidurlexception" => b"Uri\\WhatWg\\InvalidUrlException".to_vec(),
+                            b"uri\\invaliduriexception" => b"Uri\\InvalidUriException".to_vec(),
                             _ => class_name.as_bytes().to_vec(),
                         }
                     };
@@ -22121,10 +22719,31 @@ impl Vm {
                 }
 
                 OpCode::PropertyGet => {
-                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+
+                    // Lazy object initialization: skip for internal __lazy_* props
+                    // and for properties explicitly marked as skipped via
+                    // ReflectionProperty::skipLazyInitialization().
+                    if let Value::Object(obj) = &obj_val_raw {
+                        let pn = prop_name.as_bytes();
+                        if !pn.starts_with(b"__lazy_") && !is_prop_skipped(obj, pn) {
+                            self.maybe_run_lazy_init(obj);
+                        }
+                    }
+
+                    // Proxy redirect: forward property access to the real object
+                    let obj_val = if let Value::Object(obj) = &obj_val_raw {
+                        if !prop_name.as_bytes().starts_with(b"__lazy_") {
+                            Value::Object(self.proxy_redirect(obj))
+                        } else {
+                            obj_val_raw.clone()
+                        }
+                    } else {
+                        obj_val_raw.clone()
+                    };
 
                     let result = if let Value::Object(obj) = &obj_val {
                         let class_name_orig = obj.borrow().class_name.clone();
@@ -22132,6 +22751,37 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
+
+                        // ArrayObject/ArrayIterator ARRAY_AS_PROPS: route $obj->foo to $obj['foo']
+                        // when the ARRAY_AS_PROPS flag (bit 2) is set, unless the property is
+                        // a real declared one (in which case STD_PROP_LIST controls what wins).
+                        let aa_prop_result = if matches!(
+                            class_lower.as_slice(),
+                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+                        ) && !prop_name.as_bytes().starts_with(b"__spl_")
+                        {
+                            let ob = obj.borrow();
+                            let flags = ob.get_property(b"__spl_flags").to_long();
+                            let has_prop = ob.has_property(prop_name.as_bytes());
+                            let arr = ob.get_property(b"__spl_array");
+                            drop(ob);
+                            if flags & 2 != 0 && !has_prop {
+                                if let Value::Array(a) = arr {
+                                    let key = crate::array::ArrayKey::String(PhpString::from_bytes(prop_name.as_bytes()));
+                                    Some(a.borrow().get(&key).cloned().unwrap_or(Value::Null))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(v) = aa_prop_result {
+                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue;
+                        }
 
                         // Check for property get hook (PHP 8.4)
                         let prop_name_bytes = prop_name.as_bytes();
@@ -22462,11 +23112,31 @@ impl Vm {
                 }
 
                 OpCode::PropertySet => {
-                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let mut value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+
+                    // Lazy init on write access (skip internal __lazy_* and
+                    // properties marked via ReflectionProperty::skipLazyInitialization)
+                    if let Value::Object(obj) = &obj_val_raw {
+                        let pn = prop_name.as_bytes();
+                        if !pn.starts_with(b"__lazy_") && !is_prop_skipped(obj, pn) {
+                            self.maybe_run_lazy_init(obj);
+                        }
+                    }
+
+                    // Proxy redirect: forward property writes to the real object
+                    let obj_val = if let Value::Object(obj) = &obj_val_raw {
+                        if !prop_name.as_bytes().starts_with(b"__lazy_") {
+                            Value::Object(self.proxy_redirect(obj))
+                        } else {
+                            obj_val_raw.clone()
+                        }
+                    } else {
+                        obj_val_raw.clone()
+                    };
 
                     if let Value::Object(obj) = &obj_val {
                         let class_name_orig = obj.borrow().class_name.clone();
@@ -22474,6 +23144,35 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
+
+                        // ArrayObject/ArrayIterator ARRAY_AS_PROPS: route $obj->foo = $v to the array.
+                        if matches!(
+                            class_lower.as_slice(),
+                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+                        ) && !prop_name.as_bytes().starts_with(b"__spl_")
+                        {
+                            let ob = obj.borrow();
+                            let flags = ob.get_property(b"__spl_flags").to_long();
+                            let has_prop = ob.has_property(prop_name.as_bytes());
+                            let arr = ob.get_property(b"__spl_array");
+                            drop(ob);
+                            if flags & 2 != 0 && !has_prop {
+                                if let Value::Array(a) = arr {
+                                    let key = crate::array::ArrayKey::String(
+                                        PhpString::from_bytes(prop_name.as_bytes()),
+                                    );
+                                    a.borrow_mut().set(key, value.clone());
+                                    self.write_operand(
+                                        &op.op2,
+                                        value,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
 
                         // Check for property set hook (PHP 8.4)
                         let prop_name_bytes_set = prop_name.as_bytes();
@@ -24039,6 +24738,16 @@ impl Vm {
                 };
                 return PhpString::from_string(result);
             }
+            // Built-in __toString for PhpToken
+            if class_lower == b"phptoken" {
+                let obj_borrow = obj.borrow();
+                return obj_borrow.get_property(b"text").to_php_string();
+            }
+            // Built-in __toString for Uri classes: the serialized URI
+            if class_lower == b"uri\\whatwg\\url" || class_lower == b"uri\\rfc3986\\uri" {
+                let obj_borrow = obj.borrow();
+                return obj_borrow.get_property(b"__uri_serialized").to_php_string();
+            }
             // Built-in __toString for Reflection classes
             let is_reflection = class_lower.starts_with(b"reflection");
             if is_reflection {
@@ -24125,7 +24834,9 @@ impl Vm {
             let is_reflection = class_lower.starts_with(b"reflection");
             let is_gmp = class_lower == b"gmp";
             let is_simplexml = class_lower == b"simplexmlelement";
-            if !has_tostring && !is_throwable && !is_reflection && !is_gmp && !is_simplexml {
+            let is_phptoken = class_lower == b"phptoken";
+            let is_uri = class_lower == b"uri\\whatwg\\url" || class_lower == b"uri\\rfc3986\\uri";
+            if !has_tostring && !is_throwable && !is_reflection && !is_gmp && !is_simplexml && !is_phptoken && !is_uri {
                 let class_display = crate::value::display_class_name(&class_name);
                 let msg = format!("Object of class {} could not be converted to string", class_display);
                 let exc = self.create_exception(b"Error", &msg, self.current_line);
@@ -25154,7 +25865,8 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
         | b"jsonexception" | b"fibererror"
         | b"dateexception" | b"dateinvalidtimezoneexception" | b"datemalformedintervalstringexception"
         | b"datemalformedstringexception" | b"datemalformedperiodstringexception"
-        | b"parseerror" | b"compileerror" => &[b"Throwable"],
+        | b"parseerror" | b"compileerror"
+        | b"uri\\whatwg\\invalidurlexception" | b"uri\\invaliduriexception" => &[b"Throwable"],
         _ => &[],
     };
     interfaces.iter().map(|i| i.to_vec()).collect()
@@ -25170,7 +25882,8 @@ pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
         b"argumentcounterror" => Some(b"TypeError"),
         b"arithmeticerror" => Some(b"Error"),
         b"divisionbyzeroerror" => Some(b"ArithmeticError"),
-        b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"errorexception" | b"jsonexception" => Some(b"Exception"),
+        b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"errorexception" | b"jsonexception"
+        | b"uri\\whatwg\\invalidurlexception" | b"uri\\invaliduriexception" => Some(b"Exception"),
         b"overflowexception" | b"underflowexception" | b"outofboundsexception" => Some(b"RuntimeException"),
         b"invalidargumentexception" | b"badmethodcallexception" | b"domainexception"
         | b"unexpectedvalueexception" | b"lengthexception" | b"outofrangeexception" => Some(b"LogicException"),
@@ -25368,7 +26081,8 @@ pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             b"divisionbyzeroerror" => Some(b"arithmeticerror".to_vec()),
             b"error" => Some(b"throwable".to_vec()),
             // Exception hierarchy
-            b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"jsonexception" => {
+            b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"jsonexception"
+            | b"uri\\whatwg\\invalidurlexception" | b"uri\\invaliduriexception" => {
                 Some(b"exception".to_vec())
             }
             b"overflowexception" | b"underflowexception" | b"outofboundsexception" => {
@@ -25686,6 +26400,43 @@ fn vm_ymd_to_days(year: i64, month: u32, day: u32) -> i64 {
     };
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146097 + doe as i64 - 719468
+}
+
+/// Check if a property on an object has been marked as "skipped" for lazy
+/// initialization via `ReflectionProperty::skipLazyInitialization()`. The
+/// skipped names are stored as a NUL-separated string in __lazy_skipped.
+fn is_prop_skipped(obj: &Rc<RefCell<PhpObject>>, prop_name: &[u8]) -> bool {
+    let ob = obj.borrow();
+    match ob.get_property(b"__lazy_skipped") {
+        Value::String(s) => s.as_bytes().split(|b| *b == 0).any(|n| n == prop_name),
+        _ => false,
+    }
+}
+
+/// PhpToken::is() matches against an int (token id), string (token text),
+/// or an array whose entries are any of those.
+fn phptoken_is_match(kind: &Value, id: i64, text: &[u8]) -> Value {
+    fn match_one(kind: &Value, id: i64, text: &[u8]) -> bool {
+        match kind {
+            Value::Long(k) => *k == id,
+            Value::String(s) => s.as_bytes() == text,
+            Value::Reference(r) => match_one(&r.borrow(), id, text),
+            _ => false,
+        }
+    }
+    match kind {
+        Value::Array(arr) => {
+            for (_, v) in arr.borrow().iter() {
+                if match_one(v, id, text) {
+                    return Value::True;
+                }
+            }
+            Value::False
+        }
+        other => {
+            if match_one(other, id, text) { Value::True } else { Value::False }
+        }
+    }
 }
 
 /// Parse a datetime string into a unix timestamp

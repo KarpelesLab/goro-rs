@@ -6268,6 +6268,7 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
                     | b"splfixedarray" | b"splobjectstorage"
                     | b"splheap" | b"splminheap" | b"splmaxheap"
                     | b"splpriorityqueue"
+                    | b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
                 )
             };
             let has_serialize = vm.classes.get(&class_lower)
@@ -6750,6 +6751,7 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
                     | b"splfixedarray" | b"splobjectstorage"
                     | b"splheap" | b"splminheap" | b"splmaxheap"
                     | b"splpriorityqueue"
+                    | b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
                 )
             };
             let has_unserialize = vm.classes.get(&class_lower)
@@ -7521,6 +7523,7 @@ fn fopen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match file {
         Ok(f) => {
             let fid = alloc_file_handle(f, &mode);
+            goro_core::value::register_resource(fid, b"stream");
             Ok(Value::Long(fid))
         }
         Err(_) => Ok(Value::False),
@@ -7532,6 +7535,9 @@ fn fclose_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     FILE_HANDLES.with(|handles| {
         handles.borrow_mut().remove(&fid);
     });
+    // Mark the resource as closed rather than removing it, so gettype()
+    // still reports "resource (closed)" while is_resource() returns false.
+    goro_core::value::close_resource(fid);
     Ok(Value::True)
 }
 
@@ -9104,14 +9110,13 @@ fn restore_include_path_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErr
 
 fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    if let Some(t) = val.resource_type_name() {
+        return Ok(Value::String(PhpString::from_vec(t)));
+    }
     match val {
         Value::Long(id) => {
-            // Check if this is a known file handle
-            let is_file = FILE_HANDLES.with(|handles| {
-                handles.borrow().contains_key(id)
-            });
-            if is_file || *id == 0 || *id == 1 || *id == 2 {
-                // STDIN (0), STDOUT (1), STDERR (2) or opened file handle
+            // Fallback: recognize well-known fd ids even without registration
+            if *id == 0 || *id == 1 || *id == 2 {
                 Ok(Value::String(PhpString::from_bytes(b"stream")))
             } else {
                 Ok(Value::String(PhpString::from_bytes(b"Unknown")))
@@ -10166,6 +10171,7 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     use std::os::unix::io::FromRawFd;
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     let fid = alloc_file_handle(file, "w+b");
+    goro_core::value::register_resource(fid, b"stream");
     Ok(Value::Long(fid))
 }
 
@@ -11767,10 +11773,14 @@ fn popen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             use std::os::unix::io::{FromRawFd, IntoRawFd};
             if mode_str.contains('r') {
                 if let Some(stdout) = child.stdout {
-                    return Ok(Value::Long(alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) }, &mode_str)));
+                    let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) }, &mode_str);
+                    goro_core::value::register_resource(fid, b"stream");
+                    return Ok(Value::Long(fid));
                 }
             } else if let Some(stdin) = child.stdin {
-                return Ok(Value::Long(alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) }, &mode_str)));
+                let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) }, &mode_str);
+                goro_core::value::register_resource(fid, b"stream");
+                return Ok(Value::Long(fid));
             }
             Ok(Value::False)
         }
@@ -11781,6 +11791,7 @@ fn popen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn pclose_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
+    goro_core::value::close_resource(fid);
     Ok(Value::Long(0))
 }
 
@@ -11891,6 +11902,7 @@ fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             use std::os::unix::io::FromRawFd;
             let file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
             let fid = alloc_file_handle(file, "r+");
+            goro_core::value::register_resource(fid, b"stream");
             Ok(Value::Long(fid))
         }
         Err(e) => {
@@ -12053,133 +12065,17 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let _flags = if args.len() > 1 { args[1].to_long() } else { 0 };
 
     let mut lexer = goro_parser::Lexer::new(source.as_bytes());
+    lexer.set_preserve_trivia(true);
     let tokens = lexer.tokenize();
 
     let mut result = PhpArray::new();
     let src = source.as_bytes();
 
     for token in &tokens {
-        let token_id = match &token.kind {
-            goro_parser::token::TokenKind::InlineHtml(_) => 312_i64, // T_INLINE_HTML
-            goro_parser::token::TokenKind::Variable(_) => 320, // T_VARIABLE
-            goro_parser::token::TokenKind::LongNumber(_) => 317, // T_LNUMBER
-            goro_parser::token::TokenKind::DoubleNumber(_) => 318, // T_DNUMBER
-            goro_parser::token::TokenKind::ConstantString(_) => 323, // T_CONSTANT_ENCAPSED_STRING
-            goro_parser::token::TokenKind::Identifier(_) => 319, // T_STRING
-            goro_parser::token::TokenKind::InterpolatedStringPart(_) => 324, // T_ENCAPSED_AND_WHITESPACE
-            goro_parser::token::TokenKind::InterpolatedStringEnd(_) => 324,
-            goro_parser::token::TokenKind::OpenTag => 379, // T_OPEN_TAG
-            goro_parser::token::TokenKind::OpenTagShort => 380, // T_OPEN_TAG_WITH_ECHO
-            goro_parser::token::TokenKind::CloseTag => 381, // T_CLOSE_TAG
-            goro_parser::token::TokenKind::Function => 346, // T_FUNCTION
-            goro_parser::token::TokenKind::If => 330,
-            goro_parser::token::TokenKind::Else => 333,
-            goro_parser::token::TokenKind::ElseIf => 331,
-            goro_parser::token::TokenKind::While => 334,
-            goro_parser::token::TokenKind::For => 336,
-            goro_parser::token::TokenKind::Foreach => 337,
-            goro_parser::token::TokenKind::Return => 348,
-            goro_parser::token::TokenKind::Echo => 316,
-            goro_parser::token::TokenKind::Class => 361,
-            goro_parser::token::TokenKind::New => 300,
-            goro_parser::token::TokenKind::Static => 352,
-            goro_parser::token::TokenKind::Public => 362,
-            goro_parser::token::TokenKind::Protected => 363,
-            goro_parser::token::TokenKind::Private => 364,
-            goro_parser::token::TokenKind::Abstract => 358,
-            goro_parser::token::TokenKind::Final => 359,
-            goro_parser::token::TokenKind::Interface => 360,
-            goro_parser::token::TokenKind::Extends => 354,
-            goro_parser::token::TokenKind::Implements => 355,
-            goro_parser::token::TokenKind::As => 329,
-            goro_parser::token::TokenKind::Try => 340,
-            goro_parser::token::TokenKind::Catch => 341,
-            goro_parser::token::TokenKind::Finally => 342,
-            goro_parser::token::TokenKind::Throw => 343,
-            goro_parser::token::TokenKind::Switch => 335,
-            goro_parser::token::TokenKind::Case => 327,
-            goro_parser::token::TokenKind::Default => 328,
-            goro_parser::token::TokenKind::Break => 338,
-            goro_parser::token::TokenKind::Continue => 339,
-            goro_parser::token::TokenKind::Do => 344,
-            goro_parser::token::TokenKind::Instanceof => 301,
-            goro_parser::token::TokenKind::Trait => 357,
-            goro_parser::token::TokenKind::Namespace => 382,
-            goro_parser::token::TokenKind::Use => 356,
-            goro_parser::token::TokenKind::Include => 262,
-            goro_parser::token::TokenKind::IncludeOnce => 263,
-            goro_parser::token::TokenKind::Require => 264,
-            goro_parser::token::TokenKind::RequireOnce => 265,
-            goro_parser::token::TokenKind::Const => 347,
-            goro_parser::token::TokenKind::Isset => 350,
-            goro_parser::token::TokenKind::Unset => 349,
-            goro_parser::token::TokenKind::Empty => 351,
-            goro_parser::token::TokenKind::Yield => 267,
-            goro_parser::token::TokenKind::YieldFrom => 268,
-            goro_parser::token::TokenKind::Match => 369,
-            goro_parser::token::TokenKind::Enum => 370,
-            goro_parser::token::TokenKind::Fn => 345,
-            goro_parser::token::TokenKind::Print => 266,
-            goro_parser::token::TokenKind::Exit => 305,
-            goro_parser::token::TokenKind::Eval => 260,
-            goro_parser::token::TokenKind::Clone => 302,
-            goro_parser::token::TokenKind::List => 353,
-            goro_parser::token::TokenKind::Array => 365,
-            goro_parser::token::TokenKind::Callable => 366,
-            goro_parser::token::TokenKind::Readonly => 367,
-            goro_parser::token::TokenKind::Var => 347,
-            goro_parser::token::TokenKind::Global => 326,
-            goro_parser::token::TokenKind::Goto => 325,
-            goro_parser::token::TokenKind::Null => 310,
-            goro_parser::token::TokenKind::True => 308,
-            goro_parser::token::TokenKind::False => 309,
-            goro_parser::token::TokenKind::And => 297,
-            goro_parser::token::TokenKind::Or => 298,
-            goro_parser::token::TokenKind::Xor => 299,
-            goro_parser::token::TokenKind::Declare => 326,
-            goro_parser::token::TokenKind::BooleanAnd => 285,
-            goro_parser::token::TokenKind::BooleanOr => 286,
-            goro_parser::token::TokenKind::Equal => 283,
-            goro_parser::token::TokenKind::NotEqual => 282,
-            goro_parser::token::TokenKind::Identical => 281,
-            goro_parser::token::TokenKind::NotIdentical => 280,
-            goro_parser::token::TokenKind::LessEqual => 279,
-            goro_parser::token::TokenKind::GreaterEqual => 278,
-            goro_parser::token::TokenKind::Spaceship => 277,
-            goro_parser::token::TokenKind::PlusAssign => 270,
-            goro_parser::token::TokenKind::MinusAssign => 271,
-            goro_parser::token::TokenKind::StarAssign => 272,
-            goro_parser::token::TokenKind::SlashAssign => 273,
-            goro_parser::token::TokenKind::DotAssign => 274,
-            goro_parser::token::TokenKind::PercentAssign => 275,
-            goro_parser::token::TokenKind::AmpersandAssign => 276,
-            goro_parser::token::TokenKind::PipeAssign => 287,
-            goro_parser::token::TokenKind::CaretAssign => 288,
-            goro_parser::token::TokenKind::ShiftLeftAssign => 289,
-            goro_parser::token::TokenKind::ShiftRightAssign => 290,
-            goro_parser::token::TokenKind::NullCoalesceAssign => 291,
-            goro_parser::token::TokenKind::NullCoalesce => 292,
-            goro_parser::token::TokenKind::ShiftLeft => 293,
-            goro_parser::token::TokenKind::ShiftRight => 294,
-            goro_parser::token::TokenKind::Pow => 303,
-            goro_parser::token::TokenKind::PowAssign => 304,
-            goro_parser::token::TokenKind::Arrow => 384,
-            goro_parser::token::TokenKind::NullsafeArrow => 385,
-            goro_parser::token::TokenKind::DoubleArrow => 386,
-            goro_parser::token::TokenKind::DoubleColon => 387,
-            goro_parser::token::TokenKind::Ellipsis => 388,
-            goro_parser::token::TokenKind::Increment => 295,
-            goro_parser::token::TokenKind::Decrement => 296,
-            goro_parser::token::TokenKind::IntCast => 306,
-            goro_parser::token::TokenKind::FloatCast => 307,
-            goro_parser::token::TokenKind::StringCast => 308,
-            goro_parser::token::TokenKind::BoolCast => 309,
-            goro_parser::token::TokenKind::ArrayCast => 310,
-            goro_parser::token::TokenKind::ObjectCast => 311,
-            goro_parser::token::TokenKind::UnsetCast => 312,
-            goro_parser::token::TokenKind::Eof => continue,
-            _ => 0, // Single-char token
-        };
+        if matches!(token.kind, goro_parser::token::TokenKind::Eof) {
+            continue;
+        }
+        let token_id = goro_parser::token::token_kind_to_php_id(&token.kind);
 
         if token_id == 0 {
             let start = token.span.start as usize;
@@ -12212,83 +12108,7 @@ fn token_name_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::from_bytes(b"UNKNOWN")));
     }
     let id = args[0].to_long();
-    let name = match id {
-        260 => "T_EVAL",
-        262 => "T_INCLUDE",
-        263 => "T_INCLUDE_ONCE",
-        264 => "T_REQUIRE",
-        265 => "T_REQUIRE_ONCE",
-        266 => "T_PRINT",
-        267 => "T_YIELD",
-        268 => "T_YIELD_FROM",
-        297 => "T_LOGICAL_AND",
-        298 => "T_LOGICAL_OR",
-        299 => "T_LOGICAL_XOR",
-        300 => "T_NEW",
-        301 => "T_INSTANCEOF",
-        302 => "T_CLONE",
-        305 => "T_EXIT",
-        308 => "T_TRUE",
-        309 => "T_FALSE",
-        310 => "T_NULL",
-        312 => "T_INLINE_HTML",
-        316 => "T_ECHO",
-        317 => "T_LNUMBER",
-        318 => "T_DNUMBER",
-        319 => "T_STRING",
-        320 => "T_VARIABLE",
-        323 => "T_CONSTANT_ENCAPSED_STRING",
-        324 => "T_ENCAPSED_AND_WHITESPACE",
-        325 => "T_GOTO",
-        326 => "T_GLOBAL",
-        327 => "T_CASE",
-        328 => "T_DEFAULT",
-        329 => "T_AS",
-        330 => "T_IF",
-        331 => "T_ELSEIF",
-        333 => "T_ELSE",
-        334 => "T_WHILE",
-        335 => "T_SWITCH",
-        336 => "T_FOR",
-        337 => "T_FOREACH",
-        338 => "T_BREAK",
-        339 => "T_CONTINUE",
-        340 => "T_TRY",
-        341 => "T_CATCH",
-        342 => "T_FINALLY",
-        343 => "T_THROW",
-        344 => "T_DO",
-        345 => "T_FN",
-        346 => "T_FUNCTION",
-        347 => "T_CONST",
-        348 => "T_RETURN",
-        349 => "T_UNSET",
-        350 => "T_ISSET",
-        351 => "T_EMPTY",
-        352 => "T_STATIC",
-        353 => "T_LIST",
-        354 => "T_EXTENDS",
-        355 => "T_IMPLEMENTS",
-        356 => "T_USE",
-        357 => "T_TRAIT",
-        358 => "T_ABSTRACT",
-        359 => "T_FINAL",
-        360 => "T_INTERFACE",
-        361 => "T_CLASS",
-        362 => "T_PUBLIC",
-        363 => "T_PROTECTED",
-        364 => "T_PRIVATE",
-        365 => "T_ARRAY",
-        366 => "T_CALLABLE",
-        367 => "T_READONLY",
-        369 => "T_MATCH",
-        370 => "T_ENUM",
-        379 => "T_OPEN_TAG",
-        380 => "T_OPEN_TAG_WITH_ECHO",
-        381 => "T_CLOSE_TAG",
-        382 => "T_NAMESPACE",
-        _ => "UNKNOWN",
-    };
+    let name = goro_parser::token::token_id_to_name(id).unwrap_or("UNKNOWN");
     Ok(Value::String(PhpString::from_bytes(name.as_bytes())))
 }
 

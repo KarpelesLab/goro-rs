@@ -1132,6 +1132,135 @@ pub fn reflection_class_docall(
 
                 Some(new_val)
             }
+            b"resetaslazyghost" | b"resetaslazyproxy" => {
+                // Reset an existing object to the uninitialized lazy state.
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                let initializer = args.get(2).cloned().unwrap_or(Value::Null);
+                let is_proxy = method == b"resetaslazyproxy";
+                if let Value::Object(obj) = &target {
+                    let mut ob = obj.borrow_mut();
+                    // Clear existing state
+                    ob.remove_property(b"__lazy_real");
+                    // Wipe all user properties and re-seed as Undef in declaration order
+                    let names: Vec<Vec<u8>> = ob.properties.iter()
+                        .filter(|(n, _)| !n.starts_with(b"__lazy_"))
+                        .map(|(n, _)| n.clone())
+                        .collect();
+                    for n in names {
+                        ob.remove_property(&n);
+                    }
+                    if let Some(ce) = vm.classes.get(&class_lower) {
+                        let decl_props: Vec<_> = ce.properties.iter()
+                            .filter(|p| !p.is_static)
+                            .map(|p| p.name.clone())
+                            .collect();
+                        for n in decl_props {
+                            ob.set_property(n, Value::Undef);
+                        }
+                    }
+                    ob.set_property(
+                        b"__lazy_state".to_vec(),
+                        Value::String(PhpString::from_bytes(
+                            if is_proxy { b"proxy" } else { b"ghost" },
+                        )),
+                    );
+                    ob.set_property(b"__lazy_initializer".to_vec(), initializer);
+                }
+                Some(Value::Null)
+            }
+            b"newlazyghost" | b"newlazyproxy" => {
+                let initializer = args.get(1).cloned().unwrap_or(Value::Null);
+                let _options = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                let is_proxy = method == b"newlazyproxy";
+                let obj_id = vm.next_object_id();
+                let canonical = vm.classes.get(&class_lower)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
+                let mut new_obj = PhpObject::new(canonical, obj_id);
+                // For lazy objects, all declared properties are seeded as Undef
+                // in declaration order so later assignments preserve that order.
+                // Typed properties will render as uninitialized() in var_dump
+                // until the initializer runs.
+                if let Some(ce) = vm.classes.get(&class_lower) {
+                    let decl_props: Vec<_> = ce.properties.iter()
+                        .filter(|p| !p.is_static)
+                        .map(|p| p.name.clone())
+                        .collect();
+                    for name in decl_props {
+                        new_obj.set_property(name, Value::Undef);
+                    }
+                }
+                new_obj.set_property(
+                    b"__lazy_state".to_vec(),
+                    Value::String(PhpString::from_bytes(
+                        if is_proxy { b"proxy" } else { b"ghost" },
+                    )),
+                );
+                new_obj.set_property(b"__lazy_initializer".to_vec(), initializer);
+                Some(Value::Object(Rc::new(RefCell::new(new_obj))))
+            }
+            b"initializelazyobject" => {
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Object(inner) = &target {
+                    vm.maybe_run_lazy_init(inner);
+                }
+                Some(target)
+            }
+            b"marklazyobjectasinitialized" => {
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Object(inner) = &target {
+                    let mut ob = inner.borrow_mut();
+                    ob.remove_property(b"__lazy_state");
+                    ob.remove_property(b"__lazy_initializer");
+                }
+                Some(target)
+            }
+            b"isuninitializedlazyobject" => {
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Object(inner) = &target {
+                    let ob = inner.borrow();
+                    let state = ob.get_property(b"__lazy_state");
+                    let is_ghost = matches!(state, Value::String(ref s) if s.as_bytes() == b"ghost");
+                    let is_uninit_proxy = matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy")
+                        && !ob.has_property(b"__lazy_real");
+                    Some(if is_ghost || is_uninit_proxy { Value::True } else { Value::False })
+                } else {
+                    Some(Value::False)
+                }
+            }
+            b"getlazyinitializer" => {
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Object(inner) = &target {
+                    let ob = inner.borrow();
+                    let state = ob.get_property(b"__lazy_state");
+                    let is_uninit = match &state {
+                        Value::String(s) if s.as_bytes() == b"ghost" => true,
+                        Value::String(s) if s.as_bytes() == b"proxy" => !ob.has_property(b"__lazy_real"),
+                        _ => false,
+                    };
+                    if is_uninit {
+                        Some(ob.get_property(b"__lazy_initializer"))
+                    } else {
+                        Some(Value::Null)
+                    }
+                } else {
+                    Some(Value::Null)
+                }
+            }
+            b"getlazyproxyinstance" => {
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Object(inner) = &target {
+                    let ob = inner.borrow();
+                    let real = ob.get_property(b"__lazy_real");
+                    if matches!(real, Value::Object(_)) {
+                        Some(real)
+                    } else {
+                        Some(Value::Null)
+                    }
+                } else {
+                    Some(Value::Null)
+                }
+            }
             b"getstaticpropertyvalue" => {
                 let prop_name = args.get(1)?.to_php_string();
                 let default = args.get(2);
@@ -1926,6 +2055,31 @@ pub fn reflection_property_method(
                 .unwrap_or(false);
             Some(if is_readonly { Value::True } else { Value::False })
         }
+        b"isvirtual" => {
+            let is_virtual = vm.classes.get(&class_lower)
+                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_virtual))
+                .unwrap_or(false);
+            Some(if is_virtual { Value::True } else { Value::False })
+        }
+        b"isabstract" => {
+            let is_abstract = vm.classes.get(&class_lower)
+                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_abstract))
+                .unwrap_or(false);
+            Some(if is_abstract { Value::True } else { Value::False })
+        }
+        b"isfinal" => {
+            let is_final = vm.classes.get(&class_lower)
+                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_final))
+                .unwrap_or(false);
+            Some(if is_final { Value::True } else { Value::False })
+        }
+        b"hashooks" => {
+            let has_hooks = vm.classes.get(&class_lower)
+                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .map(|p| p.has_get_hook || p.has_set_hook)
+                .unwrap_or(false);
+            Some(if has_hooks { Value::True } else { Value::False })
+        }
         b"isdefault" => {
             let is_default = vm.classes.get(&class_lower)
                 .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
@@ -1983,6 +2137,61 @@ pub fn reflection_property_method(
 }
 
 /// ReflectionProperty methods with args
+/// Shared logic for `skipLazyInitialization` and
+/// `setRawValueWithoutLazyInitialization`: adds the property name to the
+/// object's `__lazy_skipped` list, optionally sets the property to a value,
+/// and clears the lazy state when all declared non-static properties have
+/// been skipped.
+fn mark_prop_skipped(
+    vm: &mut Vm,
+    target: &Value,
+    class_lower: &[u8],
+    prop_name: &[u8],
+    value: Option<Value>,
+) {
+    let target_obj = match target {
+        Value::Object(o) => o,
+        _ => return,
+    };
+    let all_props: Vec<Vec<u8>> = vm.classes.get(class_lower)
+        .map(|c| c.properties.iter()
+            .filter(|p| !p.is_static)
+            .map(|p| p.name.clone())
+            .collect())
+        .unwrap_or_default();
+    let mut ob = target_obj.borrow_mut();
+    // Append to __lazy_skipped (NUL-separated list of property names).
+    let prev = ob.get_property(b"__lazy_skipped");
+    let mut names: Vec<u8> = match prev {
+        Value::String(s) => s.as_bytes().to_vec(),
+        _ => Vec::new(),
+    };
+    // De-dupe
+    if !names.split(|b| *b == 0).any(|n| n == prop_name) {
+        if !names.is_empty() {
+            names.push(b'\0');
+        }
+        names.extend_from_slice(prop_name);
+    }
+    ob.set_property(
+        b"__lazy_skipped".to_vec(),
+        Value::String(PhpString::from_vec(names.clone())),
+    );
+    if let Some(v) = value {
+        ob.set_property(prop_name.to_vec(), v);
+    }
+    // If every declared non-static property is now in the skipped list,
+    // the object is effectively initialized — clear the lazy state.
+    let all_skipped = all_props.iter().all(|p| {
+        names.split(|b| *b == 0).any(|n| n == p.as_slice())
+    });
+    if all_skipped && !all_props.is_empty() {
+        ob.remove_property(b"__lazy_state");
+        ob.remove_property(b"__lazy_initializer");
+        ob.remove_property(b"__lazy_skipped");
+    }
+}
+
 pub fn reflection_property_docall(
     vm: &mut Vm,
     method: &[u8],
@@ -2050,6 +2259,36 @@ pub fn reflection_property_docall(
                 let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
                 let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
                 Some(create_reflection_attributes(vm, &attrs, filter_name.as_deref(), filter_flags, 8))
+            }
+            b"getrawvalue" => {
+                // getRawValue($obj): read the property without triggering lazy init.
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Object(target_obj) = &target {
+                    let ob = target_obj.borrow();
+                    Some(ob.get_property(prop_name.as_bytes()))
+                } else {
+                    Some(Value::Null)
+                }
+            }
+            b"setrawvaluewithoutlazyinitialization" => {
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                let value = args.get(2).cloned().unwrap_or(Value::Null);
+                mark_prop_skipped(vm, &target, &class_lower, prop_name.as_bytes(), Some(value));
+                Some(Value::Null)
+            }
+            b"skiplazyinitialization" => {
+                // skipLazyInitialization($obj): mark this property as already
+                // initialized on the given lazy object. We store the skipped
+                // names in __lazy_skipped and apply the property's default
+                // value. Once all declared props are skipped, we clear the
+                // lazy state so var_dump shows a normal object.
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                let default = vm.classes.get(&class_lower)
+                    .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                    .map(|p| p.default.clone());
+                let resolved_default = default.map(|d| vm.resolve_deferred_value(&d));
+                mark_prop_skipped(vm, &target, &class_lower, prop_name.as_bytes(), resolved_default);
+                Some(Value::Null)
             }
             _ => None,
         }

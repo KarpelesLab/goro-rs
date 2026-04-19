@@ -2240,6 +2240,8 @@ impl Parser {
                                 set_visibility,
                                 is_static,
                                 is_readonly,
+                                is_abstract: false,
+                                is_final: false,
                                 get_hook: None,
                                 set_hook: None,
                                 attributes: member_attributes.clone(),
@@ -2266,6 +2268,8 @@ impl Parser {
                     set_visibility,
                     is_static,
                     is_readonly,
+                    is_abstract,
+                    is_final,
                     get_hook,
                     set_hook,
                     attributes: member_attributes.clone(),
@@ -2312,6 +2316,8 @@ impl Parser {
                                 set_visibility,
                                 is_static,
                                 is_readonly,
+                                is_abstract: false,
+                                is_final: false,
                                 get_hook: None,
                                 set_hook: None,
                                 attributes: member_attributes.clone(),
@@ -2338,6 +2344,8 @@ impl Parser {
                     set_visibility,
                     is_static,
                     is_readonly,
+                    is_abstract,
+                    is_final,
                     get_hook,
                     set_hook,
                     attributes: member_attributes,
@@ -2374,6 +2382,12 @@ impl Parser {
             };
 
             if hook_name.eq_ignore_ascii_case(b"get") {
+                if get_hook.is_some() {
+                    return Err(ParseError {
+                        message: "Cannot redeclare property hook \"get\"".into(),
+                        span: self.span(),
+                    });
+                }
                 self.advance(); // consume 'get'
                 if matches!(self.peek(), TokenKind::OpenBrace) {
                     // get { ... }
@@ -2399,6 +2413,12 @@ impl Parser {
                     });
                 }
             } else if hook_name.eq_ignore_ascii_case(b"set") {
+                if set_hook.is_some() {
+                    return Err(ParseError {
+                        message: "Cannot redeclare property hook \"set\"".into(),
+                        span: self.span(),
+                    });
+                }
                 self.advance(); // consume 'set'
                 // Optional parameter: set(Type $value) or set($value) or just set
                 let param_name = if self.eat(&TokenKind::OpenParen) {
@@ -2414,12 +2434,36 @@ impl Parser {
                                 // set() with no param -- use default "value"
                                 break b"value".to_vec();
                             }
+                            TokenKind::Ampersand => {
+                                return Err(ParseError {
+                                    message: "set hook parameter must not be by-reference".into(),
+                                    span: self.span(),
+                                });
+                            }
+                            TokenKind::Ellipsis => {
+                                return Err(ParseError {
+                                    message: "set hook parameter must not be variadic".into(),
+                                    span: self.span(),
+                                });
+                            }
                             _ => {
                                 // Skip type hint tokens
                                 self.advance();
                             }
                         }
                     };
+                    // No default value allowed: `set($value = null)` → error
+                    if matches!(self.peek(), TokenKind::Assign) {
+                        return Err(ParseError {
+                            message: format!(
+                                "Parameter ${} of set hook {}::${} must not have a default value",
+                                String::from_utf8_lossy(&pname),
+                                "?",
+                                String::from_utf8_lossy(prop_name),
+                            ),
+                            span: self.span(),
+                        });
+                    }
                     self.expect(&TokenKind::CloseParen)?;
                     pname
                 } else {
@@ -2468,8 +2512,10 @@ impl Parser {
                 }
             } else {
                 return Err(ParseError {
-                    message: format!("expected 'get' or 'set' in property hook, got '{}'",
-                        String::from_utf8_lossy(&hook_name)),
+                    message: format!("Unknown hook \"{}\" for property {}::${}, expected \"get\" or \"set\"",
+                        String::from_utf8_lossy(&hook_name),
+                        "?",
+                        String::from_utf8_lossy(prop_name)),
                     span: self.span(),
                 });
             }
@@ -3740,6 +3786,46 @@ impl Parser {
                         }
                         TokenKind::Variable(name) => {
                             self.advance();
+                            // Property hook parent call: parent::$prop::get() / parent::$prop::set($v)
+                            // Rewrite to parent::__property_get_<prop>() / parent::__property_set_<prop>($v)
+                            if matches!(self.peek(), TokenKind::DoubleColon) {
+                                let lookahead = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
+                                if let Some(TokenKind::Identifier(ref hook_name)) = lookahead {
+                                    if (hook_name.eq_ignore_ascii_case(b"get")
+                                        || hook_name.eq_ignore_ascii_case(b"set"))
+                                        && matches!(
+                                            self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                                            Some(TokenKind::OpenParen)
+                                        )
+                                    {
+                                        self.advance(); // ::
+                                        let is_set = hook_name.eq_ignore_ascii_case(b"set");
+                                        self.advance(); // get/set
+                                        self.advance(); // (
+                                        let args = self.parse_arguments()?;
+                                        let end_span = self.span();
+                                        self.expect(&TokenKind::CloseParen)?;
+                                        let synthetic_method = if is_set {
+                                            let mut m = b"__property_set_".to_vec();
+                                            m.extend_from_slice(&name);
+                                            m
+                                        } else {
+                                            let mut m = b"__property_get_".to_vec();
+                                            m.extend_from_slice(&name);
+                                            m
+                                        };
+                                        expr = Expr {
+                                            span: expr.span.merge(end_span),
+                                            kind: ExprKind::StaticMethodCall {
+                                                class: Box::new(expr),
+                                                method: synthetic_method,
+                                                args,
+                                            },
+                                        };
+                                        continue;
+                                    }
+                                }
+                            }
                             // Check if followed by ( for dynamic static method call: Foo::$method()
                             if matches!(self.peek(), TokenKind::OpenParen) {
                                 // Dynamic method call: resolve variable to get method name

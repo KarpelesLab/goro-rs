@@ -124,6 +124,69 @@ pub enum Value {
     Generator(Rc<RefCell<PhpGenerator>>),
 }
 
+thread_local! {
+    /// Registry mapping resource id -> type name. When fopen/curl_init/etc.
+    /// allocate a handle id, they register it here so `is_resource`,
+    /// `get_resource_type`, and `gettype` report the value as a resource.
+    /// Removing an entry (on fclose etc.) marks the resource as closed.
+    static RESOURCE_REGISTRY: RefCell<std::collections::HashMap<i64, ResourceRegistryEntry>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+#[derive(Clone, Debug)]
+struct ResourceRegistryEntry {
+    resource_type: Vec<u8>,
+    closed: bool,
+}
+
+/// Mark an integer id as representing a resource of the given type.
+pub fn register_resource(id: i64, resource_type: &[u8]) {
+    RESOURCE_REGISTRY.with(|r| {
+        r.borrow_mut().insert(
+            id,
+            ResourceRegistryEntry {
+                resource_type: resource_type.to_vec(),
+                closed: false,
+            },
+        );
+    });
+}
+
+/// Mark a resource as closed (for fclose/curl_close semantics).
+pub fn close_resource(id: i64) {
+    RESOURCE_REGISTRY.with(|r| {
+        if let Some(entry) = r.borrow_mut().get_mut(&id) {
+            entry.closed = true;
+        }
+    });
+}
+
+/// Completely remove a resource from the registry.
+pub fn remove_resource(id: i64) {
+    RESOURCE_REGISTRY.with(|r| {
+        r.borrow_mut().remove(&id);
+    });
+}
+
+/// Return the registered resource type name for this id, or None if not registered.
+pub fn resource_type_of(id: i64) -> Option<Vec<u8>> {
+    RESOURCE_REGISTRY.with(|r| {
+        r.borrow().get(&id).map(|e| e.resource_type.clone())
+    })
+}
+
+/// True iff id is registered as a resource (even if closed).
+pub fn is_registered_resource(id: i64) -> bool {
+    RESOURCE_REGISTRY.with(|r| r.borrow().contains_key(&id))
+}
+
+/// True iff id is registered as a resource AND has not been closed.
+pub fn is_open_resource(id: i64) -> bool {
+    RESOURCE_REGISTRY.with(|r| {
+        r.borrow().get(&id).map(|e| !e.closed).unwrap_or(false)
+    })
+}
+
 impl Value {
     /// Dereference a value: if it's a Reference, return the inner value; otherwise return self.
     /// This is used by read_operand so existing code transparently reads through references.
@@ -164,12 +227,45 @@ impl Value {
             Value::Undef => "NULL",
             Value::Null => "NULL",
             Value::False | Value::True => "bool",
-            Value::Long(_) => "int",
+            Value::Long(n) => {
+                if is_registered_resource(*n) {
+                    if is_open_resource(*n) { "resource" } else { "resource (closed)" }
+                } else {
+                    "int"
+                }
+            }
             Value::Double(_) => "float",
             Value::String(_) => "string",
             Value::Array(_) => "array",
             Value::Object(_) | Value::Generator(_) => "object",
             Value::Reference(r) => r.borrow().type_name(),
+        }
+    }
+
+    /// Returns true if this value is a registered resource (as Long id).
+    pub fn is_resource(&self) -> bool {
+        match self {
+            Value::Long(n) => is_registered_resource(*n),
+            Value::Reference(r) => r.borrow().is_resource(),
+            _ => false,
+        }
+    }
+
+    /// Returns the resource id if this is a resource, or -1 otherwise.
+    pub fn resource_id(&self) -> i64 {
+        match self {
+            Value::Long(n) if is_registered_resource(*n) => *n,
+            Value::Reference(r) => r.borrow().resource_id(),
+            _ => -1,
+        }
+    }
+
+    /// Returns the resource type name (e.g. "stream") if this is a resource.
+    pub fn resource_type_name(&self) -> Option<Vec<u8>> {
+        match self {
+            Value::Long(n) => resource_type_of(*n),
+            Value::Reference(r) => r.borrow().resource_type_name(),
+            _ => None,
         }
     }
 

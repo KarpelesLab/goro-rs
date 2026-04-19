@@ -97,6 +97,12 @@ pub struct PropertyDef {
     pub has_set_hook: bool,
     /// Whether this property is virtual (hooks don't access the backing store)
     pub is_virtual: bool,
+    /// Whether the property itself is marked abstract (requires subclass to
+    /// implement hooks). Only valid on hooked properties.
+    pub is_abstract: bool,
+    /// Whether the property itself is marked final (subclasses cannot
+    /// override its hooks).
+    pub is_final: bool,
     pub attributes: Vec<RuntimeAttribute>,
 }
 
@@ -160,6 +166,14 @@ impl ClassEntry {
     }
 }
 
+/// A thread-local pool of freed object IDs. When a `PhpObject` is dropped
+/// (its Rc reference count hits zero), its ID is pushed here so subsequent
+/// `alloc_object_id` calls can reuse it. Matches PHP's handle recycling.
+std::thread_local! {
+    pub static FREED_OBJECT_IDS: std::cell::RefCell<Vec<u64>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
 /// A PHP object instance
 #[derive(Debug, Clone)]
 pub struct PhpObject {
@@ -167,6 +181,15 @@ pub struct PhpObject {
     /// Properties stored as ordered Vec to preserve declaration order
     pub properties: Vec<(Vec<u8>, Value)>,
     pub object_id: u64,
+}
+
+impl Drop for PhpObject {
+    fn drop(&mut self) {
+        // Don't recycle the sentinel zero id.
+        if self.object_id != 0 {
+            FREED_OBJECT_IDS.with(|ids| ids.borrow_mut().push(self.object_id));
+        }
+    }
 }
 
 impl PhpObject {

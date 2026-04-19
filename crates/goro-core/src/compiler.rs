@@ -2532,6 +2532,8 @@ impl Compiler {
                             set_visibility,
                             is_static,
                             is_readonly,
+                            is_abstract: prop_is_abstract,
+                            is_final: prop_is_final,
                             get_hook,
                             set_hook,
                             attributes,
@@ -3103,6 +3105,46 @@ impl Compiler {
                                 });
                             }
                             let prop_is_virtual = hooks_would_be_virtual;
+                            // Abstract+final is not allowed
+                            if *prop_is_abstract && *prop_is_final {
+                                return Err(CompileError {
+                                    message: format!("Cannot use the final modifier on an abstract property"),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            // Final+private is not allowed
+                            if *prop_is_final && matches!(visibility, goro_parser::ast::Visibility::Private) {
+                                return Err(CompileError {
+                                    message: "Property cannot be both final and private".to_string(),
+                                    line: stmt.span.line,
+                                });
+                            }
+                            // Abstract property in non-abstract, non-interface class
+                            if *prop_is_abstract && !modifiers.is_abstract && !modifiers.is_interface {
+                                let has_g = get_hook.is_some();
+                                let has_s = set_hook.is_some();
+                                let count = (has_g as usize) + (has_s as usize);
+                                let (plural, is_plural) = if count == 1 { ("method", false) } else { ("methods", true) };
+                                let mut parts: Vec<String> = Vec::new();
+                                if has_g {
+                                    parts.push(format!("{}::${}::get", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)));
+                                }
+                                if has_s {
+                                    parts.push(format!("{}::${}::set", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)));
+                                }
+                                let remaining_word = if is_plural { "remaining methods" } else { "remaining method" };
+                                return Err(CompileError {
+                                    message: format!(
+                                        "Class {} contains {} abstract {} and must therefore be declared abstract or implement the {} ({})",
+                                        String::from_utf8_lossy(name),
+                                        count,
+                                        plural,
+                                        remaining_word,
+                                        parts.join(", "),
+                                    ),
+                                    line: stmt.span.line,
+                                });
+                            }
                             class.properties.push(PropertyDef {
                                 name: prop_name.clone(),
                                 default: default_val,
@@ -3115,6 +3157,8 @@ impl Compiler {
                                 has_get_hook: get_hook.is_some(),
                                 has_set_hook: set_hook.is_some(),
                                 is_virtual: prop_is_virtual,
+                                is_abstract: *prop_is_abstract,
+                                is_final: *prop_is_final,
                                 attributes: self.compile_attributes(attributes),
                             });
 
@@ -3606,6 +3650,8 @@ impl Compiler {
                                                 has_get_hook: prom_has_get_hook,
                                                 has_set_hook: prom_has_set_hook,
                                                 is_virtual: prom_is_virtual,
+                                                is_abstract: false,
+                                                is_final: param.is_final,
                                                 attributes: pa,
                                             });
                                             // Compile promoted property get hook
@@ -10231,6 +10277,19 @@ fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
         }
         ExprKind::MethodCall { object, args, .. } => {
             expr_references_backing_store(object, prop_name) || args.iter().any(|a| expr_references_backing_store(&a.value, prop_name))
+        }
+        ExprKind::StaticMethodCall { method, args, .. } => {
+            // parent::$prop::get() / ::set() is lowered by the parser to
+            // StaticMethodCall { method: "__property_get_<prop>" or "__property_set_<prop>" }.
+            // Treat this as backing-store access for virtuality determination.
+            let is_parent_hook = (method.starts_with(b"__property_get_")
+                && &method[b"__property_get_".len()..] == prop_name)
+                || (method.starts_with(b"__property_set_")
+                    && &method[b"__property_set_".len()..] == prop_name);
+            if is_parent_hook {
+                return true;
+            }
+            args.iter().any(|a| expr_references_backing_store(&a.value, prop_name))
         }
         ExprKind::Ternary { condition, if_true, if_false } => {
             expr_references_backing_store(condition, prop_name)

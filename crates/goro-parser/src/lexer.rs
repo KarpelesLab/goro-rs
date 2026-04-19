@@ -26,6 +26,12 @@ pub struct Lexer<'a> {
     heredoc_label: Vec<u8>,
     /// Pending tokens (used when one lexer step produces multiple tokens)
     pending: Vec<Token>,
+    /// When true, `skip_whitespace` emits Whitespace/Comment tokens into
+    /// `pending` instead of silently skipping them. Used by token_get_all()
+    /// and PhpToken::tokenize(). The parser never enables this flag.
+    preserve_trivia: bool,
+    /// Accumulated trivia tokens (only used when preserve_trivia is true).
+    trivia_buffer: Vec<Token>,
 }
 
 impl<'a> Lexer<'a> {
@@ -37,7 +43,15 @@ impl<'a> Lexer<'a> {
             mode_stack: vec![LexerMode::Initial],
             heredoc_label: Vec::new(),
             pending: Vec::new(),
+            preserve_trivia: false,
+            trivia_buffer: Vec::new(),
         }
+    }
+
+    /// Turn on whitespace/comment token preservation. Must be set before
+    /// calling `tokenize()`.
+    pub fn set_preserve_trivia(&mut self, preserve: bool) {
+        self.preserve_trivia = preserve;
     }
 
     fn mode(&self) -> LexerMode {
@@ -94,13 +108,30 @@ impl<'a> Lexer<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while let Some(ch) = self.peek() {
-            match ch {
-                b' ' | b'\t' | b'\r' | b'\n' => {
-                    self.advance();
+        loop {
+            // Accumulate a run of whitespace.
+            let ws_start = self.pos;
+            let ws_line = self.line;
+            while let Some(ch) = self.peek() {
+                match ch {
+                    b' ' | b'\t' | b'\r' | b'\n' => {
+                        self.advance();
+                    }
+                    _ => break,
                 }
-                b'/' if self.peek_at(1) == Some(b'/') => {
-                    // Line comment
+            }
+            if self.preserve_trivia && self.pos > ws_start {
+                let bytes = self.source[ws_start..self.pos].to_vec();
+                self.trivia_buffer.push(Token::new(
+                    TokenKind::Whitespace(bytes),
+                    Span::new(ws_start as u32, self.pos as u32, ws_line),
+                ));
+            }
+            // Check for a comment.
+            match self.peek() {
+                Some(b'/') if self.peek_at(1) == Some(b'/') => {
+                    let c_start = self.pos;
+                    let c_line = self.line;
                     self.advance();
                     self.advance();
                     while let Some(ch) = self.peek() {
@@ -108,17 +139,25 @@ impl<'a> Lexer<'a> {
                             self.advance();
                             break;
                         }
-                        // Also handle ?> inside line comments - it ends the comment AND PHP mode
                         if ch == b'?' && self.peek_at(1) == Some(b'>') {
                             break;
                         }
                         self.advance();
                     }
+                    if self.preserve_trivia {
+                        let bytes = self.source[c_start..self.pos].to_vec();
+                        self.trivia_buffer.push(Token::new(
+                            TokenKind::LineComment(bytes),
+                            Span::new(c_start as u32, self.pos as u32, c_line),
+                        ));
+                    }
                 }
-                b'/' if self.peek_at(1) == Some(b'*') => {
-                    // Block comment
+                Some(b'/') if self.peek_at(1) == Some(b'*') => {
+                    let c_start = self.pos;
+                    let c_line = self.line;
                     self.advance();
                     self.advance();
+                    let is_doc = self.peek() == Some(b'*') && self.peek_at(1) != Some(b'/');
                     loop {
                         match self.advance() {
                             Some(b'*') if self.peek() == Some(b'/') => {
@@ -129,13 +168,25 @@ impl<'a> Lexer<'a> {
                             _ => {}
                         }
                     }
-                }
-                b'#' => {
-                    // # comment (but not #[ which is an attribute)
-                    if self.peek_at(1) == Some(b'[') {
-                        // PHP 8 attribute - break out so scan_scripting can emit AttributeOpen
-                        break;
+                    if self.preserve_trivia {
+                        let bytes = self.source[c_start..self.pos].to_vec();
+                        let tok = if is_doc {
+                            TokenKind::DocComment(bytes)
+                        } else {
+                            TokenKind::BlockComment(bytes)
+                        };
+                        self.trivia_buffer.push(Token::new(
+                            tok,
+                            Span::new(c_start as u32, self.pos as u32, c_line),
+                        ));
                     }
+                }
+                Some(b'#') => {
+                    if self.peek_at(1) == Some(b'[') {
+                        return;
+                    }
+                    let c_start = self.pos;
+                    let c_line = self.line;
                     self.advance();
                     while let Some(ch) = self.peek() {
                         if ch == b'\n' {
@@ -147,8 +198,15 @@ impl<'a> Lexer<'a> {
                         }
                         self.advance();
                     }
+                    if self.preserve_trivia {
+                        let bytes = self.source[c_start..self.pos].to_vec();
+                        self.trivia_buffer.push(Token::new(
+                            TokenKind::LineComment(bytes),
+                            Span::new(c_start as u32, self.pos as u32, c_line),
+                        ));
+                    }
                 }
-                _ => break,
+                _ => return,
             }
         }
     }
@@ -789,14 +847,27 @@ impl<'a> Lexer<'a> {
             return token;
         }
 
-        match self.mode() {
+        let token = match self.mode() {
             LexerMode::Initial => self.scan_initial(),
             LexerMode::Scripting => self.scan_scripting(),
             LexerMode::DoubleQuote | LexerMode::Backtick | LexerMode::Heredoc => {
                 // TODO: implement string interpolation scanning modes
                 self.scan_scripting()
             }
+        };
+
+        // If skip_whitespace accumulated trivia tokens (only when preserve_trivia
+        // is on), emit them first and buffer the real token for the next call.
+        if !self.trivia_buffer.is_empty() {
+            let mut trivia = std::mem::take(&mut self.trivia_buffer);
+            let first = trivia.remove(0);
+            // Push remaining trivia, then the real token, onto the pending queue.
+            self.pending.extend(trivia);
+            self.pending.push(token);
+            return first;
         }
+
+        token
     }
 
     fn scan_initial(&mut self) -> Token {
@@ -833,10 +904,22 @@ impl<'a> Lexer<'a> {
                 }
                 let tag_start = self.pos;
                 self.pos += 5; // skip "<?php"
+                // PHP's T_OPEN_TAG includes the trailing whitespace character
+                // that follows the literal "<?php" (one space, tab, or newline).
+                if let Some(c) = self.peek() {
+                    if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+                        if c == b'\r' && self.peek_at(1) == Some(b'\n') {
+                            self.advance();
+                            self.advance();
+                        } else {
+                            self.advance();
+                        }
+                    }
+                }
                 self.push_mode(LexerMode::Scripting);
                 return Token::new(
                     TokenKind::OpenTag,
-                    Span::new(tag_start as u32, self.pos as u32, self.line),
+                    Span::new(tag_start as u32, self.pos as u32, start_line),
                 );
             }
 

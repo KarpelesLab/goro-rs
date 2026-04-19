@@ -77,7 +77,7 @@ pub struct ClosureUse { pub variable: Vec<u8>, pub by_ref: bool }
 pub struct ClassModifiers { pub is_abstract: bool, pub is_final: bool, pub is_readonly: bool, pub is_interface: bool, pub is_trait: bool, pub is_enum: bool }
 #[derive(Debug, Clone)]
 pub enum ClassMember {
-    Property { name: Vec<u8>, type_hint: Option<TypeHint>, default: Option<Expr>, visibility: Visibility, set_visibility: Option<Visibility>, is_static: bool, is_readonly: bool, get_hook: Option<Vec<Statement>>, set_hook: Option<(Vec<u8>, Vec<Statement>)>, attributes: Vec<Attribute> },
+    Property { name: Vec<u8>, type_hint: Option<TypeHint>, default: Option<Expr>, visibility: Visibility, set_visibility: Option<Visibility>, is_static: bool, is_readonly: bool, is_abstract: bool, is_final: bool, get_hook: Option<Vec<Statement>>, set_hook: Option<(Vec<u8>, Vec<Statement>)>, attributes: Vec<Attribute> },
     Method { name: Vec<u8>, params: Vec<Param>, return_type: Option<TypeHint>, body: Option<Vec<Statement>>, visibility: Visibility, is_static: bool, is_abstract: bool, is_final: bool, line: u32, attributes: Vec<Attribute> },
     ClassConstant { name: Vec<u8>, value: Expr, visibility: Visibility, is_final: bool, attributes: Vec<Attribute> },
     TraitUse { traits: Vec<Vec<u8>>, adaptations: Vec<TraitAdaptation> },
