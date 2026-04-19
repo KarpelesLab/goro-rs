@@ -136,7 +136,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     while let Some(ch) = self.peek() {
                         if ch == b'\n' {
-                            self.advance();
+                            // Do NOT consume the newline - PHP emits it as T_WHITESPACE
                             break;
                         }
                         if ch == b'?' && self.peek_at(1) == Some(b'>') {
@@ -190,7 +190,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     while let Some(ch) = self.peek() {
                         if ch == b'\n' {
-                            self.advance();
+                            // Do NOT consume the newline - PHP emits it as T_WHITESPACE
                             break;
                         }
                         if ch == b'?' && self.peek_at(1) == Some(b'>') {

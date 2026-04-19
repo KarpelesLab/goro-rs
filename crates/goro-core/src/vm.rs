@@ -696,7 +696,7 @@ impl Vm {
                 c.insert(b"LOCK_EX".to_vec(), Value::Long(2));
                 c.insert(b"PREG_SPLIT_NO_EMPTY".to_vec(), Value::Long(1));
                 c.insert(b"PREG_SPLIT_DELIM_CAPTURE".to_vec(), Value::Long(2));
-                c.insert(b"T_STRING".to_vec(), Value::Long(319));
+                c.insert(b"T_STRING".to_vec(), Value::Long(262));
                 // Rounding mode constants
                 c.insert(b"PHP_ROUND_HALF_UP".to_vec(), Value::Long(1));
                 c.insert(b"PHP_ROUND_HALF_DOWN".to_vec(), Value::Long(2));
@@ -976,166 +976,168 @@ impl Vm {
                 c.insert(b"IMAGETYPE_UNKNOWN".to_vec(), Value::Long(0));
                 c.insert(b"IMAGETYPE_COUNT".to_vec(), Value::Long(21));
                 c.insert(b"IMAGETYPE_JPEG2000".to_vec(), Value::Long(9)); // alias for JPC
-                // Token constants
+                // Token constants (T_*). Values follow the PHP 8.2 grammar ordering
+                // from zend_language_parser.y. Must stay in sync with
+                // token_kind_to_php_id() and token_id_to_name() in goro-parser.
+                c.insert(b"TOKEN_PARSE".to_vec(), Value::Long(1));
                 c.insert(b"T_LNUMBER".to_vec(), Value::Long(260));
                 c.insert(b"T_DNUMBER".to_vec(), Value::Long(261));
-                c.insert(b"T_CONSTANT_ENCAPSED_STRING".to_vec(), Value::Long(318));
-                c.insert(b"T_ENCAPSED_AND_WHITESPACE".to_vec(), Value::Long(322));
-                c.insert(b"T_VARIABLE".to_vec(), Value::Long(320));
-                c.insert(b"T_OPEN_TAG".to_vec(), Value::Long(392));
-                c.insert(b"T_CLOSE_TAG".to_vec(), Value::Long(393));
-                c.insert(b"T_INLINE_HTML".to_vec(), Value::Long(321));
-                c.insert(b"T_WHITESPACE".to_vec(), Value::Long(394));
-                c.insert(b"T_COMMENT".to_vec(), Value::Long(395));
-                c.insert(b"T_DOC_COMMENT".to_vec(), Value::Long(396));
-                // More token constants
-                c.insert(b"TOKEN_PARSE".to_vec(), Value::Long(1));
-                c.insert(b"T_FUNCTION".to_vec(), Value::Long(346));
-                c.insert(b"T_CLASS".to_vec(), Value::Long(369));
-                c.insert(b"T_IF".to_vec(), Value::Long(324));
-                c.insert(b"T_ELSE".to_vec(), Value::Long(308));
-                c.insert(b"T_ELSEIF".to_vec(), Value::Long(307));
-                c.insert(b"T_WHILE".to_vec(), Value::Long(327));
-                c.insert(b"T_FOR".to_vec(), Value::Long(329));
-                c.insert(b"T_FOREACH".to_vec(), Value::Long(331));
-                c.insert(b"T_SWITCH".to_vec(), Value::Long(326));
-                c.insert(b"T_CASE".to_vec(), Value::Long(333));
-                c.insert(b"T_BREAK".to_vec(), Value::Long(335));
-                c.insert(b"T_CONTINUE".to_vec(), Value::Long(336));
-                c.insert(b"T_RETURN".to_vec(), Value::Long(348));
-                c.insert(b"T_ECHO".to_vec(), Value::Long(323));
-                c.insert(b"T_NEW".to_vec(), Value::Long(309));
-                c.insert(b"T_EXIT".to_vec(), Value::Long(305));
-                c.insert(b"T_TRY".to_vec(), Value::Long(337));
-                c.insert(b"T_CATCH".to_vec(), Value::Long(338));
-                c.insert(b"T_FINALLY".to_vec(), Value::Long(339));
-                c.insert(b"T_THROW".to_vec(), Value::Long(341));
-                c.insert(b"T_EXTENDS".to_vec(), Value::Long(364));
-                c.insert(b"T_IMPLEMENTS".to_vec(), Value::Long(365));
-                c.insert(b"T_INTERFACE".to_vec(), Value::Long(367));
-                c.insert(b"T_ABSTRACT".to_vec(), Value::Long(374));
-                c.insert(b"T_FINAL".to_vec(), Value::Long(375));
-                c.insert(b"T_PRIVATE".to_vec(), Value::Long(373));
-                c.insert(b"T_PROTECTED".to_vec(), Value::Long(372));
-                c.insert(b"T_PUBLIC".to_vec(), Value::Long(371));
-                c.insert(b"T_STATIC".to_vec(), Value::Long(376));
-                c.insert(b"T_CONST".to_vec(), Value::Long(362));
-                c.insert(b"T_ARRAY".to_vec(), Value::Long(370));
-                c.insert(b"T_LIST".to_vec(), Value::Long(363));
-                c.insert(b"T_ISSET".to_vec(), Value::Long(354));
-                c.insert(b"T_UNSET".to_vec(), Value::Long(355));
-                c.insert(b"T_EMPTY".to_vec(), Value::Long(356));
-                c.insert(b"T_INSTANCEOF".to_vec(), Value::Long(310));
-                c.insert(b"T_AS".to_vec(), Value::Long(332));
-                c.insert(b"T_DO".to_vec(), Value::Long(328));
-                c.insert(b"T_YIELD".to_vec(), Value::Long(267));
-                c.insert(b"T_YIELD_FROM".to_vec(), Value::Long(268));
-                c.insert(b"T_MATCH".to_vec(), Value::Long(349));
-                c.insert(b"T_ENUM".to_vec(), Value::Long(389));
-                c.insert(b"T_TRAIT".to_vec(), Value::Long(368));
-                c.insert(b"T_NAMESPACE".to_vec(), Value::Long(390));
-                c.insert(b"T_USE".to_vec(), Value::Long(357));
-                c.insert(b"T_INCLUDE".to_vec(), Value::Long(262));
-                c.insert(b"T_INCLUDE_ONCE".to_vec(), Value::Long(263));
-                c.insert(b"T_REQUIRE".to_vec(), Value::Long(264));
-                c.insert(b"T_REQUIRE_ONCE".to_vec(), Value::Long(265));
-                c.insert(b"T_PRINT".to_vec(), Value::Long(266));
-                c.insert(b"T_PLUS_EQUAL".to_vec(), Value::Long(277));
-                c.insert(b"T_MINUS_EQUAL".to_vec(), Value::Long(278));
-                c.insert(b"T_MUL_EQUAL".to_vec(), Value::Long(279));
-                c.insert(b"T_DIV_EQUAL".to_vec(), Value::Long(280));
-                c.insert(b"T_CONCAT_EQUAL".to_vec(), Value::Long(281));
-                c.insert(b"T_MOD_EQUAL".to_vec(), Value::Long(282));
-                c.insert(b"T_AND_EQUAL".to_vec(), Value::Long(283));
-                c.insert(b"T_OR_EQUAL".to_vec(), Value::Long(284));
-                c.insert(b"T_XOR_EQUAL".to_vec(), Value::Long(285));
-                c.insert(b"T_SL_EQUAL".to_vec(), Value::Long(286));
-                c.insert(b"T_SR_EQUAL".to_vec(), Value::Long(287));
-                c.insert(b"T_COALESCE_EQUAL".to_vec(), Value::Long(288));
-                c.insert(b"T_POW_EQUAL".to_vec(), Value::Long(289));
-                c.insert(b"T_BOOLEAN_OR".to_vec(), Value::Long(290));
-                c.insert(b"T_BOOLEAN_AND".to_vec(), Value::Long(291));
-                c.insert(b"T_IS_EQUAL".to_vec(), Value::Long(292));
-                c.insert(b"T_IS_NOT_EQUAL".to_vec(), Value::Long(293));
-                c.insert(b"T_IS_IDENTICAL".to_vec(), Value::Long(294));
-                c.insert(b"T_IS_NOT_IDENTICAL".to_vec(), Value::Long(295));
-                c.insert(b"T_IS_SMALLER_OR_EQUAL".to_vec(), Value::Long(296));
-                c.insert(b"T_IS_GREATER_OR_EQUAL".to_vec(), Value::Long(297));
-                c.insert(b"T_SPACESHIP".to_vec(), Value::Long(298));
-                c.insert(b"T_SL".to_vec(), Value::Long(299));
-                c.insert(b"T_SR".to_vec(), Value::Long(300));
-                c.insert(b"T_INC".to_vec(), Value::Long(301));
-                c.insert(b"T_DEC".to_vec(), Value::Long(302));
-                c.insert(b"T_INT_CAST".to_vec(), Value::Long(303));
-                c.insert(b"T_DOUBLE_CAST".to_vec(), Value::Long(304));
-                c.insert(b"T_STRING_CAST".to_vec(), Value::Long(305));
-                c.insert(b"T_ARRAY_CAST".to_vec(), Value::Long(306));
-                c.insert(b"T_OBJECT_CAST".to_vec(), Value::Long(315));
-                c.insert(b"T_BOOL_CAST".to_vec(), Value::Long(316));
-                c.insert(b"T_UNSET_CAST".to_vec(), Value::Long(317));
-                c.insert(b"T_OBJECT_OPERATOR".to_vec(), Value::Long(395));
-                c.insert(b"T_NULLSAFE_OBJECT_OPERATOR".to_vec(), Value::Long(396));
-                c.insert(b"T_DOUBLE_ARROW".to_vec(), Value::Long(397));
-                c.insert(b"T_DOUBLE_COLON".to_vec(), Value::Long(398));
+                c.insert(b"T_STRING".to_vec(), Value::Long(262));
+                c.insert(b"T_NAME_FULLY_QUALIFIED".to_vec(), Value::Long(263));
+                c.insert(b"T_NAME_RELATIVE".to_vec(), Value::Long(264));
+                c.insert(b"T_NAME_QUALIFIED".to_vec(), Value::Long(265));
+                c.insert(b"T_VARIABLE".to_vec(), Value::Long(266));
+                c.insert(b"T_INLINE_HTML".to_vec(), Value::Long(267));
+                c.insert(b"T_ENCAPSED_AND_WHITESPACE".to_vec(), Value::Long(268));
+                c.insert(b"T_CONSTANT_ENCAPSED_STRING".to_vec(), Value::Long(269));
+                c.insert(b"T_STRING_VARNAME".to_vec(), Value::Long(270));
+                c.insert(b"T_NUM_STRING".to_vec(), Value::Long(271));
+                c.insert(b"T_INCLUDE".to_vec(), Value::Long(272));
+                c.insert(b"T_INCLUDE_ONCE".to_vec(), Value::Long(273));
+                c.insert(b"T_EVAL".to_vec(), Value::Long(274));
+                c.insert(b"T_REQUIRE".to_vec(), Value::Long(275));
+                c.insert(b"T_REQUIRE_ONCE".to_vec(), Value::Long(276));
+                c.insert(b"T_LOGICAL_OR".to_vec(), Value::Long(277));
+                c.insert(b"T_LOGICAL_XOR".to_vec(), Value::Long(278));
+                c.insert(b"T_LOGICAL_AND".to_vec(), Value::Long(279));
+                c.insert(b"T_PRINT".to_vec(), Value::Long(280));
+                c.insert(b"T_YIELD".to_vec(), Value::Long(281));
+                c.insert(b"T_YIELD_FROM".to_vec(), Value::Long(282));
+                c.insert(b"T_INSTANCEOF".to_vec(), Value::Long(283));
+                c.insert(b"T_NEW".to_vec(), Value::Long(284));
+                c.insert(b"T_CLONE".to_vec(), Value::Long(285));
+                c.insert(b"T_EXIT".to_vec(), Value::Long(286));
+                c.insert(b"T_IF".to_vec(), Value::Long(287));
+                c.insert(b"T_ELSEIF".to_vec(), Value::Long(288));
+                c.insert(b"T_ELSE".to_vec(), Value::Long(289));
+                c.insert(b"T_ENDIF".to_vec(), Value::Long(290));
+                c.insert(b"T_ECHO".to_vec(), Value::Long(291));
+                c.insert(b"T_DO".to_vec(), Value::Long(292));
+                c.insert(b"T_WHILE".to_vec(), Value::Long(293));
+                c.insert(b"T_ENDWHILE".to_vec(), Value::Long(294));
+                c.insert(b"T_FOR".to_vec(), Value::Long(295));
+                c.insert(b"T_ENDFOR".to_vec(), Value::Long(296));
+                c.insert(b"T_FOREACH".to_vec(), Value::Long(297));
+                c.insert(b"T_ENDFOREACH".to_vec(), Value::Long(298));
+                c.insert(b"T_DECLARE".to_vec(), Value::Long(299));
+                c.insert(b"T_ENDDECLARE".to_vec(), Value::Long(300));
+                c.insert(b"T_AS".to_vec(), Value::Long(301));
+                c.insert(b"T_SWITCH".to_vec(), Value::Long(302));
+                c.insert(b"T_ENDSWITCH".to_vec(), Value::Long(303));
+                c.insert(b"T_CASE".to_vec(), Value::Long(304));
+                c.insert(b"T_DEFAULT".to_vec(), Value::Long(305));
+                c.insert(b"T_MATCH".to_vec(), Value::Long(306));
+                c.insert(b"T_BREAK".to_vec(), Value::Long(307));
+                c.insert(b"T_CONTINUE".to_vec(), Value::Long(308));
+                c.insert(b"T_GOTO".to_vec(), Value::Long(309));
+                c.insert(b"T_FUNCTION".to_vec(), Value::Long(310));
+                c.insert(b"T_FN".to_vec(), Value::Long(311));
+                c.insert(b"T_CONST".to_vec(), Value::Long(312));
+                c.insert(b"T_RETURN".to_vec(), Value::Long(313));
+                c.insert(b"T_TRY".to_vec(), Value::Long(314));
+                c.insert(b"T_CATCH".to_vec(), Value::Long(315));
+                c.insert(b"T_FINALLY".to_vec(), Value::Long(316));
+                c.insert(b"T_THROW".to_vec(), Value::Long(317));
+                c.insert(b"T_USE".to_vec(), Value::Long(318));
+                c.insert(b"T_INSTEADOF".to_vec(), Value::Long(319));
+                c.insert(b"T_GLOBAL".to_vec(), Value::Long(320));
+                c.insert(b"T_STATIC".to_vec(), Value::Long(321));
+                c.insert(b"T_ABSTRACT".to_vec(), Value::Long(322));
+                c.insert(b"T_FINAL".to_vec(), Value::Long(323));
+                c.insert(b"T_PRIVATE".to_vec(), Value::Long(324));
+                c.insert(b"T_PROTECTED".to_vec(), Value::Long(325));
+                c.insert(b"T_PUBLIC".to_vec(), Value::Long(326));
+                c.insert(b"T_READONLY".to_vec(), Value::Long(327));
+                c.insert(b"T_VAR".to_vec(), Value::Long(328));
+                c.insert(b"T_UNSET".to_vec(), Value::Long(329));
+                c.insert(b"T_ISSET".to_vec(), Value::Long(330));
+                c.insert(b"T_EMPTY".to_vec(), Value::Long(331));
+                c.insert(b"T_HALT_COMPILER".to_vec(), Value::Long(332));
+                c.insert(b"T_CLASS".to_vec(), Value::Long(333));
+                c.insert(b"T_TRAIT".to_vec(), Value::Long(334));
+                c.insert(b"T_INTERFACE".to_vec(), Value::Long(335));
+                c.insert(b"T_ENUM".to_vec(), Value::Long(336));
+                c.insert(b"T_EXTENDS".to_vec(), Value::Long(337));
+                c.insert(b"T_IMPLEMENTS".to_vec(), Value::Long(338));
+                c.insert(b"T_NAMESPACE".to_vec(), Value::Long(339));
+                c.insert(b"T_LIST".to_vec(), Value::Long(340));
+                c.insert(b"T_ARRAY".to_vec(), Value::Long(341));
+                c.insert(b"T_CALLABLE".to_vec(), Value::Long(342));
+                c.insert(b"T_LINE".to_vec(), Value::Long(343));
+                c.insert(b"T_FILE".to_vec(), Value::Long(344));
+                c.insert(b"T_DIR".to_vec(), Value::Long(345));
+                c.insert(b"T_CLASS_C".to_vec(), Value::Long(346));
+                c.insert(b"T_TRAIT_C".to_vec(), Value::Long(347));
+                c.insert(b"T_METHOD_C".to_vec(), Value::Long(348));
+                c.insert(b"T_FUNC_C".to_vec(), Value::Long(349));
+                c.insert(b"T_NS_C".to_vec(), Value::Long(350));
+                c.insert(b"T_ATTRIBUTE".to_vec(), Value::Long(351));
+                c.insert(b"T_PLUS_EQUAL".to_vec(), Value::Long(352));
+                c.insert(b"T_MINUS_EQUAL".to_vec(), Value::Long(353));
+                c.insert(b"T_MUL_EQUAL".to_vec(), Value::Long(354));
+                c.insert(b"T_DIV_EQUAL".to_vec(), Value::Long(355));
+                c.insert(b"T_CONCAT_EQUAL".to_vec(), Value::Long(356));
+                c.insert(b"T_MOD_EQUAL".to_vec(), Value::Long(357));
+                c.insert(b"T_AND_EQUAL".to_vec(), Value::Long(358));
+                c.insert(b"T_OR_EQUAL".to_vec(), Value::Long(359));
+                c.insert(b"T_XOR_EQUAL".to_vec(), Value::Long(360));
+                c.insert(b"T_SL_EQUAL".to_vec(), Value::Long(361));
+                c.insert(b"T_SR_EQUAL".to_vec(), Value::Long(362));
+                c.insert(b"T_COALESCE_EQUAL".to_vec(), Value::Long(363));
+                c.insert(b"T_BOOLEAN_OR".to_vec(), Value::Long(364));
+                c.insert(b"T_BOOLEAN_AND".to_vec(), Value::Long(365));
+                c.insert(b"T_IS_EQUAL".to_vec(), Value::Long(366));
+                c.insert(b"T_IS_NOT_EQUAL".to_vec(), Value::Long(367));
+                c.insert(b"T_IS_IDENTICAL".to_vec(), Value::Long(368));
+                c.insert(b"T_IS_NOT_IDENTICAL".to_vec(), Value::Long(369));
+                c.insert(b"T_IS_SMALLER_OR_EQUAL".to_vec(), Value::Long(370));
+                c.insert(b"T_IS_GREATER_OR_EQUAL".to_vec(), Value::Long(371));
+                c.insert(b"T_SPACESHIP".to_vec(), Value::Long(372));
+                c.insert(b"T_SL".to_vec(), Value::Long(373));
+                c.insert(b"T_SR".to_vec(), Value::Long(374));
+                c.insert(b"T_INC".to_vec(), Value::Long(375));
+                c.insert(b"T_DEC".to_vec(), Value::Long(376));
+                c.insert(b"T_INT_CAST".to_vec(), Value::Long(377));
+                c.insert(b"T_DOUBLE_CAST".to_vec(), Value::Long(378));
+                c.insert(b"T_STRING_CAST".to_vec(), Value::Long(379));
+                c.insert(b"T_ARRAY_CAST".to_vec(), Value::Long(380));
+                c.insert(b"T_OBJECT_CAST".to_vec(), Value::Long(381));
+                c.insert(b"T_BOOL_CAST".to_vec(), Value::Long(382));
+                c.insert(b"T_UNSET_CAST".to_vec(), Value::Long(383));
+                c.insert(b"T_OBJECT_OPERATOR".to_vec(), Value::Long(384));
+                c.insert(b"T_NULLSAFE_OBJECT_OPERATOR".to_vec(), Value::Long(385));
+                c.insert(b"T_DOUBLE_ARROW".to_vec(), Value::Long(386));
+                c.insert(b"T_COMMENT".to_vec(), Value::Long(387));
+                c.insert(b"T_DOC_COMMENT".to_vec(), Value::Long(388));
+                c.insert(b"T_OPEN_TAG".to_vec(), Value::Long(389));
+                c.insert(b"T_OPEN_TAG_WITH_ECHO".to_vec(), Value::Long(390));
+                c.insert(b"T_CLOSE_TAG".to_vec(), Value::Long(391));
+                c.insert(b"T_WHITESPACE".to_vec(), Value::Long(392));
+                c.insert(b"T_START_HEREDOC".to_vec(), Value::Long(393));
+                c.insert(b"T_END_HEREDOC".to_vec(), Value::Long(394));
+                c.insert(b"T_DOLLAR_OPEN_CURLY_BRACES".to_vec(), Value::Long(395));
+                c.insert(b"T_CURLY_OPEN".to_vec(), Value::Long(396));
+                // T_DOUBLE_COLON and T_PAAMAYIM_NEKUDOTAYIM share the same id
+                c.insert(b"T_PAAMAYIM_NEKUDOTAYIM".to_vec(), Value::Long(397));
+                c.insert(b"T_DOUBLE_COLON".to_vec(), Value::Long(397));
+                c.insert(b"T_NS_SEPARATOR".to_vec(), Value::Long(398));
                 c.insert(b"T_ELLIPSIS".to_vec(), Value::Long(399));
                 c.insert(b"T_COALESCE".to_vec(), Value::Long(400));
                 c.insert(b"T_POW".to_vec(), Value::Long(401));
-                c.insert(b"T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG".to_vec(), Value::Long(402));
-                c.insert(b"T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG".to_vec(), Value::Long(403));
-                c.insert(b"T_NAME_FULLY_QUALIFIED".to_vec(), Value::Long(312));
-                c.insert(b"T_NAME_QUALIFIED".to_vec(), Value::Long(313));
-                c.insert(b"T_NAME_RELATIVE".to_vec(), Value::Long(314));
-                c.insert(b"T_READONLY".to_vec(), Value::Long(383));
-                c.insert(b"T_FN".to_vec(), Value::Long(347));
-                c.insert(b"T_ATTRIBUTE".to_vec(), Value::Long(404));
-                c.insert(b"T_NAMED_ARGUMENT".to_vec(), Value::Long(405));
-                c.insert(b"T_PIPE".to_vec(), Value::Long(406));
-                c.insert(b"T_GLOBAL".to_vec(), Value::Long(358));
-                c.insert(b"T_VAR".to_vec(), Value::Long(360));
-                c.insert(b"T_EVAL".to_vec(), Value::Long(323));
-                c.insert(b"T_LOGICAL_OR".to_vec(), Value::Long(311));
-                c.insert(b"T_LOGICAL_AND".to_vec(), Value::Long(312));
-                c.insert(b"T_LOGICAL_XOR".to_vec(), Value::Long(313));
-                c.insert(b"T_LINE".to_vec(), Value::Long(380));
-                c.insert(b"T_FILE".to_vec(), Value::Long(381));
-                c.insert(b"T_DIR".to_vec(), Value::Long(382));
-                c.insert(b"T_CLASS_C".to_vec(), Value::Long(384));
-                c.insert(b"T_TRAIT_C".to_vec(), Value::Long(385));
-                c.insert(b"T_METHOD_C".to_vec(), Value::Long(386));
-                c.insert(b"T_FUNC_C".to_vec(), Value::Long(387));
-                c.insert(b"T_NS_C".to_vec(), Value::Long(388));
-                c.insert(b"T_NS_SEPARATOR".to_vec(), Value::Long(391));
-                c.insert(b"T_DECLARE".to_vec(), Value::Long(340));
-                c.insert(b"T_ENDDECLARE".to_vec(), Value::Long(342));
-                c.insert(b"T_ENDFOR".to_vec(), Value::Long(330));
-                c.insert(b"T_ENDFOREACH".to_vec(), Value::Long(332));
-                c.insert(b"T_ENDIF".to_vec(), Value::Long(325));
-                c.insert(b"T_ENDSWITCH".to_vec(), Value::Long(327));
-                c.insert(b"T_ENDWHILE".to_vec(), Value::Long(328));
-                c.insert(b"T_CLONE".to_vec(), Value::Long(310));
-                c.insert(b"T_DEFAULT".to_vec(), Value::Long(334));
-                c.insert(b"T_INSTEADOF".to_vec(), Value::Long(366));
-                c.insert(b"T_CALLABLE".to_vec(), Value::Long(377));
-                c.insert(b"T_CURLY_OPEN".to_vec(), Value::Long(399));
-                c.insert(b"T_DOLLAR_OPEN_CURLY_BRACES".to_vec(), Value::Long(400));
-                c.insert(b"T_START_HEREDOC".to_vec(), Value::Long(401));
-                c.insert(b"T_END_HEREDOC".to_vec(), Value::Long(402));
-                c.insert(b"T_OPEN_TAG_WITH_ECHO".to_vec(), Value::Long(393));
-                c.insert(b"T_HALT_COMPILER".to_vec(), Value::Long(378));
-                c.insert(b"T_BAD_CHARACTER".to_vec(), Value::Long(403));
-                // Comments + whitespace (used by PhpToken::tokenize output)
-                c.insert(b"T_COMMENT".to_vec(), Value::Long(377));
-                c.insert(b"T_DOC_COMMENT".to_vec(), Value::Long(392));
-                c.insert(b"T_WHITESPACE".to_vec(), Value::Long(397));
-                c.insert(b"T_INLINE_HTML".to_vec(), Value::Long(312));
-                c.insert(b"T_NUM_STRING".to_vec(), Value::Long(322));
-                c.insert(b"T_STRING_VARNAME".to_vec(), Value::Long(321));
-                // Additional (for tokenizer tests)
-                c.insert(b"TOKEN_PARSE".to_vec(), Value::Long(1));
-                c.insert(b"T_PAAMAYIM_NEKUDOTAYIM".to_vec(), Value::Long(398));
-                c.insert(b"T_PUBLIC_SET".to_vec(), Value::Long(407));
-                c.insert(b"T_PROTECTED_SET".to_vec(), Value::Long(408));
-                c.insert(b"T_PRIVATE_SET".to_vec(), Value::Long(409));
+                c.insert(b"T_POW_EQUAL".to_vec(), Value::Long(402));
+                c.insert(b"T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG".to_vec(), Value::Long(403));
+                c.insert(b"T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG".to_vec(), Value::Long(404));
+                c.insert(b"T_BAD_CHARACTER".to_vec(), Value::Long(405));
+                // PHP 8.4+ additions
+                c.insert(b"T_PRIVATE_SET".to_vec(), Value::Long(406));
+                c.insert(b"T_PROTECTED_SET".to_vec(), Value::Long(407));
+                c.insert(b"T_PUBLIC_SET".to_vec(), Value::Long(408));
+                // PHP 8.5 additions
+                c.insert(b"T_PROPERTY_C".to_vec(), Value::Long(409));
+                c.insert(b"T_VOID_CAST".to_vec(), Value::Long(410));
+                c.insert(b"T_PIPE".to_vec(), Value::Long(411));
+                // Non-grammar / internal tokens used by some PHP builds
+                c.insert(b"T_NAMED_ARGUMENT".to_vec(), Value::Long(412));
                 // Boolean constants
                 c.insert(b"TRUE".to_vec(), Value::True);
                 c.insert(b"FALSE".to_vec(), Value::False);
@@ -4079,6 +4081,45 @@ impl Vm {
         std::mem::take(&mut self.output)
     }
 
+    /// Apply non-static property defaults from a class (and its ancestors) onto
+    /// a freshly-constructed object. Used by static factory methods like
+    /// PhpToken::tokenize() to initialize subclass-declared properties.
+    pub fn apply_class_property_defaults(&self, obj: &mut PhpObject, class_lower: &[u8]) {
+        // Walk the chain from root (most ancestral) to subclass so that
+        // subclasses override parent defaults.
+        let mut chain: Vec<Vec<u8>> = Vec::new();
+        let mut cur: Vec<u8> = class_lower.to_vec();
+        for _ in 0..50 {
+            chain.push(cur.clone());
+            let parent = match self.classes.get(&cur) {
+                Some(ce) => ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>()),
+                None => None,
+            };
+            match parent {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+        // Apply from root to leaf
+        for name in chain.iter().rev() {
+            if let Some(ce) = self.classes.get(name) {
+                for prop in &ce.properties {
+                    if prop.is_static { continue; }
+                    // Only apply if the object doesn't already have a value
+                    // (tokenize pre-sets id/text/line/pos).
+                    let cur_val = obj.get_property(&prop.name);
+                    if matches!(cur_val, Value::Undef | Value::Null)
+                        && !matches!(prop.default, Value::Undef)
+                    {
+                        obj.set_property(prop.name.clone(), prop.default.clone());
+                    } else if matches!(cur_val, Value::Undef) {
+                        obj.set_property(prop.name.clone(), prop.default.clone());
+                    }
+                }
+            }
+        }
+    }
+
     /// Write to the output buffer
     /// Check if class_name extends target_name through the parent chain
     pub fn class_extends(&self, class_name: &[u8], target_name: &[u8]) -> bool {
@@ -4285,6 +4326,7 @@ impl Vm {
                 b"splfileinfo" | b"splfileobject" | b"spltempfileobject"
                     | b"directoryiterator" | b"filesystemiterator" | b"recursivedirectoryiterator"
                     | b"globiterator"
+                    | b"phptoken"
             ),
             _ => false,
         }
@@ -4635,9 +4677,10 @@ impl Vm {
                 match goro_parser::token::token_id_to_name(id) {
                     Some(name) => Some(Value::String(PhpString::from_bytes(name.as_bytes()))),
                     None => {
-                        // For single-char tokens, PHP returns null
+                        // For single-char tokens (< 256), return the char.
+                        // For unknown large ids, return null.
                         if id > 0 && id < 256 {
-                            Some(Value::Null)
+                            Some(Value::String(PhpString::from_bytes(&[id as u8])))
                         } else {
                             Some(Value::Null)
                         }
@@ -13527,8 +13570,25 @@ impl Vm {
                             Value::Null
                         };
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                    } else if func_name_lower == b"phptoken::tokenize" {
+                    } else if func_name_lower.ends_with(b"::tokenize")
+                        && {
+                            // Match PhpToken itself or any subclass.
+                            let class_part = &func_name_lower[..func_name_lower.len() - b"::tokenize".len()];
+                            class_part == b"phptoken"
+                                || self.class_extends(class_part, b"phptoken")
+                        }
+                    {
                         // PhpToken::tokenize(string $code, int $flags = 0): array
+                        // If called as SubClass::tokenize, create SubClass instances.
+                        let class_part = &func_name_lower[..func_name_lower.len() - b"::tokenize".len()];
+                        // Recover the original class name (preserve case) by looking it up.
+                        let class_name: Vec<u8> = if class_part == b"phptoken" {
+                            b"PhpToken".to_vec()
+                        } else {
+                            self.classes.get(class_part)
+                                .map(|ce| ce.name.clone())
+                                .unwrap_or_else(|| class_part.to_vec())
+                        };
                         let source = call.args.first().cloned().unwrap_or(Value::Null).to_php_string();
                         let _flags = call.args.get(1).map(|v| v.to_long()).unwrap_or(0);
                         let mut lexer = goro_parser::Lexer::new(source.as_bytes());
@@ -13556,11 +13616,15 @@ impl Vm {
                                 (token_id, text)
                             };
                             let obj_id = self.next_object_id();
-                            let mut tok_obj = PhpObject::new(b"PhpToken".to_vec(), obj_id);
+                            let mut tok_obj = PhpObject::new(class_name.clone(), obj_id);
                             tok_obj.set_property(b"id".to_vec(), Value::Long(id_val));
                             tok_obj.set_property(b"text".to_vec(), Value::String(PhpString::from_bytes(text_val)));
                             tok_obj.set_property(b"line".to_vec(), Value::Long(token.span.line as i64));
                             tok_obj.set_property(b"pos".to_vec(), Value::Long(token.span.start as i64));
+                            // If the class defines additional properties with defaults, initialize them.
+                            if class_part != b"phptoken" {
+                                self.apply_class_property_defaults(&mut tok_obj, class_part);
+                            }
                             result.push(Value::Object(Rc::new(RefCell::new(tok_obj))));
                         }
                         self.write_operand(
