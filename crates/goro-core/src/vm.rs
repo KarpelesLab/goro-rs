@@ -2266,7 +2266,7 @@ impl Vm {
 
     /// Check if a value matches a single ParamType constraint.
     /// Returns true if the value is acceptable for the given type.
-    fn value_matches_type(&self, value: &Value, param_type: &ParamType) -> bool {
+    pub fn value_matches_type(&self, value: &Value, param_type: &ParamType) -> bool {
         self.value_matches_type_mode(value, param_type, false)
     }
 
@@ -3073,7 +3073,62 @@ impl Vm {
             let mut ob = obj.borrow_mut();
             ob.remove_property(b"__lazy_initializer");
         }
+        // Track for destruction: for ghost objects, the lazy object itself
+        // becomes a regular object on init and should get __destruct called
+        // when dropped. For proxies, the real backing object was already
+        // tracked when it was constructed inside the initializer.
+        if state_bytes == b"ghost" {
+            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let has_destruct = self
+                .classes
+                .get(&class_lower)
+                .map(|c| c.methods.contains_key(&b"__destruct".to_vec()))
+                .unwrap_or(false);
+            if has_destruct {
+                // Avoid double-registration: check it's not already tracked.
+                let already = self.destructible_objects.iter().any(|v| match v {
+                    Value::Object(rc) => rc.borrow().object_id == object_id,
+                    _ => false,
+                });
+                if !already {
+                    self.destructible_objects.push(Value::Object(obj.clone()));
+                }
+            }
+        }
         true
+    }
+
+    /// Initialize any lazy objects contained in the given values so that
+    /// subsequent comparison/conversion sees the realized state.
+    /// Only initializes when BOTH sides are objects (so `'str' < $lazy` does
+    /// not force initialization via __toString).
+    /// Returns the values with lazy proxies redirected to their real backing
+    /// object (so comparing them sees the real class and properties).
+    pub fn init_lazy_in(&mut self, vals: &[&Value]) -> Vec<Value> {
+        let all_obj = vals.iter().all(|v| matches!(v.deref(), Value::Object(_)));
+        let mut out = Vec::with_capacity(vals.len());
+        for v in vals {
+            if let Value::Object(obj) = v.deref() {
+                let is_lazy = matches!(
+                    obj.borrow().get_property(b"__lazy_state"),
+                    Value::String(ref s) if s.as_bytes() == b"ghost" || s.as_bytes() == b"proxy"
+                );
+                // Only force init when both sides are objects.
+                if is_lazy && all_obj {
+                    self.maybe_run_lazy_init(&obj);
+                    if self.current_exception.is_some() {
+                        // Leave value as-is; caller will detect the exception.
+                        out.push((*v).clone());
+                        continue;
+                    }
+                    // Redirect proxy to real for comparison purposes.
+                    out.push(Value::Object(self.proxy_redirect(&obj)));
+                    continue;
+                }
+            }
+            out.push((*v).clone());
+        }
+        out
     }
 
     /// If `obj` is an initialized proxy, return the real backing object.
@@ -3089,50 +3144,87 @@ impl Vm {
         obj.clone()
     }
 
+    /// Convert an object to an array (as `(array)$obj`).
+    /// - Filters internal/lazy properties.
+    /// - Skips uninitialized (Undef) properties.
+    /// - For an initialized lazy proxy, redirects to the real backing object.
+    /// - Applies PHP-style name mangling for private/protected props.
+    pub fn object_to_array(&self, obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpArray>> {
+        // Proxy: if initialized, use the real backing object's props.
+        let target = self.proxy_redirect(obj);
+        let ob = target.borrow();
+        // SPL array handling
+        let spl_arr = ob.get_property(b"__spl_array");
+        if let Value::Array(a) = spl_arr {
+            return Rc::new(RefCell::new(a.borrow().clone()));
+        }
+        let class_name_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let prop_info: std::collections::HashMap<Vec<u8>, (Visibility, Vec<u8>)> =
+            if let Some(class_def) = self.classes.get(&class_name_lower) {
+                class_def.properties.iter()
+                    .map(|p| {
+                        let decl_lower = &p.declaring_class;
+                        let decl_display = self.classes.get(decl_lower.as_slice())
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| p.declaring_class.clone());
+                        (p.name.clone(), (p.visibility, decl_display))
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+        let mut arr = PhpArray::new();
+        for (name, value) in &ob.properties {
+            // Skip internal/lazy bookkeeping properties.
+            if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+                || name.starts_with(b"__enum_") || name.starts_with(b"__ctor_")
+                || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+                || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp")
+                || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
+                || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
+                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                continue;
+            }
+            // Skip uninitialized props (Undef).
+            if matches!(value, Value::Undef) {
+                continue;
+            }
+            let mangled = if let Some((vis, declaring_class)) = prop_info.get(name) {
+                match vis {
+                    Visibility::Private => {
+                        let mut m = Vec::with_capacity(1 + declaring_class.len() + 1 + name.len());
+                        m.push(0);
+                        m.extend_from_slice(declaring_class);
+                        m.push(0);
+                        m.extend_from_slice(name);
+                        m
+                    }
+                    Visibility::Protected => {
+                        let mut m = Vec::with_capacity(3 + name.len());
+                        m.push(0);
+                        m.push(b'*');
+                        m.push(0);
+                        m.extend_from_slice(name);
+                        m
+                    }
+                    Visibility::Public => name.clone(),
+                }
+            } else {
+                name.clone()
+            };
+            arr.set(
+                ArrayKey::String(PhpString::from_vec(mangled)),
+                value.clone(),
+            );
+        }
+        Rc::new(RefCell::new(arr))
+    }
+
     /// Call a closure-like Value with the given args. Returns None if the
-    /// callable cannot be invoked.
+    /// callable cannot be invoked. Delegates to call_callback so that
+    /// closure capture vars (`use` bindings) are forwarded correctly.
     fn call_closure_value(&mut self, callable: &Value, args: Vec<Value>) -> Option<Value> {
-        let callable = callable.deref();
-        // Convert closure Value to a callable name
-        let name = match &callable {
-            Value::String(s) => s.as_bytes().to_vec(),
-            Value::Array(a) => {
-                // Array callable [$obj, 'method']
-                let a = a.borrow();
-                if a.len() != 2 {
-                    return None;
-                }
-                let first = a.values().next().cloned().unwrap_or(Value::Null);
-                let second = a.values().nth(1).cloned().unwrap_or(Value::Null);
-                let method = second.to_php_string().to_string_lossy();
-                if let Value::Object(obj) = &first {
-                    let class_name = obj.borrow().class_name.clone();
-                    drop(a);
-                    return self.call_object_method(
-                        &Value::Object(obj.clone()),
-                        method.as_bytes(),
-                        &args.iter().skip(1).cloned().collect::<Vec<_>>(),
-                    );
-                }
-                let class_name = first.to_php_string().to_string_lossy();
-                format!("{}::{}", class_name, method).into_bytes()
-            }
-            _ => return None,
-        };
-        let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        if let Some(op_array) = self.user_functions.get(&lower).cloned() {
-            let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
-            for (i, v) in args.iter().enumerate() {
-                if i < cvs.len() {
-                    cvs[i] = v.clone();
-                }
-            }
-            return self.execute_op_array_pub(&op_array, cvs).ok();
-        }
-        if let Some(f) = self.functions.get(&lower).copied() {
-            return f(self, &args).ok();
-        }
-        None
+        self.call_callback(callable, &args).ok()
     }
 
     /// Register a user-defined function
@@ -12144,8 +12236,23 @@ impl Vm {
 
                 // Comparisons
                 OpCode::Equal => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
+                    let b = vs.pop().unwrap();
+                    let a = vs.pop().unwrap();
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
@@ -12179,8 +12286,23 @@ impl Vm {
                     );
                 }
                 OpCode::NotEqual => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
+                    let b = vs.pop().unwrap();
+                    let a = vs.pop().unwrap();
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
@@ -12243,8 +12365,23 @@ impl Vm {
                     );
                 }
                 OpCode::Less => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
+                    let b = vs.pop().unwrap();
+                    let a = vs.pop().unwrap();
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
@@ -12270,8 +12407,23 @@ impl Vm {
                     );
                 }
                 OpCode::LessEqual => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
+                    let b = vs.pop().unwrap();
+                    let a = vs.pop().unwrap();
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
@@ -12297,8 +12449,23 @@ impl Vm {
                     );
                 }
                 OpCode::Greater => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
+                    let b = vs.pop().unwrap();
+                    let a = vs.pop().unwrap();
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
@@ -12324,8 +12491,23 @@ impl Vm {
                     );
                 }
                 OpCode::GreaterEqual => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
+                    let b = vs.pop().unwrap();
+                    let a = vs.pop().unwrap();
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
@@ -12351,8 +12533,23 @@ impl Vm {
                     );
                 }
                 OpCode::Spaceship => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
+                    let b = vs.pop().unwrap();
+                    let a = vs.pop().unwrap();
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
@@ -16996,70 +17193,7 @@ impl Vm {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let arr = match val {
                         Value::Array(a) => a,
-                        Value::Object(obj) => {
-                            let ob = obj.borrow();
-                            // Check for SPL array classes
-                            let spl_arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = spl_arr {
-                                Rc::new(RefCell::new(a.borrow().clone()))
-                            } else {
-                                // Regular object: convert properties to array with PHP-style name mangling
-                                let class_name_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                // Map property name -> (visibility, declaring_class_original_case)
-                                let prop_info: std::collections::HashMap<Vec<u8>, (Visibility, Vec<u8>)> =
-                                    if let Some(class_def) = self.classes.get(&class_name_lower) {
-                                        class_def.properties.iter()
-                                            .map(|p| {
-                                                // Get the original-case name of the declaring class
-                                                let decl_lower = &p.declaring_class;
-                                                let decl_display = self.classes.get(decl_lower.as_slice())
-                                                    .map(|c| c.name.clone())
-                                                    .unwrap_or_else(|| p.declaring_class.clone());
-                                                (p.name.clone(), (p.visibility, decl_display))
-                                            })
-                                            .collect()
-                                    } else {
-                                        std::collections::HashMap::new()
-                                    };
-                                let mut arr = PhpArray::new();
-                                for (name, value) in &ob.properties {
-                                    if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
-                                        || name.starts_with(b"__enum_") || name.starts_with(b"__ctor_")
-                                        || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
-                                        || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp") {
-                                        continue;
-                                    }
-                                    let mangled = if let Some((vis, declaring_class)) = prop_info.get(name) {
-                                        match vis {
-                                            Visibility::Private => {
-                                                let mut m = Vec::with_capacity(1 + declaring_class.len() + 1 + name.len());
-                                                m.push(0);
-                                                m.extend_from_slice(declaring_class);
-                                                m.push(0);
-                                                m.extend_from_slice(name);
-                                                m
-                                            }
-                                            Visibility::Protected => {
-                                                let mut m = Vec::with_capacity(3 + name.len());
-                                                m.push(0);
-                                                m.push(b'*');
-                                                m.push(0);
-                                                m.extend_from_slice(name);
-                                                m
-                                            }
-                                            Visibility::Public => name.clone(),
-                                        }
-                                    } else {
-                                        name.clone()
-                                    };
-                                    arr.set(
-                                        ArrayKey::String(PhpString::from_vec(mangled)),
-                                        value.clone(),
-                                    );
-                                }
-                                Rc::new(RefCell::new(arr))
-                            }
-                        }
+                        Value::Object(obj) => self.object_to_array(&obj),
                         Value::Null | Value::Undef => {
                             Rc::new(RefCell::new(PhpArray::new()))
                         }
@@ -17800,10 +17934,44 @@ impl Vm {
                                 &static_cv_keys,
                             );
                         } else {
-                            // Plain object: convert properties to an array for iteration
-                            let obj_borrow = obj.borrow();
+                            // Plain object: trigger lazy init and convert
+                            // properties to an array for iteration.
+                            // If lazy init throws, propagate immediately.
+                            self.maybe_run_lazy_init(obj);
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                let msg = match &self.current_exception {
+                                    Some(Value::Object(o)) => {
+                                        let ob = o.borrow();
+                                        ob.get_property(b"message").to_php_string().to_string_lossy()
+                                    }
+                                    _ => "Uncaught exception".to_string(),
+                                };
+                                return Err(VmError { message: msg, line: op.line });
+                            }
+                            // Redirect to real for initialized proxy.
+                            let target = self.proxy_redirect(obj);
+                            let obj_borrow = target.borrow();
                             let mut arr = PhpArray::new();
                             for (name, value) in &obj_borrow.properties {
+                                // Skip internal bookkeeping properties and
+                                // uninitialized/typed-undef slots.
+                                if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+                                    || name.starts_with(b"__enum_") || name.starts_with(b"__ctor_")
+                                    || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+                                    || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp")
+                                    || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
+                                    || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
+                                    || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                                    continue;
+                                }
+                                if matches!(value, Value::Undef) {
+                                    continue;
+                                }
                                 arr.set(
                                     ArrayKey::String(PhpString::from_vec(name.clone())),
                                     value.clone(),
@@ -18146,10 +18314,40 @@ impl Vm {
                         _ => {
                             match &arr_val {
                                 Value::Object(obj) => {
+                                    // Trigger lazy init for lazy objects.
+                                    self.maybe_run_lazy_init(obj);
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        let msg = match &self.current_exception {
+                                            Some(Value::Object(o)) => {
+                                                let ob = o.borrow();
+                                                ob.get_property(b"message").to_php_string().to_string_lossy()
+                                            }
+                                            _ => "Uncaught exception".to_string(),
+                                        };
+                                        return Err(VmError { message: msg, line: op.line });
+                                    }
+                                    let target = self.proxy_redirect(obj);
                                     // For objects, convert to array of references to properties
-                                    let obj_borrow = obj.borrow();
+                                    let obj_borrow = target.borrow();
                                     let mut arr = PhpArray::new();
                                     for (name, value) in &obj_borrow.properties {
+                                        if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+                                            || name.starts_with(b"__enum_") || name.starts_with(b"__ctor_")
+                                            || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+                                            || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp")
+                                            || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
+                                            || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
+                                            || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                                            continue;
+                                        }
+                                        if matches!(value, Value::Undef) {
+                                            continue;
+                                        }
                                         arr.set(
                                             ArrayKey::String(PhpString::from_vec(name.clone())),
                                             value.clone(),
@@ -23677,10 +23875,63 @@ impl Vm {
                     // Lazy object initialization: skip for internal __lazy_* props
                     // and for properties explicitly marked as skipped via
                     // ReflectionProperty::skipLazyInitialization().
+                    //
+                    // For undeclared properties on a class with __get, we defer
+                    // init so that __get is called on the still-lazy object.
+                    // If __get itself accesses $this->foo for a declared prop,
+                    // that inner PropertyGet will trigger init then.
                     if let Value::Object(obj) = &obj_val_raw {
                         let pn = prop_name.as_bytes();
                         if !pn.starts_with(b"__lazy_") && !is_prop_skipped(obj, pn) {
-                            self.maybe_run_lazy_init(obj);
+                            // Check whether this is an undeclared property on a
+                            // class with __get — if so, defer init so __get
+                            // can decide whether to observe $this state.
+                            // Only applies to lazy ghosts: for proxies, the
+                            // backing real object may have a different class
+                            // without __get, so we must init first.
+                            let defer = {
+                                let ob = obj.borrow();
+                                let is_ghost = matches!(
+                                    ob.get_property(b"__lazy_state"),
+                                    Value::String(ref s) if s.as_bytes() == b"ghost"
+                                );
+                                if !is_ghost {
+                                    false
+                                } else {
+                                    let class_lower: Vec<u8> = ob.class_name.iter()
+                                        .map(|b| b.to_ascii_lowercase())
+                                        .collect();
+                                    let has_get = self.classes.get(&class_lower)
+                                        .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                        .unwrap_or(false);
+                                    let is_declared = self.classes.get(&class_lower)
+                                        .map(|c| c.properties.iter()
+                                            .any(|p| !p.is_static && p.name == pn))
+                                        .unwrap_or(false);
+                                    has_get && !is_declared
+                                }
+                            };
+                            if !defer {
+                                self.maybe_run_lazy_init(obj);
+                                // If lazy init threw, propagate the exception now
+                                // (so the user sees the initializer's error, not
+                                // a subsequent "undefined property" warning).
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    let msg = match &self.current_exception {
+                                        Some(Value::Object(o)) => {
+                                            let ob = o.borrow();
+                                            ob.get_property(b"message").to_php_string().to_string_lossy()
+                                        }
+                                        _ => "Uncaught exception".to_string(),
+                                    };
+                                    return Err(VmError { message: msg, line: op.line });
+                                }
+                            }
                         }
                     }
 
