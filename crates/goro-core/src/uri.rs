@@ -76,6 +76,13 @@ pub fn populate_from_url_with_source_flags(
     } else {
         url.host_str().map(|h| h.to_string())
     };
+    // WhatWg: for "file" scheme, host is reported as an empty string (never
+    // null), even for `file:///path` with no host component.
+    let host_value = if !preserve_rfc3986 && url.scheme() == "file" && host_value.is_none() {
+        Some(String::new())
+    } else {
+        host_value
+    };
     obj.set_property(
         b"__uri_host".to_vec(),
         match host_value {
@@ -195,6 +202,69 @@ pub fn populate_from_url_with_source_flags(
     );
 }
 
+/// Check that `[` and `]` only appear in the host portion (as IP-literal
+/// brackets), not in userinfo, path, query, or fragment. Returns false if
+/// brackets appear outside the authority host position.
+fn rfc3986_brackets_valid(uri: &str) -> bool {
+    // Scheme:// authority / path ? query # fragment
+    // Brackets are only allowed wrapping the host after "://" (and after any
+    // userinfo@). Anywhere else they must be percent-encoded in RFC 3986.
+    let after_scheme_opt = uri.find("://").map(|i| i + 3);
+    let (pre_auth, rest) = match after_scheme_opt {
+        Some(i) => (&uri[..i], &uri[i..]),
+        None => ("", uri),
+    };
+    // Brackets in the pre-authority (scheme) portion are not valid.
+    if pre_auth.contains('[') || pre_auth.contains(']') {
+        return false;
+    }
+    // If no scheme://, brackets aren't valid anywhere (no IP-literal).
+    if after_scheme_opt.is_none() {
+        return !(rest.contains('[') || rest.contains(']'));
+    }
+    // Find end of authority (first '/', '?', '#').
+    let auth_end = rest
+        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .unwrap_or(rest.len());
+    let authority = &rest[..auth_end];
+    let post_auth = &rest[auth_end..];
+    // Authority: userinfo@host[:port]. userinfo cannot contain '[' or ']'.
+    let host_port = match authority.rfind('@') {
+        Some(i) => {
+            let userinfo = &authority[..i];
+            if userinfo.contains('[') || userinfo.contains(']') {
+                return false;
+            }
+            &authority[i + 1..]
+        }
+        None => authority,
+    };
+    // Host may be IP-literal `[...]` - in which case brackets are allowed only
+    // as the wrapping delimiters at positions 0 and rb. Otherwise, no brackets.
+    if host_port.starts_with('[') {
+        let rb = match host_port.find(']') {
+            Some(i) => i,
+            None => return false,
+        };
+        let inside = &host_port[1..rb];
+        let tail = &host_port[rb + 1..];
+        if inside.contains('[') || inside.contains(']') {
+            return false;
+        }
+        // Tail after ']' should be empty or `:port` - no brackets allowed.
+        if tail.contains('[') || tail.contains(']') {
+            return false;
+        }
+    } else if host_port.contains('[') || host_port.contains(']') {
+        return false;
+    }
+    // Path/query/fragment: no brackets.
+    if post_auth.contains('[') || post_auth.contains(']') {
+        return false;
+    }
+    true
+}
+
 /// Extract the raw host component from the source URI (including brackets
 /// for IPv6 addresses). Returns `Some("")` if the authority is present but
 /// empty (e.g. `file:///...`), or None if there's no authority at all.
@@ -287,6 +357,11 @@ pub fn parse_into(obj: &mut PhpObject, uri: &str, base: Option<&str>, allow_rela
             if b <= 0x20 || b >= 0x7f {
                 return false;
             }
+        }
+        // Reject reserved characters ('[', ']') in userinfo and path where they
+        // are only valid as IP-literal brackets surrounding the host.
+        if !rfc3986_brackets_valid(uri) {
+            return false;
         }
     }
 
@@ -562,9 +637,9 @@ pub fn whatwg_error_code(uri: &str) -> &'static str {
             .find(|c: char| matches!(c, '/' | '?' | '#'))
             .unwrap_or(rest.len());
         let authority = &rest[..end];
-        let host_port = match authority.rfind('@') {
-            Some(i) => &authority[i + 1..],
-            None => authority,
+        let (has_userinfo, host_port) = match authority.rfind('@') {
+            Some(i) => (true, &authority[i + 1..]),
+            None => (false, authority),
         };
         let (host, port_str) = if let Some(rb) = host_port.rfind(']') {
             let after = &host_port[rb + 1..];
@@ -585,7 +660,20 @@ pub fn whatwg_error_code(uri: &str) -> &'static str {
             }
         }
         if host.is_empty() {
+            // `scheme://user:pass@` (authority with '@' but no host): PHP's
+            // lexbor reports a generic (codeless) error. Signal with "".
+            if has_userinfo {
+                return "";
+            }
             return "HostMissing";
+        }
+        // IP-literal host `[...]`. If it's not a valid IPv6 or the inner text
+        // is invalid (e.g. `[v7.host]`), PHP emits Ipv6InvalidCodePoint.
+        if host.starts_with('[') && host.ends_with(']') {
+            let inside = &host[1..host.len() - 1];
+            if inside.parse::<std::net::Ipv6Addr>().is_err() {
+                return "Ipv6InvalidCodePoint";
+            }
         }
         // Host contains invalid character (e.g. brackets without IPv6, spaces).
         // For special schemes, PHP reports DomainInvalidCodePoint.
@@ -999,7 +1087,29 @@ pub fn uri_dispatch_noarg(
         b"tostring" | b"toasciistring" | b"__tostring" | b"torawstring" => {
             Some(component_to_value(&ob, b"__uri_serialized"))
         }
-        b"tounicodestring" => Some(component_to_value(&ob, b"__uri_serialized")),
+        b"tounicodestring" => {
+            // Decode the host (if Punycode) back to Unicode form. The rest
+            // of the URI text is left as-is.
+            let ascii = match ob.get_property(b"__uri_serialized") {
+                Value::String(s) => s.to_string_lossy(),
+                _ => return Some(Value::Null),
+            };
+            let host = match ob.get_property(b"__uri_host") {
+                Value::String(s) => s.to_string_lossy(),
+                _ => return Some(Value::String(PhpString::from_string(ascii))),
+            };
+            // Run idna::domain_to_unicode on the (already ASCII) host. It
+            // returns the unicode form (empty errors on success).
+            let (unicode_host, _errors) = idna::domain_to_unicode(&host);
+            // Splice unicode_host back into the serialized form, replacing
+            // the ASCII host occurrence verbatim.
+            let out = if !host.is_empty() && ascii.contains(&host) {
+                ascii.replacen(&host, &unicode_host, 1)
+            } else {
+                ascii
+            };
+            Some(Value::String(PhpString::from_string(out)))
+        }
         b"tonormalizedstring" | b"tonormalizedasciistring" => {
             Some(component_to_value(&ob, b"__uri_serialized"))
         }
@@ -1099,15 +1209,31 @@ pub fn uri_dispatch_with_args(
                     other => other.to_php_string().as_bytes().to_vec(),
                 }
             }
-            let eq_part = |key: &[u8]| part(&self_ob, key) == part(&other_ob, key);
-            let eq = eq_part(b"__uri_scheme")
-                && eq_part(b"__uri_host")
-                && eq_part(b"__uri_port")
-                && eq_part(b"__uri_user")
-                && eq_part(b"__uri_pass")
-                && eq_part(b"__uri_path")
-                && eq_part(b"__uri_query")
-                && (exclude_fragment || eq_part(b"__uri_fragment"));
+            // Determine whether this is an RFC 3986 URI. RFC 3986 applies
+            // syntax normalization (lowercase scheme/host, resolve .., decode
+            // unreserved percent-encodings, remove default ports, normalize
+            // IPv6) in equals(). WhatWg uses byte-exact comparison.
+            let is_rfc3986 = class_lower == b"uri\\rfc3986\\uri";
+            let scheme_self = part(&self_ob, b"__uri_scheme");
+            let scheme_other = part(&other_ob, b"__uri_scheme");
+            let compare_part = |key: &[u8]| -> bool {
+                let a = part(&self_ob, key);
+                let b = part(&other_ob, key);
+                if !is_rfc3986 {
+                    return a == b;
+                }
+                let na = normalize_rfc3986_component(key, &scheme_self, &a);
+                let nb = normalize_rfc3986_component(key, &scheme_other, &b);
+                na == nb
+            };
+            let eq = compare_part(b"__uri_scheme")
+                && compare_part(b"__uri_host")
+                && compare_part(b"__uri_port")
+                && compare_part(b"__uri_user")
+                && compare_part(b"__uri_pass")
+                && compare_part(b"__uri_path")
+                && compare_part(b"__uri_query")
+                && (exclude_fragment || compare_part(b"__uri_fragment"));
             Some(if eq { Value::True } else { Value::False })
         }
         b"resolve" => {
@@ -1181,6 +1307,174 @@ pub fn uri_is_args_method(method: &[u8]) -> bool {
             | b"withusername"
             | b"withpassword"
     )
+}
+
+/// Normalize an RFC 3986 component for equivalence comparison.
+///
+/// - scheme: lowercase
+/// - host: lowercase, percent-decode unreserved chars, IPv6 normalize
+/// - port: drop scheme default (http=80, https=443, ftp=21, ws=80, wss=443)
+/// - user/pass/path/query/fragment: percent-decode unreserved, uppercase
+///   hex digits, resolve `.`/`..` in path.
+pub fn normalize_rfc3986_component(key: &[u8], scheme: &[u8], bytes: &[u8]) -> Vec<u8> {
+    match key {
+        b"__uri_scheme" => bytes.iter().map(|b| b.to_ascii_lowercase()).collect(),
+        b"__uri_host" => {
+            // Lowercase, percent-decode unreserved, normalize IPv6 literal.
+            let lowered: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let decoded = percent_decode_unreserved(&lowered);
+            if decoded.starts_with(b"[") && decoded.ends_with(b"]") {
+                let inside = &decoded[1..decoded.len() - 1];
+                if let Some(norm) = normalize_ipv6(std::str::from_utf8(inside).unwrap_or("")) {
+                    let mut out = Vec::with_capacity(norm.len() + 2);
+                    out.push(b'[');
+                    out.extend_from_slice(norm.as_bytes());
+                    out.push(b']');
+                    return out;
+                }
+            }
+            decoded
+        }
+        b"__uri_port" => {
+            // Drop scheme's default port. Represent as empty bytes.
+            if bytes.is_empty() {
+                return Vec::new();
+            }
+            let s = match std::str::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => return bytes.to_vec(),
+            };
+            let port = match s.parse::<u32>() {
+                Ok(p) => p,
+                Err(_) => return bytes.to_vec(),
+            };
+            let default_port = match scheme {
+                s if s.eq_ignore_ascii_case(b"http") => Some(80u32),
+                s if s.eq_ignore_ascii_case(b"https") => Some(443),
+                s if s.eq_ignore_ascii_case(b"ftp") => Some(21),
+                s if s.eq_ignore_ascii_case(b"ws") => Some(80),
+                s if s.eq_ignore_ascii_case(b"wss") => Some(443),
+                _ => None,
+            };
+            if default_port == Some(port) {
+                Vec::new()
+            } else {
+                port.to_string().into_bytes()
+            }
+        }
+        b"__uri_path" => {
+            // Percent-decode unreserved, resolve .. and . segments.
+            let decoded = percent_decode_unreserved(bytes);
+            resolve_dot_segments(&decoded)
+        }
+        b"__uri_user" | b"__uri_pass" | b"__uri_query" | b"__uri_fragment" => {
+            percent_decode_unreserved(bytes)
+        }
+        _ => bytes.to_vec(),
+    }
+}
+
+/// Percent-decode unreserved characters (RFC 3986 §6.2.2.2): alpha, digit, '-',
+/// '.', '_', '~'. Normalize hex digits to uppercase for other percent-
+/// encodings so that `%2f` and `%2F` compare equal.
+fn percent_decode_unreserved(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%' && i + 2 < input.len() {
+            let h1 = input[i + 1];
+            let h2 = input[i + 2];
+            if let (Some(d1), Some(d2)) = (hex_digit(h1), hex_digit(h2)) {
+                let byte = (d1 << 4) | d2;
+                let is_unreserved = byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'-' | b'.' | b'_' | b'~');
+                if is_unreserved {
+                    out.push(byte);
+                } else {
+                    // Preserve percent-encoding, uppercase hex.
+                    out.push(b'%');
+                    out.push(h1.to_ascii_uppercase());
+                    out.push(h2.to_ascii_uppercase());
+                }
+                i += 3;
+                continue;
+            }
+        }
+        out.push(input[i]);
+        i += 1;
+    }
+    out
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Resolve `.` and `..` segments in an RFC 3986 path. (RFC 3986 §5.2.4
+/// "Remove Dot Segments".)
+fn resolve_dot_segments(path: &[u8]) -> Vec<u8> {
+    let mut input = path.to_vec();
+    let mut output: Vec<u8> = Vec::with_capacity(path.len());
+    while !input.is_empty() {
+        if input.starts_with(b"../") {
+            input.drain(..3);
+        } else if input.starts_with(b"./") {
+            input.drain(..2);
+        } else if input.starts_with(b"/./") {
+            input.drain(..2);
+            input.insert(0, b'/');
+        } else if input == b"/." {
+            input = b"/".to_vec();
+        } else if input.starts_with(b"/../") {
+            input.drain(..3);
+            input.insert(0, b'/');
+            // Remove last segment from output.
+            while let Some(&b) = output.last() {
+                output.pop();
+                if b == b'/' {
+                    break;
+                }
+            }
+        } else if input == b"/.." {
+            input = b"/".to_vec();
+            while let Some(&b) = output.last() {
+                output.pop();
+                if b == b'/' {
+                    break;
+                }
+            }
+        } else if input == b"." || input == b".." {
+            break;
+        } else {
+            // Move first segment (up to next '/') to output.
+            // At least the first character if it's '/', then until next '/'.
+            let mut split = 0;
+            if input[0] == b'/' {
+                split = 1;
+            }
+            while split < input.len() && input[split] != b'/' {
+                split += 1;
+            }
+            output.extend_from_slice(&input[..split]);
+            input.drain(..split);
+        }
+    }
+    output
+}
+
+/// Normalize an IPv6 address per RFC 5952: lowercase hex, leading-zero strip,
+/// longest zero-run compressed as `::`. Returns None if the input isn't a
+/// valid IPv6 literal.
+fn normalize_ipv6(addr: &str) -> Option<String> {
+    // Parse via Rust stdlib.
+    let ip: std::net::Ipv6Addr = addr.parse().ok()?;
+    // Use the stdlib Display for canonicalization (already RFC 5952-ish).
+    Some(ip.to_string())
 }
 
 /// For var_dump/print_r: return a PhpArray view of the URI components that

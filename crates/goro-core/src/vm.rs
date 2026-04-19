@@ -12725,9 +12725,48 @@ impl Vm {
                     }
                 }
                 OpCode::SendNamedVal => {
-                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    let name = name_val.to_php_string().as_bytes().to_vec();
+                    let name: Vec<u8> = name_val.to_php_string().as_bytes().to_vec();
+                    // Known builtin functions that pass a specific named param
+                    // by reference. Currently: Uri\WhatWg\Url::parse and
+                    // Uri\Rfc3986\Uri::parse have &$errors.
+                    let callee_named_byref = self
+                        .pending_calls
+                        .last()
+                        .map(|c| {
+                            let fn_lower: Vec<u8> = c
+                                .name
+                                .as_bytes()
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
+                            let is_parse = fn_lower == b"uri\\whatwg\\url::parse"
+                                || fn_lower == b"uri\\rfc3986\\uri::parse";
+                            is_parse && name.eq_ignore_ascii_case(b"errors")
+                        })
+                        .unwrap_or(false);
+                    let val = if callee_named_byref {
+                        if let OperandType::Cv(idx) = &op.op1 {
+                            let i = *idx as usize;
+                            if let Some(Value::Reference(r)) = cvs.get(i) {
+                                Value::Reference(r.clone())
+                            } else {
+                                let current = cvs.get(i).cloned().unwrap_or(Value::Null);
+                                let current = if matches!(current, Value::Undef) {
+                                    Value::Null
+                                } else {
+                                    current
+                                };
+                                let r = Rc::new(RefCell::new(current));
+                                cvs[i] = Value::Reference(r.clone());
+                                Value::Reference(r)
+                            }
+                        } else {
+                            self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line)
+                        }
+                    } else {
+                        self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line)
+                    };
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.named_args.push((name, val));
                     }
@@ -13505,13 +13544,28 @@ impl Vm {
                         );
                     } else if func_name_lower == b"uri\\whatwg\\url::parse"
                         || func_name_lower == b"uri\\rfc3986\\uri::parse" {
-                        // static parse(string $uri, ?string $baseUrl = null): ?static
+                        // static parse(string $uri, ?string $baseUrl = null, mixed &$errors = null): ?static
                         let is_whatwg = func_name_lower.starts_with(b"uri\\whatwg");
                         let uri_val = call.args.first().cloned().unwrap_or(Value::Null);
                         let uri_str = uri_val.to_php_string().to_string_lossy();
-                        let base_str = call.args.get(1).and_then(|v| match v {
-                            Value::Null | Value::Undef => None,
-                            other => Some(other.to_php_string().to_string_lossy()),
+                        // base URL may be a string or a Uri\WhatWg\Url / Uri\Rfc3986\Uri
+                        // object. For objects, extract the stored serialized form.
+                        let base_str = call.args.get(1).and_then(|v| {
+                            let v = match v {
+                                Value::Reference(r) => r.borrow().clone(),
+                                other => other.clone(),
+                            };
+                            match v {
+                                Value::Null | Value::Undef => None,
+                                Value::Object(o) => {
+                                    let ob = o.borrow();
+                                    match ob.get_property(b"__uri_serialized") {
+                                        Value::String(s) => Some(s.to_string_lossy()),
+                                        _ => None,
+                                    }
+                                }
+                                other => Some(other.to_php_string().to_string_lossy()),
+                            }
                         });
                         let obj_id = self.next_object_id();
                         let class_name: Vec<u8> = if is_whatwg {
@@ -13526,6 +13580,21 @@ impl Vm {
                         } else {
                             Value::Null
                         };
+                        // If caller provided an `errors` argument (positional
+                        // index 2 or named), populate it with an array
+                        // (empty on success). The value must be a Reference
+                        // for the update to propagate back to the caller.
+                        let errors_val = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                        if let Some(Value::Reference(r)) = call.args.get(2) {
+                            *r.borrow_mut() = errors_val.clone();
+                        }
+                        for (name, val) in call.named_args.iter() {
+                            if name.eq_ignore_ascii_case(b"errors") {
+                                if let Value::Reference(r) = val {
+                                    *r.borrow_mut() = errors_val.clone();
+                                }
+                            }
+                        }
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower == b"phptoken::tokenize" {
                         // PhpToken::tokenize(string $code, int $flags = 0): array
@@ -15824,8 +15893,12 @@ impl Vm {
                                                 drop(obj_mut);
                                                 let (exc_class, msg) = if class_lower == b"uri\\whatwg\\url" {
                                                     let code = crate::uri::whatwg_error_code(&uri_str);
-                                                    (b"Uri\\WhatWg\\InvalidUrlException" as &[u8],
-                                                     format!("The specified URI is malformed ({})", code))
+                                                    let msg = if code.is_empty() {
+                                                        "The specified URI is malformed".to_string()
+                                                    } else {
+                                                        format!("The specified URI is malformed ({})", code)
+                                                    };
+                                                    (b"Uri\\WhatWg\\InvalidUrlException" as &[u8], msg)
                                                 } else {
                                                     (b"Uri\\InvalidUriException" as &[u8],
                                                      format!("The specified URI is malformed"))

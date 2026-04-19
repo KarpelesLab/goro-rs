@@ -8,3 +8,4 @@ description = "PHP engine core: values, compiler, and VM for goro-rs"
 goro-parser = { path = "../goro-parser" }
 indexmap = "2"
 url = "2"
+idna = "1"
