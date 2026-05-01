@@ -71,6 +71,10 @@ pub struct PhpGenerator {
     pub class_scope: Option<Vec<u8>>,
     /// The arguments passed to the generator function (for func_get_args())
     pub args: Vec<Value>,
+    /// The file the generator was called from (for backtrace)
+    pub call_file: String,
+    /// The line the generator was called from (for backtrace)
+    pub call_line: u32,
     /// Pending return value for deferred return (finally blocks)
     pub pending_return: Option<Value>,
     /// Pending jump target for deferred break/continue (finally blocks)
@@ -109,6 +113,8 @@ impl PhpGenerator {
             called_class: None,
             class_scope: None,
             args: Vec::new(),
+            call_file: String::new(),
+            call_line: 0,
             pending_return: None,
             pending_finally_jump: None,
             force_closed: false,
@@ -271,8 +277,12 @@ impl PhpGenerator {
         } else {
             raw_name
         };
-        let func_file = vm.current_file.clone();
-        vm.call_stack.push((func_name, func_file, 0, self.args.clone(), self.class_scope.is_some()));
+        let func_file = if self.call_file.is_empty() {
+            vm.current_file.clone()
+        } else {
+            self.call_file.clone()
+        };
+        vm.call_stack.push((func_name, func_file, self.call_line, self.args.clone(), self.class_scope.is_some()));
 
         self.is_running = true;
         let result = self.resume_inner(vm);
@@ -1691,7 +1701,9 @@ impl PhpGenerator {
                         obj.set_property(b"code".to_vec(), Value::Long(0));
                         obj.set_property(b"file".to_vec(), Value::String(PhpString::from_string(vm.current_file.clone())));
                         obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
-                        obj.set_property(b"trace".to_vec(), Value::Array(Rc::new(RefCell::new(crate::array::PhpArray::new()))));
+                        // Capture the current stack trace (includes generator and caller frames)
+                        let trace = vm.build_exception_trace();
+                        obj.set_property(b"trace".to_vec(), trace);
                         obj.set_property(b"previous".to_vec(), Value::Null);
                     }
                     // Initialize properties from class definition
@@ -1792,27 +1804,63 @@ impl PhpGenerator {
         // Clear it since we're throwing instead
         self.fiber_suspend_result = None;
 
+        // Push class context for get_class() / get_called_class() inside generators
+        let pushed_scope = if let Some(ref scope) = self.class_scope {
+            vm.push_class_scope(scope.clone());
+            true
+        } else {
+            false
+        };
+        let pushed_called = if let Some(ref called) = self.called_class {
+            vm.called_class_stack.push(called.clone());
+            true
+        } else {
+            false
+        };
+
+        // Push a call_stack entry for this generator so any exception
+        // constructed/thrown inside it gets a proper trace frame.
+        let raw_name = String::from_utf8_lossy(&self.op_array.name).to_string();
+        let func_name = if raw_name.starts_with("__closure_") && !raw_name.starts_with("__closure_fcc_") {
+            let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
+            format!("{{closure:{}:{}}}", file, self.op_array.decl_line)
+        } else {
+            raw_name
+        };
+        let func_file = if self.call_file.is_empty() {
+            vm.current_file.clone()
+        } else {
+            self.call_file.clone()
+        };
+        // For resume_with_exception, use call_line=0 to show [internal function]
+        // (matches PHP: when an exception is thrown INTO the generator, the
+        // top frame shows the generator function was called from [internal function]
+        // which is Generator->throw itself).
+        vm.call_stack.push((func_name, func_file, 0, self.args.clone(), self.class_scope.is_some()));
+
         // Try to find an exception handler in the generator
-        if let Some((catch_target, finally_target, _)) = self.exception_handlers.last().copied() {
+        let had_handler = if let Some((catch_target, finally_target, _)) = self.exception_handlers.last().copied() {
             self.exception_handlers.pop();
             if catch_target > 0 {
                 self.ip = catch_target as usize;
+                true
             } else if finally_target > 0 {
                 self.ip = finally_target as usize;
+                true
             } else {
-                // No valid handler - propagate exception
-                self.state = GeneratorState::Completed;
-                self.current_value = Value::Null;
-                vm.leave_generator_resume();
-                return Err(VmError {
-                    message: "Uncaught exception in generator".to_string(),
-                    line: 0,
-                });
+                false
             }
         } else {
-            // No exception handler at all - propagate exception out
+            false
+        };
+
+        if !had_handler {
+            // No valid handler - propagate exception out
             self.state = GeneratorState::Completed;
             self.current_value = Value::Null;
+            vm.call_stack.pop();
+            if pushed_called { vm.called_class_stack.pop(); }
+            if pushed_scope { vm.pop_class_scope(); }
             vm.leave_generator_resume();
             return Err(VmError {
                 message: "Uncaught exception in generator".to_string(),
@@ -1820,7 +1868,13 @@ impl PhpGenerator {
             });
         }
 
+        self.is_running = true;
         let result = self.resume_inner(vm);
+        self.is_running = false;
+
+        vm.call_stack.pop();
+        if pushed_called { vm.called_class_stack.pop(); }
+        if pushed_scope { vm.pop_class_scope(); }
 
         vm.leave_generator_resume();
 

@@ -2091,7 +2091,7 @@ impl Vm {
     }
 
     /// Build a trace array for exceptions from the current call stack
-    fn build_exception_trace(&self) -> Value {
+    pub fn build_exception_trace(&self) -> Value {
         let mut trace_arr = PhpArray::new();
         // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
         for (idx, (func_name, file, line, args, is_method)) in self.call_stack.iter().rev().enumerate() {
@@ -14617,6 +14617,18 @@ impl Vm {
                         if let Some(Value::Generator(gen_rc)) = call.args.first() {
                             let exception = call.args.get(1).cloned().unwrap_or(Value::Null);
 
+                            // Push a "Generator->throw" frame so any exception raised
+                            // during validation or propagated out of the generator
+                            // shows a trace frame pointing at the call site.
+                            let throw_frame_args = vec![exception.clone()];
+                            self.call_stack.push((
+                                "Generator->throw".to_string(),
+                                self.current_file.clone(),
+                                op.line,
+                                throw_frame_args,
+                                true,
+                            ));
+
                             // Validate that the argument is Throwable
                             let is_throwable = if let Value::Object(obj) = &exception {
                                 let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -14638,6 +14650,7 @@ impl Vm {
                                 };
                                 let msg = format!("Generator::throw(): Argument #1 ($exception) must be of type Throwable, {} given", type_name);
                                 let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.call_stack.pop();
                                 self.current_exception = Some(exc);
                                 if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
@@ -14651,6 +14664,7 @@ impl Vm {
                             if gen_borrow.state == crate::generator::GeneratorState::Completed {
                                 // Generator is already closed - re-throw the exception
                                 drop(gen_borrow);
+                                self.call_stack.pop();
                                 self.current_exception = Some(exception);
                                 if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
@@ -14671,6 +14685,7 @@ impl Vm {
                                 if gen_borrow.state == crate::generator::GeneratorState::Completed {
                                     // Generator completed without yielding - throw the exception
                                     drop(gen_borrow);
+                                    self.call_stack.pop();
                                     self.current_exception = Some(exception);
                                     if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
@@ -14693,6 +14708,9 @@ impl Vm {
                             let result = gen_borrow.resume_with_exception(self);
                             let current_value = gen_borrow.current_value.clone();
                             drop(gen_borrow);
+
+                            // Pop the Generator->throw frame now that the resume is done.
+                            self.call_stack.pop();
 
                             match result {
                                 Ok(_) => {
@@ -15548,6 +15566,9 @@ impl Vm {
                             let mut generator = crate::generator::PhpGenerator::new(user_fn.clone(), func_cvs);
                             // Store the args for func_get_args() support
                             generator.args = call.args.clone();
+                            // Record the call site so backtraces include it
+                            generator.call_file = self.current_file.clone();
+                            generator.call_line = op.line;
                             // Capture class context for get_class() / get_called_class() inside generator
                             if let Some(sep_pos) = func_name_lower.windows(2).position(|w| w == b"::") {
                                 // For late static binding, use the actual object class when $this is present.
@@ -17831,7 +17852,24 @@ impl Vm {
                         // For generators, advance to the first yield on init only if not already started.
                         // If valid()/current()/key() was called before foreach, the generator is
                         // already Suspended and we should not advance past the current yield.
+                        // If the generator is already Completed and has advanced past the first yield,
+                        // iterating again is an error.
                         {
+                            let already_closed = {
+                                let gen_borrow = gen_rc.borrow();
+                                gen_borrow.state == crate::generator::GeneratorState::Completed
+                                    && gen_borrow.advanced_past_first
+                            };
+                            if already_closed {
+                                let msg = "Cannot traverse an already closed generator";
+                                let exc = self.create_exception(b"Exception", msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught Exception: {}", msg), line: op.line });
+                            }
                             let mut gen_borrow = gen_rc.borrow_mut();
                             if gen_borrow.state == crate::generator::GeneratorState::Created {
                                 let resume_result = gen_borrow.resume(self);
@@ -17843,10 +17881,24 @@ impl Vm {
                                         ip = catch_target as usize;
                                         continue;
                                     }
-                                    if let Err(e) = resume_result {
-                                        return Err(e);
-                                    }
-                                    return Err(VmError { message: "Uncaught exception in generator".to_string(), line: op.line });
+                                    // No handler - build a descriptive error from the
+                                    // current exception so the Fatal error line is correct.
+                                    let line = if let Err(ref e) = resume_result { e.line } else { op.line };
+                                    let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                        let ob = obj.borrow();
+                                        let class = crate::value::display_class_name(&ob.class_name);
+                                        let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                        if msg.is_empty() {
+                                            format!("Uncaught {}", class)
+                                        } else {
+                                            format!("Uncaught {}: {}", class, msg)
+                                        }
+                                    } else if let Err(e) = resume_result {
+                                        e.message
+                                    } else {
+                                        "Uncaught exception in generator".to_string()
+                                    };
+                                    return Err(VmError { message: exc_msg, line });
                                 }
                             }
                         }
@@ -18096,10 +18148,30 @@ impl Vm {
                                 Ok(_) => {}
                                 Err(e) => {
                                     drop(gen_borrow);
-                                    // Propagate generator error
-                                    let exc_val = self.create_exception(b"Error", &e.message, e.line);
-                                    self.current_exception = Some(exc_val);
-                                    return Err(e);
+                                    // Propagate generator error. If the generator
+                                    // set a specific current_exception, keep it;
+                                    // otherwise create a generic Error.
+                                    if self.current_exception.is_none() {
+                                        let exc_val = self.create_exception(b"Error", &e.message, e.line);
+                                        self.current_exception = Some(exc_val);
+                                    }
+                                    // Try to catch the exception at this level.
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    // No handler - propagate
+                                    let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                        let ob = obj.borrow();
+                                        let class = crate::value::display_class_name(&ob.class_name);
+                                        let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                        if msg.is_empty() {
+                                            format!("Uncaught {}", class)
+                                        } else {
+                                            format!("Uncaught {}: {}", class, msg)
+                                        }
+                                    } else { e.message.clone() };
+                                    return Err(VmError { message: exc_msg, line: e.line });
                                 }
                             }
                         }
@@ -18107,6 +18179,25 @@ impl Vm {
                         let gen_borrow = gen_rc.borrow();
                         if gen_borrow.state == crate::generator::GeneratorState::Completed {
                             drop(gen_borrow);
+                            // If an exception was left over from the generator that propagated out
+                            // without being handled, rethrow it here.
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                    let ob = obj.borrow();
+                                    let class = crate::value::display_class_name(&ob.class_name);
+                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                    if msg.is_empty() {
+                                        format!("Uncaught {}", class)
+                                    } else {
+                                        format!("Uncaught {}: {}", class, msg)
+                                    }
+                                } else { "Uncaught exception".to_string() };
+                                return Err(VmError { message: exc_msg, line: op.line });
+                            }
                             // Done - jump to end
                             if let OperandType::JmpTarget(target) = op.op2 {
                                 ip = target as usize;
@@ -25733,8 +25824,18 @@ impl Vm {
                                 } else if gen_borrow.advanced_past_first {
                                     // Cannot rewind a generator that has been advanced past the first yield
                                     drop(gen_borrow);
+                                    // Push a trace frame for Generator->rewind() so the
+                                    // exception backtrace shows the call site.
+                                    self.call_stack.push((
+                                        "Generator->rewind".to_string(),
+                                        self.current_file.clone(),
+                                        op.line,
+                                        Vec::new(),
+                                        true,
+                                    ));
                                     let msg = "Cannot rewind a generator that was already run";
                                     let exc = self.create_exception(b"Exception", msg, op.line);
+                                    self.call_stack.pop();
                                     self.current_exception = Some(exc);
                                     if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
