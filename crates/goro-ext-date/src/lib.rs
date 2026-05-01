@@ -312,9 +312,82 @@ fn strtotime(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .unwrap_or(0)
     });
 
+    let tz_name = get_default_tz(vm);
     match parse_datetime_string(&datetime_str, now_secs) {
-        Some(ts) => Ok(Value::Long(ts)),
+        Some(ts) => {
+            // If the input didn't contain any timezone info, it was parsed as if UTC;
+            // adjust to interpret it in the default timezone.
+            let s = datetime_str.trim();
+            let has_tz = s.starts_with('@') || string_has_tz_info(s);
+            if !has_tz {
+                let (offset, _) = timezone_offset_and_abbrev(&tz_name, ts);
+                return Ok(Value::Long(ts - offset));
+            }
+            Ok(Value::Long(ts))
+        }
         None => Ok(Value::False),
+    }
+}
+
+/// Detect whether a date/time string contains an explicit timezone marker.
+/// Recognizes things like trailing UTC/GMT/Z, numeric offsets like +0200, -05:00,
+/// and known named zones (CET, PST, etc.).
+fn string_has_tz_info(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() { return false; }
+    // Trailing Z
+    if s.ends_with('Z') || s.ends_with('z') {
+        // "Z" is UTC but only if preceded by digit/T
+        let bytes = s.as_bytes();
+        if bytes.len() >= 2 {
+            let prev = bytes[bytes.len() - 2];
+            if prev.is_ascii_digit() || prev == b'T' {
+                return true;
+            }
+        }
+    }
+    // Numeric offsets +HHMM, +HH:MM, -HHMM, -HH:MM
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len() {
+        let b = bytes[i];
+        if (b == b'+' || b == b'-') && i > 0 {
+            let rest = &s[i..];
+            if parse_tz_offset(rest).is_some() {
+                return true;
+            }
+        }
+    }
+    // Trailing alphabetic token that looks like a timezone abbreviation or name
+    // Look at the last whitespace-separated word
+    if let Some(last_word) = s.rsplit(|c: char| c == ' ' || c == '\t').next() {
+        if is_known_tz_abbrev_or_name(last_word) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_known_tz_abbrev_or_name(s: &str) -> bool {
+    let u = s.to_uppercase();
+    match u.as_str() {
+        "UTC" | "GMT" | "Z" | "ZULU"
+        | "EST" | "EDT" | "CST" | "CDT" | "MST" | "MDT" | "PST" | "PDT"
+        | "AKST" | "AKDT" | "HST" | "AST" | "ADT"
+        | "CET" | "CEST" | "EET" | "EEST" | "WET" | "WEST"
+        | "BST" | "IST" | "MSK" | "JST" | "KST" | "SGT" | "HKT"
+        | "AEST" | "AEDT" | "ACST" | "ACDT" | "AWST"
+        | "NZST" | "NZDT" | "IDT" | "SAST" | "EAT" | "WAT"
+        | "BRT" | "BRST" | "ART" | "CLT" | "PET"
+        | "PKT" | "BDT" | "WIB" | "WITA" | "WIT"
+        | "GST" | "AZOT" | "AZOST"
+        => true,
+        _ => {
+            // IANA zone like "Europe/Oslo"
+            if s.contains('/') && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'_' || b == b'-' || b == b'+') {
+                return true;
+            }
+            false
+        }
     }
 }
 
@@ -376,6 +449,10 @@ fn gmmktime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn strftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // PHP 8.1: strftime() is deprecated
     _vm.emit_deprecated("Function strftime() is deprecated since 8.1, use IntlDateFormatter::format() instead");
+    strftime_impl(_vm, args, false)
+}
+
+fn strftime_impl(_vm: &mut Vm, args: &[Value], use_gmt: bool) -> Result<Value, VmError> {
     let format = args
         .first()
         .unwrap_or(&Value::Null)
@@ -390,8 +467,13 @@ fn strftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .unwrap_or(0)
     });
 
-    let days_since_epoch = secs / 86400;
-    let time_of_day = ((secs % 86400) + 86400) % 86400;
+    // Apply timezone offset for strftime (not gmstrftime)
+    let tz_name = if use_gmt { "UTC".to_string() } else { get_default_tz(_vm) };
+    let (tz_offset, tz_abbrev) = timezone_offset_and_abbrev(&tz_name, secs);
+    let local_secs = secs + tz_offset;
+
+    let days_since_epoch = if local_secs >= 0 { local_secs / 86400 } else { (local_secs - 86399) / 86400 };
+    let time_of_day = ((local_secs % 86400) + 86400) % 86400;
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
     let seconds = time_of_day % 60;
@@ -428,6 +510,49 @@ fn strftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
 
+    // Compute day of year (1-based)
+    let days_in_months = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let mut yday = 0i64;
+    for mm in 1..month {
+        yday += days_in_months[mm as usize] as i64;
+        if mm == 2 && is_leap {
+            yday += 1;
+        }
+    }
+    yday += day as i64;
+
+    // ISO week (Monday-based, week containing Jan 4 is week 1)
+    let iso_dow = if dow == 0 { 7 } else { dow }; // Mon=1..Sun=7
+    let iso_week = {
+        let jan1_days = ymd_to_days(year, 1, 1);
+        let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7;
+        let iso_jan1_dow: i64 = if jan1_dow == 0 { 7 } else { jan1_dow };
+        let ordinal = yday;
+        let wk = (ordinal - 1 + (iso_jan1_dow - 1)) / 7;
+        let iso_w = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
+        if iso_w == 0 { 52 } else { iso_w }
+    };
+    // ISO year
+    let iso_year: i64 = {
+        let jan1_days = ymd_to_days(year, 1, 1);
+        let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7;
+        let iso_jan1_dow: i64 = if jan1_dow == 0 { 7 } else { jan1_dow };
+        let iso_wk1_start = jan1_days - (iso_jan1_dow - 1) + if iso_jan1_dow <= 4 { 0 } else { 7 };
+        if days_since_epoch < iso_wk1_start {
+            year - 1
+        } else {
+            let dec31_days = ymd_to_days(year, 12, 31);
+            let dec31_dow = ((dec31_days + 4) % 7 + 7) % 7;
+            let dec31_iso_dow: i64 = if dec31_dow == 0 { 7 } else { dec31_dow };
+            if dec31_iso_dow < 4 && (dec31_days - days_since_epoch) < dec31_iso_dow {
+                year + 1
+            } else {
+                year
+            }
+        }
+    };
+
     let mut result = String::new();
     let fmt_bytes = format.as_bytes();
     let mut i = 0;
@@ -436,35 +561,99 @@ fn strftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             i += 1;
             match fmt_bytes[i] {
                 b'Y' => {
-                if year < 0 {
-                    result.push_str(&format!("-{:04}", -year));
-                } else {
-                    result.push_str(&format!("{:04}", year));
+                    if year < 0 {
+                        result.push_str(&format!("-{:04}", -year));
+                    } else {
+                        result.push_str(&format!("{:04}", year));
+                    }
                 }
-            }
+                b'y' => result.push_str(&format!("{:02}", ((year % 100) + 100) % 100)),
+                b'C' => result.push_str(&format!("{:02}", year / 100)),
                 b'm' => result.push_str(&format!("{:02}", month)),
                 b'd' => result.push_str(&format!("{:02}", day)),
+                b'e' => result.push_str(&format!("{:2}", day)),
                 b'H' => result.push_str(&format!("{:02}", hours)),
+                b'k' => result.push_str(&format!("{:2}", hours)),
+                b'I' => {
+                    let h12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
+                    result.push_str(&format!("{:02}", h12));
+                }
+                b'l' => {
+                    let h12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
+                    result.push_str(&format!("{:2}", h12));
+                }
                 b'M' => result.push_str(&format!("{:02}", minutes)),
                 b'S' => result.push_str(&format!("{:02}", seconds)),
-                b'A' => {
-                    result.push_str(day_names_full[dow as usize % 7]);
+                b'p' => result.push_str(if hours >= 12 { "PM" } else { "AM" }),
+                b'P' => result.push_str(if hours >= 12 { "pm" } else { "am" }),
+                b'A' => result.push_str(day_names_full[dow as usize % 7]),
+                b'a' => result.push_str(day_names_short[dow as usize % 7]),
+                b'B' => result.push_str(month_names_full[month as usize]),
+                b'b' | b'h' => result.push_str(month_names_short[month as usize]),
+                b'j' => result.push_str(&format!("{:03}", yday)),
+                b'n' => result.push('\n'),
+                b't' => result.push('\t'),
+                b'u' => result.push_str(&format!("{}", iso_dow)),
+                b'w' => result.push_str(&format!("{}", dow)),
+                b'V' => result.push_str(&format!("{:02}", iso_week)),
+                b'G' => {
+                    if iso_year < 0 { result.push_str(&format!("-{:04}", -iso_year)); }
+                    else { result.push_str(&format!("{:04}", iso_year)); }
                 }
-                b'a' => {
-                    result.push_str(day_names_short[dow as usize % 7]);
+                b'g' => result.push_str(&format!("{:02}", ((iso_year % 100) + 100) % 100)),
+                b'U' => {
+                    // Week of year, Sunday as first day
+                    let jan1_days = ymd_to_days(year, 1, 1);
+                    let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7; // 0=Sun
+                    let wk = (yday - 1 + jan1_dow) / 7;
+                    result.push_str(&format!("{:02}", wk));
                 }
-                b'B' => {
-                    result.push_str(month_names_full[month as usize]);
+                b'W' => {
+                    // Week of year, Monday as first day
+                    let jan1_days = ymd_to_days(year, 1, 1);
+                    let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7;
+                    let monday_offset = if jan1_dow == 0 { 6 } else { jan1_dow - 1 };
+                    let wk = (yday - 1 + monday_offset) / 7;
+                    result.push_str(&format!("{:02}", wk));
                 }
-                b'b' => {
-                    result.push_str(month_names_short[month as usize]);
+                b'D' => {
+                    // %m/%d/%y
+                    result.push_str(&format!("{:02}/{:02}/{:02}", month, day, ((year % 100) + 100) % 100));
                 }
-                b'Z' => {
-                    result.push_str("UTC");
+                b'F' => {
+                    // %Y-%m-%d
+                    if year < 0 {
+                        result.push_str(&format!("-{:04}-{:02}-{:02}", -year, month, day));
+                    } else {
+                        result.push_str(&format!("{:04}-{:02}-{:02}", year, month, day));
+                    }
                 }
-                b'%' => {
-                    result.push('%');
+                b'r' => {
+                    let h12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
+                    let am_pm = if hours >= 12 { "PM" } else { "AM" };
+                    result.push_str(&format!("{:02}:{:02}:{:02} {}", h12, minutes, seconds, am_pm));
                 }
+                b'R' => result.push_str(&format!("{:02}:{:02}", hours, minutes)),
+                b'T' | b'X' => result.push_str(&format!("{:02}:{:02}:{:02}", hours, minutes, seconds)),
+                b'c' => {
+                    // Preferred date/time; e.g. "Tue Feb  5 00:45:10 2009"
+                    result.push_str(&format!("{} {} {:2} {:02}:{:02}:{:02} {}",
+                        day_names_short[dow as usize % 7],
+                        month_names_short[month as usize],
+                        day, hours, minutes, seconds, year));
+                }
+                b'x' => {
+                    // Locale-specific date; use %m/%d/%y as default
+                    result.push_str(&format!("{:02}/{:02}/{:02}", month, day, ((year % 100) + 100) % 100));
+                }
+                b's' => result.push_str(&format!("{}", secs)),
+                b'z' => {
+                    let sign = if tz_offset < 0 { '-' } else { '+' };
+                    let abs = tz_offset.unsigned_abs();
+                    result.push_str(&format!("{}{:02}{:02}", sign, abs / 3600, (abs % 3600) / 60));
+                }
+                b'Z' => result.push_str(&tz_abbrev),
+                b'%' => result.push('%'),
                 other => {
                     result.push('%');
                     result.push(other as char);
@@ -483,7 +672,7 @@ fn strftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn gmstrftime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // PHP 8.1: gmstrftime() is deprecated
     _vm.emit_deprecated("Function gmstrftime() is deprecated since 8.1, use IntlDateFormatter::format() instead");
-    strftime_fn(_vm, args)
+    strftime_impl(_vm, args, true)
 }
 
 /// date_create - create a DateTime-like value (returns DateTime object with timestamp property)
@@ -1604,9 +1793,14 @@ pub fn parse_datetime_string(input: &str, now: i64) -> Option<i64> {
         }
     }
 
-    // @timestamp
+    // @timestamp [TZ] - TZ is ignored per PHP
     if s.starts_with('@') {
-        return s[1..].trim().parse::<i64>().ok();
+        let rest = s[1..].trim();
+        // Take only up to whitespace or comma
+        let end = rest.find(|c: char| c.is_ascii_whitespace() || c == ',')
+            .unwrap_or(rest.len());
+        let ts_part = &rest[..end];
+        return ts_part.parse::<i64>().ok();
     }
 
     // Try absolute date formats first
@@ -1746,7 +1940,7 @@ fn try_parse_mysql_timestamp(s: &str) -> Option<i64> {
     Some(ts)
 }
 
-/// Try to parse compact time format: HHMMSS (6 digits)
+/// Try to parse compact time format: HHMMSS (6 digits) or HHMM (4 digits)
 fn try_parse_compact_time(s: &str, now: i64) -> Option<i64> {
     let (time_str, tz_suffix) = if let Some(space_pos) = s.find(' ') {
         let tp = &s[..space_pos];
@@ -1756,12 +1950,22 @@ fn try_parse_compact_time(s: &str, now: i64) -> Option<i64> {
         (s.trim().to_string(), None)
     };
     let ts = time_str.trim();
-    if ts.len() != 6 || !ts.bytes().all(|b| b.is_ascii_digit()) {
+    if !ts.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let hour: i64 = ts[0..2].parse().ok()?;
-    let minute: i64 = ts[2..4].parse().ok()?;
-    let second: i64 = ts[4..6].parse().ok()?;
+    let (hour, minute, second) = match ts.len() {
+        6 => (
+            ts[0..2].parse::<i64>().ok()?,
+            ts[2..4].parse::<i64>().ok()?,
+            ts[4..6].parse::<i64>().ok()?,
+        ),
+        4 => (
+            ts[0..2].parse::<i64>().ok()?,
+            ts[2..4].parse::<i64>().ok()?,
+            0,
+        ),
+        _ => return None,
+    };
     if hour > 23 || minute > 59 || second > 59 {
         return None;
     }
@@ -1881,14 +2085,66 @@ fn parse_time_from_parts(time_part: Option<&&str>) -> i64 {
         };
         let time_clean = time_clean.trim_end_matches(|c: char| c.is_ascii_alphabetic());
         let time_clean = time_clean.trim();
-        let time_no_micro = time_clean.split('.').next().unwrap_or(time_clean);
+        // Handle am/pm suffix before stripping alphabetic
+        let mut pm_offset = 0i64;
+        let mut time_rest = time_clean.to_string();
+        let lc = time_clean.to_lowercase();
+        if lc.ends_with("am") || lc.ends_with("pm") {
+            let len = time_clean.len();
+            let suffix = &lc[len.saturating_sub(2)..];
+            time_rest = time_clean[..len - 2].trim().to_string();
+            if suffix == "pm" {
+                pm_offset = 12 * 3600;
+            }
+        }
+        let time_no_micro = time_rest.split('.').next().unwrap_or(&time_rest).to_string();
+        // Check compact time formats: HHMMSS (6 digits), HHMM (4 digits)
+        if !time_no_micro.contains(':') && time_no_micro.bytes().all(|b| b.is_ascii_digit()) {
+            match time_no_micro.len() {
+                6 => {
+                    if let (Ok(h), Ok(m), Ok(sec)) = (
+                        time_no_micro[0..2].parse::<i64>(),
+                        time_no_micro[2..4].parse::<i64>(),
+                        time_no_micro[4..6].parse::<i64>(),
+                    ) {
+                        if h < 24 && m < 60 && sec < 60 {
+                            return apply_pm_offset(h, pm_offset) * 3600 + m * 60 + sec;
+                        }
+                    }
+                }
+                4 => {
+                    if let (Ok(h), Ok(m)) = (
+                        time_no_micro[0..2].parse::<i64>(),
+                        time_no_micro[2..4].parse::<i64>(),
+                    ) {
+                        if h < 24 && m < 60 {
+                            return apply_pm_offset(h, pm_offset) * 3600 + m * 60;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         let parts: Vec<&str> = time_no_micro.split(':').collect();
-        let h: i64 = parts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let mut h: i64 = parts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
         let m: i64 = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
         let sec: i64 = parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
+        if pm_offset > 0 {
+            if h != 12 { h += 12; }
+        } else if lc.ends_with("am") {
+            if h == 12 { h = 0; }
+        }
         h * 3600 + m * 60 + sec
     } else {
         0
+    }
+}
+
+fn apply_pm_offset(h: i64, pm_offset: i64) -> i64 {
+    if pm_offset > 0 {
+        if h == 12 { 12 } else { h + 12 }
+    } else {
+        h
     }
 }
 
@@ -2034,25 +2290,82 @@ fn try_parse_textual_date(s: &str) -> Option<i64> {
     ];
 
     let lower = s.to_lowercase();
-    let tokens: Vec<&str> = lower.split(|c: char| c == ' ' || c == ',' || c == '-').filter(|t| !t.is_empty()).collect();
+    // Split by space/comma/dash, but preserve ':' for time tokens
+    let raw_tokens: Vec<&str> = lower.split(|c: char| c == ' ' || c == ',').filter(|t| !t.is_empty()).collect();
+    // Separate date tokens from time tokens (tokens containing ':' or matching am/pm)
+    let mut time_tokens: Vec<&str> = Vec::new();
+    let mut date_tokens: Vec<&str> = Vec::new();
+    let mut am_pm: Option<&str> = None;
+    let mut tz_token: Option<&str> = None;
+    for t in &raw_tokens {
+        if t.contains(':') {
+            time_tokens.push(t);
+        } else if *t == "am" || *t == "pm" {
+            am_pm = Some(*t);
+        } else if is_known_tz_abbrev_or_name(t) || vm_is_numeric_offset(t) {
+            tz_token = Some(*t);
+        } else {
+            date_tokens.push(t);
+        }
+    }
+    let _ = tz_token; // Not applied here; handled at a higher level
 
-    if tokens.len() >= 3 {
-        // Try "Mon d Y" pattern
-        if let Some(&(_, mon)) = month_names.iter().find(|(name, _)| *name == tokens[0]) {
-            if let (Ok(day), Ok(year)) = (tokens[1].parse::<u32>(), tokens[2].parse::<i64>()) {
-                let days = ymd_to_days(year, mon, day);
-                return Some(days * 86400);
+    let mut date_parts = date_tokens.clone();
+    // If first token is day-of-week name (Mon, Tuesday, etc.), strip it
+    if let Some(first) = date_parts.first() {
+        let dows = ["mon", "tue", "wed", "thu", "fri", "sat", "sun",
+                    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+        if dows.contains(first) {
+            date_parts.remove(0);
+        }
+    }
+
+    let mut ymd: Option<(i64, u32, u32)> = None;
+    // Try "Mon d Y" or "Mon dth Y"
+    if date_parts.len() >= 3 {
+        if let Some(&(_, mon)) = month_names.iter().find(|(name, _)| *name == date_parts[0]) {
+            let day_str = date_parts[1].trim_end_matches(|c: char| !c.is_ascii_digit());
+            if let (Ok(day), Ok(year)) = (day_str.parse::<u32>(), date_parts[2].parse::<i64>()) {
+                ymd = Some((year, mon, day));
             }
         }
-        // Try "d Mon Y" pattern
-        if let Some(&(_, mon)) = month_names.iter().find(|(name, _)| *name == tokens[1]) {
-            if let (Ok(day), Ok(year)) = (tokens[0].parse::<u32>(), tokens[2].parse::<i64>()) {
-                let days = ymd_to_days(year, mon, day);
-                return Some(days * 86400);
+        if ymd.is_none() {
+            if let Some(&(_, mon)) = month_names.iter().find(|(name, _)| *name == date_parts[1]) {
+                let day_str = date_parts[0].trim_end_matches(|c: char| !c.is_ascii_digit());
+                if let (Ok(day), Ok(year)) = (day_str.parse::<u32>(), date_parts[2].parse::<i64>()) {
+                    ymd = Some((year, mon, day));
+                }
             }
         }
     }
-    None
+    if date_parts.len() == 2 {
+        // "d Mon" or "Mon d" with current year - can't determine without `now`
+        // Not handled here, return None
+    }
+
+    let (year, mon, day) = ymd?;
+    let days = ymd_to_days(year, mon, day);
+
+    // Parse time
+    let mut time_secs: i64 = 0;
+    if let Some(t) = time_tokens.first() {
+        let parts: Vec<&str> = t.split(':').collect();
+        let h: i64 = parts.first().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let m: i64 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+        let sec: i64 = parts.get(2).and_then(|p| p.split('.').next().unwrap_or("0").parse().ok()).unwrap_or(0);
+        let mut h_adj = h;
+        match am_pm {
+            Some("am") if h == 12 => { h_adj = 0; }
+            Some("pm") if h < 12 => { h_adj = h + 12; }
+            _ => {}
+        }
+        time_secs = h_adj * 3600 + m * 60 + sec;
+    }
+    Some(days * 86400 + time_secs)
+}
+
+fn vm_is_numeric_offset(s: &str) -> bool {
+    parse_tz_offset(s).is_some()
 }
 
 /// Try to parse relative date expressions
@@ -3133,26 +3446,110 @@ fn timezone_name_from_abbr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
 }
 
 /// timezone_offset_get($timezone, $datetime)
-fn timezone_offset_get_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn timezone_offset_get_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let tz_obj = args.first().unwrap_or(&Value::Null);
     let dt_obj = args.get(1).unwrap_or(&Value::Null);
 
+    // Validate: $object must be DateTimeZone
     let tz_name = if let Value::Object(o) = tz_obj {
+        let class_name = {
+            let ob = o.borrow();
+            String::from_utf8_lossy(&ob.class_name).to_ascii_lowercase()
+        };
+        if class_name != "datetimezone" && !vm_class_extends(vm, &class_name, "datetimezone") {
+            let actual = obj_class_display_name(tz_obj);
+            let msg = format!(
+                "timezone_offset_get(): Argument #1 ($object) must be of type DateTimeZone, {} given",
+                actual
+            );
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
         let ob = o.borrow();
         let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
         if tz.is_empty() { "UTC".to_string() } else { tz }
     } else {
-        return Ok(Value::False);
+        let actual = obj_class_display_name(tz_obj);
+        let msg = format!(
+            "timezone_offset_get(): Argument #1 ($object) must be of type DateTimeZone, {} given",
+            actual
+        );
+        let exc = vm.throw_type_error(msg.clone());
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     };
 
+    // Validate: $datetime must be DateTimeInterface
     let ts = if let Value::Object(o) = dt_obj {
+        let class_name = {
+            let ob = o.borrow();
+            String::from_utf8_lossy(&ob.class_name).to_ascii_lowercase()
+        };
+        let ok = class_name == "datetime" || class_name == "datetimeimmutable"
+            || vm_class_extends(vm, &class_name, "datetime")
+            || vm_class_extends(vm, &class_name, "datetimeimmutable");
+        if !ok {
+            let actual = obj_class_display_name(dt_obj);
+            let msg = format!(
+                "timezone_offset_get(): Argument #2 ($datetime) must be of type DateTimeInterface, {} given",
+                actual
+            );
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
         o.borrow().get_property(b"__timestamp").to_long()
     } else {
-        0
+        let actual = obj_class_display_name(dt_obj);
+        let msg = format!(
+            "timezone_offset_get(): Argument #2 ($datetime) must be of type DateTimeInterface, {} given",
+            actual
+        );
+        let exc = vm.throw_type_error(msg.clone());
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     };
 
     let (offset, _) = timezone_offset_and_abbrev(&tz_name, ts);
     Ok(Value::Long(offset))
+}
+
+/// Show the class name or scalar type for error messages
+fn obj_class_display_name(v: &Value) -> String {
+    match v {
+        Value::Object(o) => {
+            let ob = o.borrow();
+            String::from_utf8_lossy(&ob.class_name).into_owned()
+        }
+        Value::Null | Value::Undef => "null".to_string(),
+        Value::True | Value::False => "bool".to_string(),
+        Value::Long(_) => "int".to_string(),
+        Value::Double(_) => "float".to_string(),
+        Value::String(_) => "string".to_string(),
+        Value::Array(_) => "array".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+/// Check whether class A extends class B (shallow lookup in VM's class table)
+fn vm_class_extends(vm: &Vm, child: &str, parent: &str) -> bool {
+    // Walk up via VM's known class hierarchy
+    let mut cur = child.to_ascii_lowercase();
+    let parent_lc = parent.to_ascii_lowercase();
+    for _ in 0..32 {
+        if cur == parent_lc { return true; }
+        if let Some(cls) = vm.classes.get(cur.as_bytes()) {
+            if let Some(p) = &cls.parent {
+                let p_lc = String::from_utf8_lossy(p).to_ascii_lowercase();
+                if p_lc == parent_lc { return true; }
+                cur = p_lc;
+                continue;
+            }
+        }
+        break;
+    }
+    false
 }
 
 fn timezone_transitions_get_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
