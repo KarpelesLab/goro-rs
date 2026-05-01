@@ -11,10 +11,10 @@ Active development. Core language features, OOP, generators, exceptions, closure
 | Metric | Count |
 |---|---|
 | Total tests | 21281 |
-| Pass | 5940 (27.9%) |
-| Fail | 7753 |
+| Pass | 6067 (28.5%) |
+| Fail | 7629 |
 | Skip | 7428 |
-| Error | 160 |
+| Error | 157 |
 
 **Recently completed features:**
 
@@ -27,24 +27,23 @@ Active development. Core language features, OOP, generators, exceptions, closure
 | SPL ArrayObject | 53 | 108 | 49% |
 
 **Key directory pass rates:**
-- ext/standard/array: 473/842 (56.2%)
-- ext/standard/strings: 323/730 (44.2%)
-- ext/standard/math: 112/171 (65.5%)
+- ext/standard/tests/array: 553/840 (65.8%)
+- ext/standard/tests/strings: 429/705 (60.8%)
+- ext/standard/tests/math: 131/171 (76.6%)
 - ext/spl: 293/781 (37.5%)
-- ext/date: 111/688 (16.1%)
-- ext/reflection: 97/493 (19.7%)
-- ext/pcre: 63/163 (38.7%)
-- ext/hash: 16/80 (20.0%)
-- ext/json: 32/88 (36.4%)
+- ext/date: 212/688 (30.8%)
+- ext/reflection: 147/493 (29.8%)
+- ext/pcre: 101/161 (62.7%)
+- ext/hash: 28/80 (35.0%)
+- ext/json: 61/88 (69.3%)
 - ext/ctype: 38/49 (77.6%)
 - ext/uri: 117/117 runnable (100%)
 - ext/tokenizer: 34/53 (64.1%)
-- Zend/type_declarations: 138/496 (27.8%)
-- Zend/traits: 85/216 (39.4%)
-- Zend/enum: 80/151 (53.0%)
-- Zend/namespaces: 76/114 (66.7%)
-- Zend/generators: 51/184 (27.7%)
-- Zend/closures: 45/135 (33.3%)
+- Zend/type_declarations: 252/496 (50.8%)
+- Zend/traits: 128/216 (59.3%)
+- Zend/enum: 108/151 (71.5%)
+- Zend/generators: 101/184 (54.9%)
+- Zend/closures: 61/135 (45.2%)
 - Zend/lazy_objects: 107/213 (50.2%)
 - Zend/property_hooks: 110/211 (52.1%)
 
