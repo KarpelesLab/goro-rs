@@ -663,7 +663,24 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
         }
         Value::Generator(generator) => {
             let gen_ref = generator.borrow();
-            let func_name = String::from_utf8_lossy(&gen_ref.op_array.name);
+            let raw_name = String::from_utf8_lossy(&gen_ref.op_array.name).to_string();
+            // Format the function name for display:
+            // - Closures: __closure_N -> {closure:file:line}
+            // - Class methods: prepend declaring class (with anonymous classes rendered as 'class@anonymous...')
+            // - Plain functions: keep as-is
+            let name_str = if raw_name.starts_with("__closure_") && !raw_name.starts_with("__closure_fcc_") {
+                let file = String::from_utf8_lossy(&gen_ref.op_array.filename).to_string();
+                format!("{{closure:{}:{}}}", file, gen_ref.op_array.decl_line)
+            } else if let Some(ref scope) = gen_ref.class_scope {
+                // Use the declaring class as the scope prefix. For anonymous
+                // classes, keep the full internal name (including the NUL-byte
+                // separator and file:line suffix) so that the debug output matches
+                // PHP's "class@anonymous<NUL>/file.php:line$counter::method" layout.
+                let class_display = String::from_utf8_lossy(scope).to_string();
+                format!("{}::{}", class_display, raw_name)
+            } else {
+                raw_name
+            };
             let prop_count = 1; // function property
             // Use a hash-based ID since generators don't have object_id
             let gen_ptr = generator.as_ptr() as u64;
@@ -674,7 +691,6 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             vm.write_output(
                 format!("{}  [\"function\"]=>\n", prefix).as_bytes(),
             );
-            let name_str = func_name.to_string();
             vm.write_output(
                 format!("{}  string({}) \"{}\"\n", prefix, name_str.len(), name_str).as_bytes(),
             );
