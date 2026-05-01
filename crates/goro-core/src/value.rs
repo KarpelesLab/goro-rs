@@ -168,6 +168,15 @@ pub fn remove_resource(id: i64) {
     });
 }
 
+/// Clear all registered resources. Intended for resetting state between
+/// independent test invocations so literal integers from one test are not
+/// mis-identified as resources leaked from a previous test.
+pub fn reset_resources() {
+    RESOURCE_REGISTRY.with(|r| {
+        r.borrow_mut().clear();
+    });
+}
+
 /// Return the registered resource type name for this id, or None if not registered.
 pub fn resource_type_of(id: i64) -> Option<Vec<u8>> {
     RESOURCE_REGISTRY.with(|r| {
