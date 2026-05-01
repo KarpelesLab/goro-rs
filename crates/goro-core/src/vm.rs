@@ -4614,6 +4614,12 @@ impl Vm {
             b"reflectionattribute" => {
                 crate::reflection::reflection_attribute_method(self, method_lower, obj)
             }
+            b"reflectiongenerator" => {
+                crate::reflection::reflection_generator_method(self, method_lower, obj)
+            }
+            b"reflectionfiber" => {
+                crate::reflection::reflection_fiber_method(self, method_lower, obj)
+            }
             b"splfileinfo" => {
                 self.spl_file_info_method(method_lower, obj)
             }
@@ -6978,8 +6984,9 @@ impl Vm {
                     | b"getstaticpropertyvalue" | b"setstaticpropertyvalue"
                     | b"getmethods" | b"getproperties"
                     | b"getreflectionconstant" | b"getreflectionconstants"
-                    | b"getconstants"
+                    | b"getconstants" | b"getdefaultproperties"
                     | b"getattributes"
+                    | b"getcase" | b"hascase"
             ),
             b"reflectionmethod" => matches!(
                 method,
@@ -6988,11 +6995,13 @@ impl Vm {
                     | b"hasmethod" | b"hasproperty" | b"issubclassof"
                     | b"implementsinterface"
                     | b"getattributes"
+                    | b"getclosure"
             ),
             b"reflectionfunction" | b"reflectionfunctionabstract" => matches!(
                 method,
                 b"invoke" | b"invokeargs"
                     | b"getattributes"
+                    | b"getclosure"
             ),
             b"reflectionproperty" => matches!(
                 method,
@@ -7000,7 +7009,9 @@ impl Vm {
                     | b"getattributes"
                     | b"skiplazyinitialization"
                     | b"setrawvaluewithoutlazyinitialization"
+                    | b"setrawvalue"
                     | b"getrawvalue"
+                    | b"isinitialized"
             ),
             b"reflectionparameter" => matches!(
                 method,
@@ -9926,7 +9937,11 @@ impl Vm {
                     b"IS_PUBLIC" => Some(Value::Long(1)),
                     b"IS_PROTECTED" => Some(Value::Long(2)),
                     b"IS_PRIVATE" => Some(Value::Long(4)),
+                    b"IS_PROTECTED_SET" => Some(Value::Long(0x800)),
+                    b"IS_PRIVATE_SET" => Some(Value::Long(0x1000)),
                     b"IS_READONLY" => Some(Value::Long(0x10000)),
+                    b"IS_ABSTRACT" => Some(Value::Long(0x40)),
+                    b"IS_FINAL" => Some(Value::Long(0x20)),
                     b"IS_VIRTUAL" => Some(Value::Long(0x200000)),
                     _ => None,
                 }
@@ -16492,6 +16507,12 @@ impl Vm {
                                         }
                                         b"reflectiongenerator" => {
                                             // ReflectionGenerator::__construct(Generator $generator)
+                                            if call.args.len() > 1 {
+                                                obj_mut.set_property(b"__reflection_target".to_vec(), call.args[1].clone());
+                                            }
+                                        }
+                                        b"reflectionfiber" => {
+                                            // ReflectionFiber::__construct(Fiber $fiber)
                                             if call.args.len() > 1 {
                                                 obj_mut.set_property(b"__reflection_target".to_vec(), call.args[1].clone());
                                             }
