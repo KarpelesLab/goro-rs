@@ -21,6 +21,8 @@ use std::rc::Rc;
 enum RegexNode {
     /// Literal byte
     Literal(u8),
+    /// Literal codepoint (used in UTF-8 mode for non-ASCII)
+    LiteralCp(u32),
     /// `.` — any char except newline (unless `s` flag)
     AnyChar,
     /// `^` — start of string (or line in multiline mode)
@@ -31,9 +33,17 @@ enum RegexNode {
     WordBoundary,
     /// `\B` — non-word boundary
     NonWordBoundary,
+    /// `\K` — reset match start
+    ResetMatchStart,
     /// Character class `[...]` or shorthand `\d`, `\w`, etc.
     CharClass {
         ranges: Vec<CharRange>,
+        classes: Vec<UnicodeClassKind>,
+        /// Anti-classes: character kinds that should NOT be matched.
+        /// A char matches the class if it matches any positive criteria (ranges/classes)
+        /// OR doesn't match any anti-class (when considering anti-classes as positive complements).
+        /// Concretely: anti_classes entries contribute (complement of class) to the positive set.
+        anti_classes: Vec<UnicodeClassKind>,
         negated: bool,
     },
     /// Quantifier: greedy `*`, `+`, `?`, `{n,m}`
@@ -72,9 +82,59 @@ enum RegexNode {
 
 #[derive(Debug, Clone)]
 enum CharRange {
-    Single(u8),
-    Range(u8, u8),
+    Single(u32),
+    Range(u32, u32),
 }
+
+/// Kinds of Unicode/POSIX-style character classes that require function-based classification
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnicodeClassKind {
+    // Unicode property \p{...}
+    Letter,              // L
+    Mark,                // M
+    Number,              // N
+    NumberDecimal,       // Nd
+    Punctuation,         // P
+    Symbol,              // S
+    Separator,           // Z
+    Other,               // C
+    LowercaseLetter,     // Ll
+    UppercaseLetter,     // Lu
+    TitlecaseLetter,     // Lt
+    ModifierLetter,      // Lm
+    OtherLetter,         // Lo
+    // Scripts
+    ScriptCyrillic,
+    ScriptGreek,
+    ScriptLatin,
+    ScriptHan,
+    ScriptArabic,
+    ScriptHebrew,
+    ScriptHiragana,
+    ScriptKatakana,
+    // Unicode-aware shorthand
+    UniWord,      // \w with unicode semantics
+    UniDigit,     // \d with unicode semantics
+    UniSpace,     // \s with unicode semantics
+    // POSIX classes (byte-level)
+    PosixAlpha,
+    PosixUpper,
+    PosixLower,
+    PosixDigit,
+    PosixXDigit,
+    PosixAlnum,
+    PosixSpace,
+    PosixBlank,
+    PosixCntrl,
+    PosixGraph,
+    PosixPrint,
+    PosixPunct,
+    PosixWord,
+    PosixAscii,
+}
+
+#[derive(Debug, Clone)]
+struct NegatedClass(UnicodeClassKind);
 
 // ============================================================================
 // Flags
@@ -89,6 +149,8 @@ struct RegexFlags {
     ungreedy: bool,         // U
     anchored: bool,         // A
     utf8: bool,             // u
+    no_auto_capture: bool,  // n — make unnamed groups non-capturing
+    dollar_end_only: bool,  // D — $ matches only end, not before trailing \n
 }
 
 // ============================================================================
@@ -318,9 +380,17 @@ impl<'a> RegexParser<'a> {
                 self.advance();
                 self.parse_escape(false)
             }
+            Some(b'*') | Some(b'+') | Some(b'?') => {
+                Err("quantifier does not follow a repeatable item".into())
+            }
             Some(ch) => {
-                self.advance();
-                Ok(RegexNode::Literal(ch))
+                if self.flags.utf8 && ch >= 0x80 {
+                    let cp = self.read_utf8_cp();
+                    Ok(RegexNode::LiteralCp(cp))
+                } else {
+                    self.advance();
+                    Ok(RegexNode::Literal(ch))
+                }
             }
         }
     }
@@ -328,53 +398,119 @@ impl<'a> RegexParser<'a> {
     fn parse_escape(&mut self, in_class: bool) -> Result<RegexNode, String> {
         match self.advance() {
             None => Err("unexpected end of escape sequence".into()),
-            Some(b'd') => Ok(RegexNode::CharClass {
-                ranges: vec![CharRange::Range(b'0', b'9')],
-                negated: false,
+            Some(b'd') => Ok(if self.flags.utf8 {
+                RegexNode::CharClass {
+                    ranges: vec![],
+                    classes: vec![UnicodeClassKind::UniDigit],
+                    anti_classes: vec![],
+                    negated: false,
+                }
+            } else {
+                RegexNode::CharClass {
+                    ranges: vec![CharRange::Range(b'0' as u32, b'9' as u32)],
+                    classes: vec![],
+                    anti_classes: vec![],
+                    negated: false,
+                }
             }),
-            Some(b'D') => Ok(RegexNode::CharClass {
-                ranges: vec![CharRange::Range(b'0', b'9')],
-                negated: true,
+            Some(b'D') => Ok(if self.flags.utf8 {
+                RegexNode::CharClass {
+                    ranges: vec![],
+                    classes: vec![UnicodeClassKind::UniDigit],
+                    anti_classes: vec![],
+                    negated: true,
+                }
+            } else {
+                RegexNode::CharClass {
+                    ranges: vec![CharRange::Range(b'0' as u32, b'9' as u32)],
+                    classes: vec![],
+                    anti_classes: vec![],
+                    negated: true,
+                }
             }),
-            Some(b'w') => Ok(RegexNode::CharClass {
-                ranges: vec![
-                    CharRange::Range(b'a', b'z'),
-                    CharRange::Range(b'A', b'Z'),
-                    CharRange::Range(b'0', b'9'),
-                    CharRange::Single(b'_'),
-                ],
-                negated: false,
+            Some(b'w') => Ok(if self.flags.utf8 {
+                RegexNode::CharClass {
+                    ranges: vec![],
+                    classes: vec![UnicodeClassKind::UniWord],
+                    anti_classes: vec![],
+                    negated: false,
+                }
+            } else {
+                RegexNode::CharClass {
+                    ranges: vec![
+                        CharRange::Range(b'a' as u32, b'z' as u32),
+                        CharRange::Range(b'A' as u32, b'Z' as u32),
+                        CharRange::Range(b'0' as u32, b'9' as u32),
+                        CharRange::Single(b'_' as u32),
+                    ],
+                    classes: vec![],
+                    anti_classes: vec![],
+                    negated: false,
+                }
             }),
-            Some(b'W') => Ok(RegexNode::CharClass {
-                ranges: vec![
-                    CharRange::Range(b'a', b'z'),
-                    CharRange::Range(b'A', b'Z'),
-                    CharRange::Range(b'0', b'9'),
-                    CharRange::Single(b'_'),
-                ],
-                negated: true,
+            Some(b'W') => Ok(if self.flags.utf8 {
+                RegexNode::CharClass {
+                    ranges: vec![],
+                    classes: vec![UnicodeClassKind::UniWord],
+                    anti_classes: vec![],
+                    negated: true,
+                }
+            } else {
+                RegexNode::CharClass {
+                    ranges: vec![
+                        CharRange::Range(b'a' as u32, b'z' as u32),
+                        CharRange::Range(b'A' as u32, b'Z' as u32),
+                        CharRange::Range(b'0' as u32, b'9' as u32),
+                        CharRange::Single(b'_' as u32),
+                    ],
+                    classes: vec![],
+                    anti_classes: vec![],
+                    negated: true,
+                }
             }),
-            Some(b's') => Ok(RegexNode::CharClass {
-                ranges: vec![
-                    CharRange::Single(b' '),
-                    CharRange::Single(b'\t'),
-                    CharRange::Single(b'\n'),
-                    CharRange::Single(b'\r'),
-                    CharRange::Single(0x0C), // form feed
-                    CharRange::Single(0x0B), // vertical tab
-                ],
-                negated: false,
+            Some(b's') => Ok(if self.flags.utf8 {
+                RegexNode::CharClass {
+                    ranges: vec![],
+                    classes: vec![UnicodeClassKind::UniSpace],
+                    anti_classes: vec![],
+                    negated: false,
+                }
+            } else {
+                RegexNode::CharClass {
+                    ranges: vec![
+                        CharRange::Single(b' ' as u32),
+                        CharRange::Single(b'\t' as u32),
+                        CharRange::Single(b'\n' as u32),
+                        CharRange::Single(b'\r' as u32),
+                        CharRange::Single(0x0C), // form feed
+                        CharRange::Single(0x0B), // vertical tab
+                    ],
+                    classes: vec![],
+                    anti_classes: vec![],
+                    negated: false,
+                }
             }),
-            Some(b'S') => Ok(RegexNode::CharClass {
-                ranges: vec![
-                    CharRange::Single(b' '),
-                    CharRange::Single(b'\t'),
-                    CharRange::Single(b'\n'),
-                    CharRange::Single(b'\r'),
-                    CharRange::Single(0x0C),
-                    CharRange::Single(0x0B),
-                ],
-                negated: true,
+            Some(b'S') => Ok(if self.flags.utf8 {
+                RegexNode::CharClass {
+                    ranges: vec![],
+                    classes: vec![UnicodeClassKind::UniSpace],
+                    anti_classes: vec![],
+                    negated: true,
+                }
+            } else {
+                RegexNode::CharClass {
+                    ranges: vec![
+                        CharRange::Single(b' ' as u32),
+                        CharRange::Single(b'\t' as u32),
+                        CharRange::Single(b'\n' as u32),
+                        CharRange::Single(b'\r' as u32),
+                        CharRange::Single(0x0C),
+                        CharRange::Single(0x0B),
+                    ],
+                    classes: vec![],
+                    anti_classes: vec![],
+                    negated: true,
+                }
             }),
             Some(b'b') => {
                 if in_class {
@@ -394,6 +530,10 @@ impl<'a> RegexParser<'a> {
             Some(b'A') if !in_class => Ok(RegexNode::StartAnchor), // \A = start of subject
             Some(b'Z') if !in_class => Ok(RegexNode::EndAnchor),   // \Z = end of subject (or before final \n)
             Some(b'z') if !in_class => Ok(RegexNode::EndAnchor),   // \z = absolute end of subject
+            Some(b'K') if !in_class => Ok(RegexNode::ResetMatchStart),
+            Some(b'p') => self.parse_unicode_prop(false),
+            Some(b'P') if !in_class => self.parse_unicode_prop(true),
+            Some(b'P') => self.parse_unicode_prop(true),
             Some(b'n') => Ok(RegexNode::Literal(b'\n')),
             Some(b'r') => Ok(RegexNode::Literal(b'\r')),
             Some(b't') => Ok(RegexNode::Literal(b'\t')),
@@ -445,6 +585,72 @@ impl<'a> RegexParser<'a> {
                 Ok(RegexNode::Literal(ch))
             }
         }
+    }
+
+    /// Parse `\p{Property}` or `\pL` (single-letter form).
+    /// If `negated` is true, this was `\P{...}`.
+    fn parse_unicode_prop(&mut self, negated: bool) -> Result<RegexNode, String> {
+        let name: Vec<u8> = if self.peek() == Some(b'{') {
+            self.advance();
+            let mut name = Vec::new();
+            while let Some(ch) = self.peek() {
+                if ch == b'}' {
+                    self.advance();
+                    break;
+                }
+                name.push(ch);
+                self.advance();
+            }
+            name
+        } else if let Some(ch) = self.advance() {
+            vec![ch]
+        } else {
+            return Err("malformed property escape".into());
+        };
+
+        // The name may start with ^ for negation
+        let (inv, name) = if let Some(&b'^') = name.first() {
+            (true, name[1..].to_vec())
+        } else {
+            (false, name)
+        };
+
+        let kind = match name.as_slice() {
+            b"L" => UnicodeClassKind::Letter,
+            b"M" => UnicodeClassKind::Mark,
+            b"N" => UnicodeClassKind::Number,
+            b"Nd" => UnicodeClassKind::NumberDecimal,
+            b"P" => UnicodeClassKind::Punctuation,
+            b"S" => UnicodeClassKind::Symbol,
+            b"Z" => UnicodeClassKind::Separator,
+            b"C" => UnicodeClassKind::Other,
+            b"Ll" => UnicodeClassKind::LowercaseLetter,
+            b"Lu" => UnicodeClassKind::UppercaseLetter,
+            b"Lt" => UnicodeClassKind::TitlecaseLetter,
+            b"Lm" => UnicodeClassKind::ModifierLetter,
+            b"Lo" => UnicodeClassKind::OtherLetter,
+            b"Cyrillic" => UnicodeClassKind::ScriptCyrillic,
+            b"Greek" => UnicodeClassKind::ScriptGreek,
+            b"Latin" => UnicodeClassKind::ScriptLatin,
+            b"Han" => UnicodeClassKind::ScriptHan,
+            b"Arabic" => UnicodeClassKind::ScriptArabic,
+            b"Hebrew" => UnicodeClassKind::ScriptHebrew,
+            b"Hiragana" => UnicodeClassKind::ScriptHiragana,
+            b"Katakana" => UnicodeClassKind::ScriptKatakana,
+            _ => {
+                return Err(format!(
+                    "Unknown property name after \\p",
+                ));
+            }
+        };
+
+        let final_negated = negated ^ inv;
+        Ok(RegexNode::CharClass {
+            ranges: vec![],
+            classes: vec![kind],
+            anti_classes: vec![],
+            negated: final_negated,
+        })
     }
 
     fn parse_group(&mut self) -> Result<RegexNode, String> {
@@ -678,7 +884,17 @@ impl<'a> RegexParser<'a> {
             }
         }
 
-        // Normal capture group
+        // Normal capture group — but if no_auto_capture is set, treat as non-capturing
+        if self.flags.no_auto_capture {
+            let inner = self.parse_alternation()?;
+            if self.peek() != Some(b')') {
+                return Err("unclosed group".into());
+            }
+            self.advance();
+            return Ok(RegexNode::NonCapturingGroup {
+                node: Box::new(inner),
+            });
+        }
         self.group_count += 1;
         let index = self.group_count;
         let inner = self.parse_alternation()?;
@@ -701,18 +917,88 @@ impl<'a> RegexParser<'a> {
             false
         };
 
-        let mut ranges = Vec::new();
+        let mut ranges: Vec<CharRange> = Vec::new();
+        let mut classes: Vec<UnicodeClassKind> = Vec::new();
+        // Track negated classes — we include their complement by adding every char range
+        // OR handle via the top-level match function. We'll collect "anti-classes" separately.
+        let mut anti_classes: Vec<UnicodeClassKind> = Vec::new();
 
         // Handle `]` or `-` as first character (literal)
         if self.peek() == Some(b']') {
             self.advance();
-            ranges.push(CharRange::Single(b']'));
+            ranges.push(CharRange::Single(b']' as u32));
         }
 
         while let Some(ch) = self.peek() {
             if ch == b']' {
                 self.advance();
-                return Ok(RegexNode::CharClass { ranges, negated });
+                // Anti-classes: we need a way to represent "char not of class X" inside a positive class.
+                // Implement this by making the class use the negation strategy:
+                // If there are only anti_classes and no positive ones, then we can flip negated.
+                // Otherwise store them as negated sub-classes via a simple encoding: we'll use
+                // paired classes (anti) with a marker. For now, use a dedicated encoding: push
+                // each anti class as a CharClass wrapped into a special literal range structure —
+                // easier approach: store anti_classes alongside classes and check on match.
+                return Ok(RegexNode::CharClass { ranges, classes, anti_classes, negated });
+            }
+
+            if ch == b'[' && self.peek_ahead(1) == Some(b':') {
+                // POSIX class like [:alpha:]
+                let saved = self.pos;
+                self.advance(); // [
+                self.advance(); // :
+                let mut name = Vec::new();
+                let mut inv = false;
+                if self.peek() == Some(b'^') {
+                    inv = true;
+                    self.advance();
+                }
+                while let Some(c) = self.peek() {
+                    if c == b':' {
+                        break;
+                    }
+                    name.push(c);
+                    self.advance();
+                }
+                if self.peek() == Some(b':') && self.peek_ahead(1) == Some(b']') {
+                    self.advance(); // :
+                    self.advance(); // ]
+                    let kind = match name.as_slice() {
+                        b"alpha" => UnicodeClassKind::PosixAlpha,
+                        b"upper" => UnicodeClassKind::PosixUpper,
+                        b"lower" => UnicodeClassKind::PosixLower,
+                        b"digit" => UnicodeClassKind::PosixDigit,
+                        b"xdigit" => UnicodeClassKind::PosixXDigit,
+                        b"alnum" => UnicodeClassKind::PosixAlnum,
+                        b"space" => UnicodeClassKind::PosixSpace,
+                        b"blank" => UnicodeClassKind::PosixBlank,
+                        b"cntrl" => UnicodeClassKind::PosixCntrl,
+                        b"graph" => UnicodeClassKind::PosixGraph,
+                        b"print" => UnicodeClassKind::PosixPrint,
+                        b"punct" => UnicodeClassKind::PosixPunct,
+                        b"word" => UnicodeClassKind::PosixWord,
+                        b"ascii" => UnicodeClassKind::PosixAscii,
+                        _ => {
+                            // Unknown POSIX class — treat as literal `[`
+                            self.pos = saved;
+                            ranges.push(CharRange::Single(b'[' as u32));
+                            self.advance();
+                            continue;
+                        }
+                    };
+                    if inv {
+                        anti_classes.push(kind);
+                    } else {
+                        classes.push(kind);
+                    }
+                    continue;
+                } else {
+                    // Not a POSIX class
+                    self.pos = saved;
+                    self.advance();
+                    ranges.push(CharRange::Single(b'[' as u32));
+                    continue;
+                }
             }
 
             if ch == b'\\' {
@@ -720,59 +1006,79 @@ impl<'a> RegexParser<'a> {
                 match self.peek() {
                     Some(b'd') => {
                         self.advance();
-                        ranges.push(CharRange::Range(b'0', b'9'));
+                        if self.flags.utf8 {
+                            classes.push(UnicodeClassKind::UniDigit);
+                        } else {
+                            ranges.push(CharRange::Range(b'0' as u32, b'9' as u32));
+                        }
                     }
                     Some(b'D') => {
-                        // \D in class — we can't negate inside a range easily,
-                        // just add common non-digit ranges
                         self.advance();
-                        ranges.push(CharRange::Range(0, b'0' - 1));
-                        ranges.push(CharRange::Range(b'9' + 1, 255));
+                        if self.flags.utf8 {
+                            anti_classes.push(UnicodeClassKind::UniDigit);
+                        } else {
+                            ranges.push(CharRange::Range(0, b'0' as u32 - 1));
+                            ranges.push(CharRange::Range(b'9' as u32 + 1, 0x10FFFF));
+                        }
                     }
                     Some(b'w') => {
                         self.advance();
-                        ranges.push(CharRange::Range(b'a', b'z'));
-                        ranges.push(CharRange::Range(b'A', b'Z'));
-                        ranges.push(CharRange::Range(b'0', b'9'));
-                        ranges.push(CharRange::Single(b'_'));
+                        if self.flags.utf8 {
+                            classes.push(UnicodeClassKind::UniWord);
+                        } else {
+                            ranges.push(CharRange::Range(b'a' as u32, b'z' as u32));
+                            ranges.push(CharRange::Range(b'A' as u32, b'Z' as u32));
+                            ranges.push(CharRange::Range(b'0' as u32, b'9' as u32));
+                            ranges.push(CharRange::Single(b'_' as u32));
+                        }
                     }
                     Some(b'W') => {
                         self.advance();
-                        // Non-word chars — hard to express as ranges, add complement
-                        ranges.push(CharRange::Range(0, b'/' ));  // before 0
-                        ranges.push(CharRange::Range(b':' , b'@'));  // between 9 and A
-                        ranges.push(CharRange::Range(b'[', b'^'));   // between Z and _
-                        ranges.push(CharRange::Single(b'`'));        // between _ and a
-                        ranges.push(CharRange::Range(b'{', 255));    // after z
+                        if self.flags.utf8 {
+                            anti_classes.push(UnicodeClassKind::UniWord);
+                        } else {
+                            ranges.push(CharRange::Range(0, b'/' as u32));  // before 0
+                            ranges.push(CharRange::Range(b':' as u32, b'@' as u32));
+                            ranges.push(CharRange::Range(b'[' as u32, b'^' as u32));
+                            ranges.push(CharRange::Single(b'`' as u32));
+                            ranges.push(CharRange::Range(b'{' as u32, 0x10FFFF));
+                        }
                     }
                     Some(b's') => {
                         self.advance();
-                        ranges.push(CharRange::Single(b' '));
-                        ranges.push(CharRange::Single(b'\t'));
-                        ranges.push(CharRange::Single(b'\n'));
-                        ranges.push(CharRange::Single(b'\r'));
-                        ranges.push(CharRange::Single(0x0C));
-                        ranges.push(CharRange::Single(0x0B));
+                        if self.flags.utf8 {
+                            classes.push(UnicodeClassKind::UniSpace);
+                        } else {
+                            ranges.push(CharRange::Single(b' ' as u32));
+                            ranges.push(CharRange::Single(b'\t' as u32));
+                            ranges.push(CharRange::Single(b'\n' as u32));
+                            ranges.push(CharRange::Single(b'\r' as u32));
+                            ranges.push(CharRange::Single(0x0C));
+                            ranges.push(CharRange::Single(0x0B));
+                        }
                     }
                     Some(b'S') => {
                         self.advance();
-                        // non-whitespace — complement
-                        ranges.push(CharRange::Range(0, 0x08));
-                        ranges.push(CharRange::Single(0x0E));
-                        ranges.push(CharRange::Range(0x0E, b' ' - 1));
-                        ranges.push(CharRange::Range(b' ' + 1, 255));
+                        if self.flags.utf8 {
+                            anti_classes.push(UnicodeClassKind::UniSpace);
+                        } else {
+                            ranges.push(CharRange::Range(0, 0x08));
+                            ranges.push(CharRange::Single(0x0E));
+                            ranges.push(CharRange::Range(0x0E, b' ' as u32 - 1));
+                            ranges.push(CharRange::Range(b' ' as u32 + 1, 0x10FFFF));
+                        }
                     }
                     Some(b'n') => {
                         self.advance();
-                        ranges.push(CharRange::Single(b'\n'));
+                        ranges.push(CharRange::Single(b'\n' as u32));
                     }
                     Some(b'r') => {
                         self.advance();
-                        ranges.push(CharRange::Single(b'\r'));
+                        ranges.push(CharRange::Single(b'\r' as u32));
                     }
                     Some(b't') => {
                         self.advance();
-                        ranges.push(CharRange::Single(b'\t'));
+                        ranges.push(CharRange::Single(b'\t' as u32));
                     }
                     Some(b'b') => {
                         // \b in character class = backspace
@@ -781,72 +1087,142 @@ impl<'a> RegexParser<'a> {
                     }
                     Some(b'x') => {
                         self.advance();
-                        let mut val: u8 = 0;
+                        let mut val: u32 = 0;
                         let has_brace = self.peek() == Some(b'{');
                         if has_brace {
                             self.advance();
-                        }
-                        for _ in 0..2 {
-                            match self.peek() {
-                                Some(c) if c.is_ascii_hexdigit() => {
+                            while let Some(c) = self.peek() {
+                                if c.is_ascii_hexdigit() {
                                     self.advance();
-                                    val = val * 16 + hex_val(c);
+                                    val = val.saturating_mul(16) + hex_val(c) as u32;
+                                } else {
+                                    break;
                                 }
-                                _ => break,
                             }
-                        }
-                        if has_brace && self.peek() == Some(b'}') {
-                            self.advance();
+                            if self.peek() == Some(b'}') {
+                                self.advance();
+                            }
+                        } else {
+                            for _ in 0..2 {
+                                match self.peek() {
+                                    Some(c) if c.is_ascii_hexdigit() => {
+                                        self.advance();
+                                        val = val * 16 + hex_val(c) as u32;
+                                    }
+                                    _ => break,
+                                }
+                            }
                         }
                         ranges.push(CharRange::Single(val));
                     }
+                    Some(b'p') => {
+                        self.advance();
+                        let node = self.parse_unicode_prop(false)?;
+                        if let RegexNode::CharClass { classes: mut sub, negated: n, .. } = node {
+                            if n {
+                                anti_classes.append(&mut sub);
+                            } else {
+                                classes.append(&mut sub);
+                            }
+                        }
+                    }
+                    Some(b'P') => {
+                        self.advance();
+                        let node = self.parse_unicode_prop(true)?;
+                        if let RegexNode::CharClass { classes: mut sub, negated: n, .. } = node {
+                            if n {
+                                anti_classes.append(&mut sub);
+                            } else {
+                                classes.append(&mut sub);
+                            }
+                        }
+                    }
                     Some(c) => {
                         self.advance();
-                        ranges.push(CharRange::Single(c));
+                        ranges.push(CharRange::Single(c as u32));
                     }
                     None => {
                         return Err("unexpected end in char class escape".into());
                     }
                 }
-            } else if ch == b'-' && !ranges.is_empty() {
+            } else if ch == b'-' && !ranges.is_empty() && self.peek_ahead(1) != Some(b']') {
                 // Could be a range like `a-z`
                 self.advance();
-                if self.peek() == Some(b']') {
-                    // `-` at end is literal
-                    ranges.push(CharRange::Single(b'-'));
-                } else if let Some(end_ch) = self.peek() {
-                    self.advance();
+                if let Some(end_ch) = self.peek() {
+                    // Read the end char (possibly escaped or UTF-8)
+                    let end_cp: u32 = if end_ch == b'\\' {
+                        self.advance();
+                        match self.advance() {
+                            Some(b'n') => b'\n' as u32,
+                            Some(b'r') => b'\r' as u32,
+                            Some(b't') => b'\t' as u32,
+                            Some(b'x') => {
+                                let mut val: u32 = 0;
+                                let has_brace = self.peek() == Some(b'{');
+                                if has_brace {
+                                    self.advance();
+                                    while let Some(c) = self.peek() {
+                                        if c.is_ascii_hexdigit() {
+                                            self.advance();
+                                            val = val.saturating_mul(16) + hex_val(c) as u32;
+                                        } else { break; }
+                                    }
+                                    if self.peek() == Some(b'}') { self.advance(); }
+                                } else {
+                                    for _ in 0..2 {
+                                        if let Some(c) = self.peek() {
+                                            if c.is_ascii_hexdigit() {
+                                                self.advance();
+                                                val = val * 16 + hex_val(c) as u32;
+                                            } else { break; }
+                                        } else { break; }
+                                    }
+                                }
+                                val
+                            }
+                            Some(c) => c as u32,
+                            None => end_ch as u32,
+                        }
+                    } else if self.flags.utf8 && end_ch >= 0x80 {
+                        self.read_utf8_cp()
+                    } else {
+                        self.advance();
+                        end_ch as u32
+                    };
                     // Get the start of the range from the last entry
                     if let Some(CharRange::Single(start)) = ranges.last() {
                         let start = *start;
                         ranges.pop();
-                        let actual_end = if end_ch == b'\\' {
-                            // Handle escaped end of range
-                            match self.advance() {
-                                Some(b'n') => b'\n',
-                                Some(b'r') => b'\r',
-                                Some(b't') => b'\t',
-                                Some(c) => c,
-                                None => end_ch,
-                            }
-                        } else {
-                            end_ch
-                        };
-                        ranges.push(CharRange::Range(start, actual_end));
+                        ranges.push(CharRange::Range(start, end_cp));
                     } else {
-                        ranges.push(CharRange::Single(b'-'));
-                        ranges.push(CharRange::Single(end_ch));
+                        ranges.push(CharRange::Single(b'-' as u32));
+                        ranges.push(CharRange::Single(end_cp));
                     }
                 } else {
-                    ranges.push(CharRange::Single(b'-'));
+                    ranges.push(CharRange::Single(b'-' as u32));
                 }
+            } else if self.flags.utf8 && ch >= 0x80 {
+                let cp = self.read_utf8_cp();
+                ranges.push(CharRange::Single(cp));
             } else {
                 self.advance();
-                ranges.push(CharRange::Single(ch));
+                ranges.push(CharRange::Single(ch as u32));
             }
         }
 
         Err("unclosed character class".into())
+    }
+
+    fn peek_ahead(&self, n: usize) -> Option<u8> {
+        self.input.get(self.pos + n).copied()
+    }
+
+    /// Decode a UTF-8 codepoint at current position, advancing past it.
+    /// Returns the codepoint, or the byte value if decoding fails.
+    fn read_utf8_cp(&mut self) -> u32 {
+        let (cp, len) = decode_utf8_at(self.input, self.pos);
+        self.pos += len.max(1);
+        cp
     }
 }
 
@@ -870,6 +1246,9 @@ struct MatchState<'a> {
     captures: Vec<Option<(usize, usize)>>, // (start, end) for each group
     flags: RegexFlags,
     step_count: usize,
+    /// If `\K` was encountered during the match, this holds the position where
+    /// the reported match should start. None means start from initial position.
+    match_start_override: Option<usize>,
 }
 
 const MAX_STEPS: usize = 1_000_000;
@@ -881,6 +1260,7 @@ impl<'a> MatchState<'a> {
             captures: vec![None; num_groups + 1], // index 0 = full match
             flags,
             step_count: 0,
+            match_start_override: None,
         }
     }
 
@@ -911,9 +1291,35 @@ impl<'a> MatchState<'a> {
                 }
             }
 
+            RegexNode::LiteralCp(cp) => {
+                if pos < self.input.len() {
+                    let (input_cp, len) = decode_utf8_at(self.input, pos);
+                    let matches = if self.flags.case_insensitive {
+                        ascii_lc_cp(input_cp) == ascii_lc_cp(*cp)
+                    } else {
+                        input_cp == *cp
+                    };
+                    if matches {
+                        Some(pos + len.max(1))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+
             RegexNode::AnyChar => {
                 if pos < self.input.len() {
-                    if self.flags.dotall || self.input[pos] != b'\n' {
+                    if self.flags.utf8 {
+                        // Check for newline
+                        let (cp, len) = decode_utf8_at(self.input, pos);
+                        if !self.flags.dotall && cp == b'\n' as u32 {
+                            None
+                        } else {
+                            Some(pos + len.max(1))
+                        }
+                    } else if self.flags.dotall || self.input[pos] != b'\n' {
                         Some(pos + 1)
                     } else {
                         None
@@ -939,20 +1345,22 @@ impl<'a> MatchState<'a> {
                 } else if self.flags.multiline && pos < self.input.len() && self.input[pos] == b'\n'
                 {
                     Some(pos)
-                } else if pos == self.input.len() - 1 && self.input[pos] == b'\n' {
-                    // $ matches before trailing newline
+                } else if !self.flags.dollar_end_only && pos == self.input.len() - 1 && self.input[pos] == b'\n' {
+                    // $ matches before trailing newline (unless /D modifier)
                     Some(pos)
                 } else {
                     None
                 }
             }
 
+            RegexNode::ResetMatchStart => {
+                self.match_start_override = Some(pos);
+                Some(pos)
+            }
+
             RegexNode::WordBoundary => {
-                let before_is_word =
-                    pos > 0 && is_word_char(self.input[pos - 1], self.flags.case_insensitive);
-                let after_is_word = pos < self.input.len()
-                    && is_word_char(self.input[pos], self.flags.case_insensitive);
-                if before_is_word != after_is_word {
+                let (before_word, after_word) = self.word_boundary_states(pos);
+                if before_word != after_word {
                     Some(pos)
                 } else {
                     None
@@ -960,23 +1368,24 @@ impl<'a> MatchState<'a> {
             }
 
             RegexNode::NonWordBoundary => {
-                let before_is_word =
-                    pos > 0 && is_word_char(self.input[pos - 1], self.flags.case_insensitive);
-                let after_is_word = pos < self.input.len()
-                    && is_word_char(self.input[pos], self.flags.case_insensitive);
-                if before_is_word == after_is_word {
+                let (before_word, after_word) = self.word_boundary_states(pos);
+                if before_word == after_word {
                     Some(pos)
                 } else {
                     None
                 }
             }
 
-            RegexNode::CharClass { ranges, negated } => {
+            RegexNode::CharClass { ranges, classes, anti_classes, negated } => {
                 if pos < self.input.len() {
-                    let ch = self.input[pos];
-                    let matches = char_in_ranges(ch, ranges, self.flags.case_insensitive);
+                    let (cp, len) = if self.flags.utf8 {
+                        decode_utf8_at(self.input, pos)
+                    } else {
+                        (self.input[pos] as u32, 1)
+                    };
+                    let matches = char_matches_class(cp, ranges, classes, anti_classes, self.flags.case_insensitive);
                     if matches != *negated {
-                        Some(pos + 1)
+                        Some(pos + len.max(1))
                     } else {
                         None
                     }
@@ -1002,6 +1411,7 @@ impl<'a> MatchState<'a> {
                     if let Some(end_pos) = state.try_match(branch, pos) {
                         // Propagate captures from successful branch
                         self.captures = state.captures;
+                        self.match_start_override = state.match_start_override;
                         self.step_count = state.step_count;
                         return Some(end_pos);
                     }
@@ -1199,45 +1609,414 @@ impl<'a> MatchState<'a> {
     }
 }
 
-/// Check if a byte is in the given ranges
-fn char_in_ranges(ch: u8, ranges: &[CharRange], case_insensitive: bool) -> bool {
+/// Decode a UTF-8 codepoint at `pos`. Returns (codepoint, byte_length).
+/// If the bytes don't form valid UTF-8, returns the raw byte value with length 1.
+fn decode_utf8_at(input: &[u8], pos: usize) -> (u32, usize) {
+    if pos >= input.len() {
+        return (0, 0);
+    }
+    let b0 = input[pos];
+    if b0 < 0x80 {
+        return (b0 as u32, 1);
+    }
+    // Determine byte length from leading bits
+    let (len, mut cp): (usize, u32) = if b0 & 0xE0 == 0xC0 {
+        (2, (b0 & 0x1F) as u32)
+    } else if b0 & 0xF0 == 0xE0 {
+        (3, (b0 & 0x0F) as u32)
+    } else if b0 & 0xF8 == 0xF0 {
+        (4, (b0 & 0x07) as u32)
+    } else {
+        return (b0 as u32, 1);
+    };
+    if pos + len > input.len() {
+        return (b0 as u32, 1);
+    }
+    for i in 1..len {
+        let b = input[pos + i];
+        if b & 0xC0 != 0x80 {
+            return (b0 as u32, 1);
+        }
+        cp = (cp << 6) | (b & 0x3F) as u32;
+    }
+    (cp, len)
+}
+
+/// ASCII-lowercase a codepoint (safe for Unicode: only affects A-Z).
+fn ascii_lc_cp(cp: u32) -> u32 {
+    if (b'A' as u32..=b'Z' as u32).contains(&cp) {
+        cp + 32
+    } else {
+        cp
+    }
+}
+
+/// ASCII-uppercase a codepoint.
+fn ascii_uc_cp(cp: u32) -> u32 {
+    if (b'a' as u32..=b'z' as u32).contains(&cp) {
+        cp - 32
+    } else {
+        cp
+    }
+}
+
+/// Check if a codepoint matches a set of ranges + classes, with anti_classes adding
+/// (complement of X) to the positive set.
+fn char_matches_class(
+    cp: u32,
+    ranges: &[CharRange],
+    classes: &[UnicodeClassKind],
+    anti_classes: &[UnicodeClassKind],
+    case_insensitive: bool,
+) -> bool {
+    // Check ranges
     for range in ranges {
         match range {
             CharRange::Single(c) => {
                 if case_insensitive {
-                    if ch.to_ascii_lowercase() == c.to_ascii_lowercase() {
+                    if ascii_lc_cp(cp) == ascii_lc_cp(*c) {
                         return true;
                     }
-                } else if ch == *c {
+                } else if cp == *c {
                     return true;
                 }
             }
             CharRange::Range(start, end) => {
                 if case_insensitive {
-                    let ch_lower = ch.to_ascii_lowercase();
-                    let start_lower = start.to_ascii_lowercase();
-                    let end_lower = end.to_ascii_lowercase();
-                    if ch_lower >= start_lower && ch_lower <= end_lower {
+                    let cp_l = ascii_lc_cp(cp);
+                    let s_l = ascii_lc_cp(*start);
+                    let e_l = ascii_lc_cp(*end);
+                    if cp_l >= s_l && cp_l <= e_l {
                         return true;
                     }
-                    // Also check uppercase range
-                    let ch_upper = ch.to_ascii_uppercase();
-                    let start_upper = start.to_ascii_uppercase();
-                    let end_upper = end.to_ascii_uppercase();
-                    if ch_upper >= start_upper && ch_upper <= end_upper {
+                    let cp_u = ascii_uc_cp(cp);
+                    let s_u = ascii_uc_cp(*start);
+                    let e_u = ascii_uc_cp(*end);
+                    if cp_u >= s_u && cp_u <= e_u {
                         return true;
                     }
-                } else if ch >= *start && ch <= *end {
+                } else if cp >= *start && cp <= *end {
                     return true;
                 }
             }
         }
     }
+    // Check classes (positive match)
+    for k in classes {
+        if check_class(cp, *k) {
+            return true;
+        }
+    }
+    // Check anti_classes (complement of X is in positive set)
+    for k in anti_classes {
+        if !check_class(cp, *k) {
+            return true;
+        }
+    }
     false
+}
+
+fn check_class(cp: u32, kind: UnicodeClassKind) -> bool {
+    use UnicodeClassKind::*;
+    match kind {
+        Letter | UniWord if cp < 0x80 => {
+            if kind == UniWord {
+                (cp >= b'a' as u32 && cp <= b'z' as u32)
+                    || (cp >= b'A' as u32 && cp <= b'Z' as u32)
+                    || (cp >= b'0' as u32 && cp <= b'9' as u32)
+                    || cp == b'_' as u32
+            } else {
+                (cp >= b'a' as u32 && cp <= b'z' as u32)
+                    || (cp >= b'A' as u32 && cp <= b'Z' as u32)
+            }
+        }
+        UniWord => {
+            // word char: letter, digit, mark, or connector punctuation (roughly _)
+            is_unicode_letter(cp) || is_unicode_mark(cp) || is_unicode_decimal_digit(cp) || cp == b'_' as u32
+        }
+        UniDigit => is_unicode_decimal_digit(cp),
+        UniSpace => is_unicode_space(cp),
+        Letter => is_unicode_letter(cp),
+        Mark => is_unicode_mark(cp),
+        Number => is_unicode_number(cp),
+        NumberDecimal => is_unicode_decimal_digit(cp),
+        Punctuation => is_unicode_punctuation(cp),
+        Symbol => is_unicode_symbol(cp),
+        Separator => is_unicode_separator(cp),
+        Other => is_unicode_other(cp),
+        LowercaseLetter => is_unicode_lowercase_letter(cp),
+        UppercaseLetter => is_unicode_uppercase_letter(cp),
+        TitlecaseLetter => false, // rare, skip
+        ModifierLetter => false,
+        OtherLetter => is_unicode_letter(cp) && !is_unicode_lowercase_letter(cp) && !is_unicode_uppercase_letter(cp),
+        ScriptCyrillic => is_cyrillic(cp),
+        ScriptGreek => is_greek(cp),
+        ScriptLatin => is_latin(cp),
+        ScriptHan => is_han(cp),
+        ScriptArabic => is_arabic(cp),
+        ScriptHebrew => is_hebrew(cp),
+        ScriptHiragana => is_hiragana(cp),
+        ScriptKatakana => is_katakana(cp),
+        PosixAlpha => (cp as u8).is_ascii_alphabetic() && cp < 0x80,
+        PosixUpper => cp >= b'A' as u32 && cp <= b'Z' as u32,
+        PosixLower => cp >= b'a' as u32 && cp <= b'z' as u32,
+        PosixDigit => cp >= b'0' as u32 && cp <= b'9' as u32,
+        PosixXDigit => (cp >= b'0' as u32 && cp <= b'9' as u32)
+            || (cp >= b'a' as u32 && cp <= b'f' as u32)
+            || (cp >= b'A' as u32 && cp <= b'F' as u32),
+        PosixAlnum => cp < 0x80 && (cp as u8).is_ascii_alphanumeric(),
+        PosixSpace => cp == b' ' as u32 || cp == b'\t' as u32 || cp == b'\n' as u32
+            || cp == b'\r' as u32 || cp == 0x0B || cp == 0x0C,
+        PosixBlank => cp == b' ' as u32 || cp == b'\t' as u32,
+        PosixCntrl => cp < 0x20 || cp == 0x7F,
+        PosixGraph => cp >= 0x21 && cp <= 0x7E,
+        PosixPrint => cp >= 0x20 && cp <= 0x7E,
+        PosixPunct => cp < 0x80 && (cp as u8).is_ascii_punctuation(),
+        PosixWord => cp < 0x80 && ((cp as u8).is_ascii_alphanumeric() || cp == b'_' as u32),
+        PosixAscii => cp < 0x80,
+    }
+}
+
+/// Simplified Unicode letter check — covers commonly-used ranges.
+fn is_unicode_letter(cp: u32) -> bool {
+    match cp {
+        // ASCII letters
+        0x41..=0x5A | 0x61..=0x7A => true,
+        // Latin-1 supplement letters
+        0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0xFF => true,
+        // Latin Extended-A/B, IPA Extensions
+        0x100..=0x2AF => true,
+        // Greek
+        0x370..=0x373 | 0x376..=0x377 | 0x37A..=0x37D | 0x37F
+            | 0x386 | 0x388..=0x38A | 0x38C | 0x38E..=0x3A1 | 0x3A3..=0x3FF => true,
+        // Cyrillic
+        0x400..=0x481 | 0x48A..=0x4FF | 0x500..=0x52F => true,
+        // Armenian
+        0x531..=0x556 | 0x561..=0x587 => true,
+        // Hebrew letters
+        0x5D0..=0x5EA | 0x5EF..=0x5F2 => true,
+        // Arabic letters
+        0x620..=0x64A | 0x66E..=0x66F | 0x671..=0x6D3 | 0x6D5 | 0x6E5..=0x6E6
+            | 0x6EE..=0x6EF | 0x6FA..=0x6FC | 0x6FF => true,
+        // Devanagari
+        0x904..=0x939 => true,
+        // Thai
+        0xE01..=0xE30 | 0xE32..=0xE33 | 0xE40..=0xE46 => true,
+        // Sinhala
+        0xD85..=0xD96 | 0xD9A..=0xDB1 | 0xDB3..=0xDBB | 0xDBD | 0xDC0..=0xDC6 => true,
+        // Hiragana
+        0x3041..=0x3096 => true,
+        // Katakana
+        0x30A1..=0x30FA => true,
+        // CJK
+        0x4E00..=0x9FFF => true,
+        0x3400..=0x4DBF => true,
+        0x20000..=0x2A6DF => true,
+        // Hangul
+        0xAC00..=0xD7A3 => true,
+        // Fullwidth / halfwidth Latin letters
+        0xFF21..=0xFF3A | 0xFF41..=0xFF5A => true,
+        _ => false,
+    }
+}
+
+fn is_unicode_mark(cp: u32) -> bool {
+    match cp {
+        // Combining diacriticals
+        0x300..=0x36F | 0x483..=0x487 | 0x591..=0x5BD | 0x5BF | 0x5C1..=0x5C2
+            | 0x5C4..=0x5C5 | 0x5C7
+            | 0x610..=0x61A | 0x64B..=0x65F | 0x670 | 0x6D6..=0x6DC
+            | 0x6DF..=0x6E4 | 0x6E7..=0x6E8 | 0x6EA..=0x6ED => true,
+        0x900..=0x903 | 0x93A..=0x93C | 0x93E..=0x94F | 0x951..=0x957
+            | 0x962..=0x963 => true,
+        0xDCA..=0xDDF | 0xDF2..=0xDF3 => true,
+        0x20D0..=0x20FF => true,
+        _ => false,
+    }
+}
+
+fn is_unicode_number(cp: u32) -> bool {
+    is_unicode_decimal_digit(cp)
+        || matches!(cp, 0xB2..=0xB3 | 0xB9 | 0xBC..=0xBE | 0x2070..=0x2189)
+}
+
+fn is_unicode_decimal_digit(cp: u32) -> bool {
+    match cp {
+        0x30..=0x39 => true, // ASCII digits
+        0x660..=0x669 => true, // Arabic-Indic
+        0x6F0..=0x6F9 => true, // Extended Arabic-Indic
+        0x7C0..=0x7C9 => true, // NKo
+        0x966..=0x96F => true, // Devanagari
+        0x9E6..=0x9EF => true, // Bengali
+        0xA66..=0xA6F => true, // Gurmukhi
+        0xAE6..=0xAEF => true, // Gujarati
+        0xB66..=0xB6F => true, // Oriya
+        0xBE6..=0xBEF => true, // Tamil
+        0xC66..=0xC6F => true, // Telugu
+        0xCE6..=0xCEF => true, // Kannada
+        0xD66..=0xD6F => true, // Malayalam
+        0xE50..=0xE59 => true, // Thai
+        0xED0..=0xED9 => true, // Lao
+        0xF20..=0xF29 => true, // Tibetan
+        0xFF10..=0xFF19 => true, // Fullwidth
+        _ => false,
+    }
+}
+
+fn is_unicode_space(cp: u32) -> bool {
+    match cp {
+        0x9..=0xD => true,
+        0x20 => true,
+        0x85 => true,
+        0xA0 => true,
+        0x1680 => true,
+        0x2000..=0x200A => true,
+        0x2028..=0x2029 => true,
+        0x202F => true,
+        0x205F => true,
+        0x3000 => true,
+        _ => false,
+    }
+}
+
+fn is_unicode_punctuation(cp: u32) -> bool {
+    match cp {
+        0x21..=0x23 | 0x25..=0x2A | 0x2C..=0x2F | 0x3A..=0x3B | 0x3F..=0x40
+            | 0x5B..=0x5D | 0x5F | 0x7B | 0x7D => true,
+        0xA1 | 0xA7 | 0xAB | 0xB6..=0xB7 | 0xBB | 0xBF => true,
+        0x2010..=0x2027 | 0x2030..=0x205E => true,
+        0x3001..=0x3003 | 0x3008..=0x3011 | 0x3014..=0x301F => true,
+        _ => false,
+    }
+}
+
+fn is_unicode_symbol(cp: u32) -> bool {
+    match cp {
+        0x24 | 0x2B | 0x3C..=0x3E | 0x5E | 0x60 | 0x7C | 0x7E => true,
+        0xA2..=0xA6 | 0xA8..=0xA9 | 0xAC | 0xAE..=0xB1 | 0xB4 | 0xB8 | 0xD7 | 0xF7 => true,
+        0x20A0..=0x20CF => true,
+        0x2100..=0x214F | 0x2190..=0x21FF | 0x2200..=0x22FF => true,
+        _ => false,
+    }
+}
+
+fn is_unicode_separator(cp: u32) -> bool {
+    matches!(cp, 0x20 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028..=0x2029 | 0x202F | 0x205F | 0x3000)
+}
+
+fn is_unicode_other(cp: u32) -> bool {
+    cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F)
+}
+
+fn is_unicode_lowercase_letter(cp: u32) -> bool {
+    match cp {
+        0x61..=0x7A => true,
+        0xDF..=0xF6 | 0xF8..=0xFF => true,
+        _ => false,
+    }
+}
+
+fn is_unicode_uppercase_letter(cp: u32) -> bool {
+    match cp {
+        0x41..=0x5A => true,
+        0xC0..=0xD6 | 0xD8..=0xDE => true,
+        _ => false,
+    }
+}
+
+fn is_cyrillic(cp: u32) -> bool {
+    matches!(cp, 0x400..=0x4FF | 0x500..=0x52F | 0x1C80..=0x1C88 | 0x2DE0..=0x2DFF | 0xA640..=0xA69F)
+}
+
+fn is_greek(cp: u32) -> bool {
+    matches!(cp, 0x370..=0x3FF | 0x1F00..=0x1FFE)
+}
+
+fn is_latin(cp: u32) -> bool {
+    matches!(cp,
+        0x41..=0x5A | 0x61..=0x7A | 0xAA | 0xBA
+        | 0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0x2AF
+        | 0x2B0..=0x2B8 | 0x2E0..=0x2E4
+        | 0x1D00..=0x1D25 | 0x1D2C..=0x1D5C | 0x1D62..=0x1D65
+        | 0x1E00..=0x1EFF
+    )
+}
+
+fn is_han(cp: u32) -> bool {
+    matches!(cp, 0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x20000..=0x2A6DF | 0x2A700..=0x2EBEF | 0xF900..=0xFAFF)
+}
+
+fn is_arabic(cp: u32) -> bool {
+    matches!(cp, 0x600..=0x6FF | 0x750..=0x77F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF)
+}
+
+fn is_hebrew(cp: u32) -> bool {
+    matches!(cp, 0x590..=0x5FF | 0xFB1D..=0xFB4F)
+}
+
+fn is_hiragana(cp: u32) -> bool {
+    matches!(cp, 0x3041..=0x3096 | 0x309D..=0x309F)
+}
+
+fn is_katakana(cp: u32) -> bool {
+    matches!(cp, 0x30A1..=0x30FA | 0x30FD..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9D)
 }
 
 fn is_word_char(ch: u8, _case_insensitive: bool) -> bool {
     ch.is_ascii_alphanumeric() || ch == b'_'
+}
+
+impl<'a> MatchState<'a> {
+    /// Compute whether the "before" and "after" positions are word characters,
+    /// honouring UTF-8 mode when enabled.
+    fn word_boundary_states(&self, pos: usize) -> (bool, bool) {
+        let before_word = if pos == 0 {
+            false
+        } else if self.flags.utf8 {
+            // Find the codepoint ending at `pos`
+            let start = utf8_cp_start_before(self.input, pos);
+            let (cp, _) = decode_utf8_at(self.input, start);
+            is_cp_word_char(cp, self.flags.utf8)
+        } else {
+            is_word_char(self.input[pos - 1], self.flags.case_insensitive)
+        };
+        let after_word = if pos >= self.input.len() {
+            false
+        } else if self.flags.utf8 {
+            let (cp, _) = decode_utf8_at(self.input, pos);
+            is_cp_word_char(cp, self.flags.utf8)
+        } else {
+            is_word_char(self.input[pos], self.flags.case_insensitive)
+        };
+        (before_word, after_word)
+    }
+}
+
+/// Find the start of the UTF-8 codepoint that ends at or before `pos`.
+fn utf8_cp_start_before(input: &[u8], pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
+    }
+    let mut i = pos;
+    while i > 0 {
+        i -= 1;
+        let b = input[i];
+        if b < 0x80 || b & 0xC0 == 0xC0 {
+            return i;
+        }
+        if pos.saturating_sub(i) >= 4 {
+            return pos - 1;
+        }
+    }
+    0
+}
+
+fn is_cp_word_char(cp: u32, utf8: bool) -> bool {
+    if utf8 {
+        is_unicode_letter(cp) || is_unicode_decimal_digit(cp) || is_unicode_mark(cp) || cp == b'_' as u32
+    } else {
+        (cp as u8).is_ascii_alphanumeric() || cp == b'_' as u32
+    }
 }
 
 // ============================================================================
@@ -1343,6 +2122,7 @@ fn match_sequence_backtrack(
                     sub_state.captures = caps.clone();
                     if let Some(end) = match_sequence_backtrack(rest, &mut sub_state, try_pos) {
                         state.captures = sub_state.captures;
+                        state.match_start_override = sub_state.match_start_override;
                         state.step_count = sub_state.step_count;
                         return Some(end);
                     }
@@ -1360,6 +2140,7 @@ fn match_sequence_backtrack(
                     sub_state.captures = caps.clone();
                     if let Some(end) = match_sequence_backtrack(rest, &mut sub_state, try_pos) {
                         state.captures = sub_state.captures;
+                        state.match_start_override = sub_state.match_start_override;
                         state.step_count = sub_state.step_count;
                         return Some(end);
                     }
@@ -1387,6 +2168,7 @@ fn match_sequence_backtrack(
                 combined.extend_from_slice(rest);
                 if let Some(end) = match_sequence_backtrack(&combined, &mut sub_state, pos) {
                     state.captures = sub_state.captures;
+                    state.match_start_override = sub_state.match_start_override;
                     state.step_count = sub_state.step_count;
                     return Some(end);
                 }
@@ -1513,6 +2295,7 @@ fn match_sequence_backtrack(
             if let Some(new_pos) = sub_state.try_match(other, pos) {
                 if let Some(end) = match_sequence_backtrack(rest, &mut sub_state, new_pos) {
                     state.captures = sub_state.captures;
+                    state.match_start_override = sub_state.match_start_override;
                     state.step_count = sub_state.step_count;
                     return Some(end);
                 }
@@ -1537,6 +2320,7 @@ fn match_node_backtrack(node: &RegexNode, state: &mut MatchState, pos: usize) ->
                 let mut sub_state = state.clone();
                 if let Some(end) = match_node_backtrack(branch, &mut sub_state, pos) {
                     state.captures = sub_state.captures;
+                    state.match_start_override = sub_state.match_start_override;
                     state.step_count = sub_state.step_count;
                     return Some(end);
                 }
@@ -1608,10 +2392,13 @@ pub struct CompiledRegex {
 /// Format a PCRE error message following PHP conventions.
 /// Delimiter/modifier errors are reported directly, other errors use "Compilation failed:" prefix.
 fn format_preg_error(func_name: &str, error: &str) -> String {
-    if error.starts_with("Delimiter must") || error.starts_with("No ending delimiter") || error.starts_with("No ending matching delimiter") || error.starts_with("Unknown modifier") || error.starts_with("Empty regular expression") {
+    if error.starts_with("Delimiter must") || error.starts_with("No ending delimiter") || error.starts_with("No ending matching delimiter") || error.starts_with("Unknown modifier") || error.starts_with("Empty regular expression") || error.starts_with("NUL byte is not") {
         format!("{}: {}", func_name, error)
-    } else {
+    } else if error.contains(" at offset ") {
         format!("{}: Compilation failed: {}", func_name, error)
+    } else {
+        // Approximate PCRE's offset reporting
+        format!("{}: Compilation failed: {} at offset 0", func_name, error)
     }
 }
 
@@ -1669,18 +2456,21 @@ pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
     let mut flags = RegexFlags::default();
     for &flag_byte in flags_str {
         match flag_byte {
+            0 => {
+                return Err("NUL byte is not a valid modifier".into());
+            }
             b'i' => flags.case_insensitive = true,
             b'm' => flags.multiline = true,
             b's' => flags.dotall = true,
             b'x' => flags.extended = true,
             b'U' => flags.ungreedy = true,
             b'u' => flags.utf8 = true,
-            b'D' => {} // Dollar end only — ignore
+            b'D' => flags.dollar_end_only = true,
             b'A' => flags.anchored = true,
             b'S' => {} // Extra study — ignore
             b'X' => {} // Extra — ignore
             b'J' => {} // Allow duplicate names — ignore
-            b'n' => {} // No auto capture — ignore
+            b'n' => flags.no_auto_capture = true,
             b'r' => {} // Caseless restrict — ignore
             b'\r' | b'\n' | b' ' => {} // trailing whitespace
             _ => {
@@ -1782,15 +2572,25 @@ impl CompiledRegex {
             input.len() + 1
         };
 
-        for start_pos in start_offset..end {
+        let mut start_pos = start_offset;
+        while start_pos < end {
             state.captures = vec![None; self.num_groups + 1];
             state.step_count = 0;
+            state.match_start_override = None;
             if let Some(end_pos) = match_node_backtrack(&self.ast, &mut state, start_pos) {
-                state.captures[0] = Some((start_pos, end_pos));
+                let real_start = state.match_start_override.unwrap_or(start_pos);
+                state.captures[0] = Some((real_start, end_pos));
                 return Some(RegexMatch {
-                    full_match: (start_pos, end_pos),
+                    full_match: (real_start, end_pos),
                     groups: state.captures,
                 });
+            }
+            // Advance by one codepoint in UTF-8 mode, otherwise one byte
+            if self.flags.utf8 && start_pos < input.len() {
+                let (_, len) = decode_utf8_at(input, start_pos);
+                start_pos += len.max(1);
+            } else {
+                start_pos += 1;
             }
         }
         None
@@ -1807,7 +2607,13 @@ impl CompiledRegex {
                 matches.push(m);
                 if start == end {
                     // Zero-length match: advance past the match position
-                    offset = end + 1;
+                    let step = if self.flags.utf8 && end < input.len() {
+                        let (_, len) = decode_utf8_at(input, end);
+                        len.max(1)
+                    } else {
+                        1
+                    };
+                    offset = end + step;
                 } else {
                     offset = end;
                 }
@@ -1823,11 +2629,32 @@ impl CompiledRegex {
 // PHP preg_* function implementations
 // ============================================================================
 
+/// Ensure the pattern argument is a string (not array/object).
+/// On array/object, throws a TypeError and returns Err (caller propagates).
+fn ensure_string_pattern(vm: &mut Vm, val: &Value, func: &str) -> Result<PhpString, VmError> {
+    match val {
+        Value::Array(_) => {
+            let msg = format!("{}(): Argument #1 ($pattern) must be of type string, array given", func);
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 })
+        }
+        Value::Object(obj) => {
+            let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+            let msg = format!("{}(): Argument #1 ($pattern) must be of type string, {} given", func, class_name);
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 })
+        }
+        _ => Ok(val.to_php_string()),
+    }
+}
+
 /// preg_match($pattern, $subject [, &$matches [, $flags [, $offset]]])
 pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.preg_last_error = 0;
     let pattern = match args.first() {
-        Some(v) => v.to_php_string(),
+        Some(v) => ensure_string_pattern(vm, v, "preg_match")?,
         None => {
             return Ok(Value::False);
         }
@@ -1891,7 +2718,28 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Validate UTF-8 when /u modifier is used
     if compiled.flags.utf8 && std::str::from_utf8(input).is_err() {
         vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
+        // Clear matches array too
+        if let Some(matches_ref) = args.get(2) {
+            if let Value::Reference(r) = matches_ref {
+                *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+            }
+        }
         return Ok(Value::False);
+    }
+
+    // Validate offset is on a codepoint boundary for /u
+    if compiled.flags.utf8 && offset > 0 && offset < input.len() {
+        let b = input[offset];
+        if b & 0xC0 == 0x80 {
+            // Continuation byte — offset is in the middle of a codepoint
+            vm.preg_last_error = 5; // PREG_BAD_UTF8_OFFSET_ERROR
+            if let Some(matches_ref) = args.get(2) {
+                if let Value::Reference(r) = matches_ref {
+                    *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                }
+            }
+            return Ok(Value::False);
+        }
     }
 
     let result = compiled.find(input, offset);
@@ -1952,7 +2800,7 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.preg_last_error = 0;
     let pattern = match args.first() {
-        Some(v) => v.to_php_string(),
+        Some(v) => ensure_string_pattern(vm, v, "preg_match_all")?,
         None => {
             return Ok(Value::False);
         }
@@ -2024,7 +2872,13 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 matches.push(m);
                 if start == end {
                     // Zero-length match: advance past the match position
-                    off = end + 1;
+                    let step = if compiled.flags.utf8 && end < input.len() {
+                        let (_, len) = decode_utf8_at(input, end);
+                        len.max(1)
+                    } else {
+                        1
+                    };
+                    off = end + step;
                 } else {
                     off = end;
                 }
@@ -2126,11 +2980,36 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.preg_last_error = 0;
     let pattern_val = match args.first() {
-        Some(v) => v.clone(),
+        Some(v) => {
+            if let Value::Object(obj) = v {
+                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                let msg = format!("preg_replace(): Argument #1 ($pattern) must be of type array|string, {} given", class_name);
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+            }
+            v.clone()
+        }
         None => return Ok(Value::Null),
     };
     let replacement_val = match args.get(1) {
-        Some(v) => v.clone(),
+        Some(v) => {
+            if let Value::Object(obj) = v {
+                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                let msg = format!("preg_replace(): Argument #2 ($replacement) must be of type array|string, {} given", class_name);
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+            }
+            // If replacement is array but pattern is not, TypeError
+            if matches!(v, Value::Array(_)) && !matches!(&pattern_val, Value::Array(_)) {
+                let msg = "preg_replace(): Argument #1 ($pattern) must be of type array when argument #2 ($replacement) is an array, string given".to_string();
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+            }
+            v.clone()
+        }
         None => return Ok(Value::Null),
     };
     let subject_val = match args.get(2) {
@@ -2291,11 +3170,19 @@ fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u
             count += 1;
 
             if match_end == offset {
-                // Zero-length match: copy one char and advance
+                // Zero-length match: copy one codepoint and advance past it
                 if offset < subject.len() {
-                    result.push(subject[offset]);
+                    let step = if compiled.flags.utf8 {
+                        let (_, len) = decode_utf8_at(subject, offset);
+                        len.max(1)
+                    } else {
+                        1
+                    };
+                    result.extend_from_slice(&subject[offset..offset + step]);
+                    offset += step;
+                } else {
+                    offset += 1;
                 }
-                offset += 1;
             } else {
                 offset = match_end;
             }
@@ -2376,7 +3263,7 @@ fn apply_replacement(result: &mut Vec<u8>, replacement: &[u8], subject: &[u8], m
 pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.preg_last_error = 0;
     let pattern = match args.first() {
-        Some(v) => v.to_php_string(),
+        Some(v) => ensure_string_pattern(vm, v, "preg_split")?,
         None => return Ok(Value::Null),
     };
 
@@ -2455,10 +3342,17 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
 
             if match_start == match_end {
-                // Zero-length match: advance search position past the match to avoid infinite loop
+                // Zero-length match: advance search position past the match to avoid infinite loop.
+                // In UTF-8 mode, advance by a full codepoint.
                 last_split_pos = match_end;
                 if match_end < input.len() {
-                    search_offset = match_end + 1;
+                    let step = if compiled.flags.utf8 {
+                        let (_, len) = decode_utf8_at(input, match_end);
+                        len.max(1)
+                    } else {
+                        1
+                    };
+                    search_offset = match_end + step;
                 } else {
                     search_offset = match_end + 1;
                     break;
@@ -2667,6 +3561,7 @@ pub fn preg_replace_callback(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         None => return Ok(Value::Null),
     };
     let limit = args.get(3).map(|v| v.to_long()).unwrap_or(-1);
+    let flags = args.get(5).map(|v| v.to_long()).unwrap_or(0);
 
     // Handle array pattern
     let patterns: Vec<Vec<u8>> = if let Value::Array(patterns_arr) = &pattern_val {
@@ -2679,15 +3574,24 @@ pub fn preg_replace_callback(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     if let Value::Array(subjects_arr) = &subject_val {
         let mut result = PhpArray::new();
         let mut total_count = 0i64;
-        for (key, subject) in subjects_arr.borrow().iter() {
+        // Collect entries first to avoid borrow overlap when emitting warnings
+        let entries: Vec<(ArrayKey, Value)> = subjects_arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (key, subject) in entries {
+            if matches!(subject, Value::Array(_)) {
+                vm.emit_warning("Array to string conversion");
+            }
             let subject_str = subject.to_php_string();
             let mut current = subject_str.as_bytes().to_vec();
             for pat in &patterns {
-                let (replaced, count) = do_preg_replace_callback(vm, pat, &callback, &current, limit)?;
-                current = replaced;
-                total_count += count;
+                match do_preg_replace_callback(vm, pat, &callback, &current, limit, flags)? {
+                    Some((replaced, count)) => {
+                        current = replaced;
+                        total_count += count;
+                    }
+                    None => return Ok(Value::Null),
+                }
             }
-            result.set(key.clone(), Value::String(PhpString::from_vec(current)));
+            result.set(key, Value::String(PhpString::from_vec(current)));
         }
         // Set count if provided
         if let Some(count_ref) = args.get(4) {
@@ -2703,9 +3607,13 @@ pub fn preg_replace_callback(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     let mut current = subject.as_bytes().to_vec();
     let mut total_count = 0i64;
     for pat in &patterns {
-        let (replaced, count) = do_preg_replace_callback(vm, pat, &callback, &current, limit)?;
-        current = replaced;
-        total_count += count;
+        match do_preg_replace_callback(vm, pat, &callback, &current, limit, flags)? {
+            Some((replaced, count)) => {
+                current = replaced;
+                total_count += count;
+            }
+            None => return Ok(Value::Null),
+        }
     }
 
     // Set count if provided
@@ -2724,19 +3632,40 @@ fn do_preg_replace_callback(
     callback: &Value,
     subject: &[u8],
     limit: i64,
-) -> Result<(Vec<u8>, i64), VmError> {
+    flags: i64,
+) -> Result<Option<(Vec<u8>, i64)>, VmError> {
+    do_preg_replace_callback_fn(vm, pattern, callback, subject, limit, flags, "preg_replace_callback")
+}
+
+fn do_preg_replace_callback_fn(
+    vm: &mut Vm,
+    pattern: &[u8],
+    callback: &Value,
+    subject: &[u8],
+    limit: i64,
+    flags: i64,
+    func_name: &str,
+) -> Result<Option<(Vec<u8>, i64)>, VmError> {
+    let offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
+    let unmatched_as_null = (flags & 512) != 0; // PREG_UNMATCHED_AS_NULL
+
+    let func_full = format!("{}()", func_name);
+    if pattern.is_empty() || pattern.iter().all(|b| b.is_ascii_whitespace()) {
+        vm.emit_warning(&format!("{}: Empty regular expression", func_full));
+        return Ok(None);
+    }
     let compiled = match parse_php_regex(pattern) {
         Ok(c) => c,
         Err(_e) => {
-            vm.emit_warning(&format_preg_error("preg_replace_callback()", &_e));
-            return Ok((subject.to_vec(), 0));
+            vm.emit_warning(&format_preg_error(&func_full, &_e));
+            return Ok(None);
         }
     };
 
     // Validate UTF-8 when /u modifier is used
     if compiled.flags.utf8 && std::str::from_utf8(subject).is_err() {
         vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
-        return Ok((subject.to_vec(), 0));
+        return Ok(None);
     }
 
     let mut result = Vec::new();
@@ -2754,17 +3683,34 @@ fn do_preg_replace_callback(
             // Build matches array for callback
             let mut matches_arr = PhpArray::new();
             for (i, capture) in m.groups.iter().enumerate() {
-                if let Some((start, end)) = capture {
-                    matches_arr.set(
-                        ArrayKey::Int(i as i64),
-                        Value::String(PhpString::from_bytes(&subject[*start..*end])),
-                    );
+                let val = if let Some((start, end)) = capture {
+                    let text = Value::String(PhpString::from_bytes(&subject[*start..*end]));
+                    if offset_capture {
+                        let mut pair = PhpArray::new();
+                        pair.push(text);
+                        pair.push(Value::Long(*start as i64));
+                        Value::Array(Rc::new(RefCell::new(pair)))
+                    } else {
+                        text
+                    }
+                } else if offset_capture {
+                    let mut pair = PhpArray::new();
+                    pair.push(if unmatched_as_null { Value::Null } else { Value::String(PhpString::empty()) });
+                    pair.push(Value::Long(-1));
+                    Value::Array(Rc::new(RefCell::new(pair)))
+                } else if unmatched_as_null {
+                    Value::Null
                 } else {
+                    Value::String(PhpString::empty())
+                };
+                // Insert named key before numeric, matching preg_match behavior
+                if let Some((_, name)) = compiled.group_names.iter().find(|(idx, _)| *idx == i) {
                     matches_arr.set(
-                        ArrayKey::Int(i as i64),
-                        Value::String(PhpString::empty()),
+                        ArrayKey::String(PhpString::from_vec(name.clone())),
+                        val.clone(),
                     );
                 }
+                matches_arr.set(ArrayKey::Int(i as i64), val);
             }
 
             // Call the callback
@@ -2777,9 +3723,17 @@ fn do_preg_replace_callback(
 
             if match_end == offset {
                 if offset < subject.len() {
-                    result.push(subject[offset]);
+                    let step = if compiled.flags.utf8 {
+                        let (_, len) = decode_utf8_at(subject, offset);
+                        len.max(1)
+                    } else {
+                        1
+                    };
+                    result.extend_from_slice(&subject[offset..offset + step]);
+                    offset += step;
+                } else {
+                    offset += 1;
                 }
-                offset += 1;
             } else {
                 offset = match_end;
             }
@@ -2793,7 +3747,7 @@ fn do_preg_replace_callback(
         result.extend_from_slice(&subject[offset..]);
     }
 
-    Ok((result, count))
+    Ok(Some((result, count)))
 }
 
 /// preg_replace_callback_array($patterns_and_callbacks, $subject [, $limit [, &$count [, $flags]]])
@@ -2807,30 +3761,49 @@ pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value,
         None => return Ok(Value::Null),
     };
     let limit = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+    let flags = args.get(4).map(|v| v.to_long()).unwrap_or(0);
+
+    // Collect patterns first — and validate that all keys are strings
+    let pc_entries: Vec<(ArrayKey, Value)> = patterns_callbacks
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    // Check for numeric keys (invalid pattern)
+    for (pk, _) in &pc_entries {
+        if matches!(pk, ArrayKey::Int(_)) {
+            let msg = "preg_replace_callback_array(): Argument #1 ($pattern) must contain only string patterns as keys".to_string();
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+        }
+    }
 
     // Handle array subject
     if let Value::Array(subjects_arr) = &subject_val {
         let mut result = PhpArray::new();
         let mut total_count = 0i64;
-        for (key, subject) in subjects_arr.borrow().iter() {
+        let subj_entries: Vec<(ArrayKey, Value)> = subjects_arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (key, subject) in subj_entries {
+            if matches!(subject, Value::Array(_)) {
+                vm.emit_warning("Array to string conversion");
+            }
             let subject_str = subject.to_php_string();
             let mut current = subject_str.as_bytes().to_vec();
-            for (_, pair_val) in patterns_callbacks.borrow().iter() {
-                // Key is pattern, value is callback — but actually in PHP, the array is pattern => callback
-                // We need to iterate patterns_callbacks differently
-                let _ = pair_val; // handled below
-            }
-            // Re-iterate properly
-            for (pat_key, cb) in patterns_callbacks.borrow().iter() {
+            for (pat_key, cb) in &pc_entries {
                 let pat_str = match pat_key {
                     ArrayKey::String(s) => s.as_bytes().to_vec(),
                     ArrayKey::Int(_) => continue,
                 };
-                let (replaced, count) = do_preg_replace_callback(vm, &pat_str, &cb, &current, limit)?;
-                current = replaced;
-                total_count += count;
+                match do_preg_replace_callback_fn(vm, &pat_str, cb, &current, limit, flags, "preg_replace_callback_array")? {
+                    Some((replaced, count)) => {
+                        current = replaced;
+                        total_count += count;
+                    }
+                    None => return Ok(Value::Null),
+                }
             }
-            result.set(key.clone(), Value::String(PhpString::from_vec(current)));
+            result.set(key, Value::String(PhpString::from_vec(current)));
         }
         if let Some(count_ref) = args.get(3) {
             if let Value::Reference(r) = count_ref {
@@ -2844,14 +3817,18 @@ pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value,
     let subject = subject_val.to_php_string();
     let mut current = subject.as_bytes().to_vec();
     let mut total_count = 0i64;
-    for (pat_key, cb) in patterns_callbacks.borrow().iter() {
+    for (pat_key, cb) in &pc_entries {
         let pat_str = match pat_key {
             ArrayKey::String(s) => s.as_bytes().to_vec(),
             ArrayKey::Int(_) => continue,
         };
-        let (replaced, count) = do_preg_replace_callback(vm, &pat_str, &cb, &current, limit)?;
-        current = replaced;
-        total_count += count;
+        match do_preg_replace_callback_fn(vm, &pat_str, cb, &current, limit, flags, "preg_replace_callback_array")? {
+            Some((replaced, count)) => {
+                current = replaced;
+                total_count += count;
+            }
+            None => return Ok(Value::Null),
+        }
     }
     if let Some(count_ref) = args.get(3) {
         if let Value::Reference(r) = count_ref {
@@ -2865,7 +3842,7 @@ pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value,
 /// preg_grep($pattern, $array [, $flags])
 pub fn preg_grep(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let pattern = match args.first() {
-        Some(v) => v.to_php_string(),
+        Some(v) => ensure_string_pattern(vm, v, "preg_grep")?,
         None => return Ok(Value::False),
     };
 
@@ -2886,11 +3863,16 @@ pub fn preg_grep(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let mut result = PhpArray::new();
-    for (key, value) in array.borrow().iter() {
+    // Collect entries first to avoid borrow overlap when emitting warnings
+    let entries: Vec<(ArrayKey, Value)> = array.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (key, value) in entries {
+        if matches!(value, Value::Array(_)) {
+            vm.emit_warning("Array to string conversion");
+        }
         let subject = value.to_php_string();
         let matches = compiled.find(subject.as_bytes(), 0).is_some();
         if matches != invert {
-            result.set(key.clone(), value.clone());
+            result.set(key, value);
         }
     }
 
