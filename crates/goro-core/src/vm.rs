@@ -16651,6 +16651,20 @@ impl Vm {
                                         }
                                         b"datetimezone" => {
                                             // DateTimeZone::__construct($timezone)
+                                            // Too-many-args check: constructor takes 1 arg (plus implicit self)
+                                            if call.args.len() > 2 {
+                                                drop(obj_mut);
+                                                let given = call.args.len() - 1;
+                                                let err_msg = format!("DateTimeZone::__construct() expects exactly 1 argument, {} given", given);
+                                                let exc = self.create_exception(b"ArgumentCountError", &err_msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                } else {
+                                                    return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", err_msg), line: op.line });
+                                                }
+                                            }
                                             if call.args.len() > 1 {
                                                 let tz = call.args[1].to_php_string().to_string_lossy();
                                                 if !vm_is_valid_timezone(&tz) {
@@ -16666,7 +16680,13 @@ impl Vm {
                                                     }
                                                 }
                                                 // Determine timezone type: 1=offset, 2=abbreviation, 3=identifier
-                                                let tz_type = if vm_parse_tz_offset(&tz).is_some() { 1 } else { 3 };
+                                                let tz_type = if vm_parse_tz_offset(&tz).is_some() {
+                                                    1
+                                                } else if vm_is_tz_abbrev(&tz) {
+                                                    2
+                                                } else {
+                                                    3
+                                                };
                                                 obj_mut.set_property(b"timezone_type".to_vec(), Value::Long(tz_type));
                                                 obj_mut.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz)));
                                             } else {
@@ -28378,6 +28398,35 @@ fn vm_parse_tz_offset(s: &str) -> Option<i64> {
     }
 }
 
+/// Check if a given string is a known timezone abbreviation (e.g. "GMT", "EST").
+fn vm_is_tz_abbrev(tz_name: &str) -> bool {
+    if tz_name.is_empty() { return false; }
+    // Uppercase 2-5 letter abbreviations
+    let upper = tz_name.to_uppercase();
+    if !upper.chars().all(|c| c.is_ascii_alphabetic()) { return false; }
+    if upper.len() < 2 || upper.len() > 6 { return false; }
+    matches!(upper.as_str(),
+        "UTC" | "GMT" | "Z" | "ZULU"
+        | "EST" | "EDT" | "CST" | "CDT" | "MST" | "MDT" | "PST" | "PDT"
+        | "AKST" | "AKDT" | "HST" | "AST" | "ADT" | "NST" | "NDT"
+        | "CET" | "CEST" | "EET" | "EEST" | "WET" | "WEST" | "MET" | "MEST"
+        | "BST" | "IST" | "MSK" | "MSD" | "JST" | "KST" | "SGT" | "HKT" | "WIB" | "WITA" | "WIT"
+        | "AEST" | "AEDT" | "ACST" | "ACDT" | "AWST" | "AWDT"
+        | "NZST" | "NZDT" | "IDT" | "SAST" | "EAT" | "WAT" | "CAT"
+        | "BRT" | "BRST" | "ART" | "CLT" | "CLST" | "PET" | "COT"
+        | "PKT" | "BDT" | "IRST" | "IRDT" | "AFT"
+        | "GST" | "AZOT" | "AZOST" | "ADT" | "CCT" | "CXT" | "CKT"
+        | "ChST" | "EAST" | "EASST" | "FJT" | "FJST" | "GALT" | "GAMT"
+        | "GILT" | "GYT" | "HDT" | "HKT" | "HOVT" | "ICT" | "IOT"
+        | "KGT" | "LHST" | "LHDT" | "MHT" | "MMT" | "MVT" | "MYT"
+        | "NPT" | "NRT" | "NUT" | "PGT" | "PHOT" | "PHT" | "PONT"
+        | "PYT" | "PYST" | "RET" | "ROTT" | "SBT" | "SCT" | "SRT"
+        | "SST" | "TAHT" | "TFT" | "TJT" | "TKT" | "TMT" | "TOT"
+        | "TVT" | "ULAT" | "UZT" | "VET" | "VLAT" | "VOST" | "VUT"
+        | "WAKT" | "WEST" | "WFT" | "YAKT" | "YEKT"
+    )
+}
+
 /// Check if a timezone name is valid
 fn vm_is_valid_timezone(tz_name: &str) -> bool {
     if tz_name.is_empty() { return false; }
@@ -28403,6 +28452,10 @@ fn vm_is_valid_timezone(tz_name: &str) -> bool {
     }
     // Offset format
     if vm_parse_tz_offset(tz_name).is_some() {
+        return true;
+    }
+    // Named abbreviations (e.g., "EST", "PST")
+    if vm_is_tz_abbrev(tz_name) {
         return true;
     }
     false

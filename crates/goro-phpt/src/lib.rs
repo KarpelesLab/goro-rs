@@ -1218,28 +1218,29 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_test_with_dir_and_filename(&test, test_dir, &test_filename)
                 }));
+                let _dbg_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 match result {
                     Ok(TestResult::Pass) => {
                         pass += 1;
-                        println!("PASS: {}", test_name);
+                        println!("PASS: {} [{}]", test_name, _dbg_name);
                     }
                     Ok(TestResult::Fail { expected, actual }) => {
                         fail += 1;
-                        println!("FAIL: {}", test_name);
+                        println!("FAIL: {} [{}]", test_name, _dbg_name);
                         println!("  Expected: {:?}", expected);
                         println!("  Actual:   {:?}", actual);
                     }
                     Ok(TestResult::Skip(reason)) => {
                         skip += 1;
-                        println!("SKIP: {} ({})", test_name, reason);
+                        println!("SKIP: {} [{}] ({})", test_name, _dbg_name, reason);
                     }
                     Ok(TestResult::Error(msg)) => {
                         error += 1;
-                        println!("ERROR: {} ({})", test_name, msg);
+                        println!("ERROR: {} [{}] ({})", test_name, _dbg_name, msg);
                     }
                     Err(_) => {
                         error += 1;
-                        println!("ERROR: {} (panic/stack overflow)", test_name);
+                        println!("ERROR: {} [{}] (panic/stack overflow)", test_name, _dbg_name);
                     }
                 }
             }
