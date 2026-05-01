@@ -17564,6 +17564,19 @@ impl Vm {
                         }
                     } else if let Value::String(s) = &arr_val {
                         // String offset access (supports negative indices)
+                        // PHP emits "String offset cast occurred" when the offset is not
+                        // a "naturally integer-typed" key. Resolve through one layer of
+                        // reference for the type check.
+                        let key_inner = match &key_val {
+                            Value::Reference(r) => r.borrow().clone(),
+                            other => other.clone(),
+                        };
+                        match &key_inner {
+                            Value::Double(_) | Value::True | Value::False | Value::Null => {
+                                self.emit_warning_at("String offset cast occurred", op.line);
+                            }
+                            _ => {}
+                        }
                         // Check for illegal string offset: non-numeric string keys
                         if let Value::String(key_str) = &key_val {
                             let key_bytes = key_str.as_bytes();
@@ -26058,14 +26071,24 @@ impl Vm {
     /// Convert a value to an array key (PHP coerces numeric strings to int keys)
     /// Convert a value to an array key, emitting deprecation for null offset
     pub fn value_to_array_key_checked(&mut self, val: &Value, line: u32) -> ArrayKey {
-        match val {
+        // Resolve a single layer of reference for type checks
+        let inner_val: Value = if let Value::Reference(r) = val {
+            r.borrow().clone()
+        } else {
+            val.clone()
+        };
+        match &inner_val {
             Value::Null | Value::Undef => {
                 self.emit_deprecated_at("Using null as an array offset is deprecated, use an empty string instead", line);
             }
-            Value::Reference(r) => {
-                let inner = r.borrow();
-                if matches!(&*inner, Value::Null | Value::Undef) {
-                    self.emit_deprecated_at("Using null as an array offset is deprecated, use an empty string instead", line);
+            Value::Double(f) => {
+                // Implicit float-to-int conversion for non-integer floats is deprecated since 8.1
+                if f.is_finite() && f.fract() != 0.0 {
+                    self.emit_deprecated_at(
+                        &format!("Implicit conversion from float {} to int loses precision",
+                            crate::value::format_php_float(*f)),
+                        line,
+                    );
                 }
             }
             _ => {}

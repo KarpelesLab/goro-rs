@@ -327,7 +327,12 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 Value::Double(current.to_double())
             }
-            "string" => Value::String(current.to_php_string()),
+            "string" => {
+                if matches!(&current, Value::Array(_)) {
+                    _vm.emit_warning("Array to string conversion");
+                }
+                Value::String(current.to_php_string())
+            }
             "bool" | "boolean" => {
                 if current.is_truthy() {
                     Value::True

@@ -100,10 +100,24 @@ fn run_code(source: &[u8], filename: &str) {
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
     let (op_array, compiled_classes, compile_warnings) = match compiler.compile(&program) {
-        Ok(result) => result,
+        Ok(result) => {
+            // Drain any pending compile-time warnings so they do not leak into a later session
+            let _ = goro_core::compiler::take_pending_compile_warnings();
+            result
+        }
         Err(e) => {
-            // Output as Fatal error to match PHP error format
-            eprintln!("Fatal error: {} in {} on line {}", e.message, filename, e.line);
+            // Emit any compile-time diagnostics collected before the fatal, in order
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            for (kind, msg, line) in goro_core::compiler::take_pending_compile_warnings() {
+                let _ = handle.write_all(
+                    format!("\n{}: {} in {} on line {}\n", kind, msg, filename, line).as_bytes()
+                );
+            }
+            let _ = handle.write_all(
+                format!("\nFatal error: {} in {} on line {}\n", e.message, filename, e.line).as_bytes()
+            );
+            let _ = handle.flush();
             process::exit(255);
         }
     };

@@ -11,6 +11,28 @@ use crate::value::Value;
 thread_local! {
     /// Global counter for generating unique closure names across all compilation units
     static CLOSURE_COUNTER: Cell<u64> = const { Cell::new(0) };
+    /// Compile-time diagnostics (Warning/Deprecated) collected even when compilation
+    /// aborts with a fatal. Drained by the SAPI/runner before printing the fatal
+    /// message so they appear in source order ahead of the fatal.
+    /// Each entry is (severity_label, message, line) where severity_label is
+    /// e.g. "Warning" or "Deprecated".
+    static PENDING_COMPILE_DIAGNOSTICS: std::cell::RefCell<Vec<(&'static str, String, u32)>>
+        = std::cell::RefCell::new(Vec::new());
+}
+
+/// Drain compile-time diagnostics collected during the most recent compile pass.
+/// Callers should invoke this after `Compiler::compile` (success or failure) to
+/// emit warnings/deprecateds before any fatal message.
+pub fn take_pending_compile_warnings() -> Vec<(&'static str, String, u32)> {
+    PENDING_COMPILE_DIAGNOSTICS.with(|w| std::mem::take(&mut *w.borrow_mut()))
+}
+
+fn push_pending_compile_warning(msg: String, line: u32) {
+    PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow_mut().push(("Warning", msg, line)));
+}
+
+fn push_pending_compile_deprecated(msg: String, line: u32) {
+    PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow_mut().push(("Deprecated", msg, line)));
 }
 
 /// Get the next globally unique closure ID
@@ -93,6 +115,12 @@ pub struct Compiler {
     pub warnings: Vec<(String, u32)>,
     /// Whether the current expression's result will be discarded (for #[\NoDiscard])
     is_discarding_result: bool,
+    /// True when compiling inside a function/method/closure body (reserved for future use).
+    pub is_in_function_body: bool,
+    /// True when compiling inside the body of a *class method* (not a plain function or
+    /// closure). Used to enforce "Class declarations may not be nested" for non-anonymous
+    /// class declarations.
+    pub is_in_class_method: bool,
 }
 
 impl Default for Compiler {
@@ -204,6 +232,8 @@ impl Compiler {
             is_in_trait: false,
             warnings: Vec::new(),
             is_discarding_result: false,
+            is_in_function_body: false,
+            is_in_class_method: false,
         }
     }
 
@@ -1864,8 +1894,52 @@ impl Compiler {
                         }
                         continue;
                     }
-                    // Skip declare(encoding=...) and declare(ticks=...)
-                    if name_lower == b"encoding" || name_lower == b"ticks" {
+                    // declare(ticks = N): value must be a literal
+                    if name_lower == b"ticks" {
+                        if !matches!(&value.kind,
+                            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::String(_)
+                            | ExprKind::True | ExprKind::False | ExprKind::Null)
+                        {
+                            return Err(CompileError {
+                                message: "declare(ticks) value must be a literal".into(),
+                                line: stmt.span.line,
+                            });
+                        }
+                        continue;
+                    }
+                    // declare(encoding = ...): value must be a literal; non-string literals get a warning
+                    if name_lower == b"encoding" {
+                        let line = value.span.line;
+                        match &value.kind {
+                            ExprKind::String(_) => { /* OK - not validated further */ }
+                            ExprKind::Int(n) => {
+                                let msg = format!("Unsupported encoding [{}]", n);
+                                self.warnings.push((msg.clone(), line));
+                                push_pending_compile_warning(msg, line);
+                            }
+                            ExprKind::Float(f) => {
+                                let s = crate::value::format_php_float(*f);
+                                let msg = format!("Unsupported encoding [{}]", s);
+                                self.warnings.push((msg.clone(), line));
+                                push_pending_compile_warning(msg, line);
+                            }
+                            ExprKind::True => {
+                                let msg = "Unsupported encoding [1]".to_string();
+                                self.warnings.push((msg.clone(), line));
+                                push_pending_compile_warning(msg, line);
+                            }
+                            ExprKind::False | ExprKind::Null => {
+                                let msg = "Unsupported encoding []".to_string();
+                                self.warnings.push((msg.clone(), line));
+                                push_pending_compile_warning(msg, line);
+                            }
+                            _ => {
+                                return Err(CompileError {
+                                    message: "Encoding must be a literal".into(),
+                                    line: value.span.line,
+                                });
+                            }
+                        }
                         continue;
                     }
                     // This is a const declaration: const FOO = value;
@@ -2406,6 +2480,17 @@ impl Compiler {
             } => {
                 // Determine qualified name: anonymous classes use NUL-byte PHP names
                 let is_anonymous = name.starts_with(b"__anonymous_class_");
+                // Disallow non-anonymous class declarations inside *class method* bodies.
+                // PHP allows class declarations inside plain functions and closures, but a
+                // class declared inside a class method is a fatal "Class declarations may not
+                // be nested" error. Anonymous classes are allowed everywhere since they are
+                // expressions, not declarations.
+                if !is_anonymous && self.is_in_class_method {
+                    return Err(CompileError {
+                        message: "Class declarations may not be nested".into(),
+                        line: stmt.span.line,
+                    });
+                }
                 let qualified_name = if is_anonymous {
                     // Look up from pre-built map (built before hoisting pass)
                     self.anon_class_name_map.get(name.as_slice()).cloned().unwrap_or_else(|| {
@@ -2426,21 +2511,31 @@ impl Compiler {
                 };
                 // Check for reserved class names
                 let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if !is_anonymous && is_reserved_class_name(&name_lower) {
-                    let (article, kind) = if modifiers.is_interface {
-                        ("an", "interface")
-                    } else if modifiers.is_trait {
-                        ("a", "trait")
-                    } else if modifiers.is_enum {
-                        ("an", "enum")
-                    } else {
-                        ("a", "class")
-                    };
-                    return Err(CompileError {
-                        message: format!("Cannot use \"{}\" as {} {} name as it is reserved",
-                            String::from_utf8_lossy(name), article, kind),
-                        line: stmt.span.line,
-                    });
+                let (article, kind) = if modifiers.is_interface {
+                    ("an", "interface")
+                } else if modifiers.is_trait {
+                    ("a", "trait")
+                } else if modifiers.is_enum {
+                    ("an", "enum")
+                } else {
+                    ("a", "class")
+                };
+                if !is_anonymous {
+                    // Single-underscore name was deprecated in 8.4.
+                    if name == b"_" {
+                        push_pending_compile_deprecated(
+                            format!("Using \"_\" as {} {} name is deprecated since 8.4",
+                                article, kind),
+                            stmt.span.line,
+                        );
+                    }
+                    if is_reserved_class_name(&name_lower) {
+                        return Err(CompileError {
+                            message: format!("Cannot use \"{}\" as {} {} name as it is reserved",
+                                String::from_utf8_lossy(name), article, kind),
+                            line: stmt.span.line,
+                        });
+                    }
                 }
                 let mut class = ClassEntry::new(qualified_name.clone());
                 class.start_line = stmt.span.line;
@@ -3841,6 +3936,7 @@ impl Compiler {
                                 method_compiler.op_array.name = method_name.clone();
                                 method_compiler.op_array.is_generator = method_is_generator;
                                 method_compiler.is_in_trait = modifiers.is_trait;
+                                method_compiler.is_in_class_method = true;
                                 method_compiler.op_array.decl_line = *method_line;
                                 method_compiler.op_array.strict_types = self.op_array.strict_types;
                                 method_compiler.source_file = self.source_file.clone();
@@ -9687,7 +9783,7 @@ fn type_hint_display(hint: &TypeHint) -> String {
 }
 
 /// Check if a name is a reserved type name that cannot be used as a class/interface/trait name
-fn is_reserved_class_name(name: &[u8]) -> bool {
+pub fn is_reserved_class_name(name: &[u8]) -> bool {
     let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
     matches!(
         lower.as_slice(),

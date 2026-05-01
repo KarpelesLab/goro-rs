@@ -7267,6 +7267,17 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let alias = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let original_lower: Vec<u8> = original.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
     let alias_lower: Vec<u8> = alias.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    // Single-underscore alias was deprecated in 8.4.
+    if alias.as_bytes() == b"_" {
+        vm.emit_deprecated("Using \"_\" as a class alias is deprecated since 8.4");
+    }
+    // Reserved class names (e.g. "array", "callable", "bool") cannot be used as aliases.
+    if goro_core::compiler::is_reserved_class_name(alias.as_bytes()) {
+        let line = vm.current_line;
+        let msg = format!("Cannot use \"{}\" as a class alias as it is reserved",
+            std::str::from_utf8(alias.as_bytes()).unwrap_or(""));
+        return Err(VmError { message: msg, line });
+    }
     if let Some(class) = vm.classes.get(&original_lower).cloned() {
         // Use the original class name (not alias) for the class entry
         let mut aliased_class = class;
@@ -8373,9 +8384,11 @@ fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
         let callback = callback.clone();
         let mut entries: Vec<Value> = arr.borrow().values().cloned().collect();
+        let mut bool_returned = false;
 
         stable_sort_by(&mut entries, |a, b| {
             let result = vm.call_callback(&callback, &[a.clone(), b.clone()]).unwrap_or(Value::Long(0));
+            if matches!(result, Value::True | Value::False) { bool_returned = true; }
             let cmp = result.to_long();
             if cmp < 0 {
                 std::cmp::Ordering::Less
@@ -8385,6 +8398,10 @@ fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 std::cmp::Ordering::Equal
             }
         });
+
+        if bool_returned {
+            vm.emit_deprecated("usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero");
+        }
 
         let mut new_arr = PhpArray::new();
         for val in entries {
@@ -8401,8 +8418,10 @@ fn uasort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         let cb = callback.clone();
+        let mut bool_returned = false;
         stable_sort_by(&mut entries, |a, b| {
             let result = call_user_func(vm, &[cb.clone(), a.1.clone(), b.1.clone()]).unwrap_or(Value::Long(0));
+            if matches!(result, Value::True | Value::False) { bool_returned = true; }
             let cmp = result.to_long();
             if cmp < 0 {
                 std::cmp::Ordering::Less
@@ -8412,6 +8431,10 @@ fn uasort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 std::cmp::Ordering::Equal
             }
         });
+
+        if bool_returned {
+            vm.emit_deprecated("uasort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero");
+        }
 
         let mut new_arr = PhpArray::new();
         for (key, val) in entries {
@@ -8427,6 +8450,7 @@ fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         let cb = callback.clone();
+        let mut bool_returned = false;
         stable_sort_by(&mut entries, |a, b| {
             let key_a = match &a.0 {
                 ArrayKey::Int(n) => Value::Long(*n),
@@ -8437,6 +8461,7 @@ fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 ArrayKey::String(s) => Value::String(s.clone()),
             };
             let result = call_user_func(vm, &[cb.clone(), key_a, key_b]).unwrap_or(Value::Long(0));
+            if matches!(result, Value::True | Value::False) { bool_returned = true; }
             let cmp = result.to_long();
             if cmp < 0 {
                 std::cmp::Ordering::Less
@@ -8446,6 +8471,10 @@ fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 std::cmp::Ordering::Equal
             }
         });
+
+        if bool_returned {
+            vm.emit_deprecated("uksort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero");
+        }
 
         let mut new_arr = PhpArray::new();
         for (key, val) in entries {

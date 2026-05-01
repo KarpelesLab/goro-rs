@@ -735,13 +735,24 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
     let (op_array, compiled_classes, compile_warnings) = match compiler.compile(&program) {
-        Ok(r) => r,
+        Ok(r) => {
+            // Drain any pending compile warnings so they don't leak into the next test
+            let _ = goro_core::compiler::take_pending_compile_warnings();
+            r
+        }
         Err(e) => {
-            let msg = format!(
+            let mut out = String::new();
+            for (kind, msg, wline) in goro_core::compiler::take_pending_compile_warnings() {
+                out.push_str(&format!(
+                    "\n{}: {} in {} on line {}\n",
+                    kind, msg, filename, wline
+                ));
+            }
+            out.push_str(&format!(
                 "\nFatal error: {} in {} on line {}\n",
                 e.message, filename, e.line
-            );
-            return Ok(msg.into_bytes());
+            ));
+            return Ok(out.into_bytes());
         }
     };
 
