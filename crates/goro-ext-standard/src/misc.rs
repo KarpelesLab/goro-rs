@@ -1821,7 +1821,23 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_slice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Validate $length is int or null
+    if let Some(v) = args.get(2) {
+        match v.deref() {
+            Value::Null | Value::Long(_) | Value::True | Value::False => {}
+            other => {
+                let type_name = Vm::value_type_name(&other);
+                let msg = format!(
+                    "array_slice(): Argument #3 ($length) must be of type ?int, {} given",
+                    type_name
+                );
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
         let entries: Vec<_> = arr.iter().collect();
@@ -2767,10 +2783,22 @@ fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_pad(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null);
     let pad_size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let pad_value = args.get(2).cloned().unwrap_or(Value::Null);
+
+    // PHP caps the target length at HT_MAX_SIZE (2^30 by default). Throw a
+    // ValueError rather than trying to allocate a huge array.
+    const MAX_ARRAY_SIZE: i64 = 1 << 30;
+    if pad_size <= -MAX_ARRAY_SIZE || pad_size >= MAX_ARRAY_SIZE {
+        let msg =
+            "array_pad(): Argument #2 ($length) must not exceed the maximum allowed array size"
+                .to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
 
     if let Value::Array(arr) = input {
         let arr = arr.borrow();
@@ -7516,33 +7544,34 @@ fn array_multisort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut sort_orders: Vec<bool> = Vec::new(); // true = ascending
     let mut sort_types: Vec<i64> = Vec::new();
 
-    let mut current_ascending = true;
-    let mut current_sort_type = 0i64; // SORT_REGULAR
-
+    // Sort flags follow the array they apply to. Collect arrays and
+    // subsequent flags, then assign order/type based on position.
     for arg in args {
         match arg {
             Value::Array(arr) => {
                 arrays.push(arr.clone());
-                sort_orders.push(current_ascending);
-                sort_types.push(current_sort_type);
-                current_ascending = true;
-                current_sort_type = 0;
+                sort_orders.push(true); // Default ascending
+                sort_types.push(0);      // Default SORT_REGULAR
             }
             Value::Reference(r) => {
                 let val = r.borrow().clone();
                 if let Value::Array(arr) = val {
                     arrays.push(arr.clone());
-                    sort_orders.push(current_ascending);
-                    sort_types.push(current_sort_type);
-                    current_ascending = true;
-                    current_sort_type = 0;
+                    sort_orders.push(true);
+                    sort_types.push(0);
                 }
             }
             Value::Long(n) => {
-                match *n {
-                    4 => current_ascending = true,  // SORT_ASC
-                    3 => current_ascending = false,  // SORT_DESC
-                    _ => current_sort_type = *n,
+                if let Some(last) = sort_orders.last_mut() {
+                    match *n {
+                        4 => *last = true,   // SORT_ASC
+                        3 => *last = false,  // SORT_DESC
+                        _ => {
+                            if let Some(st) = sort_types.last_mut() {
+                                *st = *n;
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
@@ -7565,16 +7594,23 @@ fn array_multisort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::True);
     }
 
-    // Extract values from the first array (the primary sort key)
-    let mut indices: Vec<usize> = (0..len).collect();
-    let first_values: Vec<Value> = arrays[0].borrow().values().cloned().collect();
+    // Extract values from each array (to use as sort keys)
+    let all_values: Vec<Vec<Value>> = arrays
+        .iter()
+        .map(|a| a.borrow().values().cloned().collect())
+        .collect();
 
-    // Sort indices based on the first array
-    let ascending = sort_orders[0];
-    let sort_type = sort_types[0];
+    // Sort indices: primary by arrays[0], tiebreak with arrays[1], etc.
+    let mut indices: Vec<usize> = (0..len).collect();
     indices.sort_by(|&a, &b| {
-        let result = php_compare_for_sort(&first_values[a], &first_values[b], sort_type);
-        if ascending { result } else { result.reverse() }
+        for i in 0..arrays.len() {
+            let result = php_compare_for_sort(&all_values[i][a], &all_values[i][b], sort_types[i]);
+            let result = if sort_orders[i] { result } else { result.reverse() };
+            if result != std::cmp::Ordering::Equal {
+                return result;
+            }
+        }
+        std::cmp::Ordering::Equal
     });
 
     // Apply the sorted indices to all arrays
@@ -7587,11 +7623,18 @@ fn array_multisort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Check if original was using string keys
         let has_string_keys = old_entries.iter().any(|(k, _)| matches!(k, ArrayKey::String(_)));
         if has_string_keys {
-            // Preserve original keys but reorder values
-            let old_keys: Vec<ArrayKey> = old_entries.iter().map(|(k, _)| k.clone()).collect();
-            let old_vals: Vec<Value> = old_entries.iter().map(|(_, v)| v.clone()).collect();
-            for (idx, &sorted_idx) in indices.iter().enumerate() {
-                new_arr.set(old_keys[idx].clone(), old_vals[sorted_idx].clone());
+            // Preserve (key, value) pairs together and reorder by sorted indices.
+            // Integer keys get renumbered from 0 but string keys are preserved.
+            for &sorted_idx in &indices {
+                let (ref k, ref v) = old_entries[sorted_idx];
+                match k {
+                    ArrayKey::String(_) => {
+                        new_arr.set(k.clone(), v.clone());
+                    }
+                    ArrayKey::Int(_) => {
+                        new_arr.push(v.clone());
+                    }
+                }
             }
         } else {
             // Rebuild with sequential integer keys
@@ -8264,14 +8307,74 @@ fn str_contains_builtin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::False)
 }
 
+// Simple stable merge sort that tolerates inconsistent comparators without
+// panicking, unlike the stdlib sort on recent Rust versions. Used by usort
+// and friends, where user callbacks may not implement a total order.
+fn stable_sort_by<T, F>(arr: &mut Vec<T>, mut cmp: F)
+where
+    T: Clone,
+    F: FnMut(&T, &T) -> std::cmp::Ordering,
+{
+    let n = arr.len();
+    if n < 2 {
+        return;
+    }
+    // Bottom-up merge sort using two alternating buffers.
+    let mut buf: Vec<T> = arr.clone();
+    let mut width = 1usize;
+    // Track whether arr is the current source (true) or buf is (false).
+    let mut arr_is_src = true;
+    while width < n {
+        let (src, dst): (&[T], &mut [T]) = if arr_is_src {
+            (arr.as_slice(), buf.as_mut_slice())
+        } else {
+            (buf.as_slice(), arr.as_mut_slice())
+        };
+        let mut i = 0usize;
+        while i < n {
+            let mid = std::cmp::min(i + width, n);
+            let end = std::cmp::min(i + 2 * width, n);
+            let (left, right) = src[i..end].split_at(mid - i);
+            let mut li = 0usize;
+            let mut ri = 0usize;
+            let mut di = i;
+            while li < left.len() && ri < right.len() {
+                if cmp(&left[li], &right[ri]) == std::cmp::Ordering::Greater {
+                    dst[di] = right[ri].clone();
+                    ri += 1;
+                } else {
+                    dst[di] = left[li].clone();
+                    li += 1;
+                }
+                di += 1;
+            }
+            while li < left.len() {
+                dst[di] = left[li].clone();
+                li += 1;
+                di += 1;
+            }
+            while ri < right.len() {
+                dst[di] = right[ri].clone();
+                ri += 1;
+                di += 1;
+            }
+            i = end;
+        }
+        arr_is_src = !arr_is_src;
+        width *= 2;
+    }
+    if !arr_is_src {
+        // Latest result is in buf; copy back to arr.
+        arr.clone_from_slice(&buf);
+    }
+}
+
 fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
         let callback = callback.clone();
-        let mut arr_mut = arr.borrow_mut();
-        let mut entries: Vec<Value> = arr_mut.values().cloned().collect();
-        drop(arr_mut);
+        let mut entries: Vec<Value> = arr.borrow().values().cloned().collect();
 
-        entries.sort_by(|a, b| {
+        stable_sort_by(&mut entries, |a, b| {
             let result = vm.call_callback(&callback, &[a.clone(), b.clone()]).unwrap_or(Value::Long(0));
             let cmp = result.to_long();
             if cmp < 0 {
@@ -8294,11 +8397,11 @@ fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn uasort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
-        let mut arr_mut = arr.borrow_mut();
-        let mut entries: Vec<(ArrayKey, Value)> = arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut entries: Vec<(ArrayKey, Value)> =
+            arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         let cb = callback.clone();
-        entries.sort_by(|a, b| {
+        stable_sort_by(&mut entries, |a, b| {
             let result = call_user_func(vm, &[cb.clone(), a.1.clone(), b.1.clone()]).unwrap_or(Value::Long(0));
             let cmp = result.to_long();
             if cmp < 0 {
@@ -8314,17 +8417,17 @@ fn uasort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         for (key, val) in entries {
             new_arr.set(key, val);
         }
-        *arr_mut = new_arr;
+        *arr.borrow_mut() = new_arr;
     }
     Ok(Value::True)
 }
 fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
-        let mut arr_mut = arr.borrow_mut();
-        let mut entries: Vec<(ArrayKey, Value)> = arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut entries: Vec<(ArrayKey, Value)> =
+            arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         let cb = callback.clone();
-        entries.sort_by(|a, b| {
+        stable_sort_by(&mut entries, |a, b| {
             let key_a = match &a.0 {
                 ArrayKey::Int(n) => Value::Long(*n),
                 ArrayKey::String(s) => Value::String(s.clone()),
@@ -8348,7 +8451,7 @@ fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         for (key, val) in entries {
             new_arr.set(key, val);
         }
-        *arr_mut = new_arr;
+        *arr.borrow_mut() = new_arr;
     }
     Ok(Value::True)
 }
@@ -9241,48 +9344,94 @@ fn natcasesort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-/// Natural order comparison
+/// Natural order comparison (matches PHP strnatcmp).
 fn natcmp(a: &str, b: &str) -> std::cmp::Ordering {
     let ab = a.as_bytes();
     let bb = b.as_bytes();
     let mut ai = 0;
     let mut bi = 0;
     while ai < ab.len() && bi < bb.len() {
-        if ab[ai].is_ascii_digit() && bb[bi].is_ascii_digit() {
-            // Compare number segments
-            while ai < ab.len() && ab[ai] == b'0' {
-                ai += 1;
-            }
-            while bi < bb.len() && bb[bi] == b'0' {
-                bi += 1;
-            }
-            let astart = ai;
-            let bstart = bi;
-            while ai < ab.len() && ab[ai].is_ascii_digit() {
-                ai += 1;
-            }
-            while bi < bb.len() && bb[bi].is_ascii_digit() {
-                bi += 1;
-            }
-            let alen = ai - astart;
-            let blen = bi - bstart;
-            if alen != blen {
-                return alen.cmp(&blen);
-            }
-            let acmp = &ab[astart..ai];
-            let bcmp = &bb[bstart..bi];
-            if acmp != bcmp {
-                return acmp.cmp(bcmp);
+        // Skip spaces.
+        while ai < ab.len() && (ab[ai] as char).is_whitespace() {
+            ai += 1;
+        }
+        while bi < bb.len() && (bb[bi] as char).is_whitespace() {
+            bi += 1;
+        }
+        if ai >= ab.len() || bi >= bb.len() {
+            break;
+        }
+        let ca = ab[ai];
+        let cb = bb[bi];
+        if ca.is_ascii_digit() && cb.is_ascii_digit() {
+            // If either starts with '0', compare left-aligned (fractional):
+            // digit-by-digit, shorter wins on tie.
+            let fractional = ca == b'0' || cb == b'0';
+            if fractional {
+                // Left-aligned: compare digit by digit; first mismatch decides.
+                loop {
+                    let da = if ai < ab.len() { ab[ai] } else { 0 };
+                    let db = if bi < bb.len() { bb[bi] } else { 0 };
+                    let da_digit = (da as char).is_ascii_digit();
+                    let db_digit = (db as char).is_ascii_digit();
+                    if !da_digit && !db_digit {
+                        break;
+                    }
+                    if !da_digit {
+                        return std::cmp::Ordering::Less;
+                    }
+                    if !db_digit {
+                        return std::cmp::Ordering::Greater;
+                    }
+                    if da != db {
+                        return da.cmp(&db);
+                    }
+                    ai += 1;
+                    bi += 1;
+                }
+            } else {
+                // Right-aligned: longer number is bigger; tie → first mismatch.
+                let mut bias: std::cmp::Ordering = std::cmp::Ordering::Equal;
+                loop {
+                    let da_in_range = ai < ab.len();
+                    let db_in_range = bi < bb.len();
+                    let da = if da_in_range { ab[ai] } else { 0 };
+                    let db = if db_in_range { bb[bi] } else { 0 };
+                    let da_digit = da_in_range && (da as char).is_ascii_digit();
+                    let db_digit = db_in_range && (db as char).is_ascii_digit();
+                    if !da_digit && !db_digit {
+                        if bias != std::cmp::Ordering::Equal {
+                            return bias;
+                        }
+                        break;
+                    }
+                    if !da_digit {
+                        return std::cmp::Ordering::Less;
+                    }
+                    if !db_digit {
+                        return std::cmp::Ordering::Greater;
+                    }
+                    if bias == std::cmp::Ordering::Equal {
+                        if da < db {
+                            bias = std::cmp::Ordering::Less;
+                        } else if da > db {
+                            bias = std::cmp::Ordering::Greater;
+                        }
+                    }
+                    ai += 1;
+                    bi += 1;
+                }
             }
         } else {
-            if ab[ai] != bb[bi] {
-                return ab[ai].cmp(&bb[bi]);
+            if ca != cb {
+                return ca.cmp(&cb);
             }
             ai += 1;
             bi += 1;
         }
     }
-    ab.len().cmp(&bb.len())
+    // Remaining chars (trailing spaces are skipped above) break the tie by length.
+    (ab.len() - ai).cmp(&(bb.len() - bi))
 }
 
 fn set_include_path_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -9581,7 +9730,7 @@ fn array_find_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
-fn array_product_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_product_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arr = match args.first() {
         Some(Value::Array(arr)) => arr.borrow(),
         _ => return Ok(Value::Long(0)),
@@ -9590,7 +9739,8 @@ fn array_product_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut is_float = false;
     let mut product_float: f64 = 1.0;
     for (_, value) in arr.iter() {
-        match value {
+        let v = value.deref();
+        match &v {
             Value::Double(f) => {
                 if !is_float {
                     is_float = true;
@@ -9598,29 +9748,89 @@ fn array_product_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 product_float *= f;
             }
-            Value::True => {
-                // true * x = x (no change)
+            Value::Long(n) => {
                 if is_float {
-                    // 1.0 * product_float = product_float
+                    product_float *= *n as f64;
                 } else {
-                    // 1 * product_int = product_int
+                    match product_int.checked_mul(*n) {
+                        Some(r) => product_int = r,
+                        None => {
+                            is_float = true;
+                            product_float = product_int as f64 * *n as f64;
+                        }
+                    }
                 }
             }
+            Value::True => {
+                // 1 * x => no change
+            }
             Value::False | Value::Null => {
-                // false/null = 0, result is 0
                 if is_float {
                     product_float = 0.0;
                 } else {
                     product_int = 0;
                 }
             }
+            Value::String(s) => {
+                // PHP tries to parse as number; if not numeric, warns.
+                let bytes = s.as_bytes();
+                // Lean on Value's numeric parsing.
+                let as_str = String::from_utf8_lossy(bytes);
+                let trimmed = as_str.trim();
+                let as_int = trimmed.parse::<i64>().ok();
+                let as_flt = trimmed.parse::<f64>().ok();
+                if as_int.is_none() && as_flt.is_none() {
+                    vm.emit_warning(
+                        "array_product(): Multiplication is not supported on type string",
+                    );
+                    if is_float {
+                        product_float = 0.0;
+                    } else {
+                        product_int = 0;
+                    }
+                    continue;
+                }
+                if let Some(n) = as_int {
+                    if is_float {
+                        product_float *= n as f64;
+                    } else {
+                        match product_int.checked_mul(n) {
+                            Some(r) => product_int = r,
+                            None => {
+                                is_float = true;
+                                product_float = product_int as f64 * n as f64;
+                            }
+                        }
+                    }
+                } else if let Some(f) = as_flt {
+                    if !is_float {
+                        is_float = true;
+                        product_float = product_int as f64;
+                    }
+                    product_float *= f;
+                }
+            }
+            Value::Array(_) => {
+                vm.emit_warning(
+                    "array_product(): Multiplication is not supported on type array",
+                );
+            }
+            Value::Object(o) => {
+                let class = o.borrow().class_name.clone();
+                let name = goro_core::value::display_class_name(&class);
+                vm.emit_warning(&format!(
+                    "array_product(): Multiplication is not supported on type {}",
+                    name
+                ));
+            }
             _ => {
-                let n = value.to_long();
+                // fallback for unhandled types
+                let n = v.to_long();
                 if is_float {
                     product_float *= n as f64;
                 } else {
                     match product_int.checked_mul(n) {
-                        Some(v) => product_int = v,
+                        Some(r) => product_int = r,
                         None => {
                             is_float = true;
                             product_float = product_int as f64 * n as f64;

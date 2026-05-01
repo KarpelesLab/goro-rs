@@ -19736,33 +19736,155 @@ impl Vm {
 
                 OpCode::Extract => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let flags = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_long();
-                    // EXTR_OVERWRITE = 0, EXTR_SKIP = 1, EXTR_PREFIX_SAME = 2, etc.
+                    let meta_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // meta is either a [flags, prefix] array from the newer
+                    // compile path, or a Long (flags) from older call sites.
+                    let (flags, prefix_bytes): (i64, Vec<u8>) = match &meta_val {
+                        Value::Array(a) => {
+                            let a = a.borrow();
+                            let f = a
+                                .iter()
+                                .next()
+                                .map(|(_, v)| v.to_long())
+                                .unwrap_or(0);
+                            let p = a
+                                .iter()
+                                .nth(1)
+                                .map(|(_, v)| v.to_php_string().as_bytes().to_vec())
+                                .unwrap_or_default();
+                            (f, p)
+                        }
+                        _ => (meta_val.to_long(), Vec::new()),
+                    };
+                    // Mask out EXTR_REFS (256) so we can work with the action alone.
+                    let action = flags & !256;
+                    // EXTR_OVERWRITE = 0, EXTR_SKIP = 1, EXTR_PREFIX_SAME = 2,
+                    // EXTR_PREFIX_ALL = 3, EXTR_PREFIX_INVALID = 4,
+                    // EXTR_IF_EXISTS = 5, EXTR_PREFIX_IF_EXISTS = 6
                     let mut count = 0i64;
-                    if let Value::Array(arr) = &arr_val {
-                        let arr_borrow = arr.borrow();
-                        for (key, val) in arr_borrow.iter() {
-                            if let crate::array::ArrayKey::String(key_str) = key {
-                                let key_bytes = key_str.as_bytes();
-                                // Find the CV index for this variable name
-                                let cv_idx = op_array.cv_names.iter().position(|n| n == key_bytes);
-                                if let Some(cv_idx) = cv_idx {
-                                    let should_set = match flags {
-                                        1 => { // EXTR_SKIP
-                                            // Only set if not already defined
-                                            matches!(&cvs[cv_idx], Value::Undef)
-                                        }
-                                        _ => true, // EXTR_OVERWRITE (default)
-                                    };
-                                    if should_set {
-                                        cvs[cv_idx] = val.clone();
-                                        count += 1;
-                                    }
-                                } else {
-                                    // Variable doesn't exist as a CV - we can't create new CVs at runtime
-                                    // Skip silently (this is a limitation)
-                                }
+                    let is_valid_identifier = |name: &[u8]| -> bool {
+                        if name.is_empty() {
+                            return false;
+                        }
+                        let first = name[0];
+                        if !(first.is_ascii_alphabetic() || first == b'_' || first >= 0x80) {
+                            return false;
+                        }
+                        for &c in &name[1..] {
+                            if !(c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80) {
+                                return false;
                             }
+                        }
+                        true
+                    };
+                    let make_prefixed = |name: &[u8]| -> Vec<u8> {
+                        let mut out = Vec::with_capacity(prefix_bytes.len() + 1 + name.len());
+                        out.extend_from_slice(&prefix_bytes);
+                        out.push(b'_');
+                        out.extend_from_slice(name);
+                        out
+                    };
+                    let find_cv = |name: &[u8]| -> Option<usize> {
+                        op_array.cv_names.iter().position(|n| n == name)
+                    };
+                    if let Value::Array(arr) = &arr_val {
+                        let entries: Vec<(crate::array::ArrayKey, Value)> = {
+                            let a = arr.borrow();
+                            a.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                        };
+                        for (key, val) in entries {
+                            // Resolve the variable name and whether it's valid.
+                            let (name_bytes, is_numeric_key) = match &key {
+                                crate::array::ArrayKey::String(s) => (s.as_bytes().to_vec(), false),
+                                crate::array::ArrayKey::Int(n) => (n.to_string().into_bytes(), true),
+                            };
+                            let valid_name = !is_numeric_key && is_valid_identifier(&name_bytes);
+                            // Determine the target variable name based on action.
+                            let target_name: Option<Vec<u8>> = match action {
+                                0 => {
+                                    // EXTR_OVERWRITE
+                                    if valid_name { Some(name_bytes.clone()) } else { None }
+                                }
+                                1 => {
+                                    // EXTR_SKIP
+                                    if valid_name { Some(name_bytes.clone()) } else { None }
+                                }
+                                2 => {
+                                    // EXTR_PREFIX_SAME: if var exists, prefix it
+                                    if !valid_name { None }
+                                    else if let Some(idx) = find_cv(&name_bytes) {
+                                        if !matches!(&cvs[idx], Value::Undef) {
+                                            let pn = make_prefixed(&name_bytes);
+                                            if is_valid_identifier(&pn) { Some(pn) } else { None }
+                                        } else {
+                                            Some(name_bytes.clone())
+                                        }
+                                    } else if self.globals.contains_key(name_bytes.as_slice()) {
+                                        let pn = make_prefixed(&name_bytes);
+                                        if is_valid_identifier(&pn) { Some(pn) } else { None }
+                                    } else {
+                                        Some(name_bytes.clone())
+                                    }
+                                }
+                                3 => {
+                                    // EXTR_PREFIX_ALL: always prefix
+                                    let pn = make_prefixed(&name_bytes);
+                                    if is_valid_identifier(&pn) { Some(pn) } else { None }
+                                }
+                                4 => {
+                                    // EXTR_PREFIX_INVALID: prefix invalid names
+                                    if valid_name {
+                                        Some(name_bytes.clone())
+                                    } else {
+                                        let pn = make_prefixed(&name_bytes);
+                                        if is_valid_identifier(&pn) { Some(pn) } else { None }
+                                    }
+                                }
+                                5 => {
+                                    // EXTR_IF_EXISTS: only if var exists
+                                    if !valid_name { None }
+                                    else if let Some(idx) = find_cv(&name_bytes) {
+                                        if !matches!(&cvs[idx], Value::Undef) {
+                                            Some(name_bytes.clone())
+                                        } else { None }
+                                    } else if self.globals.contains_key(name_bytes.as_slice()) {
+                                        Some(name_bytes.clone())
+                                    } else { None }
+                                }
+                                6 => {
+                                    // EXTR_PREFIX_IF_EXISTS: prefix if exists
+                                    if !valid_name { None }
+                                    else {
+                                        let exists = find_cv(&name_bytes)
+                                            .map(|i| !matches!(&cvs[i], Value::Undef))
+                                            .unwrap_or(false)
+                                            || self.globals.contains_key(name_bytes.as_slice());
+                                        if exists {
+                                            let pn = make_prefixed(&name_bytes);
+                                            if is_valid_identifier(&pn) { Some(pn) } else { None }
+                                        } else { None }
+                                    }
+                                }
+                                _ => {
+                                    if valid_name { Some(name_bytes.clone()) } else { None }
+                                }
+                            };
+                            let Some(target_name) = target_name else { continue };
+                            // Write into a CV if one exists with that name; else
+                            // fall back to a global entry.
+                            if let Some(idx) = find_cv(&target_name) {
+                                if action == 1 && !matches!(&cvs[idx], Value::Undef) {
+                                    // EXTR_SKIP: don't overwrite existing
+                                    continue;
+                                }
+                                cvs[idx] = val.clone();
+                            } else {
+                                if action == 1 && self.globals.contains_key(target_name.as_slice()) {
+                                    continue;
+                                }
+                                self.globals.insert(target_name.clone(), val.clone());
+                            }
+                            count += 1;
                         }
                     }
                     self.write_operand(&op.result, Value::Long(count), &mut cvs, &mut tmps, &static_cv_keys);

@@ -5868,17 +5868,49 @@ impl Compiler {
                         // extract($array [, $flags [, $prefix]])
                         // Compile the array argument
                         let arr_operand = self.compile_expr(&args[0].value)?;
+                        // Build a [flags, prefix] array in a tmp so the opcode
+                        // can access both without growing the Op struct.
+                        let meta_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayNew,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(meta_tmp),
+                            line: expr.span.line,
+                        });
+                        // Push flags (default 0 == EXTR_OVERWRITE)
                         let flags = if args.len() > 1 {
                             self.compile_expr(&args[1].value)?
                         } else {
-                            let idx = self.op_array.add_literal(Value::Long(0)); // EXTR_OVERWRITE
+                            let idx = self.op_array.add_literal(Value::Long(0));
                             OperandType::Const(idx)
                         };
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayAppend,
+                            op1: OperandType::Tmp(meta_tmp),
+                            op2: flags,
+                            result: OperandType::Tmp(meta_tmp),
+                            line: expr.span.line,
+                        });
+                        // Push prefix (default empty string)
+                        let prefix = if args.len() > 2 {
+                            self.compile_expr(&args[2].value)?
+                        } else {
+                            let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(Vec::new())));
+                            OperandType::Const(idx)
+                        };
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayAppend,
+                            op1: OperandType::Tmp(meta_tmp),
+                            op2: prefix,
+                            result: OperandType::Tmp(meta_tmp),
+                            line: expr.span.line,
+                        });
                         let tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::Extract,
                             op1: arr_operand,
-                            op2: flags,
+                            op2: OperandType::Tmp(meta_tmp),
                             result: OperandType::Tmp(tmp),
                             line: expr.span.line,
                         });
