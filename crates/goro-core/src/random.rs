@@ -1044,19 +1044,33 @@ pub fn handle_random_docall(
                         }
                     }
                 } else {
+                    let mut consec_failures = 0;
                     while out.len() < len as usize {
                         let bytes = engine_generate_bytes(vm, &engine, 8);
+                        if vm.current_exception.is_some() { break; }
                         if bytes.is_empty() { break; }
                         let mut buf = [0u8; 8];
                         let n = bytes.len().min(8);
                         buf[..n].copy_from_slice(&bytes[..n]);
                         let mut result = u64::from_le_bytes(buf) & mask;
+                        let prev_len = out.len();
                         for _ in 0..n {
                             let offset = (result & 0xff) as usize;
                             result >>= 8;
                             if offset > max_offset { continue; }
                             out.push(src[offset]);
                             if out.len() >= len as usize { break; }
+                        }
+                        if out.len() == prev_len {
+                            consec_failures += 1;
+                            if consec_failures > 50 {
+                                let exc = vm.create_exception(b"Random\\BrokenRandomEngineError",
+                                    "Failed to generate an acceptable random number in 50 attempts", vm.current_line);
+                                vm.current_exception = Some(exc);
+                                break;
+                            }
+                        } else {
+                            consec_failures = 0;
                         }
                     }
                 }
