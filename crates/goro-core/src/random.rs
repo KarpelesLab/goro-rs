@@ -1538,6 +1538,9 @@ fn engine_generate_bytes(vm: &mut Vm, engine: &Value, count: usize) -> Vec<u8> {
         if vm.current_exception.is_some() {
             return out;
         }
+        if vm.exit_requested {
+            return out;
+        }
         match result {
             Some(Value::String(s)) => {
                 let bytes = s.as_bytes();
