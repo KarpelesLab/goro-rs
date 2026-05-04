@@ -944,18 +944,24 @@ fn print_r_value(
             // Object, not as a regular array.
             {
                 let arr_b = arr.borrow();
-                if let Some(Value::String(s)) = arr_b.values().next() {
-                    let b = s.as_bytes();
-                    if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
-                        let lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
-                        if let Some(info) = closure_info_table.get(&lower) {
-                            render_closure_print_r(buf, indent, info);
+                // A closure-with-captures has the form `[name, capture1, ...]`,
+                // i.e. at least 2 elements. Require that to avoid misidentifying
+                // a regular 1-element args array containing a closure value.
+                let len = arr_b.iter().count();
+                if len >= 2 {
+                    if let Some(Value::String(s)) = arr_b.values().next() {
+                        let b = s.as_bytes();
+                        if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                            let lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+                            if let Some(info) = closure_info_table.get(&lower) {
+                                render_closure_print_r(buf, indent, info);
+                                return;
+                            }
+                            let prefix = " ".repeat(indent);
+                            buf.extend_from_slice(b"Closure Object\n");
+                            buf.extend_from_slice(format!("{}(\n{})\n", prefix, prefix).as_bytes());
                             return;
                         }
-                        let prefix = " ".repeat(indent);
-                        buf.extend_from_slice(b"Closure Object\n");
-                        buf.extend_from_slice(format!("{}(\n{})\n", prefix, prefix).as_bytes());
-                        return;
                     }
                 }
             }

@@ -4154,16 +4154,22 @@ impl Vm {
                 }
             }
             Value::Array(arr) => {
-                // Closures stored as arrays [__closure_N, captured...] render as Object(Closure)
+                // Closures stored as arrays [__closure_N, captured...] render as Object(Closure).
+                // Require at least 2 elements (name + at least one capture) to avoid
+                // misidentifying a regular 1-element args array that happens to
+                // hold a closure value.
                 let arr_ref = arr.borrow();
-                if let Some(Value::String(s)) = arr_ref.values().next() {
-                    let b = s.as_bytes();
-                    if b.starts_with(b"__closure_")
-                        || b.starts_with(b"__arrow_")
-                        || b.starts_with(b"__bound_closure_")
-                        || b.starts_with(b"__closure_fcc_")
-                    {
-                        return "Object(Closure)".to_string();
+                let len = arr_ref.iter().count();
+                if len >= 2 {
+                    if let Some(Value::String(s)) = arr_ref.values().next() {
+                        let b = s.as_bytes();
+                        if b.starts_with(b"__closure_")
+                            || b.starts_with(b"__arrow_")
+                            || b.starts_with(b"__bound_closure_")
+                            || b.starts_with(b"__closure_fcc_")
+                        {
+                            return "Object(Closure)".to_string();
+                        }
                     }
                 }
                 "Array".to_string()
