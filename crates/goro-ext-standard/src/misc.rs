@@ -6428,6 +6428,14 @@ fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     let s = serialize_value_with_vm(val, 0, _vm);
+    if _vm.current_exception.is_some() {
+        // Re-throw as Err to propagate to PHP try/catch
+        let msg = if let Some(Value::Object(o)) = &_vm.current_exception {
+            let m = o.borrow().get_property(b"message");
+            m.to_php_string().to_string_lossy()
+        } else { String::new() };
+        return Err(VmError { message: format!("Uncaught Exception: {}", msg), line: _vm.current_line });
+    }
     Ok(Value::String(PhpString::from_string(s)))
 }
 fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
@@ -6446,6 +6454,14 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
                 let case_str = case_name.to_php_string();
                 let full = format!("{}:{}", class_name, case_str.to_string_lossy());
                 return format!("E:{}:\"{}\";", full.len(), full);
+            }
+
+            // Random\Engine\Secure cannot be serialized
+            if class_lower == b"random\\engine\\secure" {
+                let msg = format!("Serialization of '{}' is not allowed", class_name);
+                let exc = vm.create_exception(b"Exception", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return String::new();
             }
 
             // Check for __serialize first (PHP 7.4+)
@@ -6629,6 +6645,24 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
             }
         }
         Value::Reference(r) => serialize_value_with_vm(&r.borrow(), depth, vm),
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            let mut result = format!("a:{}:{{", arr.len());
+            for (key, v) in arr.iter() {
+                match key {
+                    goro_core::array::ArrayKey::Int(n) => result.push_str(&format!("i:{};", n)),
+                    goro_core::array::ArrayKey::String(s) => {
+                        result.push_str(&format!("s:{}:\"{}\";", s.len(), s.to_string_lossy()))
+                    }
+                }
+                result.push_str(&serialize_value_with_vm(v, depth + 1, vm));
+                if vm.current_exception.is_some() {
+                    return result;
+                }
+            }
+            result.push('}');
+            result
+        }
         _ => serialize_value_depth(val, depth),
     }
 }
