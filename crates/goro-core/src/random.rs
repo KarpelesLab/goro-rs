@@ -965,11 +965,197 @@ pub fn handle_random_docall(
                 return Some(Value::String(PhpString::empty()));
             }
             let mut out = Vec::with_capacity(len as usize);
-            let max_idx = (src.len() - 1) as i64;
-            for _ in 0..len {
-                let r = randomizer_range(vm, &obj, 0, max_idx);
-                if r >= 0 && (r as usize) < src.len() {
-                    out.push(src[r as usize]);
+            let max_offset = src.len() - 1;
+            // Fast path: source <= 256 -> bitmask each generate output's bytes
+            if max_offset <= 0xff {
+                let mut mask = max_offset as u64;
+                mask |= mask >> 1;
+                mask |= mask >> 2;
+                mask |= mask >> 4;
+                mask = mask.wrapping_mul(0x0101010101010101);
+                let engine = obj.borrow().get_property(b"engine");
+                // For native engines, use a fast inline path that avoids load/save per call.
+                let native_class = native_engine_class(&engine);
+                if let Some(class) = native_class.as_ref() {
+                    if let Value::Object(eobj) = &engine {
+                        match class.as_slice() {
+                            b"random\\engine\\mt19937" => {
+                                let mut st = load_mt_state(eobj);
+                                while out.len() < len as usize {
+                                    let v = st.generate_u32();
+                                    let mut result = (v as u64) & mask;
+                                    for _ in 0..4 {
+                                        let offset = (result & 0xff) as usize;
+                                        result >>= 8;
+                                        if offset > max_offset { continue; }
+                                        out.push(src[offset]);
+                                        if out.len() >= len as usize { break; }
+                                    }
+                                }
+                                save_mt_state(eobj, &st);
+                            }
+                            b"random\\engine\\xoshiro256starstar" => {
+                                let mut st = load_xoshiro_state(eobj);
+                                while out.len() < len as usize {
+                                    let v = st.generate_u64();
+                                    let mut result = v & mask;
+                                    for _ in 0..8 {
+                                        let offset = (result & 0xff) as usize;
+                                        result >>= 8;
+                                        if offset > max_offset { continue; }
+                                        out.push(src[offset]);
+                                        if out.len() >= len as usize { break; }
+                                    }
+                                }
+                                save_xoshiro_state(eobj, &st);
+                            }
+                            b"random\\engine\\pcgoneseq128xslrr64" => {
+                                let mut st = load_pcg_state(eobj);
+                                while out.len() < len as usize {
+                                    let v = st.generate_u64();
+                                    let mut result = v & mask;
+                                    for _ in 0..8 {
+                                        let offset = (result & 0xff) as usize;
+                                        result >>= 8;
+                                        if offset > max_offset { continue; }
+                                        out.push(src[offset]);
+                                        if out.len() >= len as usize { break; }
+                                    }
+                                }
+                                save_pcg_state(eobj, &st);
+                            }
+                            _ => {
+                                while out.len() < len as usize {
+                                    let bytes = engine_generate_bytes(vm, &engine, 8);
+                                    if bytes.is_empty() { break; }
+                                    let mut buf = [0u8; 8];
+                                    let n = bytes.len().min(8);
+                                    buf[..n].copy_from_slice(&bytes[..n]);
+                                    let mut result = u64::from_le_bytes(buf) & mask;
+                                    for _ in 0..n {
+                                        let offset = (result & 0xff) as usize;
+                                        result >>= 8;
+                                        if offset > max_offset { continue; }
+                                        out.push(src[offset]);
+                                        if out.len() >= len as usize { break; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    while out.len() < len as usize {
+                        let bytes = engine_generate_bytes(vm, &engine, 8);
+                        if bytes.is_empty() { break; }
+                        let mut buf = [0u8; 8];
+                        let n = bytes.len().min(8);
+                        buf[..n].copy_from_slice(&bytes[..n]);
+                        let mut result = u64::from_le_bytes(buf) & mask;
+                        for _ in 0..n {
+                            let offset = (result & 0xff) as usize;
+                            result >>= 8;
+                            if offset > max_offset { continue; }
+                            out.push(src[offset]);
+                            if out.len() >= len as usize { break; }
+                        }
+                    }
+                }
+            } else {
+                // Slow path: source > 256 bytes - need range() per byte.
+                // For native engines, do bulk inline state ops to avoid load/save overhead.
+                let engine = obj.borrow().get_property(b"engine");
+                let native_class = native_engine_class(&engine);
+                let max_idx = max_offset as u64;
+                if let Some(class) = native_class.as_ref() {
+                    if let Value::Object(eobj) = &engine {
+                        // Compute umax
+                        let umax = max_idx;
+                        let umax_inc = umax.wrapping_add(1);
+                        let limit = if umax <= u32::MAX as u64 {
+                            (u32::MAX - (u32::MAX % umax_inc as u32) - 1) as u64
+                        } else {
+                            u64::MAX - (u64::MAX % umax_inc) - 1
+                        };
+                        let is_pow2 = umax_inc & umax == 0;
+                        let use_u32 = umax <= u32::MAX as u64;
+                        match class.as_slice() {
+                            b"random\\engine\\mt19937" => {
+                                let mut st = load_mt_state(eobj);
+                                while out.len() < len as usize {
+                                    // Need 32 bits per offset
+                                    let v = st.generate_u32() as u64;
+                                    if is_pow2 {
+                                        let r = v & umax;
+                                        out.push(src[r as usize]);
+                                    } else if use_u32 {
+                                        if (v as u32) <= limit as u32 {
+                                            let r = (v as u32) % umax_inc as u32;
+                                            out.push(src[r as usize]);
+                                        }
+                                    } else {
+                                        // 64-bit: fetch another word
+                                        let v2 = st.generate_u32() as u64;
+                                        let combined = (v2 << 32) | v;
+                                        if combined <= limit {
+                                            out.push(src[(combined % umax_inc) as usize]);
+                                        }
+                                    }
+                                }
+                                save_mt_state(eobj, &st);
+                            }
+                            b"random\\engine\\xoshiro256starstar" => {
+                                let mut st = load_xoshiro_state(eobj);
+                                while out.len() < len as usize {
+                                    let v = st.generate_u64();
+                                    if is_pow2 {
+                                        out.push(src[(v & umax) as usize]);
+                                    } else if use_u32 {
+                                        let v32 = v as u32;
+                                        if v32 <= limit as u32 {
+                                            out.push(src[(v32 % umax_inc as u32) as usize]);
+                                        }
+                                    } else if v <= limit {
+                                        out.push(src[(v % umax_inc) as usize]);
+                                    }
+                                }
+                                save_xoshiro_state(eobj, &st);
+                            }
+                            b"random\\engine\\pcgoneseq128xslrr64" => {
+                                let mut st = load_pcg_state(eobj);
+                                while out.len() < len as usize {
+                                    let v = st.generate_u64();
+                                    if is_pow2 {
+                                        out.push(src[(v & umax) as usize]);
+                                    } else if use_u32 {
+                                        let v32 = v as u32;
+                                        if v32 <= limit as u32 {
+                                            out.push(src[(v32 % umax_inc as u32) as usize]);
+                                        }
+                                    } else if v <= limit {
+                                        out.push(src[(v % umax_inc) as usize]);
+                                    }
+                                }
+                                save_pcg_state(eobj, &st);
+                            }
+                            _ => {
+                                let max_idx_i = max_offset as i64;
+                                for _ in 0..len {
+                                    let r = randomizer_range(vm, &obj, 0, max_idx_i);
+                                    if r >= 0 && (r as usize) < src.len() {
+                                        out.push(src[r as usize]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let max_idx_i = max_offset as i64;
+                    for _ in 0..len {
+                        let r = randomizer_range(vm, &obj, 0, max_idx_i);
+                        if r >= 0 && (r as usize) < src.len() {
+                            out.push(src[r as usize]);
+                        }
+                    }
                 }
             }
             Some(Value::String(PhpString::from_vec(out)))
