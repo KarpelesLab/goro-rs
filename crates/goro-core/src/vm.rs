@@ -4081,8 +4081,9 @@ impl Vm {
                 file
             };
             let args_str = format_trace_args(args);
-            // For instance methods, replace :: with ->
-            let display_name = if *is_instance {
+            // For instance methods, replace `::` with `->`. Skip the rewrite for
+            // closure display names (`{closure:...}`) which may embed `Class::method()`.
+            let display_name = if *is_instance && !func_name.starts_with("{closure:") {
                 func_name.replacen("::", "->", 1)
             } else {
                 func_name.clone()
@@ -4122,6 +4123,14 @@ impl Vm {
             }
             Value::String(s) => {
                 let bytes = s.as_bytes();
+                // Closures stored as strings render as Object(Closure) in trace args
+                if bytes.starts_with(b"__closure_")
+                    || bytes.starts_with(b"__arrow_")
+                    || bytes.starts_with(b"__bound_closure_")
+                    || bytes.starts_with(b"__closure_fcc_")
+                {
+                    return "Object(Closure)".to_string();
+                }
                 // PHP escapes non-printable and non-ASCII bytes as \xHH
                 let mut escaped = String::new();
                 let mut char_count = 0;
@@ -4144,7 +4153,21 @@ impl Vm {
                     format!("'{}'", escaped)
                 }
             }
-            Value::Array(_) => "Array".to_string(),
+            Value::Array(arr) => {
+                // Closures stored as arrays [__closure_N, captured...] render as Object(Closure)
+                let arr_ref = arr.borrow();
+                if let Some(Value::String(s)) = arr_ref.values().next() {
+                    let b = s.as_bytes();
+                    if b.starts_with(b"__closure_")
+                        || b.starts_with(b"__arrow_")
+                        || b.starts_with(b"__bound_closure_")
+                        || b.starts_with(b"__closure_fcc_")
+                    {
+                        return "Object(Closure)".to_string();
+                    }
+                }
+                "Array".to_string()
+            }
             Value::Object(obj) => {
                 let obj_ref = obj.borrow();
                 if obj_ref.has_property(b"__enum_case") {
@@ -11328,8 +11351,11 @@ impl Vm {
                 let mixed_implicit_mismatch = implicit_return && matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"mixed"));
                 if mixed_implicit_mismatch || !self.value_matches_return_type(val, ret_type, op_array.strict_types) {
                     let raw_name = String::from_utf8_lossy(&op_array.name);
-                    // Include class name in the function display name for methods
-                    let func_name = if let Some(ref scope) = op_array.scope_class {
+                    // Include class name in the function display name for methods.
+                    // For closures, prefer the canonical PHP display name.
+                    let func_name = if !op_array.display_name.is_empty() {
+                        String::from_utf8_lossy(&op_array.display_name).to_string()
+                    } else if let Some(ref scope) = op_array.scope_class {
                         let class_display = self.classes.get(scope)
                             .map(|c| crate::value::display_class_name(&c.name))
                             .unwrap_or_else(|| crate::value::display_class_name(scope));
@@ -15066,8 +15092,12 @@ impl Vm {
                         if !user_fn.attributes.is_empty() {
                             let attrs_clone = user_fn.attributes.clone();
                             if let Some(custom_msg) = self.get_deprecated_message(&attrs_clone) {
-                                let fn_display = call.name.to_string_lossy();
-                                let msg = if fn_display.contains("::") {
+                                let fn_display = if !user_fn.display_name.is_empty() {
+                                    String::from_utf8_lossy(&user_fn.display_name).into_owned()
+                                } else {
+                                    call.name.to_string_lossy()
+                                };
+                                let msg = if fn_display.contains("::") && !fn_display.starts_with("{closure:") {
                                     if custom_msg.is_empty() {
                                         format!("Method {}() is deprecated", fn_display)
                                     } else {
@@ -15283,8 +15313,11 @@ impl Vm {
 
                         // Push call stack frame early for proper error stack traces
                         let raw_display = String::from_utf8_lossy(call.name.as_bytes()).into_owned();
-                        // Format closure names for stack traces: __closure_N -> {closure:file:line}
-                        let early_call_display = if raw_display.starts_with("__closure_") && !raw_display.starts_with("__closure_fcc_") {
+                        // Format closure names for stack traces using the canonical
+                        // display name (e.g. {closure:file:line} or {closure:Class::method():line}).
+                        let early_call_display = if !user_fn.display_name.is_empty() {
+                            String::from_utf8_lossy(&user_fn.display_name).to_string()
+                        } else if (raw_display.starts_with("__closure_") || raw_display.starts_with("__arrow_")) && !raw_display.starts_with("__closure_fcc_") {
                             let file = String::from_utf8_lossy(&user_fn.filename).to_string();
                             format!("{{closure:{}:{}}}", file, user_fn.decl_line)
                         } else if let Some(ref scope) = user_fn.scope_class {
@@ -15466,8 +15499,13 @@ impl Vm {
                             } else {
                                 0
                             };
-                            // Build display name from call.name
-                            let display_name = call.name.to_string_lossy();
+                            // Build display name from call.name. For closures, prefer
+                            // the canonical PHP display name (e.g. {closure:file:line}).
+                            let display_name = if !user_fn.display_name.is_empty() {
+                                String::from_utf8_lossy(&user_fn.display_name).into_owned()
+                            } else {
+                                call.name.to_string_lossy()
+                            };
                             // For method calls like ClassName::method, format as ClassName::method
                             // For regular functions, just the function name
                             let param_err = self.check_param_types_with_strict(
@@ -18694,7 +18732,11 @@ impl Vm {
                         for attr in &func_op_array.attributes {
                             let attr_lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if attr_lower == b"returntypewillchange" {
-                                let func_display = String::from_utf8_lossy(&func_op_array.name).to_string();
+                                let func_display = if !func_op_array.display_name.is_empty() {
+                                    String::from_utf8_lossy(&func_op_array.display_name).to_string()
+                                } else {
+                                    String::from_utf8_lossy(&func_op_array.name).to_string()
+                                };
                                 return Err(VmError {
                                     message: format!("Attribute \"ReturnTypeWillChange\" cannot target function (is targeting function {})", func_display),
                                     line: op.line,
@@ -18702,8 +18744,13 @@ impl Vm {
                             }
                         }
                         let name = name_val.to_php_string();
-                        // Emit deprecation for implicitly nullable parameters
-                        let func_display = String::from_utf8_lossy(&func_op_array.name).to_string();
+                        // Emit deprecation for implicitly nullable parameters.
+                        // For closures, prefer the canonical PHP display name (e.g. {closure:file:line}).
+                        let func_display = if !func_op_array.display_name.is_empty() {
+                            String::from_utf8_lossy(&func_op_array.display_name).to_string()
+                        } else {
+                            String::from_utf8_lossy(&func_op_array.name).to_string()
+                        };
                         for pt_info in func_op_array.param_types.iter().flatten() {
                             if pt_info.implicitly_nullable {
                                 let param_name = String::from_utf8_lossy(&pt_info.param_name);

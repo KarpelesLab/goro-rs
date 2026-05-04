@@ -263,8 +263,39 @@ pub fn reflection_function_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
         }
     }
 
-    // Handle array callables like [ClassName, method] - these should throw for ReflectionFunction
-    if let Value::Array(_) = &arg {
+    // Handle array callables. A closure with captured values (use vars or $this)
+    // is stored as an array `[closure_name, captured1, ...]` — treat that as a
+    // closure. Otherwise the array form represents `[class, method]` callables,
+    // which ReflectionFunction does not accept.
+    if let Value::Array(arr) = &arg {
+        let first = arr.borrow().values().next().cloned();
+        if let Some(Value::String(s)) = first {
+            let n = s.to_string_lossy();
+            if n.starts_with("__closure_") || n.starts_with("__arrow_") || n.starts_with("__bound_closure_") || n.starts_with("__closure_fcc_") {
+                let lower: Vec<u8> = n.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                let display = if n.starts_with("__closure_fcc_") {
+                    if let Some(op) = vm.user_functions.get(lower.as_slice()) {
+                        if let Some(t) = &op.fcc_target_name {
+                            String::from_utf8_lossy(t).to_string()
+                        } else {
+                            String::from_utf8_lossy(op.effective_name()).to_string()
+                        }
+                    } else {
+                        "{closure}".to_string()
+                    }
+                } else if let Some(op) = vm.user_functions.get(lower.as_slice()) {
+                    let dn = op.effective_name();
+                    if dn.is_empty() { "{closure}".to_string() } else { String::from_utf8_lossy(dn).to_string() }
+                } else {
+                    "{closure}".to_string()
+                };
+                let mut obj = this.borrow_mut();
+                obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(display)));
+                obj.set_property(b"__reflection_target".to_vec(), Value::String(s.clone()));
+                obj.set_property(b"__reflection_is_closure".to_vec(), Value::True);
+                return true;
+            }
+        }
         let err_msg = "Function Array() does not exist".to_string();
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
         vm.current_exception = Some(exc);
@@ -276,8 +307,27 @@ pub fn reflection_function_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
             let name = s.to_string_lossy();
             // Check for closures
             if name.starts_with("__closure_") || name.starts_with("__arrow_") || name.starts_with("__bound_closure_") || name.starts_with("__closure_fcc_") {
+                // Resolve the canonical display name from the registered op_array.
+                // FCC closures keep the wrapped function's original name (e.g. "strrev").
+                let lower: Vec<u8> = name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                let display = if name.starts_with("__closure_fcc_") {
+                    if let Some(op) = vm.user_functions.get(lower.as_slice()) {
+                        if let Some(t) = &op.fcc_target_name {
+                            String::from_utf8_lossy(t).to_string()
+                        } else {
+                            String::from_utf8_lossy(op.effective_name()).to_string()
+                        }
+                    } else {
+                        "{closure}".to_string()
+                    }
+                } else if let Some(op) = vm.user_functions.get(lower.as_slice()) {
+                    let dn = op.effective_name();
+                    if dn.is_empty() { "{closure}".to_string() } else { String::from_utf8_lossy(dn).to_string() }
+                } else {
+                    "{closure}".to_string()
+                };
                 let mut obj = this.borrow_mut();
-                obj.set_property(b"name".to_vec(), Value::String(PhpString::from_bytes(b"{closure}")));
+                obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(display)));
                 obj.set_property(b"__reflection_target".to_vec(), Value::String(s.clone()));
                 obj.set_property(b"__reflection_is_closure".to_vec(), Value::True);
                 return true;
@@ -2317,11 +2367,20 @@ pub fn reflection_function_method(
         b"innamespace" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
-            Some(if name.contains('\\') { Value::True } else { Value::False })
+            // Closures are never inside a namespace, even when their display name
+            // embeds a namespace-qualified context (e.g. `{closure:Foo\Bar::baz():6}`).
+            if name.starts_with("{closure:") {
+                Some(Value::False)
+            } else {
+                Some(if name.contains('\\') { Value::True } else { Value::False })
+            }
         }
         b"getnamespacename" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            if name.starts_with("{closure:") {
+                return Some(Value::String(PhpString::from_bytes(b"")));
+            }
             if let Some(pos) = name.rfind('\\') {
                 Some(Value::String(PhpString::from_string(name[..pos].to_string())))
             } else {
@@ -2331,6 +2390,9 @@ pub fn reflection_function_method(
         b"getshortname" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            if name.starts_with("{closure:") {
+                return Some(Value::String(PhpString::from_string(name)));
+            }
             if let Some(pos) = name.rfind('\\') {
                 Some(Value::String(PhpString::from_string(name[pos+1..].to_string())))
             } else {
@@ -3005,13 +3067,22 @@ pub fn reflection_parameter_method(
             }
         }
         b"getdeclaringfunction" => {
-            // Return a ReflectionFunction for the declaring function
-            let ob = obj.borrow();
-            let func_name = ob.get_property(b"name").to_php_string().to_string_lossy();
-            drop(ob);
+            // Return a ReflectionFunction for the declaring function. The
+            // displayed name comes from the op_array (closures use their
+            // canonical `{closure:...}` form via display_name).
+            let display_name = if let Some(op) = vm.user_functions.get(func_target.as_bytes()) {
+                let dn = op.effective_name();
+                if dn.is_empty() {
+                    func_target.to_string_lossy()
+                } else {
+                    String::from_utf8_lossy(dn).to_string()
+                }
+            } else {
+                func_target.to_string_lossy()
+            };
             let obj_id = vm.next_object_id();
             let mut rf_obj = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
-            rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(func_name.clone())));
+            rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(display_name)));
             rf_obj.set_property(b"__reflection_target".to_vec(), Value::String(func_target.clone()));
             Some(Value::Object(Rc::new(RefCell::new(rf_obj))))
         }

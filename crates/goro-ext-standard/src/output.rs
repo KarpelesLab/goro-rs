@@ -127,6 +127,8 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     let line = op.decl_line;
                     let name = if op.name.starts_with(b"__closure_fcc_") {
                         format!("{{closure}}")
+                    } else if !op.display_name.is_empty() {
+                        String::from_utf8_lossy(&op.display_name).to_string()
                     } else {
                         format!("{{closure:{}:{}}}", file, line)
                     };
@@ -668,7 +670,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             // - Closures: __closure_N -> {closure:file:line}
             // - Class methods: prepend declaring class (with anonymous classes rendered as 'class@anonymous...')
             // - Plain functions: keep as-is
-            let name_str = if raw_name.starts_with("__closure_") && !raw_name.starts_with("__closure_fcc_") {
+            let name_str = if !gen_ref.op_array.display_name.is_empty() {
+                String::from_utf8_lossy(&gen_ref.op_array.display_name).to_string()
+            } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_")) && !raw_name.starts_with("__closure_fcc_") {
                 let file = String::from_utf8_lossy(&gen_ref.op_array.filename).to_string();
                 format!("{{closure:{}:{}}}", file, gen_ref.op_array.decl_line)
             } else if let Some(ref scope) = gen_ref.class_scope {
