@@ -2228,8 +2228,14 @@ pub fn reflection_function_method(
             Some(if is_user { Value::True } else { Value::False })
         }
         b"getfilename" => {
-            if vm.user_functions.contains_key(func_lower.as_slice()) {
-                Some(Value::String(PhpString::from_string(vm.current_file.clone())))
+            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
+                // Closures know their own filename via op_array.filename;
+                // fall back to the currently executing file otherwise.
+                if !op_array.filename.is_empty() {
+                    Some(Value::String(PhpString::from_vec(op_array.filename.clone())))
+                } else {
+                    Some(Value::String(PhpString::from_string(vm.current_file.clone())))
+                }
             } else {
                 Some(Value::False)
             }
