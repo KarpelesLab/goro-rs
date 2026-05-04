@@ -1412,6 +1412,7 @@ fn bulk_fisher_yates<T>(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, items: &mut [
     // Fallback: standard slow path with full call_object_method per swap
     for i in (1..n).rev() {
         let j = randomizer_range(vm, obj, 0, i as i64) as usize;
+        if vm.current_exception.is_some() { return; }
         items.swap(i, j);
     }
 }
@@ -1578,6 +1579,7 @@ fn range_u32(vm: &mut Vm, engine: &Value, umax: u32) -> u32 {
     // First draw 32 bits from engine; some engines (Mt19937) return 4 bytes per generate(), some (xoshiro/pcg) return 8.
     // We need to keep pulling until we have 4 bytes accumulated; engine_generate_bytes does that.
     let bytes = engine_generate_bytes(vm, engine, 4);
+    if vm.current_exception.is_some() { return 0; }
     let mut buf = [0u8; 4];
     let n = bytes.len().min(4);
     buf[..n].copy_from_slice(&bytes[..n]);
@@ -1593,9 +1595,13 @@ fn range_u32(vm: &mut Vm, engine: &Value, umax: u32) -> u32 {
     while result > limit {
         count += 1;
         if count > 50 {
+            let exc = vm.create_exception(b"Random\\BrokenRandomEngineError",
+                "Failed to generate an acceptable random number in 50 attempts", vm.current_line);
+            vm.current_exception = Some(exc);
             return 0;
         }
         let bytes = engine_generate_bytes(vm, engine, 4);
+        if vm.current_exception.is_some() { return 0; }
         let mut buf = [0u8; 4];
         let n = bytes.len().min(4);
         buf[..n].copy_from_slice(&bytes[..n]);
@@ -1606,6 +1612,7 @@ fn range_u32(vm: &mut Vm, engine: &Value, umax: u32) -> u32 {
 
 fn range_u64(vm: &mut Vm, engine: &Value, umax: u64) -> u64 {
     let bytes = engine_generate_bytes(vm, engine, 8);
+    if vm.current_exception.is_some() { return 0; }
     let mut buf = [0u8; 8];
     let n = bytes.len().min(8);
     buf[..n].copy_from_slice(&bytes[..n]);
@@ -1620,8 +1627,14 @@ fn range_u64(vm: &mut Vm, engine: &Value, umax: u64) -> u64 {
     let mut count = 0;
     while result > limit {
         count += 1;
-        if count > 50 { return 0; }
+        if count > 50 {
+            let exc = vm.create_exception(b"Random\\BrokenRandomEngineError",
+                "Failed to generate an acceptable random number in 50 attempts", vm.current_line);
+            vm.current_exception = Some(exc);
+            return 0;
+        }
         let bytes = engine_generate_bytes(vm, engine, 8);
+        if vm.current_exception.is_some() { return 0; }
         let mut buf = [0u8; 8];
         let n = bytes.len().min(8);
         buf[..n].copy_from_slice(&bytes[..n]);
