@@ -6759,7 +6759,13 @@ impl Compiler {
                         }
                     }
                     b"__function__" => {
-                        let name = self.op_array.name.clone();
+                        // For closures, __FUNCTION__ is the canonical display name
+                        // (e.g. {closure:file:line}); otherwise it's the bare op_array name.
+                        let name = if !self.op_array.display_name.is_empty() {
+                            self.op_array.display_name.clone()
+                        } else {
+                            self.op_array.name.clone()
+                        };
                         Value::String(PhpString::from_vec(name))
                     }
                     b"__class__" => {
@@ -6774,7 +6780,13 @@ impl Compiler {
                         return Ok(OperandType::Const(idx));
                     }
                     b"__method__" => {
-                        let method_val = if let Some(ref class_name) = self.current_class {
+                        // For closures, __METHOD__ is the canonical display name
+                        // (e.g. {closure:Class::method():line}); the closure's
+                        // display_name already embeds the surrounding scope so we
+                        // don't prepend the class name a second time.
+                        let method_val = if !self.op_array.display_name.is_empty() {
+                            Value::String(PhpString::from_vec(self.op_array.display_name.clone()))
+                        } else if let Some(ref class_name) = self.current_class {
                             let mut method = class_name.clone();
                             method.extend_from_slice(b"::");
                             method.extend_from_slice(&self.op_array.name);

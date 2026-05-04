@@ -844,20 +844,75 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let return_output = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     // Clone classes for property visibility lookup in print_r_value
     let classes: goro_core::vm::ClassMap = vm.classes.clone();
+    // Snapshot closure metadata so print_r can render closure values like
+    // PHP does (with name/file/line/parameters), without holding a vm borrow.
+    let closure_info_table: std::collections::HashMap<Vec<u8>, ClosurePrintInfo> =
+        vm.user_functions.iter().filter_map(|(k, op)| {
+            let name = if op.name.starts_with(b"__closure_fcc_") {
+                "{closure}".to_string()
+            } else if !op.display_name.is_empty() {
+                String::from_utf8_lossy(&op.display_name).to_string()
+            } else {
+                return None;
+            };
+            let file = String::from_utf8_lossy(&op.filename).to_string();
+            let line = op.decl_line;
+            let mut params = Vec::with_capacity(op.param_count as usize);
+            for i in 0..op.param_count as usize {
+                if let Some(cv_name) = op.cv_names.get(i) {
+                    let pname = format!("${}", String::from_utf8_lossy(cv_name));
+                    let has_default = op.param_has_default.get(i).copied().unwrap_or(false);
+                    params.push((pname, has_default));
+                }
+            }
+            Some((k.clone(), ClosurePrintInfo { name, file, line, params }))
+        }).collect();
 
     if return_output {
         let mut buf = Vec::new();
-        print_r_value(&args[0], &mut buf, 0, &classes);
+        print_r_value(&args[0], &mut buf, 0, &classes, &closure_info_table);
         Ok(Value::String(PhpString::from_vec(buf)))
     } else {
         let mut buf = Vec::new();
-        print_r_value(&args[0], &mut buf, 0, &classes);
+        print_r_value(&args[0], &mut buf, 0, &classes, &closure_info_table);
         vm.write_output(&buf);
         Ok(Value::True)
     }
 }
 
-fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_core::vm::ClassMap) {
+struct ClosurePrintInfo {
+    name: String,
+    file: String,
+    line: u32,
+    params: Vec<(String, bool)>,
+}
+
+fn render_closure_print_r(buf: &mut Vec<u8>, indent: usize, info: &ClosurePrintInfo) {
+    let prefix = " ".repeat(indent);
+    buf.extend_from_slice(b"Closure Object\n");
+    buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
+    buf.extend_from_slice(format!("{}    [name] => {}\n", prefix, info.name).as_bytes());
+    buf.extend_from_slice(format!("{}    [file] => {}\n", prefix, info.file).as_bytes());
+    buf.extend_from_slice(format!("{}    [line] => {}\n", prefix, info.line).as_bytes());
+    if !info.params.is_empty() {
+        buf.extend_from_slice(format!("{}    [parameter] => Array\n", prefix).as_bytes());
+        buf.extend_from_slice(format!("{}        (\n", prefix).as_bytes());
+        for (pname, has_default) in &info.params {
+            let label = if *has_default { "<optional>" } else { "<required>" };
+            buf.extend_from_slice(format!("{}            [{}] => {}\n", prefix, pname, label).as_bytes());
+        }
+        buf.extend_from_slice(format!("{}        )\n\n", prefix).as_bytes());
+    }
+    buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+}
+
+fn print_r_value(
+    val: &Value,
+    buf: &mut Vec<u8>,
+    indent: usize,
+    classes: &goro_core::vm::ClassMap,
+    closure_info_table: &std::collections::HashMap<Vec<u8>, ClosurePrintInfo>,
+) {
     if indent > 128 {
         buf.extend_from_slice(b" *RECURSION*");
         return;
@@ -871,14 +926,39 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
         Value::String(s) => {
             let b = s.as_bytes();
             if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
-                buf.extend_from_slice(b"Closure Object\n");
-                let prefix = " ".repeat(indent);
-                buf.extend_from_slice(format!("{}(\n{})\n", prefix, prefix).as_bytes());
+                let lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+                if let Some(info) = closure_info_table.get(&lower) {
+                    render_closure_print_r(buf, indent, info);
+                } else {
+                    buf.extend_from_slice(b"Closure Object\n");
+                    let prefix = " ".repeat(indent);
+                    buf.extend_from_slice(format!("{}(\n{})\n", prefix, prefix).as_bytes());
+                }
             } else {
                 buf.extend_from_slice(b);
             }
         }
         Value::Array(arr) => {
+            // Closure with captured values (use vars or implicit $this) is
+            // stored as `[closure_name, captured1, ...]` — render as a Closure
+            // Object, not as a regular array.
+            {
+                let arr_b = arr.borrow();
+                if let Some(Value::String(s)) = arr_b.values().next() {
+                    let b = s.as_bytes();
+                    if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                        let lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+                        if let Some(info) = closure_info_table.get(&lower) {
+                            render_closure_print_r(buf, indent, info);
+                            return;
+                        }
+                        let prefix = " ".repeat(indent);
+                        buf.extend_from_slice(b"Closure Object\n");
+                        buf.extend_from_slice(format!("{}(\n{})\n", prefix, prefix).as_bytes());
+                        return;
+                    }
+                }
+            }
             let arr = arr.borrow();
             let prefix = " ".repeat(indent);
             buf.extend_from_slice(b"Array\n");
@@ -894,7 +974,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
                         );
                     }
                 }
-                print_r_value(value, buf, indent + 8, classes);
+                print_r_value(value, buf, indent + 8, classes, closure_info_table);
                 buf.push(b'\n');
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
@@ -918,12 +998,12 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
                 buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
                 let case_name = obj_borrow.get_property(b"name");
                 buf.extend_from_slice(format!("{}    [name] => ", prefix).as_bytes());
-                print_r_value(&case_name, buf, indent + 8, classes);
+                print_r_value(&case_name, buf, indent + 8, classes, closure_info_table);
                 buf.push(b'\n');
                 if has_backing {
                     let case_value = obj_borrow.get_property(b"value");
                     buf.extend_from_slice(format!("{}    [value] => ", prefix).as_bytes());
-                    print_r_value(&case_value, buf, indent + 8, classes);
+                    print_r_value(&case_value, buf, indent + 8, classes, closure_info_table);
                     buf.push(b'\n');
                 }
                 buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
@@ -960,7 +1040,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
                 buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
                 buf.extend_from_slice(format!("{}    [flags:{}:private] => {}\n", prefix, class_name, flags_val).as_bytes());
                 buf.extend_from_slice(format!("{}    [dllist:{}:private] => ", prefix, class_name).as_bytes());
-                print_r_value(&spl_arr, buf, indent + 8, classes);
+                print_r_value(&spl_arr, buf, indent + 8, classes, closure_info_table);
                 buf.push(b'\n');
                 buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
                 return;
@@ -979,11 +1059,11 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
                 for (name, value) in &extra_props {
                     let name_str = String::from_utf8_lossy(name);
                     buf.extend_from_slice(format!("{}    [{}] => ", prefix, name_str).as_bytes());
-                    print_r_value(value, buf, indent + 8, classes);
+                    print_r_value(value, buf, indent + 8, classes, closure_info_table);
                     buf.push(b'\n');
                 }
                 buf.extend_from_slice(format!("{}    [storage:{}:private] => ", prefix, class_name).as_bytes());
-                print_r_value(&spl_arr, buf, indent + 8, classes);
+                print_r_value(&spl_arr, buf, indent + 8, classes, closure_info_table);
                 buf.push(b'\n');
                 buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
                 return;
@@ -1007,7 +1087,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
                                 );
                             }
                         }
-                        print_r_value(value, buf, indent + 8, classes);
+                        print_r_value(value, buf, indent + 8, classes, closure_info_table);
                         buf.push(b'\n');
                     }
                     buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
@@ -1043,7 +1123,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
                     _ => format!("{}", name_str),
                 };
                 buf.extend_from_slice(format!("{}    [{}] => ", prefix, display_name).as_bytes());
-                print_r_value(value, buf, indent + 8, classes);
+                print_r_value(value, buf, indent + 8, classes, closure_info_table);
                 buf.push(b'\n');
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
@@ -1052,7 +1132,7 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
             buf.extend_from_slice(b"Generator Object\n(\n)\n");
         }
         Value::Reference(r) => {
-            print_r_value(&r.borrow(), buf, indent, classes);
+            print_r_value(&r.borrow(), buf, indent, classes, closure_info_table);
         }
     }
 }
