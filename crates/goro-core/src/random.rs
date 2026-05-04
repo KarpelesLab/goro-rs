@@ -1210,11 +1210,7 @@ pub fn handle_random_docall(
                 let mut values: Vec<Value> = arr.borrow().values().cloned().collect();
                 let n = values.len();
                 if n > 1 {
-                    // Fisher-Yates
-                    for i in (1..n).rev() {
-                        let j = randomizer_range(vm, &obj, 0, i as i64) as usize;
-                        values.swap(i, j);
-                    }
+                    bulk_fisher_yates(vm, &obj, &mut values);
                 }
                 let mut out = PhpArray::new();
                 for v in values { out.push(v); }
@@ -1233,10 +1229,7 @@ pub fn handle_random_docall(
             let mut bytes = s;
             let n = bytes.len();
             if n > 1 {
-                for i in (1..n).rev() {
-                    let j = randomizer_range(vm, &obj, 0, i as i64) as usize;
-                    bytes.swap(i, j);
-                }
+                bulk_fisher_yates(vm, &obj, &mut bytes);
             }
             Some(Value::String(PhpString::from_vec(bytes)))
         }
@@ -1272,12 +1265,8 @@ pub fn handle_random_docall(
                 // Reservoir sampling? Simpler: collect all keys, shuffle, take first num.
                 let mut keys: Vec<ArrayKey> = arr_b.iter().map(|(k, _)| k.clone()).collect();
                 drop(arr_b);
-                let m = keys.len();
-                if m > 1 {
-                    for i in (1..m).rev() {
-                        let j = randomizer_range(vm, &obj, 0, i as i64) as usize;
-                        keys.swap(i, j);
-                    }
+                if keys.len() > 1 {
+                    bulk_fisher_yates(vm, &obj, &mut keys);
                 }
                 // PHP returns keys in their original ascending positional order.
                 // Take first `num` (after shuffle), then re-sort by original index.
@@ -1296,6 +1285,134 @@ pub fn handle_random_docall(
         }
 
         _ => None,
+    }
+}
+
+/// Fisher-Yates shuffle that uses native engine state inline when possible
+/// to avoid load/save overhead per swap.
+fn bulk_fisher_yates<T>(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, items: &mut [T]) {
+    let n = items.len();
+    if n < 2 { return; }
+    let engine = obj.borrow().get_property(b"engine");
+    let native_class = native_engine_class(&engine);
+
+    // Helper closure to compute a random index in [0, max] inclusive
+    // using a u64 from a generator function.
+    let pick_idx = |g: &mut dyn FnMut() -> u64, max: u64| -> u64 {
+        let umax_inc = max.wrapping_add(1);
+        if max == u64::MAX {
+            return g();
+        }
+        if umax_inc & max == 0 {
+            return g() & max;
+        }
+        let limit = u64::MAX - (u64::MAX % umax_inc) - 1;
+        loop {
+            let r = g();
+            if r <= limit {
+                return r % umax_inc;
+            }
+        }
+    };
+
+    if let Some(class) = native_class.as_ref() {
+        if let Value::Object(eobj) = &engine {
+            match class.as_slice() {
+                b"random\\engine\\mt19937" => {
+                    let mut st = load_mt_state(eobj);
+                    for i in (1..n).rev() {
+                        let max = i as u64;
+                        let mut g = || {
+                            // Need 32 bits (range fits in u32)
+                            if max <= u32::MAX as u64 {
+                                st.generate_u32() as u64
+                            } else {
+                                let lo = st.generate_u32() as u64;
+                                let hi = st.generate_u32() as u64;
+                                (hi << 32) | lo
+                            }
+                        };
+                        let umax_inc = max.wrapping_add(1);
+                        let j = if umax_inc & max == 0 {
+                            g() & max
+                        } else if max <= u32::MAX as u64 {
+                            let limit32 = u32::MAX - (u32::MAX % umax_inc as u32) - 1;
+                            loop {
+                                let r = st.generate_u32();
+                                if r <= limit32 {
+                                    break (r % umax_inc as u32) as u64;
+                                }
+                            }
+                        } else {
+                            pick_idx(&mut g, max)
+                        };
+                        items.swap(i, j as usize);
+                    }
+                    save_mt_state(eobj, &st);
+                    return;
+                }
+                b"random\\engine\\xoshiro256starstar" => {
+                    let mut st = load_xoshiro_state(eobj);
+                    for i in (1..n).rev() {
+                        let max = i as u64;
+                        let umax_inc = max.wrapping_add(1);
+                        let j = if umax_inc & max == 0 {
+                            st.generate_u64() & max
+                        } else if max <= u32::MAX as u64 {
+                            let limit32 = u32::MAX - (u32::MAX % umax_inc as u32) - 1;
+                            loop {
+                                let r = st.generate_u64() as u32;
+                                if r <= limit32 {
+                                    break (r % umax_inc as u32) as u64;
+                                }
+                            }
+                        } else {
+                            let limit = u64::MAX - (u64::MAX % umax_inc) - 1;
+                            loop {
+                                let r = st.generate_u64();
+                                if r <= limit { break r % umax_inc; }
+                            }
+                        };
+                        items.swap(i, j as usize);
+                    }
+                    save_xoshiro_state(eobj, &st);
+                    return;
+                }
+                b"random\\engine\\pcgoneseq128xslrr64" => {
+                    let mut st = load_pcg_state(eobj);
+                    for i in (1..n).rev() {
+                        let max = i as u64;
+                        let umax_inc = max.wrapping_add(1);
+                        let j = if umax_inc & max == 0 {
+                            st.generate_u64() & max
+                        } else if max <= u32::MAX as u64 {
+                            let limit32 = u32::MAX - (u32::MAX % umax_inc as u32) - 1;
+                            loop {
+                                let r = st.generate_u64() as u32;
+                                if r <= limit32 {
+                                    break (r % umax_inc as u32) as u64;
+                                }
+                            }
+                        } else {
+                            let limit = u64::MAX - (u64::MAX % umax_inc) - 1;
+                            loop {
+                                let r = st.generate_u64();
+                                if r <= limit { break r % umax_inc; }
+                            }
+                        };
+                        items.swap(i, j as usize);
+                    }
+                    save_pcg_state(eobj, &st);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+    // Fallback: standard slow path with full call_object_method per swap
+    for i in (1..n).rev() {
+        let j = randomizer_range(vm, obj, 0, i as i64) as usize;
+        items.swap(i, j);
     }
 }
 
