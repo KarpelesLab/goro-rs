@@ -899,9 +899,12 @@ pub fn handle_random_docall(
 
         (b"random\\randomizer", b"__unserialize") => {
             let data = args.get(1)?;
+            let class_name = "Random\\Randomizer";
+            // PHP enforces that __unserialize must not bypass readonly. Since
+            // we don't have full readonly enforcement, we accept the data.
             if let Value::Array(arr) = data {
-                // Look for index 0 properties
                 let arr_b = arr.borrow();
+                // Look for index 0 properties
                 if let Some(Value::Array(props)) = arr_b.get(&ArrayKey::Int(0)) {
                     let props_b = props.borrow();
                     for (k, v) in props_b.iter() {
@@ -910,8 +913,10 @@ pub fn handle_random_docall(
                             o.set_property(s.as_bytes().to_vec(), v.clone());
                         }
                     }
+                    return Some(Value::Null);
                 }
             }
+            throw_invalid_serialization(vm, class_name);
             Some(Value::Null)
         }
 
