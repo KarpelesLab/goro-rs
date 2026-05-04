@@ -17,6 +17,7 @@ fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
         || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
         || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
+        || name.starts_with(b"__dir_")
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -43,7 +44,20 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             vm.write_output(format!("{}bool(false)\n", prefix).as_bytes());
         }
         Value::Long(n) => {
-            vm.write_output(format!("{}int({})\n", prefix, n).as_bytes());
+            if goro_core::value::is_registered_resource(*n) {
+                let type_label: String = if goro_core::value::is_open_resource(*n) {
+                    goro_core::value::resource_type_of(*n)
+                        .map(|t| String::from_utf8_lossy(&t).to_string())
+                        .unwrap_or_else(|| "Unknown".to_string())
+                } else {
+                    "Unknown".to_string()
+                };
+                vm.write_output(
+                    format!("{}resource({}) of type ({})\n", prefix, n, type_label).as_bytes(),
+                );
+            } else {
+                vm.write_output(format!("{}int({})\n", prefix, n).as_bytes());
+            }
         }
         Value::Double(f) => {
             // var_dump uses serialize_precision (-1 in PHP 8 = shortest representation)
@@ -722,7 +736,20 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, see
             vm.write_output(format!("{}&bool(false)\n", prefix).as_bytes());
         }
         Value::Long(n) => {
-            vm.write_output(format!("{}&int({})\n", prefix, n).as_bytes());
+            if goro_core::value::is_registered_resource(*n) {
+                let type_label: String = if goro_core::value::is_open_resource(*n) {
+                    goro_core::value::resource_type_of(*n)
+                        .map(|t| String::from_utf8_lossy(&t).to_string())
+                        .unwrap_or_else(|| "Unknown".to_string())
+                } else {
+                    "Unknown".to_string()
+                };
+                vm.write_output(
+                    format!("{}&resource({}) of type ({})\n", prefix, n, type_label).as_bytes(),
+                );
+            } else {
+                vm.write_output(format!("{}&int({})\n", prefix, n).as_bytes());
+            }
         }
         Value::Double(f) => {
             vm.write_output(
@@ -862,7 +889,13 @@ fn print_r_value(val: &Value, buf: &mut Vec<u8>, indent: usize, classes: &goro_c
         Value::Null | Value::Undef => buf.extend_from_slice(b""),
         Value::True => buf.extend_from_slice(b"1"),
         Value::False => {}
-        Value::Long(n) => buf.extend_from_slice(n.to_string().as_bytes()),
+        Value::Long(n) => {
+            if goro_core::value::is_registered_resource(*n) {
+                buf.extend_from_slice(format!("Resource id #{}", n).as_bytes());
+            } else {
+                buf.extend_from_slice(n.to_string().as_bytes());
+            }
+        }
         Value::Double(f) => buf.extend_from_slice(format_float(*f).as_bytes()),
         Value::String(s) => {
             let b = s.as_bytes();

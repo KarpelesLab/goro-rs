@@ -6757,9 +6757,9 @@ impl Compiler {
                     b"true" => Value::True,
                     b"false" => Value::False,
                     b"null" => Value::Null,
-                    b"stdin" => Value::Long(1),
-                    b"stdout" => Value::Long(2),
-                    b"stderr" => Value::Long(3),
+                    b"stdin" => Value::Long(10001),
+                    b"stdout" => Value::Long(10002),
+                    b"stderr" => Value::Long(10003),
                     b"e_all" => Value::Long(30719), // PHP 8.4+: E_ALL excludes E_STRICT
                     b"e_error" => Value::Long(1),
                     b"e_warning" => Value::Long(2),

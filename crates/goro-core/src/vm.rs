@@ -490,13 +490,17 @@ impl Vm {
                     b"PHP_CONFIG_FILE_SCAN_DIR".to_vec(),
                     Value::String(PhpString::from_bytes(b"")),
                 );
-                // File handles - use Long as resource placeholders (non-zero so they are truthy)
-                c.insert(b"STDIN".to_vec(), Value::Long(1));
-                c.insert(b"STDOUT".to_vec(), Value::Long(2));
-                c.insert(b"STDERR".to_vec(), Value::Long(3));
-                crate::value::register_resource(1, b"stream");
-                crate::value::register_resource(2, b"stream");
-                crate::value::register_resource(3, b"stream");
+                // File handles - use Long as resource placeholders (non-zero so they are truthy).
+                // Use high IDs so that var_dump of small int literals does not get
+                // misinterpreted as a resource by the heuristic is_registered_resource()
+                // check in output.rs (since Goro uses Value::Long for both ints and
+                // resource IDs).
+                c.insert(b"STDIN".to_vec(), Value::Long(10001));
+                c.insert(b"STDOUT".to_vec(), Value::Long(10002));
+                c.insert(b"STDERR".to_vec(), Value::Long(10003));
+                crate::value::register_resource(10001, b"stream");
+                crate::value::register_resource(10002, b"stream");
+                crate::value::register_resource(10003, b"stream");
                 c.insert(
                     b"DIRECTORY_SEPARATOR".to_vec(),
                     Value::String(PhpString::from_bytes(b"/")),
@@ -1146,13 +1150,16 @@ impl Vm {
                 c.insert(b"TRUE".to_vec(), Value::True);
                 c.insert(b"FALSE".to_vec(), Value::False);
                 c.insert(b"NULL".to_vec(), Value::Null);
-                // Additional type-checking constants
-                c.insert(b"STDIN".to_vec(), Value::Long(1));
-                c.insert(b"STDOUT".to_vec(), Value::Long(2));
-                c.insert(b"STDERR".to_vec(), Value::Long(3));
-                crate::value::register_resource(1, b"stream");
-                crate::value::register_resource(2, b"stream");
-                crate::value::register_resource(3, b"stream");
+                // Additional type-checking constants. STDIN/STDOUT/STDERR use
+                // high resource IDs to avoid colliding with literal int values
+                // in the var_dump heuristic (since Goro uses Value::Long for both
+                // ints and resource IDs).
+                c.insert(b"STDIN".to_vec(), Value::Long(10001));
+                c.insert(b"STDOUT".to_vec(), Value::Long(10002));
+                c.insert(b"STDERR".to_vec(), Value::Long(10003));
+                crate::value::register_resource(10001, b"stream");
+                crate::value::register_resource(10002, b"stream");
+                crate::value::register_resource(10003, b"stream");
                 c
 
 
@@ -2700,6 +2707,58 @@ impl Vm {
             }
             if let Some(type_info) = &user_fn.param_types[i] {
                 Self::coerce_value_to_type(arg, &type_info.param_type, caller_strict);
+            }
+        }
+    }
+
+    /// Check whether a parameter type would coerce a finite non-integer float into an int.
+    /// Used to determine if the implicit float-to-int deprecation should fire.
+    /// The check is: type is int (possibly nullable, or as part of a union where int wins).
+    /// In a union containing `float`, the float stays as float (no conversion at all).
+    fn param_type_coerces_float_to_int(param_type: &ParamType) -> bool {
+        match param_type {
+            ParamType::Simple(name) => {
+                matches!(name.as_slice(), b"int" | b"integer")
+            }
+            ParamType::Nullable(inner) => Self::param_type_coerces_float_to_int(inner),
+            ParamType::Union(types) => {
+                // If `float` is in the union, the value stays as float — no precision loss.
+                let has_float = types.iter().any(|t| matches!(t,
+                    ParamType::Simple(n) if matches!(n.as_slice(), b"float" | b"double")));
+                if has_float {
+                    return false;
+                }
+                // If `int` is in the union, a finite float with fractional part is coerced
+                // to int (with deprecation). NaN/infinity follow other rules but those are
+                // already filtered by the caller (only finite, non-integer floats reach here).
+                types.iter().any(|t| matches!(t,
+                    ParamType::Simple(n) if matches!(n.as_slice(), b"int" | b"integer")))
+            }
+            ParamType::Intersection(_) => false,
+        }
+    }
+
+    /// Emit "Implicit conversion from float X to int loses precision" if the value is
+    /// a finite float with a non-integer fractional part and the target type would
+    /// coerce it to int. Used for typed property assignments, function parameter
+    /// coercion (non-strict mode), and return-type coercion.
+    fn emit_implicit_float_to_int_if_needed(&mut self, value: &Value, param_type: &ParamType, line: u32) {
+        let inner: Value = if let Value::Reference(r) = value {
+            r.borrow().clone()
+        } else {
+            value.clone()
+        };
+        if let Value::Double(f) = inner {
+            if f.is_finite() && f.fract() != 0.0 {
+                if Self::param_type_coerces_float_to_int(param_type) {
+                    self.emit_deprecated_at(
+                        &format!(
+                            "Implicit conversion from float {} to int loses precision",
+                            crate::value::format_php_float(f)
+                        ),
+                        line,
+                    );
+                }
             }
         }
     }
@@ -4639,6 +4698,25 @@ impl Vm {
             b"directory" => {
                 match method_lower {
                     b"read" => {
+                        // If the handle has been closed (e.g. via $d->close()),
+                        // PHP throws a TypeError mentioning the cannot-use-after-close
+                        // semantics.
+                        let handle_id = {
+                            let ob = obj.borrow();
+                            match ob.get_property(b"handle") {
+                                Value::Long(n) => Some(n),
+                                _ => None,
+                            }
+                        };
+                        if let Some(id) = handle_id {
+                            if !crate::value::is_open_resource(id) && crate::value::is_registered_resource(id) {
+                                let exc = self.throw_type_error(
+                                    "Directory::read(): cannot use Directory resource after it has been closed".to_string(),
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                        }
                         let mut ob = obj.borrow_mut();
                         let pos = ob.get_property(b"__dir_pos").to_long();
                         let entries = ob.get_property(b"__dir_entries");
@@ -4661,6 +4739,19 @@ impl Vm {
                         Some(Value::Null)
                     }
                     b"close" => {
+                        // Mark the underlying resource as closed so that
+                        // subsequent var_dump shows "of type (Unknown)" and
+                        // subsequent ->read() throws.
+                        let handle_id = {
+                            let ob = obj.borrow();
+                            match ob.get_property(b"handle") {
+                                Value::Long(n) => Some(n),
+                                _ => None,
+                            }
+                        };
+                        if let Some(id) = handle_id {
+                            crate::value::close_resource(id);
+                        }
                         Some(Value::Null)
                     }
                     _ => None,
@@ -11320,6 +11411,11 @@ impl Vm {
         if let Ok(ref mut val) = result {
             if let Some(ref ret_type) = op_array.return_type {
                 if !op_array.strict_types {
+                    // Emit implicit float-to-int deprecation BEFORE coercion truncates the value
+                    let val_clone = (*val).clone();
+                    let ret_type_clone = ret_type.clone();
+                    let line = self.current_line;
+                    self.emit_implicit_float_to_int_if_needed(&val_clone, &ret_type_clone, line);
                     // Weak mode: coerce return value
                     Self::coerce_value_to_type(val, ret_type, false);
                 }
@@ -15500,6 +15596,17 @@ impl Vm {
                                         message: format!("Uncaught TypeError: {}", err_msg),
                                         line: def_line,
                                     });
+                                }
+                            }
+                            // Emit implicit float-to-int deprecation for non-strict mode
+                            // BEFORE coercion truncates the value.
+                            if !op_array.strict_types {
+                                for (i, arg) in call.args.iter().enumerate() {
+                                    if i >= user_fn.param_types.len() { break; }
+                                    if matches!(arg, Value::Undef) { continue; }
+                                    if let Some(type_info) = &user_fn.param_types[i] {
+                                        self.emit_implicit_float_to_int_if_needed(arg, &type_info.param_type, op.line);
+                                    }
                                 }
                             }
                             // Coerce args to their declared types (weak mode)
@@ -24863,6 +24970,8 @@ impl Vm {
                                 if let Some(ref pt) = prop_type {
                                     // Try coercion in weak mode
                                     if !op_array.strict_types {
+                                        // Emit implicit float-to-int deprecation BEFORE coercion truncates
+                                        self.emit_implicit_float_to_int_if_needed(&value, pt, op.line);
                                         Self::coerce_value_to_type(&mut value, pt, false);
                                     }
                                     if !self.value_matches_type(&value, pt) {
