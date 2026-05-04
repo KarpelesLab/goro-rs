@@ -1517,22 +1517,47 @@ fn engine_generate_bytes(vm: &mut Vm, engine: &Value, count: usize) -> Vec<u8> {
     }
     // For user engines, PHP truncates each generate() to 8 bytes (64 bits).
     let mut out = Vec::with_capacity(count);
+    let mut consec_empty = 0;
     while out.len() < count {
         let result = vm.call_object_method(engine, b"generate", &[]);
+        if vm.current_exception.is_some() {
+            return out;
+        }
         match result {
             Some(Value::String(s)) => {
                 let bytes = s.as_bytes();
+                if bytes.is_empty() {
+                    // PHP: A random engine must return a non-empty string.
+                    let _ = consec_empty;
+                    throw_broken_engine(vm);
+                    return out;
+                }
+                consec_empty = 0;
                 let truncated_len = bytes.len().min(8);
                 let truncated = &bytes[..truncated_len];
                 let need = count - out.len();
                 let take = truncated.len().min(need);
                 out.extend_from_slice(&truncated[..take]);
-                if truncated.is_empty() { break; }
             }
-            _ => break,
+            _ => {
+                // generate() returned non-string - PHP throws TypeError
+                let class_name = if let Value::Object(o) = engine {
+                    String::from_utf8_lossy(&o.borrow().class_name).to_string()
+                } else { String::from("Engine") };
+                let msg = format!("{}::generate(): Return value must be of type string", class_name);
+                let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return out;
+            }
         }
     }
     out
+}
+
+fn throw_broken_engine(vm: &mut Vm) {
+    let exc = vm.create_exception(b"Random\\BrokenRandomEngineError",
+        "A random engine must return a non-empty string", vm.current_line);
+    vm.current_exception = Some(exc);
 }
 
 // Range function: inclusive of both min and max.

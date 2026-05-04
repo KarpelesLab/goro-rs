@@ -27405,6 +27405,8 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
         | b"dateexception" | b"dateinvalidtimezoneexception" | b"datemalformedintervalstringexception"
         | b"datemalformedstringexception" | b"datemalformedperiodstringexception"
         | b"parseerror" | b"compileerror"
+        | b"random\\randomexception" | b"random\\randomerror" | b"random\\brokenrandomengineerror"
+        | b"random\\intervalerror"
         | b"uri\\whatwg\\invalidurlexception" | b"uri\\invaliduriexception" => &[b"Throwable"],
         _ => &[],
     };
@@ -27422,7 +27424,11 @@ pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
         b"arithmeticerror" => Some(b"Error"),
         b"divisionbyzeroerror" => Some(b"ArithmeticError"),
         b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"errorexception" | b"jsonexception"
-        | b"uri\\whatwg\\invalidurlexception" | b"uri\\invaliduriexception" => Some(b"Exception"),
+        | b"uri\\whatwg\\invalidurlexception" | b"uri\\invaliduriexception"
+        | b"random\\randomexception" => Some(b"Exception"),
+        b"random\\randomerror" => Some(b"Error"),
+        b"random\\brokenrandomengineerror" => Some(b"Random\\RandomError"),
+        b"random\\intervalerror" => Some(b"ValueError"),
         b"overflowexception" | b"underflowexception" | b"outofboundsexception" => Some(b"RuntimeException"),
         b"invalidargumentexception" | b"badmethodcallexception" | b"domainexception"
         | b"unexpectedvalueexception" | b"lengthexception" | b"outofrangeexception" => Some(b"LogicException"),
@@ -27640,6 +27646,11 @@ pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             b"dateexception" | b"dateinvalidtimezoneexception"
             | b"datemalformedintervalstringexception" | b"datemalformedstringexception"
             | b"datemalformedperiodstringexception" => Some(b"exception".to_vec()),
+            // Random exception hierarchy
+            b"random\\randomexception" => Some(b"exception".to_vec()),
+            b"random\\randomerror" => Some(b"error".to_vec()),
+            b"random\\brokenrandomengineerror" => Some(b"random\\randomerror".to_vec()),
+            b"random\\intervalerror" => Some(b"valueerror".to_vec()),
             // SPL class hierarchy
             b"splstack" | b"splqueue" => Some(b"spldoublylinkedlist".to_vec()),
             b"splminheap" | b"splmaxheap" => Some(b"splheap".to_vec()),
