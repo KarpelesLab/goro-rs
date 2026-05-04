@@ -15321,7 +15321,15 @@ impl Vm {
                         let raw_display = String::from_utf8_lossy(call.name.as_bytes()).into_owned();
                         // Format closure names for stack traces using the canonical
                         // display name (e.g. {closure:file:line} or {closure:Class::method():line}).
-                        let early_call_display = if !user_fn.display_name.is_empty() {
+                        // FCC closures wrap an underlying function/method — show that name
+                        // (e.g. "throws") rather than the internal __closure_fcc_N identifier.
+                        let early_call_display = if raw_display.starts_with("__closure_fcc_") {
+                            if let Some(t) = &user_fn.fcc_target_name {
+                                String::from_utf8_lossy(t).to_string()
+                            } else {
+                                raw_display.clone()
+                            }
+                        } else if !user_fn.display_name.is_empty() {
                             String::from_utf8_lossy(&user_fn.display_name).to_string()
                         } else if (raw_display.starts_with("__closure_") || raw_display.starts_with("__arrow_")) && !raw_display.starts_with("__closure_fcc_") {
                             let file = String::from_utf8_lossy(&user_fn.filename).to_string();
