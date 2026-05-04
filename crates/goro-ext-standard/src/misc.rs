@@ -6456,6 +6456,10 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
                     | b"splheap" | b"splminheap" | b"splmaxheap"
                     | b"splpriorityqueue"
                     | b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+                    | b"random\\engine\\mt19937"
+                    | b"random\\engine\\xoshiro256starstar"
+                    | b"random\\engine\\pcgoneseq128xslrr64"
+                    | b"random\\randomizer"
                 )
             };
             let has_serialize = vm.classes.get(&class_lower)
@@ -6939,6 +6943,10 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
                     | b"splheap" | b"splminheap" | b"splmaxheap"
                     | b"splpriorityqueue"
                     | b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+                    | b"random\\engine\\mt19937"
+                    | b"random\\engine\\xoshiro256starstar"
+                    | b"random\\engine\\pcgoneseq128xslrr64"
+                    | b"random\\randomizer"
                 )
             };
             let has_unserialize = vm.classes.get(&class_lower)

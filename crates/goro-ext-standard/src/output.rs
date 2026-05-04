@@ -17,6 +17,7 @@ fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
         || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
         || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
+        || name.starts_with(b"__rng_")
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -476,6 +477,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 b"splfileinfo" | b"splfileobject" | b"spltempfileobject"
                     | b"directoryiterator" | b"filesystemiterator"
                     | b"recursivedirectoryiterator" | b"globiterator"
+                    | b"random\\engine\\mt19937"
+                    | b"random\\engine\\xoshiro256starstar"
+                    | b"random\\engine\\pcgoneseq128xslrr64"
             );
 
             if has_debug_info || is_spl_debug {
