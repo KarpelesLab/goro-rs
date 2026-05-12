@@ -333,7 +333,7 @@ pub struct Vm {
 
 impl Vm {
     pub fn new() -> Self {
-        Self {
+        let mut vm = Self {
             output: Vec::new(),
                 ob_stack: Vec::new(),
             functions: HashMap::new(),
@@ -1180,7 +1180,23 @@ impl Vm {
             weak_map_entries: HashMap::new(),
             class_aliases: HashMap::new(),
             disabled_functions: std::collections::HashSet::new(),
+        };
+        // Built-in enum: Random\IntervalBoundary
+        let mut iv = ClassEntry::new(b"Random\\IntervalBoundary".to_vec());
+        iv.is_enum = true;
+        iv.enum_backing_type = None; // unit enum
+        let case_names: &[&[u8]] = &[b"ClosedOpen", b"ClosedClosed", b"OpenClosed", b"OpenOpen"];
+        for &name in case_names {
+            iv.enum_cases.push((name.to_vec(), Value::Null));
+            // Class constants for cases use the special enum marker so StaticPropGet
+            // creates a singleton enum instance.
+            let mut marker = b"__enum_case__::".to_vec();
+            marker.extend_from_slice(name);
+            iv.constants.insert(name.to_vec(), Value::String(PhpString::from_vec(marker)));
         }
+        let iv_lower = b"random\\intervalboundary".to_vec();
+        vm.classes.insert(iv_lower, iv);
+        vm
     }
 
     /// Register an extension as loaded (called by extension crates in their register() function)
@@ -2507,6 +2523,10 @@ impl Vm {
                             }
                             // Check built-in class hierarchy
                             if is_builtin_subclass(&obj_class_lower, &class_name_lower) {
+                                return true;
+                            }
+                            // Built-in interface implementations
+                            if self.builtin_implements_interface(&obj_class_lower, &class_name_lower) {
                                 return true;
                             }
                             // If target is a common interface/abstract class we don't track,
@@ -4506,6 +4526,14 @@ impl Vm {
                     | b"globiterator"
                     | b"phptoken"
             ),
+            b"random\\engine" => matches!(
+                class_lower,
+                b"random\\engine\\mt19937"
+                | b"random\\engine\\xoshiro256starstar"
+                | b"random\\engine\\pcgoneseq128xslrr64"
+                | b"random\\engine\\secure"
+            ),
+            b"random\\cryptosafeengine" => matches!(class_lower, b"random\\engine\\secure"),
             _ => false,
         }
     }
@@ -4716,6 +4744,13 @@ impl Vm {
             }
             b"simplexmlelement" => {
                 self.simplexml_method(method_lower, obj)
+            }
+            b"random\\engine\\mt19937"
+            | b"random\\engine\\xoshiro256starstar"
+            | b"random\\engine\\pcgoneseq128xslrr64"
+            | b"random\\engine\\secure"
+            | b"random\\randomizer" => {
+                crate::random::dispatch_random_method(self, class_lower, method_lower, obj)
             }
             b"directory" => {
                 match method_lower {
@@ -7111,6 +7146,11 @@ impl Vm {
                 b"children" | b"attributes" | b"asxml" | b"xpath"
                     | b"addchild" | b"addattribute"
             ),
+            b"random\\engine\\mt19937"
+            | b"random\\engine\\xoshiro256starstar"
+            | b"random\\engine\\pcgoneseq128xslrr64"
+            | b"random\\engine\\secure"
+            | b"random\\randomizer" => crate::random::is_random_args_method(class, method),
             _ => false,
         }
     }
@@ -9370,6 +9410,14 @@ impl Vm {
                 }
                 b"simplexmlelement" => {
                     self.simplexml_docall(method, obj, args)
+                }
+                b"random\\engine\\mt19937"
+                | b"random\\engine\\xoshiro256starstar"
+                | b"random\\engine\\pcgoneseq128xslrr64"
+                | b"random\\engine\\secure"
+                | b"random\\randomizer" => {
+                    let _ = obj;
+                    crate::random::handle_random_docall(self, class, method, args)
                 }
                 _ => None,
             }
@@ -19387,6 +19435,12 @@ impl Vm {
                                             }
                                         }
                                     }
+                                    if resolved && const_name.as_slice() == b"MT_RAND_PHP" {
+                                        self.emit_deprecated_at(
+                                            "Constant MT_RAND_PHP is deprecated since 8.3, as it uses a biased non-standard variant of Mt19937",
+                                            op.line,
+                                        );
+                                    }
                                     if !resolved {
                                         // Constant not found - throw Undefined constant error (PHP 8+)
                                         let const_display = String::from_utf8_lossy(&const_name).to_string();
@@ -19651,6 +19705,12 @@ impl Vm {
                         if name_bytes == b"E_STRICT" {
                             self.emit_deprecated_at(
                                 "Constant E_STRICT is deprecated since 8.4, the error level was removed",
+                                op.line,
+                            );
+                        }
+                        if name_bytes == b"MT_RAND_PHP" {
+                            self.emit_deprecated_at(
+                                "Constant MT_RAND_PHP is deprecated since 8.3, as it uses a biased non-standard variant of Mt19937",
                                 op.line,
                             );
                         }
@@ -24076,6 +24136,16 @@ impl Vm {
                             b"uri\\rfc3986\\uri" => b"Uri\\Rfc3986\\Uri".to_vec(),
                             b"uri\\whatwg\\invalidurlexception" => b"Uri\\WhatWg\\InvalidUrlException".to_vec(),
                             b"uri\\invaliduriexception" => b"Uri\\InvalidUriException".to_vec(),
+                            // Random classes
+                            b"random\\randomizer" => b"Random\\Randomizer".to_vec(),
+                            b"random\\engine\\mt19937" => b"Random\\Engine\\Mt19937".to_vec(),
+                            b"random\\engine\\xoshiro256starstar" => b"Random\\Engine\\Xoshiro256StarStar".to_vec(),
+                            b"random\\engine\\pcgoneseq128xslrr64" => b"Random\\Engine\\PcgOneseq128XslRr64".to_vec(),
+                            b"random\\engine\\secure" => b"Random\\Engine\\Secure".to_vec(),
+                            b"random\\randomexception" => b"Random\\RandomException".to_vec(),
+                            b"random\\randomerror" => b"Random\\RandomError".to_vec(),
+                            b"random\\brokenrandomengineerror" => b"Random\\BrokenRandomEngineError".to_vec(),
+                            b"random\\intervalboundary" => b"Random\\IntervalBoundary".to_vec(),
                             _ => class_name.as_bytes().to_vec(),
                         }
                     };
@@ -27504,6 +27574,8 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
         | b"dateexception" | b"dateinvalidtimezoneexception" | b"datemalformedintervalstringexception"
         | b"datemalformedstringexception" | b"datemalformedperiodstringexception"
         | b"parseerror" | b"compileerror"
+        | b"random\\randomexception" | b"random\\randomerror" | b"random\\brokenrandomengineerror"
+        | b"random\\intervalerror"
         | b"uri\\whatwg\\invalidurlexception" | b"uri\\invaliduriexception" => &[b"Throwable"],
         _ => &[],
     };
@@ -27521,7 +27593,11 @@ pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
         b"arithmeticerror" => Some(b"Error"),
         b"divisionbyzeroerror" => Some(b"ArithmeticError"),
         b"runtimeexception" | b"logicexception" | b"closedgeneratorexception" | b"errorexception" | b"jsonexception"
-        | b"uri\\whatwg\\invalidurlexception" | b"uri\\invaliduriexception" => Some(b"Exception"),
+        | b"uri\\whatwg\\invalidurlexception" | b"uri\\invaliduriexception"
+        | b"random\\randomexception" => Some(b"Exception"),
+        b"random\\randomerror" => Some(b"Error"),
+        b"random\\brokenrandomengineerror" => Some(b"Random\\RandomError"),
+        b"random\\intervalerror" => Some(b"ValueError"),
         b"overflowexception" | b"underflowexception" | b"outofboundsexception" => Some(b"RuntimeException"),
         b"invalidargumentexception" | b"badmethodcallexception" | b"domainexception"
         | b"unexpectedvalueexception" | b"lengthexception" | b"outofrangeexception" => Some(b"LogicException"),
@@ -27739,6 +27815,11 @@ pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             b"dateexception" | b"dateinvalidtimezoneexception"
             | b"datemalformedintervalstringexception" | b"datemalformedstringexception"
             | b"datemalformedperiodstringexception" => Some(b"exception".to_vec()),
+            // Random exception hierarchy
+            b"random\\randomexception" => Some(b"exception".to_vec()),
+            b"random\\randomerror" => Some(b"error".to_vec()),
+            b"random\\brokenrandomengineerror" => Some(b"random\\randomerror".to_vec()),
+            b"random\\intervalerror" => Some(b"valueerror".to_vec()),
             // SPL class hierarchy
             b"splstack" | b"splqueue" => Some(b"spldoublylinkedlist".to_vec()),
             b"splminheap" | b"splmaxheap" => Some(b"splheap".to_vec()),
