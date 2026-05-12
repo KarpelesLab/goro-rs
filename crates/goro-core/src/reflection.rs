@@ -4531,6 +4531,9 @@ fn reflection_property_modifiers_static(prop: &crate::object::PropertyDef) -> i6
         Visibility::Private => mods |= 4,
     }
     if prop.is_static { mods |= 0x10; }
+    if prop.is_final { mods |= 0x20; }
+    if prop.is_abstract { mods |= 0x40; }
+    if prop.is_virtual { mods |= 0x200; }
     if prop.is_readonly { mods |= 0x10000; }
     mods
 }
