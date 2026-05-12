@@ -306,6 +306,52 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 class_lower.as_slice(),
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
             );
+            // SplObjectStorage uses a private "storage" property containing an
+            // indexed array of {obj, inf} entries.
+            let is_spl_obj_storage = class_lower.as_slice() == b"splobjectstorage";
+
+            if is_spl_obj_storage {
+                let objs_val = obj_borrow.get_property(b"__spl_objects");
+                let infos_val = obj_borrow.get_property(b"__spl_array");
+                let class_name_owned = class_name.to_string();
+                drop(obj_borrow);
+                // PHP suppresses the object header when this object is already
+                // being walked: just emit *RECURSION*.
+                if !seen.insert(oid) {
+                    vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+                    return;
+                }
+                vm.write_output(
+                    format!("{}object({})#{} (1) {{\n", prefix, class_name_owned, oid).as_bytes(),
+                );
+                vm.write_output(format!("{}  [\"storage\":\"SplObjectStorage\":private]=>\n", prefix).as_bytes());
+                // Build the storage array view: [0 => {"obj" => X, "inf" => Y}, ...]
+                let mut storage_view = goro_core::array::PhpArray::new();
+                if let (Value::Array(objs), Value::Array(infos)) = (&objs_val, &infos_val) {
+                    let ob = objs.borrow();
+                    let inb = infos.borrow();
+                    for (idx, ((_, o), (_, inf))) in ob.iter().zip(inb.iter()).enumerate() {
+                        let mut entry = goro_core::array::PhpArray::new();
+                        entry.set(
+                            goro_core::array::ArrayKey::String(goro_core::string::PhpString::from_bytes(b"obj")),
+                            o.clone(),
+                        );
+                        entry.set(
+                            goro_core::array::ArrayKey::String(goro_core::string::PhpString::from_bytes(b"inf")),
+                            inf.clone(),
+                        );
+                        storage_view.set(
+                            goro_core::array::ArrayKey::Int(idx as i64),
+                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(entry))),
+                        );
+                    }
+                }
+                let view_val = Value::Array(std::rc::Rc::new(std::cell::RefCell::new(storage_view)));
+                var_dump_value(vm, &view_val, indent + 2, seen);
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
 
             // Uri classes: expose __uri_* properties as scheme/username/... for var_dump
             let is_uri_class = matches!(

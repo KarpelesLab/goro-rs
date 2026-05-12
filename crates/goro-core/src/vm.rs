@@ -20983,12 +20983,21 @@ impl Vm {
                             // is replaced by a snapshot array of its visible
                             // properties so the clone is detached from future
                             // mutations of the wrapped object.
+                            // ArrayObject deep-clones its storage; ArrayIterator
+                            // shares the backing storage (PHP behaviour). We still
+                            // snapshot a wrapped object into a fresh array in
+                            // both cases because the wrapped object lifecycle is
+                            // separate.
                             let is_array_object_like = matches!(class_lower.as_slice(),
                                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator");
+                            let deep_clone_storage = class_lower.as_slice() == b"arrayobject";
                             // Copy all properties, deep-cloning arrays for SPL classes
                             // and deep-cloning __lazy_real for lazy proxies.
                             for (name, value) in &obj_borrow.properties {
-                                let cloned_value = if name == b"__spl_array" && is_array_object_like {
+                                let cloned_value = if name == b"__spl_array" && is_array_object_like && !deep_clone_storage && matches!(value, Value::Array(_)) {
+                                    // Share storage by reference (ArrayIterator semantics).
+                                    value.clone()
+                                } else if name == b"__spl_array" && is_array_object_like {
                                     match value {
                                         Value::Array(a) => {
                                             Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
