@@ -2009,8 +2009,8 @@ fn try_parse_absolute(s: &str) -> Option<i64> {
     let parts: Vec<&str> = s.splitn(2, |c: char| c == ' ' || c == 'T').collect();
     let date_str = parts.first()?;
 
-    // Try Y-m-d format (also handles YYYY-Mon-DD or Mon-DD-YYYY)
-    let date_parts: Vec<&str> = date_str.split('-').collect();
+    // Try Y-m-d / Y/m/d format (also handles YYYY-Mon-DD or Mon-DD-YYYY)
+    let date_parts: Vec<&str> = date_str.split(|c: char| c == '-' || c == '/').collect();
     if date_parts.len() == 3 {
         // Check for month name in parts
         if let Some(month_num) = parse_month_name(date_parts[1]) {

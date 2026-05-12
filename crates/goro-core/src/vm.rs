@@ -28908,7 +28908,8 @@ pub fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
     } else {
         (1, *date_str_raw)
     };
-    let date_parts: Vec<&str> = date_str.split('-').collect();
+    // Support `-` and `/` as date separators (e.g. "2005/8/12").
+    let date_parts: Vec<&str> = date_str.split(|c: char| c == '-' || c == '/').collect();
     if date_parts.len() == 3 {
         if let (Ok(year_abs), Ok(month), Ok(day)) = (date_parts[0].parse::<i64>(), date_parts[1].parse::<u32>(), date_parts[2].parse::<u32>()) {
             let year = year_abs * year_sign;
