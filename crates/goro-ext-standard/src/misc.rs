@@ -6635,6 +6635,7 @@ fn is_serialize_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
         || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
         || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
+        || name.starts_with(b"__dir_")
 }
 
 fn serialize_value_depth(val: &Value, depth: usize) -> String {
@@ -7688,7 +7689,78 @@ use std::io::{Read as IoRead, Write as IoWrite, Seek, SeekFrom, BufRead, BufRead
 thread_local! {
     static FILE_HANDLES: RefCell<StdHashMap<i64, FileHandle>> = RefCell::new(StdHashMap::new());
     static NEXT_FILE_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(100) }; // Start at 100 to avoid clashing with STDIN/STDOUT/STDERR
-    static DIR_HANDLES: RefCell<StdHashMap<String, Vec<String>>> = RefCell::new(StdHashMap::new());
+    /// Directory handles keyed by resource id. Each entry stores the directory
+    /// path (for rewind) and a remaining list of entry names that we pop from
+    /// the back to feed readdir().
+    static DIR_HANDLES: RefCell<StdHashMap<i64, DirHandle>> = RefCell::new(StdHashMap::new());
+    /// "Current" directory stream pointer used as fallback when readdir/closedir/
+    /// rewinddir are called with no argument or null. PHP keeps this state per
+    /// request; opendir() updates it.
+    static CURRENT_DIR_RESOURCE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) struct DirHandle {
+    pub path: String,
+    pub remaining: Vec<String>,
+}
+
+fn read_dir_entries(path: &str) -> std::io::Result<Vec<String>> {
+    let entries = std::fs::read_dir(path)?;
+    let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
+    for entry in entries {
+        if let Ok(e) = entry {
+            names.push(e.file_name().to_string_lossy().to_string());
+        }
+    }
+    names.sort();
+    // Reverse so we can pop from the end efficiently while still feeding entries
+    // in ascending order.
+    names.reverse();
+    Ok(names)
+}
+
+fn alloc_dir_handle(path: String) -> i64 {
+    let names = match read_dir_entries(&path) {
+        Ok(n) => n,
+        Err(_) => Vec::new(),
+    };
+    NEXT_FILE_ID.with(|id| {
+        let did = id.get();
+        id.set(did + 1);
+        DIR_HANDLES.with(|dh| {
+            dh.borrow_mut().insert(did, DirHandle {
+                path,
+                remaining: names,
+            });
+        });
+        goro_core::value::register_resource(did, b"stream");
+        CURRENT_DIR_RESOURCE.with(|c| c.set(Some(did)));
+        did
+    })
+}
+
+/// Return the resource id from a directory handle Value. Accepts a direct Long
+/// (resource id), a Directory object whose `handle` property holds the resource
+/// id, or a Reference wrapping either of those. Returns None for any other
+/// shape.
+fn dir_handle_resource_id(val: &Value) -> Option<i64> {
+    match val {
+        Value::Long(n) => Some(*n),
+        Value::Reference(r) => dir_handle_resource_id(&r.borrow()),
+        Value::Object(obj) => {
+            let ob = obj.borrow();
+            if ob.class_name.eq_ignore_ascii_case(b"Directory") {
+                let handle = ob.get_property(b"handle");
+                match handle {
+                    Value::Long(n) => Some(n),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 struct FileHandle {
@@ -8867,52 +8939,210 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path_str = path.to_string_lossy();
     let dir_path = std::path::Path::new(&*path_str);
     if dir_path.is_dir() {
-        // Read all entries
         match std::fs::read_dir(dir_path) {
-            Ok(entries) => {
-                let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
-                for entry in entries {
-                    if let Ok(e) = entry {
-                        names.push(e.file_name().to_string_lossy().to_string());
-                    }
-                }
-                names.sort(); // Sort for consistent order
-                // Reverse so we can pop from end efficiently
-                names.reverse();
-                let key = format!("dir:{}", path_str);
-                DIR_HANDLES.with(|dh| {
-                    dh.borrow_mut().insert(key.clone(), names);
-                });
-                Ok(Value::String(PhpString::from_string(key)))
+            Ok(_) => {
+                let did = alloc_dir_handle(path_str.to_string());
+                Ok(Value::Long(did))
             }
-            Err(_) => {
-                vm.emit_warning(&format!("opendir({}): Failed to open directory", path_str));
+            Err(e) => {
+                vm.emit_warning(&format!(
+                    "opendir({}): Failed to open directory: {}",
+                    path_str, e
+                ));
                 Ok(Value::False)
             }
         }
     } else {
-        vm.emit_warning(&format!("opendir({}): No such file or directory", path_str));
+        let err_msg = match std::fs::metadata(dir_path) {
+            Err(e) => format!("{}", e),
+            Ok(_) => "Not a directory".to_string(),
+        };
+        vm.emit_warning(&format!(
+            "opendir({}): Failed to open directory: {}",
+            path_str, err_msg
+        ));
         Ok(Value::False)
     }
 }
 
-fn closedir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(handle) = args.first() {
-        let key = handle.to_php_string().to_string_lossy();
-        DIR_HANDLES.with(|dh| {
-            dh.borrow_mut().remove(&*key);
-        });
+/// Resolve the resource id for a dir-handle argument and validate it.
+/// On null/missing argument: emits the deprecation notice and falls back to
+/// the current-dir-resource. On wrong-type argument: throws a TypeError.
+/// Returns Ok(Some(id)) when we should proceed, Ok(None) when we should
+/// short-circuit returning the supplied default value (e.g. when null is
+/// passed and there is no current dir resource), or Err if a TypeError was
+/// thrown.
+fn resolve_dir_handle(
+    vm: &mut Vm,
+    args: &[Value],
+    func_name: &str,
+) -> Result<Option<i64>, VmError> {
+    // Determine the supplied arg, treating "no argument supplied" identically to
+    // "null supplied" — PHP's signature has a default of null.
+    let raw = args.first().cloned().unwrap_or(Value::Null);
+    // Dereference once to inspect the underlying value.
+    let val = match &raw {
+        Value::Reference(r) => r.borrow().clone(),
+        v => v.clone(),
+    };
+    match val {
+        Value::Null | Value::Undef => {
+            vm.emit_deprecated_at(
+                &format!(
+                    "{}(): Passing null is deprecated, instead the last opened directory stream should be provided",
+                    func_name
+                ),
+                vm.current_line,
+            );
+            Ok(CURRENT_DIR_RESOURCE.with(|c| c.get()))
+        }
+        Value::Long(n) => {
+            if !goro_core::value::is_registered_resource(n) {
+                let exc = vm.throw_type_error(format!(
+                    "{}(): Argument #1 ($dir_handle) must be of type resource, int given",
+                    func_name
+                ));
+                vm.current_exception = Some(exc);
+                return Err(VmError {
+                    message: format!(
+                        "{}(): Argument #1 ($dir_handle) must be of type resource, int given",
+                        func_name
+                    ),
+                    line: vm.current_line,
+                });
+            }
+            let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(&n));
+            if is_dir {
+                Ok(Some(n))
+            } else if !goro_core::value::is_open_resource(n) {
+                let exc = vm.throw_type_error(format!(
+                    "{}(): Argument #1 ($dir_handle) must be an open stream resource",
+                    func_name
+                ));
+                vm.current_exception = Some(exc);
+                Err(VmError {
+                    message: format!(
+                        "{}(): Argument #1 ($dir_handle) must be an open stream resource",
+                        func_name
+                    ),
+                    line: vm.current_line,
+                })
+            } else {
+                let exc = vm.throw_type_error(format!(
+                    "{}(): Argument #1 ($dir_handle) must be a valid Directory resource",
+                    func_name
+                ));
+                vm.current_exception = Some(exc);
+                Err(VmError {
+                    message: format!(
+                        "{}(): Argument #1 ($dir_handle) must be a valid Directory resource",
+                        func_name
+                    ),
+                    line: vm.current_line,
+                })
+            }
+        }
+        Value::Object(_) => {
+            if let Some(id) = dir_handle_resource_id(&val) {
+                let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(&id));
+                if is_dir {
+                    Ok(Some(id))
+                } else if !goro_core::value::is_open_resource(id) {
+                    let exc = vm.throw_type_error(format!(
+                        "{}(): Argument #1 ($dir_handle) must be an open stream resource",
+                        func_name
+                    ));
+                    vm.current_exception = Some(exc);
+                    Err(VmError {
+                        message: format!(
+                            "{}(): Argument #1 ($dir_handle) must be an open stream resource",
+                            func_name
+                        ),
+                        line: vm.current_line,
+                    })
+                } else {
+                    let exc = vm.throw_type_error(format!(
+                        "{}(): Argument #1 ($dir_handle) must be a valid Directory resource",
+                        func_name
+                    ));
+                    vm.current_exception = Some(exc);
+                    Err(VmError {
+                        message: format!(
+                            "{}(): Argument #1 ($dir_handle) must be a valid Directory resource",
+                            func_name
+                        ),
+                        line: vm.current_line,
+                    })
+                }
+            } else {
+                let type_name = val.type_name();
+                let exc = vm.throw_type_error(format!(
+                    "{}(): Argument #1 ($dir_handle) must be of type resource, {} given",
+                    func_name, type_name
+                ));
+                vm.current_exception = Some(exc);
+                Err(VmError {
+                    message: format!(
+                        "{}(): Argument #1 ($dir_handle) must be of type resource, {} given",
+                        func_name, type_name
+                    ),
+                    line: vm.current_line,
+                })
+            }
+        }
+        other => {
+            let type_name = other.type_name();
+            let exc = vm.throw_type_error(format!(
+                "{}(): Argument #1 ($dir_handle) must be of type resource, {} given",
+                func_name, type_name
+            ));
+            vm.current_exception = Some(exc);
+            Err(VmError {
+                message: format!(
+                    "{}(): Argument #1 ($dir_handle) must be of type resource, {} given",
+                    func_name, type_name
+                ),
+                line: vm.current_line,
+            })
+        }
     }
+}
+
+fn closedir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = match resolve_dir_handle(vm, args, "closedir")? {
+        Some(id) => id,
+        None => {
+            // Null with no current dir handle. PHP throws "No resource supplied"
+            // as a TypeError after the deprecation notice.
+            let exc = vm.throw_type_error("No resource supplied".to_string());
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: "No resource supplied".to_string(),
+                line: vm.current_line,
+            });
+        }
+    };
+    DIR_HANDLES.with(|dh| {
+        dh.borrow_mut().remove(&id);
+    });
+    goro_core::value::close_resource(id);
+    CURRENT_DIR_RESOURCE.with(|c| {
+        if c.get() == Some(id) {
+            c.set(None);
+        }
+    });
     Ok(Value::Null)
 }
 
-fn readdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle = args.first().unwrap_or(&Value::Null);
-    let key = handle.to_php_string().to_string_lossy();
+fn readdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = match resolve_dir_handle(vm, args, "readdir")? {
+        Some(id) => id,
+        None => return Ok(Value::False),
+    };
     DIR_HANDLES.with(|dh| {
         let mut handles = dh.borrow_mut();
-        if let Some(entries) = handles.get_mut(&*key) {
-            if let Some(name) = entries.pop() {
+        if let Some(entries) = handles.get_mut(&id) {
+            if let Some(name) = entries.remaining.pop() {
                 Ok(Value::String(PhpString::from_string(name)))
             } else {
                 Ok(Value::False)
@@ -12176,23 +12406,44 @@ fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path_str = path.to_string_lossy();
     let dir_path = std::path::Path::new(&*path_str);
     if !dir_path.is_dir() {
-        vm.emit_warning(&format!("dir({}): Failed to open directory", path_str));
+        vm.emit_warning(&format!(
+            "dir({}): Failed to open directory: No such file or directory",
+            path_str
+        ));
         return Ok(Value::False);
     }
-    match std::fs::read_dir(dir_path) {
-        Ok(entries) => {
-            let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
-            for entry in entries { if let Ok(e) = entry { names.push(e.file_name().to_string_lossy().to_string()); } }
-            names.sort(); names.reverse();
-            let key = format!("dir:{}", path_str);
-            DIR_HANDLES.with(|dh| dh.borrow_mut().insert(key.clone(), names));
-            let mut obj = PhpObject::new(b"Directory".to_vec(), 0);
-            obj.set_property(b"path".to_vec(), Value::String(PhpString::from_string(path_str.to_string())));
-            obj.set_property(b"handle".to_vec(), Value::String(PhpString::from_string(key)));
-            Ok(Value::Object(Rc::new(RefCell::new(obj))))
-        }
-        Err(_) => { vm.emit_warning(&format!("dir({}): Failed to open directory", path_str)); Ok(Value::False) }
+    if std::fs::read_dir(dir_path).is_err() {
+        vm.emit_warning(&format!(
+            "dir({}): Failed to open directory: Permission denied",
+            path_str
+        ));
+        return Ok(Value::False);
     }
+    let did = alloc_dir_handle(path_str.to_string());
+    // Build entries snapshot for the Directory class methods (read/rewind/close).
+    let mut entries_arr = PhpArray::new();
+    if let Ok(names) = read_dir_entries(&path_str) {
+        // names is reversed (descending); reverse-iterate to get ascending.
+        for (i, name) in names.iter().rev().enumerate() {
+            entries_arr.set(
+                ArrayKey::Int(i as i64),
+                Value::String(PhpString::from_string(name.clone())),
+            );
+        }
+    }
+    let object_id = vm.alloc_object_id();
+    let mut obj = PhpObject::new(b"Directory".to_vec(), object_id);
+    obj.set_property(
+        b"path".to_vec(),
+        Value::String(PhpString::from_string(path_str.to_string())),
+    );
+    obj.set_property(b"handle".to_vec(), Value::Long(did));
+    obj.set_property(b"__dir_pos".to_vec(), Value::Long(0));
+    obj.set_property(
+        b"__dir_entries".to_vec(),
+        Value::Array(Rc::new(RefCell::new(entries_arr))),
+    );
+    Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
 fn popen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -12233,20 +12484,21 @@ fn pclose_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
 }
 
-fn rewinddir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle = args.first().unwrap_or(&Value::Null);
-    let key = handle.to_php_string().to_string_lossy();
-    DIR_HANDLES.with(|dh| {
-        if key.starts_with("dir:") {
-            let path = &key[4..];
-            if let Ok(entries) = std::fs::read_dir(path) {
-                let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
-                for entry in entries { if let Ok(e) = entry { names.push(e.file_name().to_string_lossy().to_string()); } }
-                names.sort(); names.reverse();
-                dh.borrow_mut().insert(key.to_string(), names);
-            }
+fn rewinddir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = match resolve_dir_handle(vm, args, "rewinddir")? {
+        Some(id) => id,
+        None => return Ok(Value::Null),
+    };
+    let path = DIR_HANDLES.with(|dh| dh.borrow().get(&id).map(|h| h.path.clone()));
+    if let Some(path) = path {
+        if let Ok(names) = read_dir_entries(&path) {
+            DIR_HANDLES.with(|dh| {
+                if let Some(h) = dh.borrow_mut().get_mut(&id) {
+                    h.remaining = names;
+                }
+            });
         }
-    });
+    }
     Ok(Value::Null)
 }
 
