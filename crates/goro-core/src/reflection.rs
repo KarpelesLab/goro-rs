@@ -2810,8 +2810,11 @@ pub fn reflection_property_method(
             Some(if is_abstract { Value::True } else { Value::False })
         }
         b"isfinal" => {
+            // Either explicitly final OR `private(set)` (implicit final
+            // because the setter cannot be overridden).
             let is_final = vm.classes.get(&class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_final))
+                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .map(|p| p.is_final || p.set_visibility == Some(Visibility::Private))
                 .unwrap_or(false);
             Some(if is_final { Value::True } else { Value::False })
         }
