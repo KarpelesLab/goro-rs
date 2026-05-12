@@ -16522,8 +16522,26 @@ impl Vm {
                                         b"reflectionextension" => {
                                             // ReflectionExtension::__construct(string $name)
                                             if call.args.len() > 1 {
-                                                let ext_name = call.args[1].to_php_string();
-                                                obj_mut.set_property(b"name".to_vec(), Value::String(ext_name));
+                                                let raw = call.args[1].to_php_string().to_string_lossy();
+                                                // Canonicalize known extension names; otherwise pass through unchanged.
+                                                let canonical = match raw.to_ascii_lowercase().as_str() {
+                                                    "reflection" => "Reflection".to_string(),
+                                                    "core" => "Core".to_string(),
+                                                    "standard" => "standard".to_string(),
+                                                    "date" => "date".to_string(),
+                                                    "json" => "json".to_string(),
+                                                    "spl" => "SPL".to_string(),
+                                                    "pcre" => "pcre".to_string(),
+                                                    "phar" => "Phar".to_string(),
+                                                    "hash" => "hash".to_string(),
+                                                    "random" => "Random".to_string(),
+                                                    "ctype" => "ctype".to_string(),
+                                                    "filter" => "filter".to_string(),
+                                                    "tokenizer" => "tokenizer".to_string(),
+                                                    "uri" => "uri".to_string(),
+                                                    _ => raw.clone(),
+                                                };
+                                                obj_mut.set_property(b"name".to_vec(), Value::String(PhpString::from_string(canonical)));
                                             }
                                         }
                                         b"reflectiongenerator" => {
