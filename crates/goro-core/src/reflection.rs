@@ -3267,6 +3267,48 @@ pub fn reflection_parameter_method(
             // Deprecated: returns the class if the param type hints a class
             Some(Value::Null)
         }
+        b"isarray" => {
+            // Deprecated since 8.0, returns true if param type is array.
+            vm.emit_deprecated_raw(
+                "Method ReflectionParameter::isArray() is deprecated since 8.0, use ReflectionParameter::getType() instead",
+                vm.current_line,
+            );
+            let is_array = vm.user_functions.get(func_target.as_bytes())
+                .and_then(|op| {
+                    if param_idx < op.param_types.len() {
+                        op.param_types[param_idx].as_ref().map(|pti| pti.param_type.clone())
+                    } else { None }
+                })
+                .map(|pt| match &pt {
+                    crate::opcode::ParamType::Simple(n) => n.as_slice() == b"array",
+                    crate::opcode::ParamType::Nullable(inner) => matches!(inner.as_ref(),
+                        crate::opcode::ParamType::Simple(n) if n.as_slice() == b"array"),
+                    _ => false,
+                })
+                .unwrap_or(false);
+            Some(if is_array { Value::True } else { Value::False })
+        }
+        b"iscallable" => {
+            // Deprecated since 8.0, returns true if param type is callable.
+            vm.emit_deprecated_raw(
+                "Method ReflectionParameter::isCallable() is deprecated since 8.0, use ReflectionParameter::getType() instead",
+                vm.current_line,
+            );
+            let is_callable = vm.user_functions.get(func_target.as_bytes())
+                .and_then(|op| {
+                    if param_idx < op.param_types.len() {
+                        op.param_types[param_idx].as_ref().map(|pti| pti.param_type.clone())
+                    } else { None }
+                })
+                .map(|pt| match &pt {
+                    crate::opcode::ParamType::Simple(n) => n.as_slice() == b"callable",
+                    crate::opcode::ParamType::Nullable(inner) => matches!(inner.as_ref(),
+                        crate::opcode::ParamType::Simple(n) if n.as_slice() == b"callable"),
+                    _ => false,
+                })
+                .unwrap_or(false);
+            Some(if is_callable { Value::True } else { Value::False })
+        }
         b"isdefaultvalueconstant" => {
             Some(Value::False)
         }
