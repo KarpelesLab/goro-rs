@@ -351,6 +351,10 @@ pub struct OpArray {
     pub filename: Vec<u8>,
     /// For FCC closures: the original function/method name (e.g. "strrev", "Foo::bar")
     pub fcc_target_name: Option<Vec<u8>>,
+    /// Display name shown to users (e.g. `{closure:/path/to/file.php:5}` or
+    /// `{closure:Class::method():5}`). Empty for non-closure functions; in that
+    /// case the regular `name` field is the display name.
+    pub display_name: Vec<u8>,
 }
 
 impl OpArray {
@@ -379,6 +383,17 @@ impl OpArray {
             fcc_target_name: None,
             param_attributes: Vec::new(),
             filename: Vec::new(),
+            display_name: Vec::new(),
+        }
+    }
+
+    /// Get the user-visible name. For closures (display_name set), returns the
+    /// canonical PHP form `{closure:%s:%d}`. Otherwise returns `name`.
+    pub fn effective_name(&self) -> &[u8] {
+        if !self.display_name.is_empty() {
+            &self.display_name
+        } else {
+            &self.name
         }
     }
 

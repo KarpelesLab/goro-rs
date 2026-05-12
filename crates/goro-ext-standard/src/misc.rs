@@ -9212,8 +9212,11 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::Long(*line as i64),
             );
         }
-        // Parse class::method or class->method from func_name
-        if let Some(sep) = func_name.find("::") {
+        // Parse class::method or class->method from func_name. For closures
+        // (`{closure:...}`) we never split on `::` even if the closure name
+        // embeds `Class::method()`.
+        if !func_name.starts_with("{closure:") && func_name.find("::").is_some() {
+            let sep = func_name.find("::").unwrap();
             let class_name = &func_name[..sep];
             let method_name = &func_name[sep+2..];
             frame.set(
@@ -9230,7 +9233,8 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 ArrayKey::String(PhpString::from_bytes(b"type")),
                 Value::String(PhpString::from_bytes(type_str)),
             );
-        } else if let Some(sep) = func_name.find("->") {
+        } else if !func_name.starts_with("{closure:") && func_name.find("->").is_some() {
+            let sep = func_name.find("->").unwrap();
             let class_name = &func_name[..sep];
             let method_name = &func_name[sep+2..];
             frame.set(

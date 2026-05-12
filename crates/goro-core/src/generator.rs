@@ -270,8 +270,10 @@ impl PhpGenerator {
 
         // Push a call_stack entry for func_get_args() support
         let raw_name = String::from_utf8_lossy(&self.op_array.name).to_string();
-        // Format closure names for stack traces: __closure_N -> {closure:file:line}
-        let func_name = if raw_name.starts_with("__closure_") && !raw_name.starts_with("__closure_fcc_") {
+        // Format closure names for stack traces using the canonical display name.
+        let func_name = if !self.op_array.display_name.is_empty() {
+            String::from_utf8_lossy(&self.op_array.display_name).to_string()
+        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_")) && !raw_name.starts_with("__closure_fcc_") {
             let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
             format!("{{closure:{}:{}}}", file, self.op_array.decl_line)
         } else {
@@ -1821,7 +1823,9 @@ impl PhpGenerator {
         // Push a call_stack entry for this generator so any exception
         // constructed/thrown inside it gets a proper trace frame.
         let raw_name = String::from_utf8_lossy(&self.op_array.name).to_string();
-        let func_name = if raw_name.starts_with("__closure_") && !raw_name.starts_with("__closure_fcc_") {
+        let func_name = if !self.op_array.display_name.is_empty() {
+            String::from_utf8_lossy(&self.op_array.display_name).to_string()
+        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_")) && !raw_name.starts_with("__closure_fcc_") {
             let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
             format!("{{closure:{}:{}}}", file, self.op_array.decl_line)
         } else {

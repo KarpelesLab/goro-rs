@@ -237,6 +237,44 @@ impl Compiler {
         }
     }
 
+    /// Compute the canonical PHP closure display name `{closure:<context>:<line>}`
+    /// from the current compiler scope (the *parent* of the closure being created).
+    ///
+    /// `<context>` is one of:
+    /// - The parent's already-set `op_array.display_name` (for nested closures inside another
+    ///   closure/arrow), with the outer `{closure:...}` braces kept intact, e.g.
+    ///   `{closure:{closure:Foo::bar():12}:13}`.
+    /// - `Class::method()` when compiling inside a class method.
+    /// - `function_name()` when compiling inside a global/namespaced function.
+    /// - The source file path otherwise (top-level script).
+    fn closure_display_name(&self, line: u32) -> Vec<u8> {
+        let mut name = b"{closure:".to_vec();
+        // Nested closure: parent already has a display_name like `{closure:...}`.
+        if !self.op_array.display_name.is_empty() {
+            name.extend_from_slice(&self.op_array.display_name);
+        } else if let Some(class) = &self.current_class {
+            // Method or class-level context. The parent op_array.name is the bare
+            // method name (e.g. "bar"). For top-level class scope (property/const
+            // initializers compiled by a fresh sub-compiler), op_array.name may be empty;
+            // in that case we still want `Class::` even without method.
+            name.extend_from_slice(class);
+            if !self.op_array.name.is_empty() {
+                name.extend_from_slice(b"::");
+                name.extend_from_slice(&self.op_array.name);
+                name.extend_from_slice(b"()");
+            }
+        } else if !self.op_array.name.is_empty() {
+            // Inside a global/namespaced function.
+            name.extend_from_slice(&self.op_array.name);
+            name.extend_from_slice(b"()");
+        } else {
+            // Top-level script: use the source file path.
+            name.extend_from_slice(&self.source_file);
+        }
+        name.extend_from_slice(format!(":{}}}", line).as_bytes());
+        name
+    }
+
     /// Compile a property name expression, treating bare identifiers as string literals
     /// (not as constant lookups). This is important for $obj->property syntax.
     fn compile_property_name(&mut self, expr: &Expr) -> CompileResult<OperandType> {
@@ -3020,8 +3058,17 @@ impl Compiler {
                                         let global_id = next_closure_id();
                                         let closure_name = format!("__closure_{}", global_id).into_bytes();
                                         let is_generator = stmts_contain_yield(closure_body);
+                                        // Compute display_name with no method context (property default).
+                                        let display_name = {
+                                            let mut s = b"{closure:".to_vec();
+                                            s.extend_from_slice(&self.source_file);
+                                            s.extend_from_slice(format!(":{}}}", expr.span.line).as_bytes());
+                                            s
+                                        };
                                         let mut closure_compiler = Compiler::new();
                                         closure_compiler.op_array.name = closure_name.clone();
+                                        closure_compiler.op_array.display_name = display_name;
+                                        closure_compiler.op_array.filename = self.source_file.clone();
                                         closure_compiler.op_array.is_generator = is_generator;
                                         closure_compiler.op_array.is_static_closure = *closure_is_static;
                                         closure_compiler.op_array.decl_line = expr.span.line;
@@ -4573,8 +4620,17 @@ impl Compiler {
                                         let global_id = next_closure_id();
                                         let closure_name = format!("__closure_{}", global_id).into_bytes();
                                         let is_generator = stmts_contain_yield(closure_body);
+                                        // Const-expression closures have no surrounding method context.
+                                        let display_name = {
+                                            let mut s = b"{closure:".to_vec();
+                                            s.extend_from_slice(&self.source_file);
+                                            s.extend_from_slice(format!(":{}}}", const_expr.span.line).as_bytes());
+                                            s
+                                        };
                                         let mut closure_compiler = Compiler::new();
                                         closure_compiler.op_array.name = closure_name.clone();
+                                        closure_compiler.op_array.display_name = display_name;
+                                        closure_compiler.op_array.filename = self.source_file.clone();
                                         closure_compiler.op_array.is_generator = is_generator;
                                         closure_compiler.op_array.is_static_closure = *closure_is_static;
                                         closure_compiler.op_array.decl_line = const_expr.span.line;
@@ -6799,7 +6855,13 @@ impl Compiler {
                         }
                     }
                     b"__function__" => {
-                        let name = self.op_array.name.clone();
+                        // For closures, __FUNCTION__ is the canonical display name
+                        // (e.g. {closure:file:line}); otherwise it's the bare op_array name.
+                        let name = if !self.op_array.display_name.is_empty() {
+                            self.op_array.display_name.clone()
+                        } else {
+                            self.op_array.name.clone()
+                        };
                         Value::String(PhpString::from_vec(name))
                     }
                     b"__class__" => {
@@ -6814,7 +6876,13 @@ impl Compiler {
                         return Ok(OperandType::Const(idx));
                     }
                     b"__method__" => {
-                        let method_val = if let Some(ref class_name) = self.current_class {
+                        // For closures, __METHOD__ is the canonical display name
+                        // (e.g. {closure:Class::method():line}); the closure's
+                        // display_name already embeds the surrounding scope so we
+                        // don't prepend the class name a second time.
+                        let method_val = if !self.op_array.display_name.is_empty() {
+                            Value::String(PhpString::from_vec(self.op_array.display_name.clone()))
+                        } else if let Some(ref class_name) = self.current_class {
                             let mut method = class_name.clone();
                             method.extend_from_slice(b"::");
                             method.extend_from_slice(&self.op_array.name);
@@ -7642,12 +7710,15 @@ impl Compiler {
                 let closure_id = self.op_array.child_functions.len();
                 let global_id = next_closure_id();
                 let closure_name = format!("__closure_{}", global_id).into_bytes();
+                // Compute the canonical PHP closure display name from current scope.
+                let display_name = self.closure_display_name(expr.span.line);
 
                 // Check if closure body contains yield
                 let is_generator = stmts_contain_yield(body);
 
                 let mut closure_compiler = Compiler::new();
                 closure_compiler.op_array.name = closure_name.clone();
+                closure_compiler.op_array.display_name = display_name;
                 closure_compiler.op_array.is_generator = is_generator;
                 closure_compiler.op_array.is_static_closure = *is_static;
                 closure_compiler.op_array.decl_line = expr.span.line;
@@ -7900,9 +7971,13 @@ impl Compiler {
                 let closure_id = self.op_array.child_functions.len();
                 let global_id = next_closure_id();
                 let closure_name = format!("__arrow_{}", global_id).into_bytes();
+                // Arrow functions share the canonical `{closure:...}` display name format.
+                let display_name = self.closure_display_name(expr.span.line);
 
                 let mut closure_compiler = Compiler::new();
                 closure_compiler.op_array.name = closure_name.clone();
+                closure_compiler.op_array.display_name = display_name;
+                closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.op_array.decl_line = expr.span.line;
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(attributes);
