@@ -4672,6 +4672,21 @@ impl Vm {
                         tz_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
                         Some(Value::Object(Rc::new(RefCell::new(tz_obj))))
                     }
+                    b"__serialize" => {
+                        // Return ["date" => ..., "timezone_type" => ..., "timezone" => ..., ...user_props]
+                        let ob = obj.borrow();
+                        let mut arr = PhpArray::new();
+                        arr.set(ArrayKey::String(PhpString::from_bytes(b"date")), ob.get_property(b"date"));
+                        arr.set(ArrayKey::String(PhpString::from_bytes(b"timezone_type")), ob.get_property(b"timezone_type"));
+                        arr.set(ArrayKey::String(PhpString::from_bytes(b"timezone")), ob.get_property(b"timezone"));
+                        // Append user-defined properties (skip internal and the 3 above).
+                        for (name, val) in ob.properties.iter() {
+                            if name.starts_with(b"__") { continue; }
+                            if matches!(name.as_slice(), b"date" | b"timezone_type" | b"timezone") { continue; }
+                            arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                        }
+                        Some(Value::Array(Rc::new(RefCell::new(arr))))
+                    }
                     _ => None, // format() and others handled via __spl:: dispatch
                 }
             }
@@ -4687,6 +4702,38 @@ impl Vm {
                         }
                     }
                     b"getoffset" => Some(Value::Long(0)),
+                    b"__serialize" => {
+                        let ob = obj.borrow();
+                        let mut arr = PhpArray::new();
+                        arr.set(ArrayKey::String(PhpString::from_bytes(b"timezone_type")), ob.get_property(b"timezone_type"));
+                        arr.set(ArrayKey::String(PhpString::from_bytes(b"timezone")), ob.get_property(b"timezone"));
+                        for (name, val) in ob.properties.iter() {
+                            if name.starts_with(b"__") { continue; }
+                            if matches!(name.as_slice(), b"timezone_type" | b"timezone") { continue; }
+                            arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                        }
+                        Some(Value::Array(Rc::new(RefCell::new(arr))))
+                    }
+                    _ => None,
+                }
+            }
+            b"dateinterval" => {
+                match method_lower {
+                    b"__serialize" => {
+                        let ob = obj.borrow();
+                        let mut arr = PhpArray::new();
+                        for k in [b"y" as &[u8], b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days", b"from_string"] {
+                            arr.set(ArrayKey::String(PhpString::from_bytes(k)), ob.get_property(k));
+                        }
+                        // Append user-defined properties.
+                        let std_props: [&[u8]; 10] = [b"y", b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days", b"from_string"];
+                        for (name, val) in ob.properties.iter() {
+                            if name.starts_with(b"__") { continue; }
+                            if std_props.iter().any(|k| k == &name.as_slice()) { continue; }
+                            arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                        }
+                        Some(Value::Array(Rc::new(RefCell::new(arr))))
+                    }
                     _ => None,
                 }
             }
@@ -5172,6 +5219,21 @@ impl Vm {
                 } else {
                     iter_class
                 };
+                // Collect remaining user properties (anything that isn't an
+                // internal slot). Property names already carry their declared
+                // visibility encoding for protected/private members.
+                let mut props = PhpArray::new();
+                for (name, val) in ob.properties.iter() {
+                    if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+                        || name.starts_with(b"__ctor_") || name.starts_with(b"__destructed")
+                        || name.starts_with(b"__clone_") {
+                        continue;
+                    }
+                    if matches!(val, Value::Undef) {
+                        continue;
+                    }
+                    props.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                }
                 drop(ob);
                 let mut arr = PhpArray::new();
                 arr.set(
@@ -5183,10 +5245,9 @@ impl Vm {
                     ArrayKey::String(PhpString::from_bytes(b"iteratorClass")),
                     iter_class,
                 );
-                // PHP also stores remaining public properties under 'properties'
                 arr.set(
                     ArrayKey::String(PhpString::from_bytes(b"properties")),
-                    Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                    Value::Array(Rc::new(RefCell::new(props))),
                 );
                 Some(Value::Array(Rc::new(RefCell::new(arr))))
             }
@@ -5552,6 +5613,23 @@ impl Vm {
                         }
                     }
                 }
+                // Append a trailing associative array with user/protected/private
+                // properties so subclasses with declared properties serialize
+                // correctly. PHP's SplObjectStorage uses this slot as the
+                // tail element of the result array.
+                let mut props = PhpArray::new();
+                for (name, val) in ob.properties.iter() {
+                    if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+                        || name.starts_with(b"__ctor_") || name.starts_with(b"__destructed")
+                        || name.starts_with(b"__clone_") {
+                        continue;
+                    }
+                    if matches!(val, Value::Undef) {
+                        continue;
+                    }
+                    props.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                }
+                result.push(Value::Array(Rc::new(RefCell::new(props))));
                 Some(Value::Array(Rc::new(RefCell::new(result))))
             }
             b"__unserialize" => None, // handled in handle_spl_docall
@@ -5702,6 +5780,12 @@ impl Vm {
             }
             b"top" | b"current" => {
                 let ob = obj.borrow();
+                if matches!(ob.get_property(b"__spl_corrupted"), Value::True) {
+                    drop(ob);
+                    let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let arr = ob.get_property(storage_prop);
                 if let Value::Array(a) = arr {
                     let a = a.borrow();
@@ -5748,8 +5832,15 @@ impl Vm {
                 ob.set_property(b"__spl_heap_key".to_vec(), Value::Long(0));
                 Some(Value::Null)
             }
-            b"recoverfromcorruption" => Some(Value::Null),
-            b"iscorrupted" => Some(Value::False),
+            b"recoverfromcorruption" => {
+                let mut ob = obj.borrow_mut();
+                ob.set_property(b"__spl_corrupted".to_vec(), Value::False);
+                Some(Value::Null)
+            }
+            b"iscorrupted" => {
+                let ob = obj.borrow();
+                Some(if matches!(ob.get_property(b"__spl_corrupted"), Value::True) { Value::True } else { Value::False })
+            }
             b"__serialize" => {
                 let ob = obj.borrow();
                 let arr = ob.get_property(storage_prop);
@@ -7057,12 +7148,12 @@ impl Vm {
             b"splobjectstorage" => matches!(
                 method,
                 b"attach" | b"detach" | b"contains" | b"offsetget" | b"offsetset" | b"offsetexists" | b"offsetunset" | b"seek"
-                    | b"unserialize" | b"setinfo" | b"removeall" | b"removeallexcept" | b"addall" | b"gethash"
+                    | b"unserialize" | b"__unserialize" | b"setinfo" | b"removeall" | b"removeallexcept" | b"addall" | b"gethash"
             ),
             b"splpriorityqueue" => matches!(method, b"insert" | b"extract" | b"next" | b"setextractflags" | b"__unserialize"),
             b"splheap" | b"splminheap" | b"splmaxheap" => matches!(
                 method,
-                b"insert" | b"extract" | b"next" | b"__unserialize"
+                b"insert" | b"extract" | b"next" | b"__unserialize" | b"compare"
             ),
             b"appenditerator" => matches!(method, b"append"),
             b"multipleiterator" => matches!(method, b"attachiterator"),
@@ -7083,9 +7174,9 @@ impl Vm {
                 b"getbasename" | b"setfileclass" | b"setinfoclass" | b"seek"
             ),
             b"recursivetreeiterator" => false, // delegate to outer iterator
-            b"datetime" | b"datetimeimmutable" => matches!(method, b"format" | b"modify" | b"settimezone" | b"gettimezone" | b"settime" | b"setdate" | b"setisodate" | b"settimestamp" | b"gettimestamp" | b"add" | b"sub" | b"diff" | b"getoffset"),
-            b"dateinterval" => matches!(method, b"format"),
-            b"datetimezone" => matches!(method, b"getname" | b"getoffset" | b"gettransitions" | b"getlocation"),
+            b"datetime" | b"datetimeimmutable" => matches!(method, b"format" | b"modify" | b"settimezone" | b"gettimezone" | b"settime" | b"setdate" | b"setisodate" | b"settimestamp" | b"gettimestamp" | b"add" | b"sub" | b"diff" | b"getoffset" | b"__unserialize"),
+            b"dateinterval" => matches!(method, b"format" | b"__unserialize"),
+            b"datetimezone" => matches!(method, b"getname" | b"getoffset" | b"gettransitions" | b"getlocation" | b"__unserialize"),
             b"reflectionclass" | b"reflectionobject" | b"reflectionenum" => matches!(
                 method,
                 b"getmethod" | b"getproperty" | b"getconstant" | b"hasconstant"
@@ -7461,6 +7552,7 @@ impl Vm {
                                 let flags_key = ArrayKey::String(PhpString::from_bytes(b"flags"));
                                 let storage_key = ArrayKey::String(PhpString::from_bytes(b"storage"));
                                 let iter_key = ArrayKey::String(PhpString::from_bytes(b"iteratorClass"));
+                                let props_key = ArrayKey::String(PhpString::from_bytes(b"properties"));
                                 let mut ob = obj.borrow_mut();
                                 if let Some(v) = a.get(&flags_key) {
                                     ob.set_property(b"__spl_flags".to_vec(), v.clone());
@@ -7470,6 +7562,15 @@ impl Vm {
                                 }
                                 if let Some(v) = a.get(&iter_key) {
                                     ob.set_property(b"__spl_iterator_class".to_vec(), v.clone());
+                                }
+                                // Restore user/protected/private properties (saved via __serialize).
+                                if let Some(Value::Array(p)) = a.get(&props_key) {
+                                    let p = p.borrow();
+                                    for (k, v) in p.iter() {
+                                        if let ArrayKey::String(s) = k {
+                                            ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                        }
+                                    }
                                 }
                             }
                             Some(Value::Null)
@@ -7746,6 +7847,24 @@ impl Vm {
                         }
                         b"seek" => {
                             let pos = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                            // Validate against the size of the storage.
+                            let size = {
+                                let ob = obj.borrow();
+                                let arr = ob.get_property(b"__spl_array");
+                                if let Value::Array(a) = arr {
+                                    a.borrow().len() as i64
+                                } else if let Value::Object(inner) = arr {
+                                    inner.borrow().properties.len() as i64
+                                } else {
+                                    0
+                                }
+                            };
+                            if pos < 0 || pos >= size {
+                                let msg = format!("Seek position {} is out of range", pos);
+                                let exc = self.create_exception(b"OutOfBoundsException", &msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
                             ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos));
                             Some(Value::Null)
@@ -8420,6 +8539,50 @@ impl Vm {
                             let _data = args.get(1).cloned().unwrap_or(Value::Null);
                             Some(Value::Null)
                         }
+                        b"__unserialize" => {
+                            // PHP's SplObjectStorage::__unserialize() receives
+                            // an indexed array of [obj0, data0, obj1, data1, ...]
+                            // optionally followed by an assoc array of trailing
+                            // user properties.
+                            let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            if let Value::Array(a) = &data {
+                                let entries: Vec<(ArrayKey, Value)> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                let mut storage = PhpArray::new();
+                                let mut objects = PhpArray::new();
+                                let mut i = 0;
+                                while i < entries.len() {
+                                    let cur = &entries[i].1;
+                                    // A trailing associative array (string keys)
+                                    // is the user-properties slot.
+                                    if let Value::Array(extra) = cur {
+                                        let eb = extra.borrow();
+                                        let is_assoc = eb.iter().any(|(k, _)| matches!(k, ArrayKey::String(_)));
+                                        if is_assoc {
+                                            let mut ob = obj.borrow_mut();
+                                            for (k, v) in eb.iter() {
+                                                if let ArrayKey::String(s) = k {
+                                                    ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                                }
+                                            }
+                                            i += 1;
+                                            continue;
+                                        }
+                                    }
+                                    if i + 1 >= entries.len() { break; }
+                                    let val = entries[i + 1].1.clone();
+                                    if let Value::Object(key_o) = cur {
+                                        let hash = format!("{:016x}", key_o.borrow().object_id);
+                                        storage.set(ArrayKey::String(PhpString::from_string(hash.clone())), val);
+                                        objects.set(ArrayKey::String(PhpString::from_string(hash)), cur.clone());
+                                    }
+                                    i += 2;
+                                }
+                                let mut ob = obj.borrow_mut();
+                                ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(storage))));
+                                ob.set_property(b"__spl_objects".to_vec(), Value::Array(Rc::new(RefCell::new(objects))));
+                            }
+                            Some(Value::Null)
+                        }
                         _ => None,
                     }
                 }
@@ -8504,10 +8667,33 @@ impl Vm {
                 }
                 b"splheap" | b"splminheap" | b"splmaxheap" => {
                     match method {
+                        b"compare" => {
+                            // Default comparator. SplMinHeap/SplMaxHeap define
+                            // the ordering; SplHeap itself is abstract but we
+                            // fall through to natural ordering when called
+                            // via parent::compare() from a user subclass.
+                            let a_val = args.get(1).cloned().unwrap_or(Value::Null);
+                            let b_val = args.get(2).cloned().unwrap_or(Value::Null);
+                            let ord = Self::php_compare_values(&a_val, &b_val);
+                            // SplMinHeap inverts the ordering relative to a max-heap.
+                            let cmp = if class == b"splminheap" { ord.reverse() } else { ord };
+                            let n: i64 = match cmp {
+                                std::cmp::Ordering::Less => -1,
+                                std::cmp::Ordering::Equal => 0,
+                                std::cmp::Ordering::Greater => 1,
+                            };
+                            Some(Value::Long(n))
+                        }
                         b"insert" => {
+                            // Reject if heap is already corrupted.
+                            if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
+                                let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let val = args.get(1).cloned().unwrap_or(Value::Null);
                             let is_min = class == b"splminheap";
-                            let is_max = class == b"splmaxheap";
+                            let _is_max = class == b"splmaxheap";
                             // Check if this object has a user-defined compare() method
                             let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             let has_user_compare = self.classes.get(&obj_class_lower)
@@ -8524,12 +8710,21 @@ impl Vm {
                                 let len = entries.len();
                                 if len > 1 {
                                     if has_user_compare {
-                                        // Use insertion sort with user compare
-                                        for i in 1..len {
+                                        // Use insertion sort with user compare. If the
+                                        // user comparator throws, mark the heap corrupted
+                                        // and bail out — the in-progress entry has
+                                        // already been pushed but cannot be ordered.
+                                        let mut aborted = false;
+                                        'outer: for i in 1..len {
                                             let mut j = i;
                                             while j > 0 {
-                                                let cmp = self.call_object_method(&this_val, b"compare", &[entries[j].clone(), entries[j-1].clone()])
-                                                    .unwrap_or(Value::Long(0)).to_long();
+                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j].clone(), entries[j-1].clone()])
+                                                    .unwrap_or(Value::Null);
+                                                if self.current_exception.is_some() {
+                                                    aborted = true;
+                                                    break 'outer;
+                                                }
+                                                let cmp = cmp_v.to_long();
                                                 if cmp > 0 {
                                                     entries.swap(j-1, j);
                                                     j -= 1;
@@ -8537,6 +8732,10 @@ impl Vm {
                                                     break;
                                                 }
                                             }
+                                        }
+                                        if aborted {
+                                            obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
+                                            return Some(Value::Null);
                                         }
                                     } else {
                                         entries.sort_by(|a_v, b_v| {
@@ -8561,6 +8760,12 @@ impl Vm {
                             Some(Value::True)
                         }
                         b"extract" | b"next" => {
+                            // Reject if heap is already corrupted.
+                            if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
+                                let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
                             if let Value::Array(a) = arr {
@@ -8572,10 +8777,58 @@ impl Vm {
                                     self.current_exception = Some(exc);
                                     Some(Value::Null)
                                 } else {
-                                    // Extract the top (first element)
+                                    // Extract the top (first element).
+                                    // Check if this object has a user-defined compare() method;
+                                    // if so, calling it can throw — and when it does we must
+                                    // surface the exception and mark the heap corrupted (the
+                                    // extract has not completed).
+                                    let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let has_user_compare = self.classes.get(&obj_class_lower)
+                                        .map(|c| c.get_method(b"compare").is_some())
+                                        .unwrap_or(false);
                                     let val = a.shift().unwrap_or(Value::Null);
+                                    // Restore-heap-property — for a simple array this means
+                                    // re-sorting the remaining entries. With a user comparator
+                                    // a single comparison call after extract is enough to
+                                    // surface any throw.
+                                    let mut entries: Vec<Value> = a.values().cloned().collect();
                                     drop(a);
                                     drop(ob);
+                                    if has_user_compare && entries.len() >= 2 {
+                                        let this_val = this.clone();
+                                        // Run one compare() to flush any potential throw.
+                                        let _ = self.call_object_method(&this_val, b"compare", &[entries[0].clone(), entries[1].clone()]);
+                                        if self.current_exception.is_some() {
+                                            obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
+                                            return Some(Value::Null);
+                                        }
+                                        // Insertion-sort with user compare to restore order.
+                                        for i in 1..entries.len() {
+                                            let mut j = i;
+                                            while j > 0 {
+                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j].clone(), entries[j-1].clone()]);
+                                                if self.current_exception.is_some() {
+                                                    obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
+                                                    return Some(Value::Null);
+                                                }
+                                                let cmp = cmp_v.unwrap_or(Value::Long(0)).to_long();
+                                                if cmp > 0 {
+                                                    entries.swap(j-1, j);
+                                                    j -= 1;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        let arr_ref = obj.borrow().get_property(b"__spl_array");
+                                        if let Value::Array(a) = arr_ref {
+                                            let mut new_arr = PhpArray::new();
+                                            for v in entries {
+                                                new_arr.push(v);
+                                            }
+                                            *a.borrow_mut() = new_arr;
+                                        }
+                                    }
                                     // Update key counter
                                     let mut ob = obj.borrow_mut();
                                     let key = ob.get_property(b"__spl_heap_key");
@@ -8649,6 +8902,58 @@ impl Vm {
                 b"datetime" | b"datetimeimmutable" => {
                     let is_immutable = class == b"datetimeimmutable";
                     match method {
+                        b"__unserialize" => {
+                            // Restore properties from the array data, then recompute __timestamp.
+                            let data_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            if let Value::Array(arr) = &data_arg {
+                                let mut ob = obj.borrow_mut();
+                                let arr_b = arr.borrow();
+                                for (k, v) in arr_b.iter() {
+                                    if let ArrayKey::String(s) = k {
+                                        // Normalize +HHMM offset format to +HH:MM
+                                        let new_v = if s.as_bytes() == b"timezone" {
+                                            if let Value::String(sv) = v {
+                                                let sb = sv.as_bytes();
+                                                if sb.len() == 5 && (sb[0] == b'+' || sb[0] == b'-')
+                                                    && sb[1..].iter().all(|c| c.is_ascii_digit())
+                                                {
+                                                    let mut buf = vec![sb[0]];
+                                                    buf.extend_from_slice(&sb[1..3]);
+                                                    buf.push(b':');
+                                                    buf.extend_from_slice(&sb[3..5]);
+                                                    Value::String(PhpString::from_vec(buf))
+                                                } else { v.clone() }
+                                            } else { v.clone() }
+                                        } else if s.as_bytes() == b"date" {
+                                            // Normalize date to always include .000000 fractional seconds.
+                                            if let Value::String(sv) = v {
+                                                let sb = sv.as_bytes();
+                                                if sb.len() == 19 && !sb.contains(&b'.') {
+                                                    let mut buf = sb.to_vec();
+                                                    buf.extend_from_slice(b".000000");
+                                                    Value::String(PhpString::from_vec(buf))
+                                                } else { v.clone() }
+                                            } else { v.clone() }
+                                        } else {
+                                            v.clone()
+                                        };
+                                        ob.set_property(s.as_bytes().to_vec(), new_v);
+                                    }
+                                }
+                                drop(arr_b);
+                                let date_str = ob.get_property(b"date").to_php_string().to_string_lossy();
+                                let tz_str = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+                                if !date_str.is_empty() {
+                                    if let Some(local_ts) = vm_parse_datetime_string(&date_str, 0) {
+                                        let tz_name = if tz_str.is_empty() { "UTC".to_string() } else { tz_str };
+                                        let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, local_ts);
+                                        let utc_ts = if tz_name == "UTC" || tz_name == "utc" { local_ts } else { local_ts - offset };
+                                        ob.set_property(b"__timestamp".to_vec(), Value::Long(utc_ts));
+                                    }
+                                }
+                            }
+                            Some(Value::Null)
+                        }
                         b"format" => {
                             let format_str = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
                             let ob = obj.borrow();
@@ -8695,6 +9000,14 @@ impl Vm {
                         }
                         b"modify" => {
                             let modifier = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
+                            // Empty string -> DateMalformedStringException
+                            if modifier.is_empty() {
+                                let class_disp = if is_immutable { "DateTimeImmutable" } else { "DateTime" };
+                                let msg = format!("{}::modify(): Failed to parse time string () at position 0 ( ): Empty string", class_disp);
+                                let exc = self.create_exception(b"DateMalformedStringException", &msg, self.current_line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let ob = obj.borrow();
                             let ts = ob.get_property(b"__timestamp").to_long();
                             let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
@@ -8767,11 +9080,22 @@ impl Vm {
                             let ob = obj.borrow();
                             let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
                             let tz = if tz.is_empty() { "UTC".to_string() } else { tz };
+                            // Preserve type from DateTime if available, else infer.
+                            let stored_type = ob.get_property(b"timezone_type");
+                            let type_v = if !matches!(stored_type, Value::Null | Value::Undef) {
+                                stored_type
+                            } else if vm_parse_tz_offset(&tz).is_some() {
+                                Value::Long(1)
+                            } else if vm_is_tz_abbrev(&tz) {
+                                Value::Long(2)
+                            } else {
+                                Value::Long(3)
+                            };
                             drop(ob);
                             let obj_id = self.next_object_id;
                             self.next_object_id += 1;
                             let mut tz_obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
-                            tz_obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                            tz_obj.set_property(b"timezone_type".to_vec(), type_v);
                             tz_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz)));
                             Some(Value::Object(Rc::new(RefCell::new(tz_obj))))
                         }
@@ -9017,6 +9341,19 @@ impl Vm {
                 }
                 b"dateinterval" => {
                     match method {
+                        b"__unserialize" => {
+                            let data_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            if let Value::Array(arr) = &data_arg {
+                                let mut ob = obj.borrow_mut();
+                                let arr_b = arr.borrow();
+                                for (k, v) in arr_b.iter() {
+                                    if let ArrayKey::String(s) = k {
+                                        ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                    }
+                                }
+                            }
+                            Some(Value::Null)
+                        }
                         b"format" => {
                             let format_str = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
                             let ob = obj.borrow();
@@ -9072,6 +9409,20 @@ impl Vm {
                 }
                 b"datetimezone" => {
                     match method {
+                        b"__unserialize" => {
+                            // Restore properties from the array data.
+                            let data_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            if let Value::Array(arr) = &data_arg {
+                                let mut ob = obj.borrow_mut();
+                                let arr_b = arr.borrow();
+                                for (k, v) in arr_b.iter() {
+                                    if let ArrayKey::String(s) = k {
+                                        ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                    }
+                                }
+                            }
+                            Some(Value::Null)
+                        }
                         b"getname" => {
                             let ob = obj.borrow();
                             let tz = ob.get_property(b"timezone");
@@ -9336,6 +9687,55 @@ impl Vm {
                                 name
                             };
                             Some(Value::String(PhpString::from_string(result)))
+                        }
+                        b"ftruncate" => {
+                            // Truncate file or in-memory storage. Returns bool.
+                            let size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                            let ob = obj.borrow();
+                            let path_val = ob.get_property(b"__spl_file_path");
+                            let path_str = path_val.to_php_string().to_string_lossy();
+                            let is_temp = path_str.starts_with("php://temp") || path_str.starts_with("php://memory");
+                            drop(ob);
+                            if is_temp {
+                                // Truncate the in-memory line buffer at byte offset `size`.
+                                let ob = obj.borrow();
+                                let lines = ob.get_property(b"__spl_file_lines");
+                                if let Value::Array(a) = lines {
+                                    let mut a_mut = a.borrow_mut();
+                                    let mut remaining = size as usize;
+                                    let mut new_lines = PhpArray::new();
+                                    let snapshot: Vec<Value> = a_mut.iter().map(|(_, v)| v.clone()).collect();
+                                    for v in snapshot {
+                                        let s = v.to_php_string();
+                                        let len = s.as_bytes().len();
+                                        if remaining >= len {
+                                            new_lines.push(v);
+                                            remaining -= len;
+                                        } else if remaining > 0 {
+                                            let truncated: Vec<u8> = s.as_bytes()[..remaining].to_vec();
+                                            new_lines.push(Value::String(PhpString::from_vec(truncated)));
+                                            remaining = 0;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    *a_mut = new_lines;
+                                }
+                                Some(Value::True)
+                            } else {
+                                use std::fs::OpenOptions;
+                                match OpenOptions::new().write(true).open(&*path_str) {
+                                    Ok(f) => match f.set_len(size as u64) {
+                                        Ok(()) => Some(Value::True),
+                                        Err(_) => Some(Value::False),
+                                    },
+                                    Err(_) => Some(Value::False),
+                                }
+                            }
+                        }
+                        b"flock" => {
+                            // Stub: pretend the lock was acquired.
+                            Some(Value::True)
                         }
                         _ => None,
                     }
@@ -10099,6 +10499,8 @@ impl Vm {
                 match const_name {
                     b"STD_PROP_LIST" => Some(Value::Long(1)),
                     b"ARRAY_AS_PROPS" => Some(Value::Long(2)),
+                    b"CHILD_ARRAYS_ONLY" if class_lower == b"recursivearrayiterator" =>
+                        Some(Value::Long(4)),
                     _ => None,
                 }
             }
@@ -10136,14 +10538,6 @@ impl Vm {
                     b"TARGET_CONSTANT" => Some(Value::Long(64)),
                     b"TARGET_ALL" => Some(Value::Long(127)),
                     b"IS_REPEATABLE" => Some(Value::Long(128)),
-                    _ => None,
-                }
-            }
-            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
-                match const_name {
-                    b"STD_PROP_LIST" => Some(Value::Long(1)),
-                    b"ARRAY_AS_PROPS" => Some(Value::Long(2)),
-                    b"CHILD_ARRAYS_ONLY" => Some(Value::Long(4)),
                     _ => None,
                 }
             }
@@ -10207,15 +10601,6 @@ impl Vm {
                     b"EXTR_DATA" => Some(Value::Long(1)),
                     b"EXTR_PRIORITY" => Some(Value::Long(2)),
                     b"EXTR_BOTH" => Some(Value::Long(3)),
-                    _ => None,
-                }
-            }
-            b"spldoublylinkedlist" | b"splstack" | b"splqueue" => {
-                match const_name {
-                    b"IT_MODE_LIFO" => Some(Value::Long(2)),
-                    b"IT_MODE_FIFO" => Some(Value::Long(0)),
-                    b"IT_MODE_DELETE" => Some(Value::Long(1)),
-                    b"IT_MODE_KEEP" => Some(Value::Long(0)),
                     _ => None,
                 }
             }
@@ -10302,6 +10687,97 @@ impl Vm {
             }
             _ => None,
         }
+    }
+
+    /// Get all built-in class constants for a class (own constants only — does
+    /// not include inherited constants). Returns `(name, value)` pairs in the
+    /// order PHP exposes them. Returns empty vec for classes that have no
+    /// known built-in constants.
+    pub fn get_builtin_class_constants_list(&self, class_lower: &[u8]) -> Vec<(Vec<u8>, Value)> {
+        let names: &[&[u8]] = match class_lower {
+            b"reflectionmethod" | b"reflectionfunction" | b"reflectionfunctionabstract" => &[
+                b"IS_STATIC", b"IS_ABSTRACT", b"IS_FINAL", b"IS_PUBLIC",
+                b"IS_PROTECTED", b"IS_PRIVATE", b"IS_DEPRECATED",
+            ],
+            b"reflectionproperty" => &[
+                b"IS_STATIC", b"IS_PUBLIC", b"IS_PROTECTED", b"IS_PRIVATE",
+                b"IS_PROTECTED_SET", b"IS_PRIVATE_SET", b"IS_READONLY",
+                b"IS_ABSTRACT", b"IS_FINAL", b"IS_VIRTUAL",
+            ],
+            b"reflectionclass" => &[
+                b"IS_IMPLICIT_ABSTRACT", b"IS_EXPLICIT_ABSTRACT", b"IS_FINAL",
+                b"IS_READONLY", b"SKIP_INITIALIZATION_ON_SERIALIZE", b"SKIP_DESTRUCTOR",
+            ],
+            b"reflectionclassconstant" => &[
+                b"IS_PUBLIC", b"IS_PROTECTED", b"IS_PRIVATE", b"IS_FINAL",
+            ],
+            b"arrayobject" | b"arrayiterator" => &[
+                b"STD_PROP_LIST", b"ARRAY_AS_PROPS",
+            ],
+            b"recursivearrayiterator" => &[
+                b"CHILD_ARRAYS_ONLY",
+            ],
+            b"reflectionattribute" => &[b"IS_INSTANCEOF"],
+            b"attribute" => &[
+                b"TARGET_CLASS", b"TARGET_FUNCTION", b"TARGET_METHOD",
+                b"TARGET_PROPERTY", b"TARGET_CLASS_CONSTANT", b"TARGET_PARAMETER",
+                b"TARGET_CONSTANT", b"TARGET_ALL", b"IS_REPEATABLE",
+            ],
+            b"spldoublylinkedlist" | b"splstack" | b"splqueue" => &[
+                b"IT_MODE_LIFO", b"IT_MODE_FIFO", b"IT_MODE_DELETE", b"IT_MODE_KEEP",
+            ],
+            b"cachingiterator" => &[
+                b"CALL_TOSTRING", b"CATCH_GET_CHILD", b"TOSTRING_USE_KEY",
+                b"TOSTRING_USE_CURRENT", b"TOSTRING_USE_INNER", b"FULL_CACHE",
+            ],
+            b"regexiterator" | b"recursiveregexiterator" => &[
+                b"MATCH", b"GET_MATCH", b"ALL_MATCHES", b"SPLIT", b"REPLACE",
+                b"USE_KEY", b"INVERT_MATCH",
+            ],
+            b"multipleiterator" => &[
+                b"MIT_NEED_ANY", b"MIT_NEED_ALL", b"MIT_KEYS_NUMERIC", b"MIT_KEYS_ASSOC",
+            ],
+            b"splfileobject" => &[
+                b"DROP_NEW_LINE", b"READ_AHEAD", b"SKIP_EMPTY", b"READ_CSV",
+            ],
+            b"splpriorityqueue" => &[
+                b"EXTR_DATA", b"EXTR_PRIORITY", b"EXTR_BOTH",
+            ],
+            b"filesystemiterator" | b"recursivedirectoryiterator" | b"globiterator" => &[
+                b"CURRENT_AS_PATHNAME", b"CURRENT_AS_FILEINFO", b"CURRENT_AS_SELF",
+                b"KEY_AS_PATHNAME", b"KEY_AS_FILENAME", b"FOLLOW_SYMLINKS",
+                b"NEW_CURRENT_AND_KEY", b"SKIP_DOTS", b"UNIX_PATHS",
+            ],
+            b"recursiveiteratoriterator" => &[
+                b"LEAVES_ONLY", b"SELF_FIRST", b"CHILD_FIRST", b"CATCH_GET_CHILD",
+            ],
+            b"recursivetreeiterator" => &[
+                b"BYPASS_CURRENT", b"BYPASS_KEY", b"PREFIX_LEFT",
+                b"PREFIX_MID_HAS_NEXT", b"PREFIX_MID_LAST",
+                b"PREFIX_END_HAS_NEXT", b"PREFIX_END_LAST", b"PREFIX_RIGHT",
+            ],
+            b"datetime" | b"datetimeimmutable" | b"datetimeinterface" => &[
+                b"ATOM", b"COOKIE", b"ISO8601", b"ISO8601_EXPANDED",
+                b"RFC822", b"RFC850", b"RFC1036", b"RFC1123", b"RFC7231",
+                b"RFC2822", b"RFC3339", b"RFC3339_EXTENDED", b"RSS", b"W3C",
+            ],
+            b"datetimezone" => &[
+                b"AFRICA", b"AMERICA", b"ANTARCTICA", b"ARCTIC", b"ASIA",
+                b"ATLANTIC", b"AUSTRALIA", b"EUROPE", b"INDIAN", b"PACIFIC",
+                b"UTC", b"ALL", b"ALL_WITH_BC", b"PER_COUNTRY",
+            ],
+            b"dateperiod" => &[
+                b"EXCLUDE_START_DATE", b"INCLUDE_END_DATE",
+            ],
+            _ => return Vec::new(),
+        };
+        let mut out = Vec::with_capacity(names.len());
+        for n in names {
+            if let Some(v) = self.get_builtin_class_constant(class_lower, n) {
+                out.push((n.to_vec(), v));
+            }
+        }
+        out
     }
 
     /// Get timezone offset in seconds and abbreviation for a timezone name
@@ -10483,7 +10959,13 @@ impl Vm {
             (y, m + 1, d as u32 + 1)
         }
         let (year, month, day) = dty(days_since_epoch);
-        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.000000", year, month, day, hours, minutes, seconds)
+        if year > 9999 {
+            format!("+{:05}-{:02}-{:02} {:02}:{:02}:{:02}.000000", year, month, day, hours, minutes, seconds)
+        } else if year < 0 {
+            format!("-{:04}-{:02}-{:02} {:02}:{:02}:{:02}.000000", -year, month, day, hours, minutes, seconds)
+        } else {
+            format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.000000", year, month, day, hours, minutes, seconds)
+        }
     }
 
     fn format_datetime_timestamp(&self, format: &str, secs: i64) -> String {
@@ -11101,9 +11583,20 @@ impl Vm {
                 }
             }
 
-            // Check parent classes for SPL dispatch
-            if let Some(parent) = get_builtin_parent(&class_lower) {
-                let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Check parent classes for SPL dispatch. The class chain may go
+            // through user-defined classes (e.g. `class MyHeap extends SplHeap`)
+            // before reaching a built-in like SplHeap, so walk both user and
+            // built-in parent edges.
+            let mut current_lower = class_lower.clone();
+            for _ in 0..50 {
+                let next_lower: Option<Vec<u8>> = self.classes.get(&current_lower)
+                    .and_then(|c| c.parent.clone())
+                    .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
+                    .or_else(|| get_builtin_parent(&current_lower).map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect()));
+                let parent_lower = match next_lower {
+                    Some(p) => p,
+                    None => break,
+                };
                 let result = self.dispatch_spl_method(&parent_lower, &method_lower, obj);
                 if result.is_some() {
                     return result;
@@ -11116,6 +11609,7 @@ impl Vm {
                         return result;
                     }
                 }
+                current_lower = parent_lower;
             }
         }
         None
@@ -14499,6 +14993,71 @@ impl Vm {
                         obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(src_tz)));
                         let result = Value::Object(Rc::new(RefCell::new(obj)));
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower == b"dateperiod::__set_state" {
+                        // DatePeriod::__set_state(array): rebuild from array.
+                        let arr_arg = call.args.first().cloned().unwrap_or(Value::Null);
+                        let obj_id = self.next_object_id();
+                        let mut obj = PhpObject::new(b"DatePeriod".to_vec(), obj_id);
+                        if let Value::Array(arr) = &arr_arg {
+                            let arr_b = arr.borrow();
+                            for (k, v) in arr_b.iter() {
+                                if let ArrayKey::String(s) = k {
+                                    obj.set_property(s.as_bytes().to_vec(), v.clone());
+                                }
+                            }
+                        }
+                        let result = Value::Object(Rc::new(RefCell::new(obj)));
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower == b"datetime::__set_state"
+                        || func_name_lower == b"datetimeimmutable::__set_state"
+                        || func_name_lower == b"datetimezone::__set_state"
+                        || func_name_lower == b"dateinterval::__set_state" {
+                        // __set_state(array): reconstruct from array.
+                        let is_imm = func_name_lower == b"datetimeimmutable::__set_state";
+                        let is_tz = func_name_lower == b"datetimezone::__set_state";
+                        let is_di = func_name_lower == b"dateinterval::__set_state";
+                        let arr_arg = call.args.first().cloned().unwrap_or(Value::Null);
+                        let obj_id = self.next_object_id();
+                        let class_name: Vec<u8> = if is_tz { b"DateTimeZone".to_vec() }
+                            else if is_di { b"DateInterval".to_vec() }
+                            else if is_imm { b"DateTimeImmutable".to_vec() }
+                            else { b"DateTime".to_vec() };
+                        let mut obj = PhpObject::new(class_name, obj_id);
+                        // Copy properties from the array
+                        if let Value::Array(arr) = &arr_arg {
+                            let arr_b = arr.borrow();
+                            for (k, v) in arr_b.iter() {
+                                if let ArrayKey::String(s) = k {
+                                    obj.set_property(s.as_bytes().to_vec(), v.clone());
+                                }
+                            }
+                        }
+                        // For DateTime/DateTimeImmutable - reconstruct __timestamp
+                        if !is_tz && !is_di {
+                            let date_str = obj.get_property(b"date").to_php_string().to_string_lossy();
+                            let tz_str = obj.get_property(b"timezone").to_php_string().to_string_lossy();
+                            if !date_str.is_empty() {
+                                if let Some(local_ts) = vm_parse_datetime_string(&date_str, 0) {
+                                    let tz_name = if tz_str.is_empty() { "UTC".to_string() } else { tz_str };
+                                    let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, local_ts);
+                                    let utc_ts = if tz_name == "UTC" || tz_name == "utc" { local_ts } else { local_ts - offset };
+                                    obj.set_property(b"__timestamp".to_vec(), Value::Long(utc_ts));
+                                }
+                            }
+                            // Default if missing
+                            if matches!(obj.get_property(b"timezone_type"), Value::Null | Value::Undef) {
+                                obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                            }
+                            if matches!(obj.get_property(b"timezone"), Value::Null | Value::Undef) {
+                                obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
+                            }
+                        }
+                        // For DateTimeZone - default to type 3 if missing
+                        if is_tz && matches!(obj.get_property(b"timezone_type"), Value::Null | Value::Undef) {
+                            obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                        }
+                        let result = Value::Object(Rc::new(RefCell::new(obj)));
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower == b"dateinterval::createfromdatestring" {
                         // DateInterval::createFromDateString - delegate to procedural function
                         if let Some(f) = self.functions.get(b"date_interval_create_from_date_string".as_ref()).copied() {
@@ -16097,6 +16656,13 @@ impl Vm {
                         // If it's a constructor call and the class has no __construct, silently succeed
                         let name_bytes = call.name.as_bytes();
                         if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
+                            // If $this isn't already first arg (e.g. parent::__construct from method
+                            // body) and we're inside an instance method, inject it.
+                            if !matches!(call.args.first(), Some(Value::Object(_))) {
+                                if let Some(this_val @ Value::Object(_)) = cvs.first() {
+                                    call.args.insert(0, this_val.clone());
+                                }
+                            }
                             // Check for unknown named parameters on classes without __construct
                             if !call.named_args.is_empty() {
                                 let first_name = String::from_utf8_lossy(&call.named_args[0].0).into_owned();
@@ -16135,6 +16701,14 @@ impl Vm {
                                         b"recursivearrayiterator".to_vec()
                                     } else if self.class_extends(&raw_class_lower, b"arrayiterator") {
                                         b"arrayiterator".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"datetime") {
+                                        b"datetime".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"datetimeimmutable") {
+                                        b"datetimeimmutable".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"datetimezone") {
+                                        b"datetimezone".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"dateinterval") {
+                                        b"dateinterval".to_vec()
                                     } else {
                                         raw_class_lower.clone()
                                     };
@@ -16687,8 +17261,26 @@ impl Vm {
                                         b"reflectionextension" => {
                                             // ReflectionExtension::__construct(string $name)
                                             if call.args.len() > 1 {
-                                                let ext_name = call.args[1].to_php_string();
-                                                obj_mut.set_property(b"name".to_vec(), Value::String(ext_name));
+                                                let raw = call.args[1].to_php_string().to_string_lossy();
+                                                // Canonicalize known extension names; otherwise pass through unchanged.
+                                                let canonical = match raw.to_ascii_lowercase().as_str() {
+                                                    "reflection" => "Reflection".to_string(),
+                                                    "core" => "Core".to_string(),
+                                                    "standard" => "standard".to_string(),
+                                                    "date" => "date".to_string(),
+                                                    "json" => "json".to_string(),
+                                                    "spl" => "SPL".to_string(),
+                                                    "pcre" => "pcre".to_string(),
+                                                    "phar" => "Phar".to_string(),
+                                                    "hash" => "hash".to_string(),
+                                                    "random" => "Random".to_string(),
+                                                    "ctype" => "ctype".to_string(),
+                                                    "filter" => "filter".to_string(),
+                                                    "tokenizer" => "tokenizer".to_string(),
+                                                    "uri" => "uri".to_string(),
+                                                    _ => raw.clone(),
+                                                };
+                                                obj_mut.set_property(b"name".to_vec(), Value::String(PhpString::from_string(canonical)));
                                             }
                                         }
                                         b"reflectiongenerator" => {
@@ -16704,6 +17296,25 @@ impl Vm {
                                             }
                                         }
                                         b"datetime" | b"datetimeimmutable" => {
+                                            // Argument count check (max 2 user args + $this = 3 total).
+                                            if call.args.len() > 3 {
+                                                drop(obj_mut);
+                                                let class_disp = if class_lower == b"datetimeimmutable" { "DateTimeImmutable" } else { "DateTime" };
+                                                let user_count = call.args.len() - 1;
+                                                let msg = format!("{}::__construct() expects at most 2 arguments, {} given", class_disp, user_count);
+                                                let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                                    pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                } else {
+                                                    return Err(VmError {
+                                                        message: format!("Uncaught ArgumentCountError: {}", msg),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
                                             // DateTime::__construct($datetime = "now", $timezone = null)
                                             let datetime_str = if call.args.len() > 1 {
                                                 let arg = &call.args[1];
@@ -16781,8 +17392,52 @@ impl Vm {
                                             // If we have a timezone, we need to convert to actual UTC
                                             // by subtracting the timezone offset (unless it was an @timestamp).
                                             let is_at_timestamp = datetime_str.starts_with('@');
-                                            let (offset_secs, _) = vm_timezone_offset_and_abbrev(&tz_name, timestamp);
-                                            let utc_timestamp = if is_at_timestamp || tz_name == "UTC" || tz_name == "utc" {
+                                            let user_passed_tz = call.args.len() > 2
+                                                && matches!(&call.args[2], Value::Object(_));
+                                            let mut effective_tz = tz_name.clone();
+                                            let mut effective_tz_type: i64 = 3;
+                                            if !is_at_timestamp && !user_passed_tz {
+                                                let trimmed = datetime_str.trim();
+                                                let is_abbrev_not_utc = |s: &str| -> bool {
+                                                    !s.eq_ignore_ascii_case("UTC")
+                                                        && (vm_is_tz_abbrev(s) || s.eq_ignore_ascii_case("GMT"))
+                                                };
+                                                if !trimmed.is_empty() {
+                                                    if vm_parse_tz_offset(trimmed).is_some() {
+                                                        effective_tz = trimmed.to_string();
+                                                        effective_tz_type = 1;
+                                                    } else if is_abbrev_not_utc(trimmed) {
+                                                        effective_tz = trimmed.to_uppercase();
+                                                        effective_tz_type = 2;
+                                                    } else if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
+                                                        let tail = trimmed[idx+1..].trim();
+                                                        if vm_parse_tz_offset(tail).is_some() {
+                                                            effective_tz = tail.to_string();
+                                                            effective_tz_type = 1;
+                                                        } else if is_abbrev_not_utc(tail) {
+                                                            effective_tz = tail.to_uppercase();
+                                                            effective_tz_type = 2;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // For @timestamp, default tz is +00:00 type 1 (unless user override).
+                                            if is_at_timestamp && !user_passed_tz {
+                                                effective_tz = "+00:00".to_string();
+                                                effective_tz_type = 1;
+                                            }
+                                            // If user explicitly passed a tz arg, use it (override).
+                                            if user_passed_tz {
+                                                if let Value::Object(tz_obj) = &call.args[2] {
+                                                    let tb = tz_obj.borrow();
+                                                    let typ = tb.get_property(b"timezone_type").to_long();
+                                                    effective_tz_type = if typ != 0 { typ } else { 3 };
+                                                    effective_tz = tb.get_property(b"timezone").to_php_string().to_string_lossy();
+                                                    if effective_tz.is_empty() { effective_tz = "UTC".to_string(); }
+                                                }
+                                            }
+                                            let (offset_secs, _) = vm_timezone_offset_and_abbrev(&effective_tz, timestamp);
+                                            let utc_timestamp = if is_at_timestamp || effective_tz == "UTC" || effective_tz == "utc" {
                                                 timestamp
                                             } else {
                                                 timestamp - offset_secs
@@ -16791,8 +17446,8 @@ impl Vm {
                                             // Set display properties for var_dump - show local time
                                             let date_str = Self::format_utc_datetime(timestamp); // timestamp IS local time already
                                             obj_mut.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                                            obj_mut.set_property(b"timezone_type".to_vec(), Value::Long(3));
-                                            obj_mut.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
+                                            obj_mut.set_property(b"timezone_type".to_vec(), Value::Long(effective_tz_type));
+                                            obj_mut.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(effective_tz)));
                                         }
                                         b"dateinterval" => {
                                             // DateInterval::__construct($duration) - ISO 8601 duration
@@ -17221,10 +17876,26 @@ impl Vm {
                                     let method_part = &name_bytes[sep_pos + 2..];
                                     let class_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
                                     let method_lower: Vec<u8> = method_part.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    // Get $this from call.args or CVs
-                                    let this_val = call.args.first().cloned()
-                                        .or_else(|| cvs.first().cloned())
-                                        .unwrap_or(Value::Null);
+                                    // Resolve $this. For forwarding calls (parent::, self::,
+                                    // static::) the call.args list contains only the explicit
+                                    // arguments, so $this lives in CV[0]. For non-forwarding
+                                    // static-style invocation, call.args[0] may be the object.
+                                    let cv0_object: Option<Value> = match cvs.first() {
+                                        Some(v @ Value::Object(_)) => Some(v.clone()),
+                                        _ => None,
+                                    };
+                                    let arg0_object: Option<Value> = match call.args.first() {
+                                        Some(v @ Value::Object(_)) => Some(v.clone()),
+                                        _ => None,
+                                    };
+                                    let (this_val, args_skip_first) = if is_forwarding_call {
+                                        // parent::X(args): $this from CV, args as-is
+                                        (cv0_object.or(arg0_object).unwrap_or(Value::Null), false)
+                                    } else if let Some(v) = arg0_object {
+                                        (v, true)
+                                    } else {
+                                        (cv0_object.unwrap_or(Value::Null), false)
+                                    };
                                     if let Value::Object(obj) = &this_val {
                                         // Try dispatch_spl_method
                                         let spl_result = self.dispatch_spl_method(&class_lower, &method_lower, obj);
@@ -17233,7 +17904,12 @@ impl Vm {
                                             handled = true;
                                         } else if self.is_spl_args_method(&class_lower, &method_lower) {
                                             let mut spl_args = vec![this_val.clone()];
-                                            for arg in call.args.iter().skip(1) {
+                                            let arg_iter: Box<dyn Iterator<Item=&Value>> = if args_skip_first {
+                                                Box::new(call.args.iter().skip(1))
+                                            } else {
+                                                Box::new(call.args.iter())
+                                            };
+                                            for arg in arg_iter {
                                                 spl_args.push(arg.clone());
                                             }
                                             if let Some(result) = self.handle_spl_docall(&class_lower, &method_lower, &spl_args) {
@@ -18412,12 +19088,40 @@ impl Vm {
                         // On pos > 0, advance first via next()
                         if pos > 0 {
                             self.call_object_method(&arr_val, b"next", &[]);
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                let exc_msg = if let Some(Value::Object(o)) = &self.current_exception {
+                                    let ob = o.borrow();
+                                    let class = crate::value::display_class_name(&ob.class_name);
+                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy();
+                                    if msg.is_empty() { format!("Uncaught {}", class) } else { format!("Uncaught {}: {}", class, msg) }
+                                } else { "Uncaught exception".to_string() };
+                                return Err(VmError { message: exc_msg, line: op.line });
+                            }
                         }
 
                         // Check valid()
                         let valid = self
                             .call_object_method(&arr_val, b"valid", &[])
                             .unwrap_or(Value::False);
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            let exc_msg = if let Some(Value::Object(o)) = &self.current_exception {
+                                let ob = o.borrow();
+                                let class = crate::value::display_class_name(&ob.class_name);
+                                let msg = ob.get_property(b"message").to_php_string().to_string_lossy();
+                                if msg.is_empty() { format!("Uncaught {}", class) } else { format!("Uncaught {}: {}", class, msg) }
+                            } else { "Uncaught exception".to_string() };
+                            return Err(VmError { message: exc_msg, line: op.line });
+                        }
                         let is_valid = valid.is_truthy();
 
                         if !is_valid {
@@ -19591,6 +20295,16 @@ impl Vm {
                             // Check built-in class constants first
                             // Also check if the class is a recognized builtin before "not found" error
                             if let Some(builtin_val) = self.get_builtin_class_constant(&class_lower, prop_name.as_bytes()) {
+                                // Built-in const deprecations
+                                if matches!(class_lower.as_slice(),
+                                    b"datetime" | b"datetimeimmutable" | b"datetimeinterface")
+                                    && prop_name.as_bytes() == b"RFC7231"
+                                {
+                                    self.emit_deprecated_at(
+                                        "Constant DateTimeInterface::RFC7231 is deprecated since 8.5, as this format ignores the associated timezone and always uses GMT",
+                                        op.line,
+                                    );
+                                }
                                 builtin_val
                             } else if self.is_known_builtin_class(&class_lower) {
                                 // Builtin class exists but constant doesn't
@@ -19711,6 +20425,12 @@ impl Vm {
                         if name_bytes == b"MT_RAND_PHP" {
                             self.emit_deprecated_at(
                                 "Constant MT_RAND_PHP is deprecated since 8.3, as it uses a biased non-standard variant of Mt19937",
+                                op.line,
+                            );
+                        }
+                        if name_bytes == b"DATE_RFC7231" {
+                            self.emit_deprecated_at(
+                                "Constant DATE_RFC7231 is deprecated since 8.5, as this format ignores the associated timezone and always uses GMT",
                                 op.line,
                             );
                         }
@@ -26366,7 +27086,13 @@ impl Vm {
                 if !method_cvs.is_empty() {
                     method_cvs[0] = val.clone();
                 }
-                if let Ok(result) = self.execute_op_array(&method, method_cvs) {
+                // Push class scope so `parent::`/`self::` resolves inside __toString.
+                self.class_scope_stack.push(class_lower.clone());
+                self.called_class_stack.push(class_lower.clone());
+                let result = self.execute_op_array(&method, method_cvs);
+                self.class_scope_stack.pop();
+                self.called_class_stack.pop();
+                if let Ok(result) = result {
                     return result.to_php_string();
                 }
             }
@@ -28159,7 +28885,7 @@ fn phptoken_is_match(kind: &Value, id: i64, text: &[u8]) -> Value {
 }
 
 /// Parse a datetime string into a unix timestamp
-fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
+pub fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
     let s = input.trim();
     if s.is_empty() || s.eq_ignore_ascii_case("now") {
         return Some(now);
@@ -28167,12 +28893,25 @@ fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
     if s.starts_with('@') {
         return s[1..].trim().parse::<i64>().ok();
     }
+    // Standalone timezone identifier or offset - treat as "now in that tz"
+    if vm_parse_tz_offset(s).is_some() || vm_is_tz_abbrev(s) || s.eq_ignore_ascii_case("GMT") || s.eq_ignore_ascii_case("UTC") {
+        return Some(now);
+    }
     // Try absolute date formats
     let parts: Vec<&str> = s.splitn(2, |c: char| c == ' ' || c == 'T').collect();
-    let date_str = parts.first().unwrap_or(&"");
+    let date_str_raw = parts.first().unwrap_or(&"");
+    // Handle leading "+" (expanded ISO year) and "-" (negative year).
+    let (year_sign, date_str): (i64, &str) = if let Some(rest) = date_str_raw.strip_prefix('+') {
+        (1, rest)
+    } else if let Some(rest) = date_str_raw.strip_prefix('-') {
+        (-1, rest)
+    } else {
+        (1, *date_str_raw)
+    };
     let date_parts: Vec<&str> = date_str.split('-').collect();
     if date_parts.len() == 3 {
-        if let (Ok(year), Ok(month), Ok(day)) = (date_parts[0].parse::<i64>(), date_parts[1].parse::<u32>(), date_parts[2].parse::<u32>()) {
+        if let (Ok(year_abs), Ok(month), Ok(day)) = (date_parts[0].parse::<i64>(), date_parts[1].parse::<u32>(), date_parts[2].parse::<u32>()) {
+            let year = year_abs * year_sign;
             if month >= 1 && month <= 12 && day >= 1 && day <= 31 {
                 let mut h = 0i64;
                 let mut m = 0i64;
@@ -28180,7 +28919,20 @@ fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
                 if let Some(time_str) = parts.get(1) {
                     let time_clean = time_str.trim_end_matches(|c: char| c == 'Z' || c == 'z');
                     let time_no_tz = time_clean.split('+').next().unwrap_or(time_clean);
-                    let time_no_micro = time_no_tz.split('.').next().unwrap_or(time_no_tz);
+                    // Also strip any trailing tz abbreviation/identifier or sign-offset.
+                    // The first space (or '-' after a digit) ends the time portion.
+                    let time_only: String = {
+                        let mut out = String::new();
+                        let mut prev_digit = false;
+                        for ch in time_no_tz.chars() {
+                            if ch == ' ' || ch == '\t' { break; }
+                            if ch == '-' && prev_digit { break; }
+                            out.push(ch);
+                            prev_digit = ch.is_ascii_digit();
+                        }
+                        out
+                    };
+                    let time_no_micro = time_only.split('.').next().unwrap_or(&time_only);
                     let time_parts: Vec<&str> = time_no_micro.split(':').collect();
                     h = time_parts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
                     m = time_parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -28478,6 +29230,65 @@ fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
                 day = val as u32;
                 di += consumed;
             }
+            b'M' | b'F' => {
+                // Month name (abbrev for M, full for F)
+                let names_short = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+                let names_long = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+                let mut matched = false;
+                for (idx, name) in names_short.iter().enumerate() {
+                    if di + name.len() <= dt_bytes.len() {
+                        let chunk = std::str::from_utf8(&dt_bytes[di..di+name.len()]).ok()?;
+                        if chunk.eq_ignore_ascii_case(name) {
+                            month = (idx as u32) + 1;
+                            di += name.len();
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                if !matched {
+                    for (idx, name) in names_long.iter().enumerate() {
+                        if di + name.len() <= dt_bytes.len() {
+                            let chunk = std::str::from_utf8(&dt_bytes[di..di+name.len()]).ok()?;
+                            if chunk.eq_ignore_ascii_case(name) {
+                                month = (idx as u32) + 1;
+                                di += name.len();
+                                matched = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !matched { return None; }
+            }
+            b'D' | b'l' => {
+                // Day name (abbrev for D, full for l) - just consume
+                let names_short = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+                let names_long = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+                let mut consumed_chars = 0;
+                for name in names_short.iter() {
+                    if di + name.len() <= dt_bytes.len() {
+                        let chunk = std::str::from_utf8(&dt_bytes[di..di+name.len()]).ok()?;
+                        if chunk.eq_ignore_ascii_case(name) {
+                            consumed_chars = name.len();
+                            break;
+                        }
+                    }
+                }
+                if consumed_chars == 0 {
+                    for name in names_long.iter() {
+                        if di + name.len() <= dt_bytes.len() {
+                            let chunk = std::str::from_utf8(&dt_bytes[di..di+name.len()]).ok()?;
+                            if chunk.eq_ignore_ascii_case(name) {
+                                consumed_chars = name.len();
+                                break;
+                            }
+                        }
+                    }
+                }
+                if consumed_chars == 0 { return None; }
+                di += consumed_chars;
+            }
             b'H' | b'G' | b'h' | b'g' => {
                 let (val, consumed) = vm_parse_num(&dt_bytes[di..], 2)?;
                 hour = val;
@@ -28589,7 +29400,7 @@ fn vm_is_eu_dst(timestamp: i64) -> bool {
     false
 }
 
-fn vm_timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, String) {
+pub fn vm_timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, String) {
     match tz_name {
         "UTC" | "utc" | "GMT" | "gmt" | "GMT0" | "GMT+0" | "GMT-0" => (0, "UTC".to_string()),
         "America/New_York" | "US/Eastern" => {

@@ -321,13 +321,20 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Iterate over the iterator and call the callback for each element
     if let Value::Object(_) = &iterator {
-        // Call rewind on the iterator
-        let _ = vm.call_object_method(&iterator, b"rewind", &[iterator.clone()]);
+        // Call rewind on the iterator. Propagate exceptions thrown by rewind
+        // back to the caller (don't keep iterating).
+        let _ = vm.call_object_method(&iterator, b"rewind", &[]);
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
+        }
 
         let mut count = 0i64;
         loop {
             // Check valid()
-            let valid = vm.call_object_method(&iterator, b"valid", &[iterator.clone()]);
+            let valid = vm.call_object_method(&iterator, b"valid", &[]);
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
+            }
             match valid {
                 Some(v) if !v.is_truthy() => break,
                 None => break,
@@ -345,6 +352,9 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 let result = cuf(vm, &call_fn_args)?;
+                if vm.current_exception.is_some() {
+                    return Ok(Value::Null);
+                }
                 count += 1;
 
                 if !result.is_truthy() {
@@ -356,7 +366,10 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
 
             // Call next()
-            let _ = vm.call_object_method(&iterator, b"next", &[iterator.clone()]);
+            let _ = vm.call_object_method(&iterator, b"next", &[]);
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
+            }
         }
         Ok(Value::Long(count))
     } else {

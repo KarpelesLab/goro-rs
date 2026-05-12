@@ -20,6 +20,26 @@ pub fn reflection_class_construct(vm: &mut Vm, args: &[Value], line: u32) -> boo
     };
     let arg = args.get(1).cloned().unwrap_or(Value::Null);
 
+    // Determine which reflector class we're constructing for error messages.
+    let reflector_class_name: String = {
+        let ob = this.borrow();
+        String::from_utf8_lossy(&ob.class_name).to_string()
+    };
+
+    // Reject array/non-stringable arguments before we try to stringify.
+    match &arg {
+        Value::Array(_) => {
+            let err_msg = format!(
+                "{}::__construct(): Argument #1 ($objectOrClass) must be of type object|string, array given",
+                reflector_class_name
+            );
+            let exc = vm.create_exception(b"TypeError", &err_msg, line);
+            vm.current_exception = Some(exc);
+            return false;
+        }
+        _ => {}
+    }
+
     let class_name = match &arg {
         Value::Object(obj) => {
             let ob = obj.borrow();
@@ -54,6 +74,21 @@ pub fn reflection_class_construct(vm: &mut Vm, args: &[Value], line: u32) -> boo
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
         vm.current_exception = Some(exc);
         return false;
+    }
+
+    // ReflectionEnum requires the target class actually be an enum.
+    if reflector_class_name.eq_ignore_ascii_case("ReflectionEnum") {
+        let is_enum = vm.classes.get(&class_lower).map(|c| c.is_enum).unwrap_or(false);
+        if !is_enum {
+            // Use the canonical class name in the message
+            let canonical = vm.classes.get(&class_lower)
+                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or(class_name.clone());
+            let err_msg = format!("Class \"{}\" is not an enum", canonical);
+            let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
+            vm.current_exception = Some(exc);
+            return false;
+        }
     }
 
     // Get canonical name
@@ -170,6 +205,9 @@ pub fn reflection_method_construct(vm: &mut Vm, args: &[Value], line: u32) -> bo
         (class_str, method_arg)
     } else if args.len() >= 2 {
         // new ReflectionMethod('Class::method')
+        // 1-arg form is deprecated in PHP 8.4 in favour of createFromMethodName.
+        let dep_msg = "Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead";
+        vm.emit_deprecated_raw(dep_msg, line);
         let arg = args[1].to_php_string().to_string_lossy();
         if let Some(pos) = arg.find("::") {
             (arg[..pos].to_string(), arg[pos + 2..].to_string())
@@ -517,8 +555,25 @@ pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u3
         _ => return true,
     };
 
+    // Determine which reflector class we're constructing - for error messages.
+    let reflector_name: String = {
+        let ob = this.borrow();
+        String::from_utf8_lossy(&ob.class_name).to_string()
+    };
+
     let class_arg = args.get(1).cloned().unwrap_or(Value::Null);
     let const_arg = args.get(2).cloned().unwrap_or(Value::Null);
+
+    // Reject array first argument explicitly.
+    if matches!(&class_arg, Value::Array(_)) {
+        let err_msg = format!(
+            "{}::__construct(): Argument #1 ($class) must be of type object|string, array given",
+            reflector_name
+        );
+        let exc = vm.create_exception(b"TypeError", &err_msg, line);
+        vm.current_exception = Some(exc);
+        return false;
+    }
 
     let class_name = match &class_arg {
         Value::Object(obj) => {
@@ -546,16 +601,50 @@ pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u3
     // Check constant exists
     let const_val = reflection_class_get_constant(vm, &class_lower, const_name.as_bytes());
     if const_val.is_none() {
-        let err_msg = format!("Constant {}::{} does not exist", canonical_class, const_name);
+        let err_msg = if reflector_name.eq_ignore_ascii_case("ReflectionEnumUnitCase")
+            || reflector_name.eq_ignore_ascii_case("ReflectionEnumBackedCase")
+        {
+            format!("Case {}::{} does not exist", canonical_class, const_name)
+        } else {
+            format!("Constant {}::{} does not exist", canonical_class, const_name)
+        };
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
         vm.current_exception = Some(exc);
         return false;
     }
 
+    let unwrapped = const_val.unwrap();
+
+    // ReflectionEnumUnitCase / ReflectionEnumBackedCase: validate the
+    // referenced constant is actually an enum case (and backed for the
+    // BackedCase variant).
+    if reflector_name.eq_ignore_ascii_case("ReflectionEnumUnitCase")
+        || reflector_name.eq_ignore_ascii_case("ReflectionEnumBackedCase")
+    {
+        if !Vm::is_enum_case(&unwrapped) {
+            let err_msg = format!("Constant {}::{} is not a case", canonical_class, const_name);
+            let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
+            vm.current_exception = Some(exc);
+            return false;
+        }
+        if reflector_name.eq_ignore_ascii_case("ReflectionEnumBackedCase") {
+            // Backed cases have a `value` property; unbacked cases do not.
+            let is_backed = if let Value::Object(o) = &unwrapped {
+                o.borrow().has_property(b"value")
+            } else { false };
+            if !is_backed {
+                let err_msg = format!("Enum case {}::{} is not a backed case", canonical_class, const_name);
+                let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
+                vm.current_exception = Some(exc);
+                return false;
+            }
+        }
+    }
+
     let mut obj = this.borrow_mut();
     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(const_name.clone())));
     obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical_class)));
-    obj.set_property(b"__reflection_value".to_vec(), const_val.unwrap());
+    obj.set_property(b"__reflection_value".to_vec(), unwrapped);
     true
 }
 
@@ -642,7 +731,15 @@ pub fn reflection_class_method(
             }
         }
         b"iscloneable" => {
-            Some(Value::True)
+            // Traits, interfaces, abstract classes, and enums are not cloneable.
+            let cloneable = if let Some(ce) = vm.classes.get(&class_lower) {
+                !ce.is_interface && !ce.is_trait && !ce.is_abstract && !ce.is_enum
+            } else {
+                // Built-in classes are cloneable unless they have specific
+                // restrictions; we don't model the full set here.
+                true
+            };
+            Some(if cloneable { Value::True } else { Value::False })
         }
         b"isinternal" => {
             // User-defined classes are not internal
@@ -990,9 +1087,19 @@ pub fn reflection_class_method(
             // Build a detailed __toString representation for ReflectionClass
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            // Detect which reflector this is: ReflectionClass, ReflectionObject,
+            // or ReflectionEnum. Each has a slightly different header line.
+            let reflector_class: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             drop(ob);
+            let kind = if reflector_class == b"reflectionobject" {
+                ReflectionStringKind::Object
+            } else if reflector_class == b"reflectionenum" {
+                ReflectionStringKind::Enum
+            } else {
+                ReflectionStringKind::Class
+            };
             Some(Value::String(PhpString::from_string(
-                reflection_class_to_string(vm, &name, &class_lower)
+                reflection_class_to_string(vm, &name, &class_lower, kind)
             )))
         }
         _ => None,
@@ -1027,9 +1134,30 @@ pub fn reflection_class_docall(
             b"hasproperty" => {
                 let prop_name = args.get(1)?.to_php_string();
                 let has = vm.classes.get(&class_lower)
-                    .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
+                    .map(|c| c.properties.iter().any(|p| {
+                        if p.name != prop_name.as_bytes() { return false; }
+                        // Inherited private (instance) props are not visible.
+                        if p.visibility == Visibility::Private && p.declaring_class != class_lower && !p.is_static {
+                            return false;
+                        }
+                        true
+                    }))
                     .unwrap_or(false);
-                Some(if has { Value::True } else { Value::False })
+                // Also check dynamic properties on the reflected object.
+                let has_dynamic = if !has {
+                    let ob = obj.borrow();
+                    let self_obj = ob.get_property(b"__reflection_object");
+                    drop(ob);
+                    if let Value::Object(inst) = &self_obj {
+                        let io = inst.borrow();
+                        io.has_property(prop_name.as_bytes())
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                Some(if has || has_dynamic { Value::True } else { Value::False })
             }
             b"hasconstant" => {
                 let const_name = args.get(1)?.to_php_string();
@@ -1074,24 +1202,35 @@ pub fn reflection_class_docall(
                         result.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
                     }
                 }
-                // Also check parent constants (no filter applied to inherited
-                // for simplicity; PHP does filter these too though).
+                // PHP exposes inherited constants first, then the class's own
+                // built-in constants (CHILD_ARRAYS_ONLY for RecursiveArrayIterator).
                 if filter == -1 {
                     reflection_collect_parent_constants(vm, &class_lower, &mut result);
+                }
+                for (name, val) in vm.get_builtin_class_constants_list(&class_lower) {
+                    let key = ArrayKey::String(PhpString::from_vec(name));
+                    if result.get(&key).is_none() {
+                        result.set(key, val);
+                    }
                 }
                 Some(Value::Array(Rc::new(RefCell::new(result))))
             }
             b"getmethod" => {
                 let method_name = args.get(1)?.to_php_string().to_string_lossy();
                 let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                let has = vm.classes.get(&class_lower)
-                    .map(|c| c.get_method(&method_lower).is_some())
-                    .unwrap_or(false);
-                if has {
-                    let canonical_class = vm.classes.get(&class_lower)
+                // Look up the method definition and, if found, use its
+                // `declaring_class` for the ReflectionMethod->$class field
+                // (PHP returns the defining class even when called via a
+                // subclass).
+                let method_meta = vm.classes.get(&class_lower)
+                    .and_then(|c| c.get_method(&method_lower))
+                    .map(|m| (String::from_utf8_lossy(&m.name).to_string(),
+                              m.declaring_class.clone()));
+                if let Some((canonical_method, declaring_lower)) = method_meta {
+                    let declaring_canonical = vm.classes.get(declaring_lower.as_slice())
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                        .unwrap_or(target.clone());
-                    Some(create_reflection_method(vm, &canonical_class, &method_name))
+                        .unwrap_or_else(|| String::from_utf8_lossy(&declaring_lower).to_string());
+                    Some(create_reflection_method(vm, &declaring_canonical, &canonical_method))
                 } else if class_lower == b"closure" && method_lower == b"__invoke" {
                     // Synthesise ReflectionMethod for Closure::__invoke by
                     // pointing at the underlying function name captured when
@@ -1137,6 +1276,20 @@ pub fn reflection_class_docall(
                                 return None;
                             }
                         }
+                        // Inherited private methods are NOT visible.
+                        if method_def.visibility == Visibility::Private
+                            && method_def.declaring_class != class_lower
+                        {
+                            return None;
+                        }
+                        // Property hooks (compiler-synthesised __property_get_/set_
+                        // methods) are not real methods - hide them from
+                        // getMethods listings.
+                        if method_def.name.starts_with(b"__property_get_")
+                            || method_def.name.starts_with(b"__property_set_")
+                        {
+                            return None;
+                        }
                         let method_name = String::from_utf8_lossy(&method_def.name).to_string();
                         let declaring = String::from_utf8_lossy(&method_def.declaring_class).to_string();
                         Some((declaring, method_name))
@@ -1180,14 +1333,71 @@ pub fn reflection_class_docall(
                 Some(Value::Array(Rc::new(RefCell::new(result))))
             }
             b"getproperty" => {
-                let prop_name = args.get(1)?.to_php_string().to_string_lossy();
-                let has_declared = vm.classes.get(&class_lower)
-                    .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
-                    .unwrap_or(false);
+                let prop_input = args.get(1)?.to_php_string().to_string_lossy();
+                // Support fully qualified "ClassName::propName" syntax. The
+                // class part must be in the inheritance chain of the reflected
+                // class (or itself) — otherwise we throw a "does not specify a
+                // base class" exception.
+                let (qualified_class_lower, prop_name): (Option<Vec<u8>>, String) =
+                    if let Some(pos) = prop_input.find("::") {
+                        let qc = &prop_input[..pos];
+                        let pn = &prop_input[pos + 2..];
+                        (Some(qc.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect()), pn.to_string())
+                    } else {
+                        (None, prop_input.clone())
+                    };
+                if let Some(ref qc_lower) = qualified_class_lower {
+                    // The qualifier must be the class itself or an ancestor.
+                    let is_self = *qc_lower == class_lower;
+                    let is_ancestor = vm.class_extends(&class_lower, qc_lower);
+                    if !is_self && !is_ancestor {
+                        // Differentiate between "class does not exist" and
+                        // "class is not a base of C".
+                        let qc_exists = vm.classes.contains_key(qc_lower) || vm.is_known_builtin_class(qc_lower);
+                        if !qc_exists {
+                            let qc_canonical = String::from_utf8_lossy(qc_lower).to_string();
+                            let err = format!("Class \"{}\" does not exist", qc_canonical);
+                            let exc = vm.create_exception(b"ReflectionException", &err, vm.current_line);
+                            vm.current_exception = Some(exc);
+                            return Some(Value::Null);
+                        }
+                        let qc_canonical = vm.classes.get(qc_lower)
+                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                            .unwrap_or_else(|| String::from_utf8_lossy(qc_lower).to_string());
+                        let err = format!(
+                            "Fully qualified property name {}::${} does not specify a base class of {}",
+                            qc_canonical, prop_name, target
+                        );
+                        let exc = vm.create_exception(b"ReflectionException", &err, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
+                // Effective lookup class is the qualifier (when given), else self.
+                let lookup_lower: Vec<u8> = qualified_class_lower
+                    .clone()
+                    .unwrap_or_else(|| class_lower.clone());
+                // Look up the property def so we can report the declaring class.
+                // Inherited private (instance) props are NOT visible via
+                // getProperty without an explicit qualifier; static private
+                // props remain accessible.
+                let prop_info = vm.classes.get(&lookup_lower)
+                    .and_then(|c| c.properties.iter().find(|p| {
+                        if p.name != prop_name.as_bytes() { return false; }
+                        if qualified_class_lower.is_none()
+                            && p.visibility == Visibility::Private
+                            && p.declaring_class != lookup_lower
+                            && !p.is_static
+                        {
+                            return false;
+                        }
+                        true
+                    }))
+                    .map(|p| p.declaring_class.clone());
                 // For ReflectionObject, check the actual object for dynamic
                 // properties. `__reflection_object` stores the associated
                 // object instance when the Reflection target came from one.
-                let has_dynamic = if !has_declared {
+                let has_dynamic = if prop_info.is_none() {
                     let ob = obj.borrow();
                     let self_obj = ob.get_property(b"__reflection_object");
                     drop(ob);
@@ -1200,7 +1410,12 @@ pub fn reflection_class_docall(
                 } else {
                     false
                 };
-                if has_declared || has_dynamic {
+                if let Some(declaring_lower) = prop_info {
+                    let declaring_canonical = vm.classes.get(declaring_lower.as_slice())
+                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                        .unwrap_or_else(|| String::from_utf8_lossy(&declaring_lower).to_string());
+                    Some(create_reflection_property(vm, &declaring_canonical, &prop_name))
+                } else if has_dynamic {
                     Some(create_reflection_property(vm, &target, &prop_name))
                 } else {
                     let err_msg = format!("Property {}::${} does not exist", target, prop_name);
@@ -1213,23 +1428,33 @@ pub fn reflection_class_docall(
                 let filter = args.get(1).map(|v| if matches!(v, Value::Null) { -1 } else { v.to_long() }).unwrap_or(-1);
                 let mut result = PhpArray::new();
                 let mut declared_names: Vec<Vec<u8>> = Vec::new();
-                let declared: Vec<String> = if let Some(ce) = vm.classes.get(&class_lower) {
+                // Collect declared properties (both static and instance) along
+                // with their declaring class so we emit ReflectionProperty
+                // objects keyed by the property's *defining* class. Private
+                // properties declared in an ancestor class are NOT visible on
+                // a child via getProperties (their parent owns them).
+                let declared: Vec<(String, Vec<u8>)> = if let Some(ce) = vm.classes.get(&class_lower) {
                     let mut v = Vec::new();
                     for prop in ce.properties.iter() {
                         if filter != -1 {
                             let prop_mod = reflection_property_modifiers_static(prop);
                             if prop_mod & filter == 0 { continue; }
                         }
-                        if !prop.is_static {
-                            let name_str = String::from_utf8_lossy(&prop.name).to_string();
-                            v.push(name_str);
-                            declared_names.push(prop.name.clone());
+                        // Skip private props inherited from a parent.
+                        if prop.visibility == Visibility::Private && prop.declaring_class != class_lower {
+                            continue;
                         }
+                        let name_str = String::from_utf8_lossy(&prop.name).to_string();
+                        v.push((name_str, prop.declaring_class.clone()));
+                        declared_names.push(prop.name.clone());
                     }
                     v
                 } else { Vec::new() };
-                for name_str in declared {
-                    result.push(create_reflection_property(vm, &target, &name_str));
+                for (name_str, declaring_lower) in declared {
+                    let declaring_canonical = vm.classes.get(declaring_lower.as_slice())
+                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                        .unwrap_or_else(|| String::from_utf8_lossy(&declaring_lower).to_string());
+                    result.push(create_reflection_property(vm, &declaring_canonical, &name_str));
                 }
                 // For ReflectionObject, append dynamic instance properties
                 // (these are considered IS_PUBLIC). Collect names first.
@@ -1605,7 +1830,12 @@ pub fn reflection_class_docall(
                 let mut result = PhpArray::new();
                 if method == b"getreflectionconstant" {
                     let const_name = args.get(1)?.to_php_string();
-                    let val = reflection_class_get_constant(vm, &class_lower, const_name.as_bytes());
+                    let mut val = reflection_class_get_constant(vm, &class_lower, const_name.as_bytes());
+                    if val.is_none() {
+                        // Fall back to built-in class constants (e.g.
+                        // ReflectionClass::IS_IMPLICIT_ABSTRACT).
+                        val = vm.get_builtin_class_constant(&class_lower, const_name.as_bytes());
+                    }
                     if let Some(v) = val {
                         return Some(create_reflection_class_constant(vm, &target, &const_name.to_string_lossy(), v));
                     } else {
@@ -1615,6 +1845,13 @@ pub fn reflection_class_docall(
                 // getReflectionConstants
                 if let Some(ce) = vm.classes.get(&class_lower) {
                     for (name, val) in ce.constants.clone() {
+                        let const_name = String::from_utf8_lossy(&name).to_string();
+                        result.push(create_reflection_class_constant(vm, &target, &const_name, val));
+                    }
+                } else {
+                    // For built-in classes, enumerate their built-in constants.
+                    let list = vm.get_builtin_class_constants_list(&class_lower);
+                    for (name, val) in list {
                         let const_name = String::from_utf8_lossy(&name).to_string();
                         result.push(create_reflection_class_constant(vm, &target, &const_name, val));
                     }
@@ -1910,7 +2147,17 @@ pub fn reflection_method_method(
             Some(if is_variadic { Value::True } else { Value::False })
         }
         b"isdeprecated" => {
-            Some(Value::False)
+            // Check for the #[\Deprecated] attribute on the method.
+            let has_dep = vm.classes.get(&class_lower)
+                .and_then(|c| c.get_method(method_lower.as_bytes()))
+                .map(|m| {
+                    m.attributes.iter().any(|a| {
+                        let n = String::from_utf8_lossy(&a.name);
+                        n.eq_ignore_ascii_case("deprecated") || n.eq_ignore_ascii_case("\\deprecated")
+                    })
+                })
+                .unwrap_or(false);
+            Some(if has_dep { Value::True } else { Value::False })
         }
         b"getstaticvariables" => {
             Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
@@ -2328,7 +2575,16 @@ pub fn reflection_function_method(
             Some(if is_variadic { Value::True } else { Value::False })
         }
         b"isdeprecated" => {
-            Some(Value::False)
+            // Check for the #[\Deprecated] attribute on the function.
+            let has_dep = vm.user_functions.get(func_lower.as_slice())
+                .map(|op| {
+                    op.attributes.iter().any(|a| {
+                        let n = String::from_utf8_lossy(&a.name);
+                        n.eq_ignore_ascii_case("deprecated") || n.eq_ignore_ascii_case("\\deprecated")
+                    })
+                })
+                .unwrap_or(false);
+            Some(if has_dep { Value::True } else { Value::False })
         }
         b"isgenerator" => {
             let is_gen = vm.user_functions.get(func_lower.as_slice())
@@ -2409,6 +2665,27 @@ pub fn reflection_function_method(
             let ob = obj.borrow();
             if ob.has_property(b"__reflection_closure_this") {
                 Some(ob.get_property(b"__reflection_closure_this"))
+            } else {
+                Some(Value::Null)
+            }
+        }
+        b"getclosure" => {
+            // Return a Closure wrapping the function. For internal functions
+            // and user functions we re-use the existing callable_to_closure
+            // machinery: the function name itself is a valid string callable.
+            let ob = obj.borrow();
+            // If the reflector was constructed from a closure, hand back its
+            // underlying callable value verbatim.
+            if ob.has_property(b"__reflection_is_closure") {
+                return Some(ob.get_property(b"__reflection_target"));
+            }
+            let name = ob.get_property(b"name").to_php_string();
+            drop(ob);
+            let func_lower: Vec<u8> = name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            if vm.user_functions.contains_key(func_lower.as_slice())
+                || vm.functions.contains_key(func_lower.as_slice())
+            {
+                Some(Value::String(name))
             } else {
                 Some(Value::Null)
             }
@@ -2692,14 +2969,18 @@ pub fn reflection_property_method(
         b"getmangledname" => {
             // PHP: private properties -> "\0ClassName\0name",
             // protected properties -> "\0*\0name", public -> "name".
-            let (vis, declaring) = vm.classes.get(&class_lower)
+            let (vis, declaring_lower) = vm.classes.get(&class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
-                .map(|p| (p.visibility, String::from_utf8_lossy(&p.declaring_class).to_string()))
-                .unwrap_or((Visibility::Public, class_name.clone()));
+                .map(|p| (p.visibility, p.declaring_class.clone()))
+                .unwrap_or((Visibility::Public, class_lower.clone()));
+            // Resolve the canonical (case-preserving) name of the declaring class.
+            let declaring_canonical = vm.classes.get(&declaring_lower)
+                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or_else(|| String::from_utf8_lossy(&declaring_lower).to_string());
             let mangled = match vis {
                 Visibility::Public => prop_name.clone(),
                 Visibility::Protected => format!("\0*\0{}", prop_name),
-                Visibility::Private => format!("\0{}\0{}", declaring, prop_name),
+                Visibility::Private => format!("\0{}\0{}", declaring_canonical, prop_name),
             };
             Some(Value::String(PhpString::from_string(mangled)))
         }
@@ -3198,11 +3479,49 @@ pub fn reflection_generator_method(
     method: &[u8],
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
+    // Helper closure to read the underlying generator (if still set).
+    let get_gen = |obj: &Rc<RefCell<PhpObject>>| -> Option<Rc<RefCell<crate::generator::PhpGenerator>>> {
+        let ob = obj.borrow();
+        match ob.get_property(b"__reflection_target") {
+            Value::Generator(g) => Some(g),
+            _ => None,
+        }
+    };
+
     match method {
         b"getexecutingfile" => {
+            if let Some(g) = get_gen(obj) {
+                let gb = g.borrow();
+                if gb.state == crate::generator::GeneratorState::Completed && !gb.is_running {
+                    let exc = vm.create_exception(b"ReflectionException", "Cannot fetch information from a closed Generator", vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                let fname = String::from_utf8_lossy(&gb.op_array.filename).to_string();
+                if !fname.is_empty() {
+                    return Some(Value::String(PhpString::from_string(fname)));
+                }
+            }
             Some(Value::String(PhpString::from_string(vm.current_file.clone())))
         }
         b"getexecutingline" => {
+            if let Some(g) = get_gen(obj) {
+                let gb = g.borrow();
+                if gb.state == crate::generator::GeneratorState::Completed && !gb.is_running {
+                    let exc = vm.create_exception(b"ReflectionException", "Cannot fetch information from a closed Generator", vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                // For a generator not yet started, return the function's
+                // declaration line. Once running, use the line of the op at
+                // the current ip.
+                if gb.state == crate::generator::GeneratorState::Created {
+                    return Some(Value::Long(gb.op_array.decl_line as i64));
+                }
+                let line = gb.op_array.ops.get(gb.ip).map(|op| op.line as i64).unwrap_or(0);
+                if line > 0 { return Some(Value::Long(line)); }
+                return Some(Value::Long(gb.op_array.decl_line as i64));
+            }
             Some(Value::Long(vm.current_line as i64))
         }
         b"getfunction" => {
@@ -3211,19 +3530,29 @@ pub fn reflection_generator_method(
                 let ob = obj.borrow();
                 ob.get_property(b"__reflection_target")
             };
-            if let Value::Generator(_) = &target {
-                // We don't track the originating function name on the
-                // Generator object in our VM; return a minimal Reflection
-                // object pointing at "{closure}".
+            if let Value::Generator(g) = &target {
+                let gb = g.borrow();
+                let fn_name = String::from_utf8_lossy(gb.op_array.effective_name()).to_string();
+                drop(gb);
                 let obj_id = vm.next_object_id();
                 let mut rf_obj = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
-                rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_bytes(b"{closure}")));
-                rf_obj.set_property(b"__reflection_target".to_vec(), Value::String(PhpString::from_bytes(b"")));
+                let display = if fn_name.is_empty() { "{closure}".to_string() } else { fn_name.clone() };
+                rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(display)));
+                rf_obj.set_property(b"__reflection_target".to_vec(), Value::String(PhpString::from_string(fn_name.to_ascii_lowercase())));
                 return Some(Value::Object(Rc::new(RefCell::new(rf_obj))));
             }
             Some(Value::Null)
         }
         b"getthis" => {
+            // Pull $this from the generator's first CV if available.
+            if let Some(g) = get_gen(obj) {
+                let gb = g.borrow();
+                if !gb.cvs.is_empty() {
+                    if let Value::Object(_) = &gb.cvs[0] {
+                        return Some(gb.cvs[0].clone());
+                    }
+                }
+            }
             Some(Value::Null)
         }
         b"getexecutinggenerator" => {
@@ -3231,11 +3560,24 @@ pub fn reflection_generator_method(
             Some(ob.get_property(b"__reflection_target"))
         }
         b"gettrace" => {
-            // Return an empty trace array (our generators don't track frames
-            // in a way we can expose here).
+            // A closed generator cannot produce a trace.
+            if let Some(g) = get_gen(obj) {
+                let gb = g.borrow();
+                if gb.state == crate::generator::GeneratorState::Completed && !gb.is_running {
+                    let exc = vm.create_exception(b"ReflectionException", "Cannot fetch information from a closed Generator", vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+            }
+            // Empty trace - generators don't track call frames here.
             Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
         }
         b"isclosed" => {
+            if let Some(g) = get_gen(obj) {
+                let gb = g.borrow();
+                let closed = gb.state == crate::generator::GeneratorState::Completed && !gb.is_running;
+                return Some(if closed { Value::True } else { Value::False });
+            }
             Some(Value::False)
         }
         _ => None,
@@ -3375,6 +3717,36 @@ pub fn reflection_extension_method(
             Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
         }
         b"info" => {
+            // Mimic PHP's per-extension MINFO block. Print the section banner,
+            // then a minimal block of key=>value entries. We don't have rich
+            // per-extension info, so fall back to a name => "enabled" row.
+            let banner = match ext_lower.as_str() {
+                "reflection" => "Reflection\n\nReflection => enabled\n\n".to_string(),
+                "date" => {
+                    let mut s = String::new();
+                    s.push_str("date\n\n");
+                    s.push_str("date/time support => enabled\n");
+                    s.push_str("timelib version => 2025.01\n");
+                    s.push_str("\"Olson\" Timezone Database Version => 0.system\n");
+                    s.push_str("Timezone Database => internal\n");
+                    let tz = vm.constants.get(b"__default_timezone".as_ref())
+                        .map(|v| v.to_php_string().to_string_lossy())
+                        .unwrap_or_else(|| "UTC".to_string());
+                    s.push_str(&format!("Default timezone => {}\n", tz));
+                    s.push_str("\n");
+                    s.push_str("Directive => Local Value => Master Value\n");
+                    s.push_str(&format!("date.timezone => {} => {}\n", tz, tz));
+                    s.push_str("date.default_latitude => 31.7667 => 31.7667\n");
+                    s.push_str("date.default_longitude => 35.2333 => 35.2333\n");
+                    s.push_str("date.sunset_zenith => 90.833333 => 90.833333\n");
+                    s.push_str("date.sunrise_zenith => 90.833333 => 90.833333\n");
+                    s
+                }
+                _ => format!("{}\n\n{} => enabled\n", name, name),
+            };
+            // Emit the banner via the VM's output stream so this works under
+            // both echo and the test runner.
+            vm.write_output(banner.as_bytes());
             Some(Value::Null)
         }
         b"ispersistent" => {
@@ -3610,7 +3982,15 @@ pub fn reflection_class_constant_method(
             drop(ob);
             Some(if Vm::is_enum_case(&val) { Value::True } else { Value::False })
         }
-        b"isdeprecated" => Some(Value::False),
+        b"isdeprecated" => {
+            let has_dep = meta.as_ref().map(|m| {
+                m.attributes.iter().any(|a| {
+                    let n = String::from_utf8_lossy(&a.name);
+                    n.eq_ignore_ascii_case("deprecated") || n.eq_ignore_ascii_case("\\deprecated")
+                })
+            }).unwrap_or(false);
+            Some(if has_dep { Value::True } else { Value::False })
+        }
         b"hastype" => Some(Value::False),
         b"gettype" => Some(Value::Null),
         // ReflectionEnumUnitCase/BackedCase methods
@@ -3754,12 +4134,14 @@ pub fn reflection_static_call(vm: &mut Vm, class_lower: &str, method_lower: &str
                 "getmodifiernames" => {
                     let modifiers = args.first().map(|v| v.to_long()).unwrap_or(0);
                     let mut names = PhpArray::new();
-                    if modifiers & 0x10 != 0 { names.push(Value::String(PhpString::from_bytes(b"static"))); }
+                    // Order matches PHP: abstract, final, public, protected,
+                    // private, static, readonly.
                     if modifiers & 0x40 != 0 { names.push(Value::String(PhpString::from_bytes(b"abstract"))); }
                     if modifiers & 0x20 != 0 { names.push(Value::String(PhpString::from_bytes(b"final"))); }
                     if modifiers & 1 != 0 { names.push(Value::String(PhpString::from_bytes(b"public"))); }
                     if modifiers & 2 != 0 { names.push(Value::String(PhpString::from_bytes(b"protected"))); }
                     if modifiers & 4 != 0 { names.push(Value::String(PhpString::from_bytes(b"private"))); }
+                    if modifiers & 0x10 != 0 { names.push(Value::String(PhpString::from_bytes(b"static"))); }
                     if modifiers & 0x10000 != 0 { names.push(Value::String(PhpString::from_bytes(b"readonly"))); }
                     Some(Value::Array(Rc::new(RefCell::new(names))))
                 }
@@ -3847,8 +4229,13 @@ pub fn reflection_static_call(vm: &mut Vm, class_lower: &str, method_lower: &str
 
 /// Create a ReflectionClass object for a given class name
 pub fn create_reflection_class(vm: &mut Vm, class_name: &str) -> Value {
+    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    // If the target class is an enum, materialize a ReflectionEnum so that
+    // callers like `getDeclaringClass()::class` see the right runtime type.
+    let is_enum = vm.classes.get(&class_lower).map(|c| c.is_enum).unwrap_or(false);
+    let reflector = if is_enum { b"ReflectionEnum".to_vec() } else { b"ReflectionClass".to_vec() };
     let obj_id = vm.next_object_id();
-    let mut obj = PhpObject::new(b"ReflectionClass".to_vec(), obj_id);
+    let mut obj = PhpObject::new(reflector, obj_id);
     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(class_name.to_string())));
     obj.set_property(b"__reflection_target".to_vec(), Value::String(PhpString::from_string(class_name.to_string())));
     Value::Object(Rc::new(RefCell::new(obj)))
@@ -4089,19 +4476,34 @@ fn reflection_class_get_constant(vm: &mut Vm, class_lower: &[u8], const_name: &[
 
 /// Collect parent constants into the result array
 fn reflection_collect_parent_constants(vm: &Vm, class_lower: &[u8], result: &mut PhpArray) {
-    if let Some(ce) = vm.classes.get(class_lower) {
-        if let Some(ref parent) = ce.parent {
-            let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if let Some(pce) = vm.classes.get(&parent_lower) {
-                for (name, val) in &pce.constants {
-                    let key = ArrayKey::String(PhpString::from_vec(name.clone()));
-                    if result.get(&key).is_none() {
-                        result.set(key, val.clone());
-                    }
+    // First, the parent from user-registered class entry (if any).
+    let user_parent_lower: Option<Vec<u8>> = vm.classes.get(class_lower)
+        .and_then(|ce| ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect()));
+    // Otherwise, walk built-in parent chains so subclasses of built-in
+    // classes (e.g. RecursiveArrayIterator extends ArrayIterator) pick up
+    // inherited constants.
+    let parent_lower: Option<Vec<u8>> = user_parent_lower.or_else(|| {
+        crate::vm::get_builtin_parent(class_lower).map(|p| {
+            p.iter().map(|b| b.to_ascii_lowercase()).collect()
+        })
+    });
+    if let Some(parent_lower) = parent_lower {
+        if let Some(pce) = vm.classes.get(&parent_lower) {
+            for (name, val) in &pce.constants {
+                let key = ArrayKey::String(PhpString::from_vec(name.clone()));
+                if result.get(&key).is_none() {
+                    result.set(key, val.clone());
                 }
             }
-            reflection_collect_parent_constants(vm, &parent_lower, result);
         }
+        // Inherit built-in own constants of the parent class.
+        for (name, val) in vm.get_builtin_class_constants_list(&parent_lower) {
+            let key = ArrayKey::String(PhpString::from_vec(name));
+            if result.get(&key).is_none() {
+                result.set(key, val);
+            }
+        }
+        reflection_collect_parent_constants(vm, &parent_lower, result);
     }
 }
 
@@ -4142,8 +4544,18 @@ fn reflection_property_modifiers_static(prop: &crate::object::PropertyDef) -> i6
     mods
 }
 
+/// Selector for which reflector class is producing the __toString output.
+/// Affects the header line: `Class [ ... ]`, `Object of class [ ... ]`,
+/// or `Enum [ ... ]`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReflectionStringKind {
+    Class,
+    Object,
+    Enum,
+}
+
 /// Build the complete __toString representation for a ReflectionClass
-fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8]) -> String {
+fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8], kind: ReflectionStringKind) -> String {
     let mut s = String::new();
 
     let is_interface = vm.classes.get(class_lower).map(|c| c.is_interface).unwrap_or(false);
@@ -4152,23 +4564,30 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8]) -> String
     let is_abstract = vm.classes.get(class_lower).map(|c| c.is_abstract).unwrap_or(false);
     let is_final = vm.classes.get(class_lower).map(|c| c.is_final).unwrap_or(false);
     let is_readonly = vm.classes.get(class_lower).map(|c| c.is_readonly).unwrap_or(false);
-    let is_user = vm.classes.contains_key(class_lower);
+    // A class is "user-defined" when it has a source filename recorded; built-in
+    // classes loaded synthetically into vm.classes have no filename.
+    let is_user = vm.classes.get(class_lower).map(|c| c.filename.is_some()).unwrap_or(false);
+    let user_or_internal = if is_user { "user" } else { "internal" };
 
     // Header line
     if is_interface {
-        s.push_str(&format!("Interface [ <user> interface {} ", name));
+        s.push_str(&format!("Interface [ <{}> interface {} ", user_or_internal, name));
     } else if is_trait {
-        s.push_str(&format!("Trait [ <user> trait {} ", name));
-    } else if is_enum {
-        let kind = if is_user { "user" } else { "internal" };
-        s.push_str(&format!("Class [ <{}> final class {} ", kind, name));
-    } else {
-        let kind = if is_user { "user" } else { "internal" };
+        s.push_str(&format!("Trait [ <{}> trait {} ", user_or_internal, name));
+    } else if is_enum || kind == ReflectionStringKind::Enum {
+        s.push_str(&format!("Enum [ <{}> enum {} ", user_or_internal, name));
+    } else if kind == ReflectionStringKind::Object {
         let mut modifiers = String::new();
         if is_abstract { modifiers.push_str("abstract "); }
         if is_final { modifiers.push_str("final "); }
         if is_readonly { modifiers.push_str("readonly "); }
-        s.push_str(&format!("Class [ <{}> {}class {} ", kind, modifiers, name));
+        s.push_str(&format!("Object of class [ <{}> {}class {} ", user_or_internal, modifiers, name));
+    } else {
+        let mut modifiers = String::new();
+        if is_abstract { modifiers.push_str("abstract "); }
+        if is_final { modifiers.push_str("final "); }
+        if is_readonly { modifiers.push_str("readonly "); }
+        s.push_str(&format!("Class [ <{}> {}class {} ", user_or_internal, modifiers, name));
     }
 
     // Parent and interfaces
@@ -4196,11 +4615,24 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8]) -> String
         }
     }
 
-    // Constants section
+    // Enum cases section (for enums)
+    if is_enum {
+        if let Some(ce) = vm.classes.get(class_lower) {
+            s.push_str(&format!("\n  - Enum cases [{}] {{\n", ce.enum_cases.len()));
+            for (case_name, _) in &ce.enum_cases {
+                s.push_str(&format!("    Case {}\n", String::from_utf8_lossy(case_name)));
+            }
+            s.push_str("  }\n");
+        }
+    }
+
+    // Constants section. Enum cases are constants in the class table but should
+    // not appear in the - Constants - section for an enum.
     if let Some(ce) = vm.classes.get(class_lower) {
-        let const_count = ce.constants.len();
-        s.push_str(&format!("\n  - Constants [{}] {{\n", const_count));
-        for (cname, cval) in &ce.constants {
+        let case_names: std::collections::HashSet<&[u8]> = ce.enum_cases.iter().map(|(n, _)| n.as_slice()).collect();
+        let regular_consts: Vec<_> = ce.constants.iter().filter(|(n, _)| !case_names.contains(n.as_slice())).collect();
+        s.push_str(&format!("\n  - Constants [{}] {{\n", regular_consts.len()));
+        for (cname, cval) in regular_consts {
             let const_name_str = String::from_utf8_lossy(cname);
             let meta = ce.constants_meta.get(cname.as_slice());
             let vis = meta.map(|m| m.visibility).unwrap_or(Visibility::Public);
@@ -4238,9 +4670,12 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8]) -> String
         s.push_str("\n  - Static properties [0] {\n  }\n");
     }
 
-    // Static methods
+    // Static methods. Hide property hook synthetic methods.
     if let Some(ce) = vm.classes.get(class_lower) {
-        let static_methods: Vec<_> = ce.methods.values().filter(|m| m.is_static).collect();
+        let static_methods: Vec<_> = ce.methods.values()
+            .filter(|m| m.is_static)
+            .filter(|m| !m.name.starts_with(b"__property_get_") && !m.name.starts_with(b"__property_set_"))
+            .collect();
         s.push_str(&format!("\n  - Static methods [{}] {{\n", static_methods.len()));
         for m in static_methods {
             reflection_method_to_string_section(&mut s, m);
@@ -4250,9 +4685,13 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8]) -> String
         s.push_str("\n  - Static methods [0] {\n  }\n");
     }
 
-    // Properties (non-static)
+    // Properties (non-static). Inherited private (instance) props are not
+    // listed on subclasses.
     if let Some(ce) = vm.classes.get(class_lower) {
-        let inst_props: Vec<_> = ce.properties.iter().filter(|p| !p.is_static).collect();
+        let inst_props: Vec<_> = ce.properties.iter()
+            .filter(|p| !p.is_static)
+            .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
+            .collect();
         s.push_str(&format!("\n  - Properties [{}] {{\n", inst_props.len()));
         for prop in inst_props {
             let vis = match prop.visibility {
@@ -4275,9 +4714,14 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8]) -> String
         s.push_str("\n  - Properties [0] {\n  }\n");
     }
 
-    // Methods (non-static)
+    // Methods (non-static). Hide property hook synthetic methods and
+    // inherited private methods.
     if let Some(ce) = vm.classes.get(class_lower) {
-        let inst_methods: Vec<_> = ce.methods.values().filter(|m| !m.is_static).collect();
+        let inst_methods: Vec<_> = ce.methods.values()
+            .filter(|m| !m.is_static)
+            .filter(|m| !m.name.starts_with(b"__property_get_") && !m.name.starts_with(b"__property_set_"))
+            .filter(|m| !(m.visibility == Visibility::Private && m.declaring_class != class_lower))
+            .collect();
         s.push_str(&format!("\n  - Methods [{}] {{\n", inst_methods.len()));
         for m in inst_methods {
             reflection_method_to_string_section(&mut s, m);

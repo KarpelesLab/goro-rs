@@ -6476,6 +6476,7 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
                     | b"random\\engine\\xoshiro256starstar"
                     | b"random\\engine\\pcgoneseq128xslrr64"
                     | b"random\\randomizer"
+                    | b"datetime" | b"datetimeimmutable" | b"datetimezone" | b"dateinterval"
                 )
             };
             let has_serialize = vm.classes.get(&class_lower)
@@ -6982,6 +6983,7 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
                     | b"random\\engine\\xoshiro256starstar"
                     | b"random\\engine\\pcgoneseq128xslrr64"
                     | b"random\\randomizer"
+                    | b"datetime" | b"datetimeimmutable" | b"datetimezone" | b"dateinterval"
                 )
             };
             let has_unserialize = vm.classes.get(&class_lower)
@@ -6989,14 +6991,24 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
                 .unwrap_or(false)
                 || spl_has_builtin_unserialize(class_lower.as_slice())
                 || {
+                    // Walk both user-defined and built-in parent chains so that
+                    // `class X extends ArrayObject {}` inherits ArrayObject's
+                    // __unserialize handler.
                     let mut found = false;
                     let mut check = class_lower.clone();
-                    for _ in 0..10 {
-                        if let Some(parent) = goro_core::vm::get_builtin_parent(&check) {
-                            let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if spl_has_builtin_unserialize(&parent_lower) { found = true; break; }
-                            check = parent_lower;
-                        } else { break; }
+                    for _ in 0..20 {
+                        let next: Option<Vec<u8>> = vm.classes.get(&check)
+                            .and_then(|c| c.parent.clone())
+                            .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
+                            .or_else(|| goro_core::vm::get_builtin_parent(&check)
+                                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect()));
+                        match next {
+                            Some(parent_lower) => {
+                                if spl_has_builtin_unserialize(&parent_lower) { found = true; break; }
+                                check = parent_lower;
+                            }
+                            None => break,
+                        }
                     }
                     found
                 };

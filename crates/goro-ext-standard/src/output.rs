@@ -485,28 +485,19 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             );
 
             if has_debug_info || is_spl_debug {
-                // Call __debugInfo() and use the returned array for display
-                let debug_result = if is_spl_debug {
-                    // Use SPL dispatch for __debugInfo
-                    vm.call_object_method(val, b"__debugInfo", &[])
-                } else {
-                    let class_entry = vm.classes.get(&class_lower).cloned();
-                    if let Some(class) = class_entry {
-                        if let Some(method) = class.get_method(b"__debuginfo") {
-                            let op = method.op_array.clone();
-                            let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
-                            if !fn_cvs.is_empty() {
-                                fn_cvs[0] = val.clone(); // $this
-                            }
-                            vm.execute_fn(&op, fn_cvs).ok()
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                };
+                // Call __debugInfo() and use the returned array for display.
+                // Use call_object_method so the class scope / called-class stacks
+                // are pushed correctly — without them, the method body cannot
+                // access private/protected properties of $this.
+                let debug_result = vm.call_object_method(val, b"__debugInfo", &[]);
 
+                // Unwrap a by-reference return — var_dump dereferences before
+                // walking the array, mirroring PHP's behaviour for
+                // `&__debugInfo()`.
+                let debug_result = match debug_result {
+                    Some(Value::Reference(r)) => Some(r.borrow().clone()),
+                    other => other,
+                };
                 if let Some(Value::Array(debug_arr)) = debug_result {
                     let arr_borrow = debug_arr.borrow();
                     let count = arr_borrow.len();
