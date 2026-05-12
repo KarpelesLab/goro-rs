@@ -671,7 +671,16 @@ pub fn reflection_class_method(
         }
         b"isinstantiable" => {
             if let Some(ce) = vm.classes.get(&class_lower) {
-                let instantiable = !ce.is_abstract && !ce.is_interface && !ce.is_trait && !ce.is_enum;
+                let mut instantiable = !ce.is_abstract && !ce.is_interface && !ce.is_trait && !ce.is_enum;
+                // A class with a non-public constructor isn't instantiable
+                // from outside, so isInstantiable() reports false.
+                if instantiable {
+                    if let Some(ctor) = ce.get_method(b"__construct") {
+                        if ctor.visibility != Visibility::Public {
+                            instantiable = false;
+                        }
+                    }
+                }
                 Some(if instantiable { Value::True } else { Value::False })
             } else {
                 // Built-in classes are generally instantiable
