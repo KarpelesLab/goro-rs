@@ -714,11 +714,12 @@ pub fn reflection_class_method(
             Some(if is_iterable { Value::True } else { Value::False })
         }
         b"getinterfacenames" => {
+            // Collect all interfaces reachable via implements/extends chains.
+            let mut collected: Vec<Vec<u8>> = Vec::new();
+            collect_all_interfaces(vm, &class_lower, &mut collected);
             let mut names = PhpArray::new();
-            if let Some(ce) = vm.classes.get(&class_lower) {
-                for iface in &ce.interfaces {
-                    names.push(Value::String(PhpString::from_vec(iface.clone())));
-                }
+            for iface in collected {
+                names.push(Value::String(PhpString::from_vec(iface)));
             }
             // Add implicit Stringable interface for classes with __toString
             if vm.class_implements_interface(&class_lower, b"stringable") {
@@ -732,13 +733,13 @@ pub fn reflection_class_method(
             Some(Value::Array(Rc::new(RefCell::new(names))))
         }
         b"getinterfaces" => {
+            let mut collected: Vec<Vec<u8>> = Vec::new();
+            collect_all_interfaces(vm, &class_lower, &mut collected);
             let mut result = PhpArray::new();
-            if let Some(ce) = vm.classes.get(&class_lower) {
-                for iface in ce.interfaces.clone() {
-                    let iface_name = String::from_utf8_lossy(&iface).to_string();
-                    let rc = create_reflection_class(vm, &iface_name);
-                    result.set(ArrayKey::String(PhpString::from_vec(iface.clone())), rc);
-                }
+            for iface in collected {
+                let iface_name = String::from_utf8_lossy(&iface).to_string();
+                let rc = create_reflection_class(vm, &iface_name);
+                result.set(ArrayKey::String(PhpString::from_vec(iface.clone())), rc);
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
@@ -1467,7 +1468,9 @@ pub fn reflection_class_docall(
                     }
                 }
 
-                let result = vm.class_implements_interface(&class_lower, &iface_lower)
+                // An interface "implements" itself per PHP semantics.
+                let result = class_lower == iface_lower
+                    || vm.class_implements_interface(&class_lower, &iface_lower)
                     || vm.builtin_implements_interface(&class_lower, &iface_lower);
                 Some(if result { Value::True } else { Value::False })
             }
@@ -4402,6 +4405,70 @@ fn reflection_class_get_constant(vm: &mut Vm, class_lower: &[u8], const_name: &[
         }
     }
     Some(raw)
+}
+
+/// Collect all interfaces reachable from a class by walking its
+/// `implements` list, then each interface's `extends` chain, and finally
+/// repeating for the class's parent chain. Names are returned in the order
+/// PHP emits (BFS-ish: directly declared first, then their parents).
+///
+/// For interfaces themselves, the `extends` chain is stored as `parent`
+/// (rather than `interfaces`), so we additionally walk the parent chain
+/// when the target IS an interface.
+fn collect_all_interfaces(vm: &Vm, class_lower: &[u8], out: &mut Vec<Vec<u8>>) {
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let starts_as_interface = vm.classes.get(class_lower).map(|c| c.is_interface).unwrap_or(false);
+    // Walk class -> parents collecting their `implements` list.
+    let mut cur: Vec<u8> = class_lower.to_vec();
+    for _ in 0..50 {
+        if let Some(ce) = vm.classes.get(&cur) {
+            for iface in &ce.interfaces {
+                let iface_canonical = iface.clone();
+                let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if !seen.contains(&iface_lower) {
+                    seen.insert(iface_lower.clone());
+                    out.push(iface_canonical.clone());
+                    // Walk this interface's `extends` chain (interfaces are
+                    // represented with parent = extended interface).
+                    let mut pcur = iface_lower.clone();
+                    for _ in 0..50 {
+                        let parent = vm.classes.get(&pcur).and_then(|c| c.parent.clone());
+                        match parent {
+                            Some(p) => {
+                                let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if seen.insert(p_lower.clone()) {
+                                    out.push(p.clone());
+                                }
+                                pcur = p_lower;
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+            // If our starting class is itself an interface, walk its parent
+            // chain (PHP stores interface->interface inheritance as parent).
+            if starts_as_interface {
+                match &ce.parent {
+                    Some(p) => {
+                        let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if seen.insert(p_lower.clone()) {
+                            out.push(p.clone());
+                        }
+                        cur = p_lower;
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+            match &ce.parent {
+                Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
+                None => break,
+            }
+        } else {
+            break;
+        }
+    }
 }
 
 /// Collect parent constants into the result array
