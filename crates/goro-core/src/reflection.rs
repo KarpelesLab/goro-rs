@@ -4518,9 +4518,12 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8], kind: Ref
         s.push_str("\n  - Constants [0] {\n  }\n");
     }
 
-    // Static properties
+    // Static properties. Inherited private static props are not listed on subclasses.
     if let Some(ce) = vm.classes.get(class_lower) {
-        let static_props: Vec<_> = ce.properties.iter().filter(|p| p.is_static).collect();
+        let static_props: Vec<_> = ce.properties.iter()
+            .filter(|p| p.is_static)
+            .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
+            .collect();
         s.push_str(&format!("\n  - Static properties [{}] {{\n", static_props.len()));
         for prop in static_props {
             let vis = match prop.visibility {
@@ -4530,7 +4533,13 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8], kind: Ref
             };
             let type_str = prop.property_type.as_ref().map(|t| format!(" {}", param_type_name(t))).unwrap_or_default();
             let prop_name_str = String::from_utf8_lossy(&prop.name);
-            s.push_str(&format!("    Property [ {} static{} ${} ]\n", vis, type_str, prop_name_str));
+            // For uninitialized static props, PHP renders the default as NULL.
+            let default_str = if matches!(prop.default, Value::Undef) {
+                " = NULL".to_string()
+            } else {
+                format!(" = {}", reflection_value_repr(&prop.default))
+            };
+            s.push_str(&format!("    Property [ {} static{} ${}{} ]\n", vis, type_str, prop_name_str, default_str));
         }
         s.push_str("  }\n");
     } else {
