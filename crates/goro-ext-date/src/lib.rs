@@ -394,9 +394,15 @@ fn is_known_tz_abbrev_or_name(s: &str) -> bool {
         | "GST" | "AZOT" | "AZOST"
         => true,
         _ => {
-            // IANA zone like "Europe/Oslo"
-            if s.contains('/') && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'_' || b == b'-' || b == b'+') {
-                return true;
+            // IANA zone like "Europe/Oslo": must contain a letter on either side
+            // of `/` (rules out "2005/8/12"-style date inputs).
+            if s.contains('/')
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'_' || b == b'-' || b == b'+')
+            {
+                // Require that the first character is a letter (Continent name).
+                if s.bytes().next().map(|b| b.is_ascii_alphabetic()).unwrap_or(false) {
+                    return true;
+                }
             }
             false
         }
@@ -1815,6 +1821,13 @@ pub fn parse_datetime_string(input: &str, now: i64) -> Option<i64> {
         return ts_part.parse::<i64>().ok();
     }
 
+    // Standalone timezone identifier or offset -> treat as "now in that tz".
+    if parse_tz_offset(s).is_some() || s.eq_ignore_ascii_case("UTC")
+        || s.eq_ignore_ascii_case("GMT") || is_known_tz_abbrev_or_name(s)
+    {
+        return Some(now);
+    }
+
     // Try absolute date formats first
     if let Some(ts) = try_parse_absolute(s) {
         return Some(ts);
@@ -2039,6 +2052,20 @@ fn try_parse_absolute(s: &str) -> Option<i64> {
                 let tz_offset = parse_tz_from_time_parts(parts.get(1));
                 let days = ymd_to_days(year, month, day);
                 return Some(days * 86400 + time - tz_offset);
+            }
+        }
+    }
+
+    // Try YYYY-MM (no day, defaults to day 1)
+    if date_parts.len() == 2 {
+        if let (Ok(year), Ok(month)) = (
+            date_parts[0].parse::<i64>(),
+            date_parts[1].parse::<u32>(),
+        ) {
+            if month >= 1 && month <= 12 && date_parts[0].len() == 4 {
+                let time = parse_time_from_parts(parts.get(1));
+                let days = ymd_to_days(year, month, 1);
+                return Some(days * 86400 + time);
             }
         }
     }
