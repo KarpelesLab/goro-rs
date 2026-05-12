@@ -138,6 +138,18 @@ pub fn register(vm: &mut Vm) {
 
 fn date_default_timezone_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let tz = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    // Validate against known TZ identifiers/abbreviations/offsets.
+    let is_valid = tz == "UTC" || tz == "utc" || tz == "GMT" || tz == "Z"
+        || parse_tz_offset(&tz).is_some()
+        || (tz.contains('/') && is_known_tz_identifier(&tz))
+        || is_known_tz_abbrev_or_name(&tz);
+    if !is_valid {
+        vm.emit_notice_at(
+            &format!("date_default_timezone_set(): Timezone ID '{}' is invalid", tz),
+            vm.current_line,
+        );
+        return Ok(Value::False);
+    }
     vm.constants.insert(b"__default_timezone".to_vec(), Value::String(PhpString::from_string(tz)));
     Ok(Value::True)
 }
