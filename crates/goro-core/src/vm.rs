@@ -2704,6 +2704,58 @@ impl Vm {
         }
     }
 
+    /// Check whether a parameter type would coerce a finite non-integer float into an int.
+    /// Used to determine if the implicit float-to-int deprecation should fire.
+    /// The check is: type is int (possibly nullable, or as part of a union where int wins).
+    /// In a union containing `float`, the float stays as float (no conversion at all).
+    fn param_type_coerces_float_to_int(param_type: &ParamType) -> bool {
+        match param_type {
+            ParamType::Simple(name) => {
+                matches!(name.as_slice(), b"int" | b"integer")
+            }
+            ParamType::Nullable(inner) => Self::param_type_coerces_float_to_int(inner),
+            ParamType::Union(types) => {
+                // If `float` is in the union, the value stays as float - no precision loss.
+                let has_float = types.iter().any(|t| matches!(t,
+                    ParamType::Simple(n) if matches!(n.as_slice(), b"float" | b"double")));
+                if has_float {
+                    return false;
+                }
+                // If `int` is in the union, a finite float with fractional part is coerced
+                // to int (with deprecation). NaN/infinity follow other rules but those are
+                // already filtered by the caller (only finite, non-integer floats reach here).
+                types.iter().any(|t| matches!(t,
+                    ParamType::Simple(n) if matches!(n.as_slice(), b"int" | b"integer")))
+            }
+            ParamType::Intersection(_) => false,
+        }
+    }
+
+    /// Emit "Implicit conversion from float X to int loses precision" if the value is
+    /// a finite float with a non-integer fractional part and the target type would
+    /// coerce it to int. Used for typed property assignments, function parameter
+    /// coercion (non-strict mode), and return-type coercion.
+    fn emit_implicit_float_to_int_if_needed(&mut self, value: &Value, param_type: &ParamType, line: u32) {
+        let inner: Value = if let Value::Reference(r) = value {
+            r.borrow().clone()
+        } else {
+            value.clone()
+        };
+        if let Value::Double(f) = inner {
+            if f.is_finite() && f.fract() != 0.0 {
+                if Self::param_type_coerces_float_to_int(param_type) {
+                    self.emit_deprecated_at(
+                        &format!(
+                            "Implicit conversion from float {} to int loses precision",
+                            crate::value::format_php_float(f)
+                        ),
+                        line,
+                    );
+                }
+            }
+        }
+    }
+
     /// Coerce a single value to match a parameter type.
     fn coerce_value_to_type(value: &mut Value, param_type: &ParamType, strict: bool) {
         match param_type {
@@ -11320,6 +11372,8 @@ impl Vm {
         if let Ok(ref mut val) = result {
             if let Some(ref ret_type) = op_array.return_type {
                 if !op_array.strict_types {
+                    // Note: implicit float-to-int deprecation is emitted at the
+                    // OpCode::Return site (before finally blocks run), not here.
                     // Weak mode: coerce return value
                     Self::coerce_value_to_type(val, ret_type, false);
                 }
@@ -15502,6 +15556,17 @@ impl Vm {
                                     });
                                 }
                             }
+                            // Emit implicit float-to-int deprecation for non-strict mode
+                            // BEFORE coercion truncates the value.
+                            if !op_array.strict_types {
+                                for (i, arg) in call.args.iter().enumerate() {
+                                    if i >= user_fn.param_types.len() { break; }
+                                    if matches!(arg, Value::Undef) { continue; }
+                                    if let Some(type_info) = &user_fn.param_types[i] {
+                                        self.emit_implicit_float_to_int_if_needed(arg, &type_info.param_type, op.line);
+                                    }
+                                }
+                            }
                             // Coerce args to their declared types (weak mode)
                             Self::coerce_param_types(
                                 &user_fn,
@@ -17140,6 +17205,15 @@ impl Vm {
                 OpCode::Return => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.last_return_line = op.line;
+                    // Emit implicit float-to-int deprecation BEFORE finally blocks run
+                    // (so the warning appears in source order, before any side effects in finally).
+                    // Only fires in weak mode and when the return type would coerce float to int.
+                    if !op_array.strict_types {
+                        if let Some(ref ret_type) = op_array.return_type {
+                            let ret_type_clone = ret_type.clone();
+                            self.emit_implicit_float_to_int_if_needed(&val, &ret_type_clone, op.line);
+                        }
+                    }
                     // A return statement inside a finally block discards any pending exception
                     self.current_exception = None;
                     // Also clear any pending deferred return/jump (this explicit return supersedes it)
@@ -20780,6 +20854,15 @@ impl Vm {
                     } else {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
+                    // Emit implicit float-to-int deprecation BEFORE finally blocks run
+                    // (so the warning appears in source order, before any side effects in finally).
+                    // Only fires in weak mode and when the return type would coerce float to int.
+                    if !op_array.strict_types {
+                        if let Some(ref ret_type) = op_array.return_type {
+                            let ret_type_clone = ret_type.clone();
+                            self.emit_implicit_float_to_int_if_needed(&val, &ret_type_clone, op.line);
+                        }
+                    }
                     self.pending_return = Some(val);
                     // A return inside try-with-finally discards any pending jump
                     self.pending_finally_jump = None;
@@ -24876,6 +24959,8 @@ impl Vm {
                                 if let Some(ref pt) = prop_type {
                                     // Try coercion in weak mode
                                     if !op_array.strict_types {
+                                        // Emit implicit float-to-int deprecation BEFORE coercion truncates
+                                        self.emit_implicit_float_to_int_if_needed(&value, pt, op.line);
                                         Self::coerce_value_to_type(&mut value, pt, false);
                                     }
                                     if !self.value_matches_type(&value, pt) {
