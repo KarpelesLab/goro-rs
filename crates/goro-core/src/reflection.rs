@@ -3902,9 +3902,15 @@ pub fn reflection_class_constant_method(
         b"getdoccomment" => Some(Value::False),
         b"isfinal" => Some(if is_final { Value::True } else { Value::False }),
         b"isenumcase" => {
-            let val = ob.get_property(b"__reflection_value");
+            // A ReflectionClassConstant is an enum case only when the
+            // constant was declared as `case Foo;` on an enum — not when
+            // it's a regular constant that *happens* to reference an enum
+            // case value (e.g. `const Baz = self::Bar;`).
+            let is_case = vm.classes.get(&class_lower)
+                .map(|ce| ce.enum_cases.iter().any(|(cn, _)| cn == const_name.as_bytes()))
+                .unwrap_or(false);
             drop(ob);
-            Some(if Vm::is_enum_case(&val) { Value::True } else { Value::False })
+            Some(if is_case { Value::True } else { Value::False })
         }
         b"isdeprecated" => {
             let has_dep = meta.as_ref().map(|m| {
