@@ -475,8 +475,6 @@ fn name_to_php_string(name: &Name) -> String {
 
 // ── Signature algorithm OIDs ──
 
-const OID_MD2_RSA: &str = "1.2.840.113549.1.1.2";
-const OID_MD5_RSA: &str = "1.2.840.113549.1.1.4";
 const OID_SHA1_RSA: &str = "1.2.840.113549.1.1.5";
 const OID_SHA224_RSA: &str = "1.2.840.113549.1.1.14";
 const OID_SHA256_RSA: &str = "1.2.840.113549.1.1.11";
@@ -486,8 +484,6 @@ const OID_SHA512_RSA: &str = "1.2.840.113549.1.1.13";
 fn sig_alg_info(oid: &ObjectIdentifier) -> (String, String, i64) {
     let oid_str = oid.to_string();
     match oid_str.as_str() {
-        OID_MD2_RSA => ("RSA-MD2".into(), "md2WithRSAEncryption".into(), 7),
-        OID_MD5_RSA => ("RSA-MD5".into(), "md5WithRSAEncryption".into(), 8),
         OID_SHA1_RSA => ("RSA-SHA1".into(), "sha1WithRSAEncryption".into(), 65),
         OID_SHA224_RSA => ("RSA-SHA224".into(), "sha224WithRSAEncryption".into(), 671),
         OID_SHA256_RSA => ("RSA-SHA256".into(), "sha256WithRSAEncryption".into(), 668),
@@ -725,10 +721,8 @@ fn encode_time(t: &Time) -> (String, i64) {
     let hour = dt.hour();
     let minute = dt.minutes();
     let second = dt.seconds();
-    // Match the format that's actually encoded on-wire: UTCTime uses 2-digit
-    // year, GeneralizedTime uses 4-digit year.
-    let s = match t {
-        Time::UtcTime(_) => format!(
+    let s = if year < 2050 {
+        format!(
             "{:02}{:02}{:02}{:02}{:02}{:02}Z",
             year % 100,
             month,
@@ -736,11 +730,12 @@ fn encode_time(t: &Time) -> (String, i64) {
             hour,
             minute,
             second
-        ),
-        Time::GeneralTime(_) => format!(
+        )
+    } else {
+        format!(
             "{:04}{:02}{:02}{:02}{:02}{:02}Z",
             year, month, day, hour, minute, second
-        ),
+        )
     };
     let unix = t.to_unix_duration().as_secs() as i64;
     (s, unix)
@@ -912,14 +907,8 @@ fn decode_authority_key_identifier(value: &[u8]) -> String {
                     out.push('\n');
                 }
                 out.push_str("serial:");
-                // Strip leading 0x00 sign byte if the next byte has high bit
-                // set (matches OpenSSL's display convention).
-                let mut bytes = body;
-                if bytes.len() > 1 && bytes[0] == 0 && (bytes[1] & 0x80) != 0 {
-                    bytes = &bytes[1..];
-                }
                 out.push_str(
-                    &bytes
+                    &body
                         .iter()
                         .map(|b| format!("{:02X}", b))
                         .collect::<Vec<_>>()
@@ -1088,12 +1077,6 @@ pub fn openssl_x509_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Value,
         }
     };
     let path = filename.to_string_lossy().to_string();
-    if path.len() > 4096 || path.is_empty() {
-        vm.emit_warning(
-            "openssl_x509_export_to_file(output_filename): must be a valid file path",
-        );
-        return Ok(Value::False);
-    }
     match std::fs::write(&path, pem) {
         Ok(()) => Ok(Value::True),
         Err(e) => {
@@ -1417,12 +1400,6 @@ pub fn openssl_csr_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Value, 
         }
     };
     let path = filename.to_string_lossy().to_string();
-    if path.len() > 4096 || path.is_empty() {
-        vm.emit_warning(
-            "openssl_csr_export_to_file(output_filename): must be a valid file path",
-        );
-        return Ok(Value::False);
-    }
     match std::fs::write(&path, pem) {
         Ok(()) => Ok(Value::True),
         Err(e) => {
