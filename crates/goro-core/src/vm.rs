@@ -4701,7 +4701,7 @@ impl Vm {
                             Some(tz)
                         }
                     }
-                    b"getoffset" => Some(Value::Long(0)),
+                    // getoffset takes a $datetime arg - handled in handle_spl_docall.
                     b"__serialize" => {
                         let ob = obj.borrow();
                         let mut arr = PhpArray::new();
@@ -9434,15 +9434,43 @@ impl Vm {
                         }
                         b"getoffset" => {
                             // DateTimeZone::getOffset(DateTimeInterface $datetime)
+                            // Validate the argument type first.
+                            let dt_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            let dt_obj = match &dt_arg {
+                                Value::Object(o) => {
+                                    let cl: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if cl == b"datetime" || cl == b"datetimeimmutable"
+                                        || self.class_extends(&cl, b"datetime")
+                                        || self.class_extends(&cl, b"datetimeimmutable")
+                                    {
+                                        Some(o.clone())
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                            let dt_obj = if let Some(o) = dt_obj { o } else {
+                                let actual = match &dt_arg {
+                                    Value::Null => "null".to_string(),
+                                    Value::Long(_) => "int".to_string(),
+                                    Value::Double(_) => "float".to_string(),
+                                    Value::String(_) => "string".to_string(),
+                                    Value::Array(_) => "array".to_string(),
+                                    Value::Object(o) => String::from_utf8_lossy(&o.borrow().class_name).to_string(),
+                                    Value::True | Value::False => "bool".to_string(),
+                                    _ => "value".to_string(),
+                                };
+                                let msg = format!("DateTimeZone::getOffset(): Argument #1 ($datetime) must be of type DateTimeInterface, {} given", actual);
+                                let exc = self.create_exception(b"TypeError", &msg, self.current_line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            };
                             let ob = obj.borrow();
                             let tz_name = ob.get_property(b"timezone").to_php_string().to_string_lossy();
                             drop(ob);
                             let tz_name = if tz_name.is_empty() { "UTC".to_string() } else { tz_name };
-                            let ts = if let Some(Value::Object(dt_obj)) = args.get(1) {
-                                dt_obj.borrow().get_property(b"__timestamp").to_long()
-                            } else {
-                                0
-                            };
+                            let ts = dt_obj.borrow().get_property(b"__timestamp").to_long();
                             let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, ts);
                             Some(Value::Long(offset))
                         }
