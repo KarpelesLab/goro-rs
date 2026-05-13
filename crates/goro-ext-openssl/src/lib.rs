@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 mod aes;
 mod modes;
+mod rsa;
 
 use modes::CipherMethod;
 
@@ -14,9 +15,21 @@ use modes::CipherMethod;
 const OPENSSL_RAW_DATA: i64 = 1;
 const OPENSSL_ZERO_PADDING: i64 = 2;
 
+std::thread_local! {
+    /// FIFO queue of openssl error strings produced by this extension.
+    /// `openssl_error_string()` pops one at a time.
+    pub static OPENSSL_ERROR_QUEUE: std::cell::RefCell<std::collections::VecDeque<String>> =
+        std::cell::RefCell::new(std::collections::VecDeque::new());
+}
+
+pub(crate) fn push_openssl_error(msg: impl Into<String>) {
+    OPENSSL_ERROR_QUEUE.with(|q| q.borrow_mut().push_back(msg.into()));
+}
+
 /// Register all openssl extension functions and constants
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"openssl");
+    rsa::register_class(vm);
     // Functions
     vm.register_function(b"openssl_encrypt", openssl_encrypt);
     vm.register_function(b"openssl_decrypt", openssl_decrypt);
@@ -36,21 +49,58 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"openssl_x509_check_private_key", openssl_stub_false);
     vm.register_function(b"openssl_x509_verify", openssl_stub_long_neg1);
     vm.register_function(b"openssl_x509_fingerprint", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_new", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_get_public", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_get_private", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_get_details", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_export", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_export_to_file", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_free", openssl_stub_null);
-    vm.register_function(b"openssl_get_publickey", openssl_stub_false);
-    vm.register_function(b"openssl_get_privatekey", openssl_stub_false);
+    vm.register_function_with_params(b"openssl_pkey_new", rsa::openssl_pkey_new, &[b"options"]);
+    vm.register_function_with_params(
+        b"openssl_pkey_get_public",
+        rsa::openssl_pkey_get_public,
+        &[b"public_key"],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkey_get_private",
+        rsa::openssl_pkey_get_private,
+        &[b"private_key", b"passphrase"],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkey_get_details",
+        rsa::openssl_pkey_get_details,
+        &[b"key"],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkey_export",
+        rsa::openssl_pkey_export,
+        &[b"key", b"output", b"passphrase", b"options"],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkey_export_to_file",
+        rsa::openssl_pkey_export_to_file,
+        &[b"key", b"output_filename", b"passphrase", b"options"],
+    );
+    vm.register_function_with_params(b"openssl_pkey_free", rsa::openssl_pkey_free, &[b"key"]);
+    vm.register_function_with_params(b"openssl_free_key", rsa::openssl_free_key, &[b"key"]);
+    vm.register_function_with_params(
+        b"openssl_get_publickey",
+        rsa::openssl_pkey_get_public,
+        &[b"public_key"],
+    );
+    vm.register_function_with_params(
+        b"openssl_get_privatekey",
+        rsa::openssl_pkey_get_private,
+        &[b"private_key", b"passphrase"],
+    );
     vm.register_function(b"openssl_public_encrypt", openssl_stub_false);
     vm.register_function(b"openssl_private_encrypt", openssl_stub_false);
     vm.register_function(b"openssl_public_decrypt", openssl_stub_false);
     vm.register_function(b"openssl_private_decrypt", openssl_stub_false);
-    vm.register_function(b"openssl_sign", openssl_stub_false);
-    vm.register_function(b"openssl_verify", openssl_stub_long_neg1);
+    vm.register_function_with_params(
+        b"openssl_sign",
+        rsa::openssl_sign,
+        &[b"data", b"signature", b"private_key", b"algorithm"],
+    );
+    vm.register_function_with_params(
+        b"openssl_verify",
+        rsa::openssl_verify,
+        &[b"data", b"signature", b"public_key", b"algorithm"],
+    );
     vm.register_function(b"openssl_seal", openssl_stub_false);
     vm.register_function(b"openssl_open", openssl_stub_false);
     vm.register_function(b"openssl_csr_new", openssl_stub_false);
@@ -893,8 +943,11 @@ fn openssl_get_md_methods(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
 
 /// openssl_error_string()
 fn openssl_error_string(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // We don't maintain an error queue; return false (no more errors)
-    Ok(Value::False)
+    let msg = OPENSSL_ERROR_QUEUE.with(|q| q.borrow_mut().pop_front());
+    match msg {
+        Some(s) => Ok(Value::String(PhpString::from_string(s))),
+        None => Ok(Value::False),
+    }
 }
 
 // ── Stub implementations for commonly tested but unimplemented openssl functions ──

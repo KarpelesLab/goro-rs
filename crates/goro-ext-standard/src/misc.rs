@@ -6295,7 +6295,8 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
                 || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
                 || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
-                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
+                || name.starts_with(b"__pkey_id") {
                 continue;
             }
             // Skip uninitialized typed properties
@@ -6678,7 +6679,7 @@ fn is_serialize_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
         || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
         || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-        || name.starts_with(b"__dir_")
+        || name.starts_with(b"__dir_") || name.starts_with(b"__pkey_id")
 }
 
 fn serialize_value_depth(val: &Value, depth: usize) -> String {
@@ -11759,7 +11760,8 @@ fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
                 || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp")
                 || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
                 || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
+                || name.starts_with(b"__pkey_id") {
                 continue;
             }
             // Skip uninitialized properties (Undef).

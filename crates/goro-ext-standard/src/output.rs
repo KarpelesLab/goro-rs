@@ -18,6 +18,7 @@ fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
         || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
         || name.starts_with(b"__dir_") || name.starts_with(b"__rng_")
+        || name.starts_with(b"__pkey_id")
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

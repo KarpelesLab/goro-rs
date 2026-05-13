@@ -12,7 +12,12 @@ ecb = { version = "0.1", features = ["alloc"] }
 ctr = "0.9"
 cipher = { version = "0.4", features = ["alloc"] }
 md-5 = "0.10"
-sha1 = "0.10"
-sha2 = "0.10"
+sha1 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.10", features = ["oid"] }
 digest = "0.10"
 rand = "0.8"
+rsa = { version = "0.9", features = ["sha1", "sha2"] }
+pkcs1 = { version = "0.7", features = ["pem"] }
+pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
+pem-rfc7468 = "0.7"
+signature = { version = "2", features = ["digest"] }
