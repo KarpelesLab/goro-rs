@@ -36,6 +36,10 @@ pub struct ConstantMeta {
     /// The class that originally declared this constant (lowercase)
     pub declaring_class: Vec<u8>,
     pub attributes: Vec<RuntimeAttribute>,
+    /// Optional declared type for typed class constants (PHP 8.3+).
+    pub declared_type: Option<crate::opcode::ParamType>,
+    /// Doc comment for the constant (if any).
+    pub doc_comment: Option<String>,
 }
 
 /// A PHP class entry (class definition)
@@ -104,6 +108,8 @@ pub struct PropertyDef {
     /// override its hooks).
     pub is_final: bool,
     pub attributes: Vec<RuntimeAttribute>,
+    /// Doc comment for the property (if any).
+    pub doc_comment: Option<String>,
 }
 
 #[derive(Debug, Clone)]

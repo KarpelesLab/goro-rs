@@ -2065,7 +2065,11 @@ pub fn reflection_method_method(
             Some(Value::Long(line as i64))
         }
         b"getendline" => {
-            Some(Value::False)
+            let line = vm.classes.get(&class_lower)
+                .and_then(|c| c.get_method(method_lower.as_bytes()))
+                .map(|m| if m.op_array.end_line > 0 { m.op_array.end_line as i64 } else { m.op_array.decl_line as i64 })
+                .unwrap_or(0);
+            if line > 0 { Some(Value::Long(line)) } else { Some(Value::False) }
         }
         b"getdoccomment" => {
             let doc = vm.classes.get(&class_lower)
@@ -2213,7 +2217,8 @@ pub fn reflection_method_method(
                     vis,
                 );
                 let mut s = format!("Method [ <user> {} method {} ] {{\n", modifiers, name);
-                s.push_str(&format!("  @@ {} {} - {}\n", vm.current_file, m.op_array.decl_line, m.op_array.decl_line));
+                let m_end = if m.op_array.end_line > 0 { m.op_array.end_line } else { m.op_array.decl_line };
+                s.push_str(&format!("  @@ {} {} - {}\n", vm.current_file, m.op_array.decl_line, m_end));
                 // Skip the implicit `$this` parameter for instance methods.
                 let skip = if !m.is_static { 1usize } else { 0usize };
                 let pcount_total = m.op_array.param_count as usize;
@@ -2434,11 +2439,23 @@ pub fn reflection_function_method(
             }
         }
         b"getendline" => {
-            // We don't track end line in op_array, return false
-            Some(Value::False)
+            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
+                let l = if op_array.end_line > 0 { op_array.end_line as i64 } else { op_array.decl_line as i64 };
+                if l > 0 { Some(Value::Long(l)) } else { Some(Value::False) }
+            } else {
+                Some(Value::False)
+            }
         }
         b"getdoccomment" => {
-            Some(Value::False)
+            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
+                if let Some(doc) = op_array.doc_comment.as_ref() {
+                    Some(Value::String(PhpString::from_bytes(doc)))
+                } else {
+                    Some(Value::False)
+                }
+            } else {
+                Some(Value::False)
+            }
         }
         b"getstaticvariables" => {
             // Return static variables of the function
@@ -2648,8 +2665,14 @@ pub fn reflection_function_method(
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
             drop(ob);
             if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()).cloned() {
-                let mut s = format!("Function [ <user> function {} ] {{\n", name);
-                s.push_str(&format!("  @@ {} {}\n\n", vm.current_file, op_array.decl_line));
+                let mut s = String::new();
+                if let Some(doc) = op_array.doc_comment.as_ref() {
+                    s.push_str(&String::from_utf8_lossy(doc));
+                    s.push('\n');
+                }
+                s.push_str(&format!("Function [ <user> function {} ] {{\n", name));
+                let f_end = if op_array.end_line > 0 { op_array.end_line } else { op_array.decl_line };
+                s.push_str(&format!("  @@ {} {} - {}\n\n", vm.current_file, op_array.decl_line, f_end));
                 s.push_str(&format!("  - Parameters [{}] {{\n", op_array.param_count));
                 for i in 0..op_array.param_count as usize {
                     if i < op_array.cv_names.len() {
@@ -2867,7 +2890,15 @@ pub fn reflection_property_method(
             Some(Value::Long(mods))
         }
         b"getdoccomment" => {
-            Some(Value::False)
+            let doc = vm.classes.get(&class_lower)
+                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|p| p.doc_comment.as_ref())
+                .cloned();
+            if let Some(d) = doc {
+                Some(Value::String(PhpString::from_string(d)))
+            } else {
+                Some(Value::False)
+            }
         }
         b"hastype" => {
             let has = vm.classes.get(&class_lower)
@@ -3929,7 +3960,13 @@ pub fn reflection_class_constant_method(
             if is_final { mods |= 0x20; }
             Some(Value::Long(mods))
         }
-        b"getdoccomment" => Some(Value::False),
+        b"getdoccomment" => {
+            if let Some(doc) = meta.as_ref().and_then(|m| m.doc_comment.clone()) {
+                Some(Value::String(PhpString::from_string(doc)))
+            } else {
+                Some(Value::False)
+            }
+        }
         b"isfinal" => Some(if is_final { Value::True } else { Value::False }),
         b"isenumcase" => {
             // A ReflectionClassConstant is an enum case only when the
@@ -3951,8 +3988,18 @@ pub fn reflection_class_constant_method(
             }).unwrap_or(false);
             Some(if has_dep { Value::True } else { Value::False })
         }
-        b"hastype" => Some(Value::False),
-        b"gettype" => Some(Value::Null),
+        b"hastype" => {
+            let has = meta.as_ref().map(|m| m.declared_type.is_some()).unwrap_or(false);
+            Some(if has { Value::True } else { Value::False })
+        }
+        b"gettype" => {
+            let pt = meta.as_ref().and_then(|m| m.declared_type.clone());
+            if let Some(pt) = pt {
+                Some(create_reflection_type(vm, &pt))
+            } else {
+                Some(Value::Null)
+            }
+        }
         // ReflectionEnumUnitCase/BackedCase methods
         b"getenum" => {
             drop(ob);
@@ -3989,8 +4036,17 @@ pub fn reflection_class_constant_method(
                 Visibility::Private => "private",
             };
             let final_str = if is_final { "final " } else { "" };
-            let val_str = reflection_value_repr(&val);
-            Some(Value::String(PhpString::from_string(format!("Constant [ {}{} {} ] {{ {} }}\n", final_str, vis_str, name, val_str))))
+            let type_str = reflection_const_type_name(meta.as_ref().and_then(|m| m.declared_type.as_ref()), &val)
+                .map(|n| format!("{} ", n))
+                .unwrap_or_default();
+            let val_str = reflection_const_value_repr(&val);
+            let mut s = String::new();
+            if let Some(doc) = meta.as_ref().and_then(|m| m.doc_comment.clone()) {
+                s.push_str(&doc);
+                s.push('\n');
+            }
+            s.push_str(&format!("Constant [ {}{} {}{} ] {{ {} }}\n", final_str, vis_str, type_str, name, val_str));
+            Some(Value::String(PhpString::from_string(s)))
         }
         _ => None,
     }
@@ -4655,8 +4711,11 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8], kind: Ref
                 Visibility::Private => "private",
             };
             let final_str = if is_final_const { "final " } else { "" };
-            let val_str = reflection_value_repr(cval);
-            s.push_str(&format!("    Constant [ {}{} {} ] {{ {} }}\n", final_str, vis_str, const_name_str, val_str));
+            let type_str = reflection_const_type_name(meta.and_then(|m| m.declared_type.as_ref()), cval)
+                .map(|n| format!("{} ", n))
+                .unwrap_or_default();
+            let val_str = reflection_const_value_repr(cval);
+            s.push_str(&format!("    Constant [ {}{} {}{} ] {{ {} }}\n", final_str, vis_str, type_str, const_name_str, val_str));
         }
         s.push_str("  }\n");
     } else {
@@ -4784,6 +4843,22 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
     };
     s.push_str(&format!("    Method [ <user{}> {} method {} ] {{\n", ctor_str, mod_vis, method_name));
 
+    // Add @@ filename startline - endline for the method.
+    let m_end = if m.op_array.end_line > 0 { m.op_array.end_line } else { m.op_array.decl_line };
+    if m.op_array.decl_line > 0 {
+        let fname = String::from_utf8_lossy(&m.op_array.filename);
+        let fname_str = if !fname.is_empty() {
+            fname.to_string()
+        } else {
+            // Fallback: use the current vm file? We don't have access to vm here,
+            // but reflection passes us the class with filename. Just skip if absent.
+            String::new()
+        };
+        if !fname_str.is_empty() {
+            s.push_str(&format!("      @@ {} {} - {}\n", fname_str, m.op_array.decl_line, m_end));
+        }
+    }
+
     // Parameters - skip $this (first param for non-static methods)
     let skip = if !m.is_static { 1usize } else { 0usize };
     let param_count = if m.op_array.param_count as usize > skip { m.op_array.param_count as usize - skip } else { 0 };
@@ -4836,6 +4911,43 @@ fn param_type_name(pt: &crate::opcode::ParamType) -> String {
 }
 
 /// Format a value for display in reflection __toString output
+/// Render a Value the way ReflectionClassConstant::__toString does. PHP
+/// uses single-line var_export style: true=>1, false=>'', null=>'',
+/// strings without quotes, arrays as `Array`.
+fn reflection_const_value_repr(val: &Value) -> String {
+    match val {
+        Value::Null => String::new(),
+        Value::True => "1".to_string(),
+        Value::False => String::new(),
+        _ => reflection_value_repr(val),
+    }
+}
+
+/// Return the displayed type name for a class constant. If a type is declared,
+/// use it. Otherwise, derive it from the value (PHP 8.4+ behaviour).
+fn reflection_const_type_name(declared: Option<&crate::opcode::ParamType>, val: &Value) -> Option<String> {
+    if let Some(pt) = declared {
+        return Some(param_type_name(pt));
+    }
+    match val {
+        Value::Null => Some("null".to_string()),
+        Value::True | Value::False => Some("bool".to_string()),
+        Value::Long(_) => Some("int".to_string()),
+        Value::Double(_) => Some("float".to_string()),
+        Value::String(_) => Some("string".to_string()),
+        Value::Array(_) => Some("array".to_string()),
+        Value::Object(obj) => {
+            let ob = obj.borrow();
+            if ob.has_property(b"__enum_name") {
+                Some(String::from_utf8_lossy(&ob.class_name).into_owned())
+            } else {
+                Some(String::from_utf8_lossy(&ob.class_name).into_owned())
+            }
+        }
+        _ => None,
+    }
+}
+
 fn reflection_value_repr(val: &Value) -> String {
     match val {
         Value::Null => "NULL".to_string(),

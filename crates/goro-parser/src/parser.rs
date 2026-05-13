@@ -24,6 +24,11 @@ pub type ParseResult<T> = Result<T, ParseError>;
 
 pub struct Parser {
     tokens: Vec<Token>,
+    /// Doc comment attached to the token at the same index, if any. The
+    /// comment immediately precedes the token in source (with only whitespace
+    /// between). When a declaration starts at index N, the parser may consume
+    /// the doc comment via `take_doc_comment_at(N)`.
+    token_doc_comments: Vec<Option<Vec<u8>>>,
     pos: usize,
     depth: u32,
     /// Anonymous class declarations that need to be emitted before the current statement
@@ -43,8 +48,24 @@ const MAX_PARSE_DEPTH: u32 = 512;
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
+        // Strip DocComment tokens out of the stream and attach each to the
+        // *next* non-doc token. token_doc_comments[i] is the (last) doc comment
+        // immediately preceding tokens[i].
+        let mut filtered: Vec<Token> = Vec::with_capacity(tokens.len());
+        let mut doc_comments: Vec<Option<Vec<u8>>> = Vec::with_capacity(tokens.len());
+        let mut pending_doc: Option<Vec<u8>> = None;
+        for tok in tokens {
+            if let TokenKind::DocComment(bytes) = &tok.kind {
+                // Keep the most recent doc-comment if multiple appear in a row
+                pending_doc = Some(bytes.clone());
+                continue;
+            }
+            doc_comments.push(pending_doc.take());
+            filtered.push(tok);
+        }
         Self {
-            tokens,
+            tokens: filtered,
+            token_doc_comments: doc_comments,
             pos: 0,
             depth: 0,
             anon_class_stmts: Vec::new(),
@@ -53,6 +74,35 @@ impl Parser {
             pending_extra_constants: Vec::new(),
             pending_extra_properties: Vec::new(),
             class_name_stack: Vec::new(),
+        }
+    }
+
+    /// Take and clear the doc comment attached to the current token (if any).
+    fn take_doc_comment(&mut self) -> Option<Vec<u8>> {
+        self.token_doc_comments.get_mut(self.pos).and_then(|d| d.take())
+    }
+
+    /// Peek the doc comment at the current token without consuming it.
+    #[allow(dead_code)]
+    fn peek_doc_comment(&self) -> Option<&Vec<u8>> {
+        self.token_doc_comments.get(self.pos).and_then(|d| d.as_ref())
+    }
+
+    /// Take and clear the doc comment at a specific position (if any).
+    fn take_doc_comment_at(&mut self, pos: usize) -> Option<Vec<u8>> {
+        self.token_doc_comments.get_mut(pos).and_then(|d| d.take())
+    }
+
+    /// Attach a doc comment to a freshly-parsed Statement that represents a
+    /// function/class/etc. declaration. Other statement kinds keep no doc
+    /// comment.
+    fn attach_stmt_doc_comment(stmt: &mut Statement, doc: Vec<u8>) {
+        match &mut stmt.kind {
+            StmtKind::FunctionDecl { doc_comment, .. } |
+            StmtKind::ClassDecl { doc_comment, .. } => {
+                *doc_comment = Some(doc);
+            }
+            _ => {}
         }
     }
 
@@ -307,19 +357,24 @@ impl Parser {
                     span,
                 })
             }
-            TokenKind::AttributeOpen => { let attributes = self.parse_attributes()?; match self.peek() { TokenKind::Function => self.parse_function_decl_with_attrs(attributes), TokenKind::Class | TokenKind::Abstract | TokenKind::Final | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => self.parse_class_decl_with_attrs(attributes), TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface | TokenKind::Readonly) => self.parse_class_decl_with_attrs(attributes), _ => self.parse_statement(), } }
-            TokenKind::Function => self.parse_function_decl_with_attrs(Vec::new()),
+            TokenKind::AttributeOpen => { let doc = self.take_doc_comment(); let attributes = self.parse_attributes()?; let r = match self.peek() { TokenKind::Function => self.parse_function_decl_with_attrs(attributes), TokenKind::Class | TokenKind::Abstract | TokenKind::Final | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => self.parse_class_decl_with_attrs(attributes), TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface | TokenKind::Readonly) => self.parse_class_decl_with_attrs(attributes), _ => self.parse_statement(), }; if let Some(d) = doc { return r.map(|mut s| { Self::attach_stmt_doc_comment(&mut s, d); s }); } r }
+            TokenKind::Function => { let doc = self.take_doc_comment(); let r = self.parse_function_decl_with_attrs(Vec::new()); if let Some(d) = doc { return r.map(|mut s| { Self::attach_stmt_doc_comment(&mut s, d); s }); } r }
             TokenKind::Class
             | TokenKind::Abstract
             | TokenKind::Final
             | TokenKind::Interface
             | TokenKind::Trait
-            | TokenKind::Enum => self.parse_class_decl_with_attrs(Vec::new()),
+            | TokenKind::Enum => { let doc = self.take_doc_comment(); let r = self.parse_class_decl_with_attrs(Vec::new()); if let Some(d) = doc { return r.map(|mut s| { Self::attach_stmt_doc_comment(&mut s, d); s }); } r }
             TokenKind::Readonly => {
                 // readonly can be a class modifier (readonly class Foo {}) or a function call
                 // Check if followed by class/enum/abstract/final/function
                 if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface | TokenKind::Readonly) {
-                    self.parse_class_decl_with_attrs(Vec::new())
+                    let doc = self.take_doc_comment();
+                    let r = self.parse_class_decl_with_attrs(Vec::new());
+                    if let Some(d) = doc {
+                        return r.map(|mut s| { Self::attach_stmt_doc_comment(&mut s, d); s });
+                    }
+                    r
                 } else {
                     // Treat 'readonly' as identifier for function call etc.
                     self.advance();
@@ -789,6 +844,18 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// Like parse_block but also returns the line number of the closing brace.
+    fn parse_block_with_end(&mut self) -> ParseResult<(Vec<Statement>, u32)> {
+        self.expect(&TokenKind::OpenBrace)?;
+        let mut stmts = Vec::new();
+        while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
+            stmts.push(self.parse_statement()?);
+        }
+        let end_line = self.span().line;
+        self.expect(&TokenKind::CloseBrace)?;
+        Ok((stmts, end_line))
+    }
+
     fn parse_if(&mut self) -> ParseResult<Statement> {
         let span = self.span();
         self.advance(); // consume 'if'
@@ -1150,7 +1217,7 @@ impl Parser {
             None
         };
 
-        let body = self.parse_block()?;
+        let (body, end_line) = self.parse_block_with_end()?;
 
         Ok(Statement {
             kind: StmtKind::FunctionDecl {
@@ -1160,6 +1227,8 @@ impl Parser {
                 body,
                 is_static: false,
                 attributes,
+                end_line,
+                doc_comment: None,
             },
             span,
         })
@@ -1172,6 +1241,9 @@ impl Parser {
         }
 
         loop {
+            // Capture doc comment immediately before this parameter (attached
+            // to the first token of the parameter, whichever comes first).
+            let param_doc_comment = self.take_doc_comment();
             let param_attributes = self.parse_attributes()?;
             let mut visibility = None;
             let mut set_visibility = None;
@@ -1266,6 +1338,7 @@ impl Parser {
                 set_hook_final: param_set_hook_final,
                 get_hook_abstract: param_get_hook_abstract,
                 set_hook_abstract: param_set_hook_abstract,
+                doc_comment: param_doc_comment,
             });
 
             if !self.eat(&TokenKind::Comma) {
@@ -1672,6 +1745,7 @@ impl Parser {
         if let Some(e) = parse_err {
             return Err(e);
         }
+        let end_line = self.span().line;
         self.expect(&TokenKind::CloseBrace)?;
 
         Ok(Statement {
@@ -1683,19 +1757,22 @@ impl Parser {
                 body,
                 enum_backing_type,
                 attributes,
+                end_line,
+                doc_comment: None,
             },
             span,
         })
     }
 
-    fn parse_class_body(&mut self) -> ParseResult<Vec<ClassMember>> {
+    fn parse_class_body(&mut self) -> ParseResult<(Vec<ClassMember>, u32)> {
         self.expect(&TokenKind::OpenBrace)?;
         let mut body = Vec::new();
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
             body.extend(self.parse_class_members()?);
         }
+        let end_line = self.span().line;
         self.expect(&TokenKind::CloseBrace)?;
-        Ok(body)
+        Ok((body, end_line))
     }
 
     fn parse_class_members(&mut self) -> ParseResult<Vec<ClassMember>> {
@@ -1709,6 +1786,8 @@ impl Parser {
     }
 
     fn parse_class_member(&mut self) -> ParseResult<ClassMember> {
+        // Capture doc comment before attributes/modifiers
+        let member_doc_comment = self.take_doc_comment();
         let member_attributes = self.parse_attributes()?;
         let mut visibility = Visibility::Public;
         let mut is_static = false;
@@ -2005,22 +2084,30 @@ impl Parser {
                     None
                 };
 
+                let mut method_end_line: u32 = method_line;
                 let body = if is_abstract {
                     if matches!(self.peek(), TokenKind::Semicolon) {
+                        method_end_line = self.span().line;
                         self.expect_semicolon()?;
                         None
                     } else if matches!(self.peek(), TokenKind::OpenBrace) {
                         // Abstract method with body - parse it but it will be an error
-                        Some(self.parse_block()?)
+                        let (b, el) = self.parse_block_with_end()?;
+                        method_end_line = el;
+                        Some(b)
                     } else {
+                        method_end_line = self.span().line;
                         self.expect_semicolon()?;
                         None
                     }
                 } else if matches!(self.peek(), TokenKind::Semicolon) {
+                    method_end_line = self.span().line;
                     self.expect_semicolon()?;
                     None
                 } else {
-                    Some(self.parse_block()?)
+                    let (b, el) = self.parse_block_with_end()?;
+                    method_end_line = el;
+                    Some(b)
                 };
 
                 Ok(ClassMember::Method {
@@ -2033,7 +2120,9 @@ impl Parser {
                     is_abstract,
                     is_final,
                     line: method_line,
+                    end_line: method_end_line,
                     attributes: member_attributes,
+                    doc_comment: member_doc_comment,
                 })
             }
             TokenKind::Const => {
@@ -2041,158 +2130,74 @@ impl Parser {
                     return Err(ParseError { message: "Cannot use the readonly modifier on a class constant".into(), span: self.span() });
                 }
                 self.advance();
-                // Try to parse an identifier - it might be a type hint or the constant name
-                let first_name = match self.peek().clone() {
-                    TokenKind::Identifier(name) => {
-                        self.advance();
-                        name
+
+                // Detect whether the next thing is a type hint or directly the
+                // constant name. Save state to allow rollback.
+                let saved_pos = self.pos;
+                let mut const_type: Option<TypeHint> = None;
+                let mut name: Option<Vec<u8>> = None;
+
+                // Capture doc comment associated with the post-const token. If
+                // the source is `public const /** doc */ TYPE NAME`, the doc
+                // attaches to the TYPE token here. Also handle the common case
+                // where the doc appears on the previous line and attached to
+                // either `const` or `public`.
+                let pre_type_doc = self.take_doc_comment();
+
+                // A type hint definitely starts with ?, (, or is followed by
+                // | / & / identifier-after-identifier. Try parsing a type hint
+                // speculatively when we see those leading tokens.
+                let starts_with_type_token = matches!(self.peek(), TokenKind::QuestionMark | TokenKind::OpenParen);
+
+                if starts_with_type_token {
+                    // Must be a type hint
+                    let th = self.parse_type_hint()?;
+                    const_type = Some(th);
+                } else if matches!(self.peek(), TokenKind::Identifier(_)) || self.is_semi_reserved_keyword() {
+                    // Could be type hint OR constant name. Look ahead.
+                    // Peek past potential identifier and check next token:
+                    // - If next is `=` -> identifier was the constant name.
+                    // - If next is `|` or `&` -> identifier is start of union/intersection type.
+                    // - If next is identifier (semi-reserved or not) -> identifier was a type.
+                    let next_kind = self.peek_at(1).clone();
+                    let is_type_followed_by_name = matches!(
+                        next_kind,
+                        TokenKind::Pipe | TokenKind::Ampersand | TokenKind::Identifier(_)
+                    ) || matches!(next_kind, _ if Self::is_kind_semi_reserved(&next_kind));
+                    if is_type_followed_by_name {
+                        // It's a type hint.
+                        let th = self.parse_type_hint()?;
+                        const_type = Some(th);
+                    } else {
+                        // It's the constant name. Don't parse a type hint.
                     }
-                    _ if self.is_semi_reserved_keyword() => {
-                        let kw = self.keyword_to_identifier();
-                        self.advance();
-                        kw
-                    }
-                    TokenKind::QuestionMark => {
-                        // Nullable type hint: ?int, ?string, etc.
-                        self.advance();
-                        // Skip the type name
-                        match self.peek() {
-                            TokenKind::Identifier(_) => { self.advance(); }
-                            _ if self.is_semi_reserved_keyword() => { self.advance(); }
-                            _ => { self.advance(); }
-                        }
-                        // Now parse the actual constant name
-                        let name = match self.peek().clone() {
-                            TokenKind::Identifier(name) => { self.advance(); name }
-                            _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
-                            _ => return Err(ParseError { message: "expected constant name".into(), span: self.span() }),
-                        };
-                        self.expect(&TokenKind::Assign)?;
-                        let value = self.parse_expression()?;
-                        // Handle comma-separated typed constants
-                        self.pending_extra_constants.clear();
-                        while self.eat(&TokenKind::Comma) {
-                            let extra_name = match self.peek().clone() {
-                                TokenKind::Identifier(n) => { self.advance(); n }
-                                _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
-                                _ => break,
-                            };
-                            self.expect(&TokenKind::Assign)?;
-                            let extra_value = self.parse_expression()?;
-                            self.pending_extra_constants.push(ClassMember::ClassConstant {
-                                name: extra_name,
-                                value: extra_value,
-                                visibility,
-                                is_final,
-                                    attributes: member_attributes.clone(),
-                            });
-                        }
-                        self.expect_semicolon()?;
-                        return Ok(ClassMember::ClassConstant { name, value, visibility, is_final, attributes: member_attributes.clone() });
-                    }
-                    TokenKind::OpenParen => {
-                        // DNF type hint: (A&B)|null CONST = value
-                        // Skip the entire parenthesized type expression
-                        self.advance(); // skip (
-                        let mut depth = 1u32;
-                        while depth > 0 {
-                            match self.peek() {
-                                TokenKind::OpenParen => { depth += 1; self.advance(); }
-                                TokenKind::CloseParen => { depth -= 1; self.advance(); }
-                                TokenKind::Eof => break,
-                                _ => { self.advance(); }
-                            }
-                        }
-                        // There may be a union | after the parenthesized group
-                        while matches!(self.peek(), TokenKind::Pipe | TokenKind::Ampersand) {
-                            self.advance(); // skip | or &
-                            if matches!(self.peek(), TokenKind::OpenParen) {
-                                self.advance();
-                                let mut d = 1u32;
-                                while d > 0 {
-                                    match self.peek() {
-                                        TokenKind::OpenParen => { d += 1; self.advance(); }
-                                        TokenKind::CloseParen => { d -= 1; self.advance(); }
-                                        TokenKind::Eof => break,
-                                        _ => { self.advance(); }
-                                    }
-                                }
-                            } else {
-                                match self.peek() {
-                                    TokenKind::Identifier(_) => { self.advance(); }
-                                    _ if self.is_semi_reserved_keyword() => { self.advance(); }
-                                    _ => { self.advance(); }
-                                }
-                            }
-                        }
-                        // Now parse the actual constant name
-                        let name = match self.peek().clone() {
-                            TokenKind::Identifier(name) => { self.advance(); name }
-                            _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
-                            _ => return Err(ParseError { message: "expected constant name".into(), span: self.span() }),
-                        };
-                        self.expect(&TokenKind::Assign)?;
-                        let value = self.parse_expression()?;
-                        self.pending_extra_constants.clear();
-                        while self.eat(&TokenKind::Comma) {
-                            let extra_name = match self.peek().clone() {
-                                TokenKind::Identifier(n) => { self.advance(); n }
-                                _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
-                                _ => break,
-                            };
-                            self.expect(&TokenKind::Assign)?;
-                            let extra_value = self.parse_expression()?;
-                            self.pending_extra_constants.push(ClassMember::ClassConstant {
-                                name: extra_name,
-                                value: extra_value,
-                                visibility,
-                                is_final,
-                                    attributes: member_attributes.clone(),
-                            });
-                        }
-                        self.expect_semicolon()?;
-                        return Ok(ClassMember::ClassConstant { name, value, visibility, is_final, attributes: member_attributes.clone() });
-                    }
-                    _ => {
-                        return Err(ParseError {
-                            message: "expected constant name".into(),
-                            span: self.span(),
-                        });
-                    }
-                };
-                // Check if the next token is `=` (meaning first_name IS the constant name)
-                // or if it's an identifier (meaning first_name was a type hint)
-                let name = if matches!(self.peek(), TokenKind::Assign) {
-                    first_name
-                } else if matches!(self.peek(), TokenKind::Pipe | TokenKind::Ampersand) {
-                    // Union/intersection type hint: int|string, Foo&Bar
-                    // Skip over the type hint tokens
-                    while matches!(self.peek(), TokenKind::Pipe | TokenKind::Ampersand) {
-                        self.advance(); // skip | or &
-                        match self.peek() {
-                            TokenKind::Identifier(_) => { self.advance(); }
-                            _ if self.is_semi_reserved_keyword() => { self.advance(); }
-                            _ => { self.advance(); }
-                        }
-                    }
-                    // Now parse the actual constant name
-                    match self.peek().clone() {
-                        TokenKind::Identifier(name) => { self.advance(); name }
+                }
+
+                // Check for a doc comment immediately preceding the const name
+                // (e.g. `public const bool /** doc */ X = ...`).
+                let pre_name_doc = self.take_doc_comment();
+                // Priority: doc immediately before the name, then before the
+                // type, then before the entire declaration.
+                let const_doc = pre_name_doc.or(pre_type_doc).or(member_doc_comment.clone());
+
+                // Now parse the constant name (if not already)
+                if name.is_none() {
+                    name = Some(match self.peek().clone() {
+                        TokenKind::Identifier(n) => { self.advance(); n }
                         _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
-                        _ => return Err(ParseError { message: "expected constant name".into(), span: self.span() }),
-                    }
-                } else {
-                    // first_name was a type hint, parse actual constant name
-                    match self.peek().clone() {
-                        TokenKind::Identifier(name) => { self.advance(); name }
-                        _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
-                        _ => return Err(ParseError { message: "expected constant name after type hint".into(), span: self.span() }),
-                    }
-                };
+                        _ => {
+                            // Rollback to saved_pos so error messages make sense
+                            self.pos = saved_pos;
+                            return Err(ParseError { message: "expected constant name".into(), span: self.span() });
+                        }
+                    });
+                }
+                let name = name.unwrap();
+
                 self.expect(&TokenKind::Assign)?;
                 let value = self.parse_expression()?;
-                // Handle comma-separated constants: const A = 1, B = 2;
-                // We only return the first one here; additional ones are handled by parse_class_members
+
+                // Handle comma-separated constants: const TYPE A = 1, B = 2;
                 self.pending_extra_constants.clear();
                 while self.eat(&TokenKind::Comma) {
                     let extra_name = match self.peek().clone() {
@@ -2207,9 +2212,12 @@ impl Parser {
                         value: extra_value,
                         visibility,
                         is_final,
-                                    attributes: member_attributes.clone(),
+                        attributes: member_attributes.clone(),
+                        type_hint: const_type.clone(),
+                        doc_comment: const_doc.clone(),
                     });
                 }
+
                 self.expect_semicolon()?;
                 Ok(ClassMember::ClassConstant {
                     name,
@@ -2217,6 +2225,8 @@ impl Parser {
                     visibility,
                     is_final,
                     attributes: member_attributes,
+                    type_hint: const_type,
+                    doc_comment: const_doc,
                 })
             }
             TokenKind::Variable(_) => {
@@ -2264,6 +2274,7 @@ impl Parser {
                                 get_hook_abstract: false,
                                 set_hook_abstract: false,
                                 attributes: member_attributes.clone(),
+                                doc_comment: member_doc_comment.clone(),
                             });
                         } else {
                             break;
@@ -2296,6 +2307,7 @@ impl Parser {
                     get_hook_abstract,
                     set_hook_abstract,
                     attributes: member_attributes.clone(),
+                    doc_comment: member_doc_comment,
                 })
             }
             _ => {
@@ -2348,6 +2360,7 @@ impl Parser {
                                 get_hook_abstract: false,
                                 set_hook_abstract: false,
                                 attributes: member_attributes.clone(),
+                                doc_comment: member_doc_comment.clone(),
                             });
                         } else {
                             break;
@@ -2380,6 +2393,7 @@ impl Parser {
                     get_hook_abstract,
                     set_hook_abstract,
                     attributes: member_attributes,
+                    doc_comment: member_doc_comment,
                 })
             }
         }
@@ -4095,15 +4109,16 @@ impl Parser {
                         self.expect(&TokenKind::OpenParen)?; let params = self.parse_params()?; self.expect(&TokenKind::CloseParen)?;
                         let use_vars = if matches!(self.peek(), TokenKind::Use) { self.advance(); self.expect(&TokenKind::OpenParen)?; let mut v = Vec::new(); loop { let br = self.eat(&TokenKind::Ampersand); match self.peek().clone() { TokenKind::Variable(n) => { self.advance(); v.push(ClosureUse{variable:n,by_ref:br}); } _ => break }; if !self.eat(&TokenKind::Comma) { break; } } self.expect(&TokenKind::CloseParen)?; v } else { Vec::new() };
                         let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
-                        let body = self.parse_block()?;
-                        Ok(Expr { span, kind: ExprKind::Closure { is_static: false, params, use_vars, return_type, body, attributes } })
+                        let (body, end_line) = self.parse_block_with_end()?;
+                        Ok(Expr { span, kind: ExprKind::Closure { is_static: false, params, use_vars, return_type, body, attributes, end_line } })
                     }
                     TokenKind::Fn => {
                         self.advance(); self.eat(&TokenKind::Ampersand);
                         self.expect(&TokenKind::OpenParen)?; let params = self.parse_params()?; self.expect(&TokenKind::CloseParen)?;
                         let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
                         self.expect(&TokenKind::DoubleArrow)?; let body = self.parse_expression()?;
-                        Ok(Expr { span, kind: ExprKind::ArrowFunction { is_static: false, params, return_type, body: Box::new(body), attributes } })
+                        let end_line = body.span.line;
+                        Ok(Expr { span, kind: ExprKind::ArrowFunction { is_static: false, params, return_type, body: Box::new(body), attributes, end_line } })
                     }
                     _ => Err(ParseError { message: "expected function or fn after attribute".into(), span: self.span() })
                 }
@@ -4626,7 +4641,7 @@ impl Parser {
                         self.class_name_stack.push(anon_name.as_bytes().to_vec());
                         let body_result = self.parse_class_body();
                         self.class_name_stack.pop();
-                        let body = body_result?;
+                        let (body, end_line) = body_result?;
                         // Create the class declaration as a statement that needs to be
                         // prepended before this expression. We embed it in the New expression.
                         // The compiler handles this by checking for class@anonymous prefix.
@@ -4639,6 +4654,8 @@ impl Parser {
                                 body,
                                 enum_backing_type: None,
                                 attributes: Vec::new(),
+                                end_line,
+                                doc_comment: None,
                             },
                             span,
                         };
@@ -4804,7 +4821,7 @@ impl Parser {
                     None
                 };
 
-                let body = self.parse_block()?;
+                let (body, end_line) = self.parse_block_with_end()?;
 
                 Ok(Expr {
                     span,
@@ -4815,6 +4832,7 @@ impl Parser {
                         return_type,
                         body,
                         attributes: Vec::new(),
+                        end_line,
                     },
                 })
             }
@@ -4837,6 +4855,7 @@ impl Parser {
                 };
                 self.expect(&TokenKind::DoubleArrow)?;
                 let body = self.parse_expression()?;
+                let end_line = body.span.line;
                 Ok(Expr {
                     span,
                     kind: ExprKind::ArrowFunction {
@@ -4845,6 +4864,7 @@ impl Parser {
                         return_type,
                         body: Box::new(body),
                         attributes: Vec::new(),
+                        end_line,
                     },
                 })
             }
@@ -4868,6 +4888,7 @@ impl Parser {
                     };
                     self.expect(&TokenKind::DoubleArrow)?;
                     let body = self.parse_expression()?;
+                    let end_line = body.span.line;
                     Ok(Expr {
                         span,
                         kind: ExprKind::ArrowFunction {
@@ -4876,6 +4897,7 @@ impl Parser {
                             return_type,
                             body: Box::new(body),
                             attributes: Vec::new(),
+                            end_line,
                         },
                     })
                 } else {
@@ -4917,7 +4939,7 @@ impl Parser {
                     } else {
                         None
                     };
-                    let body = self.parse_block()?;
+                    let (body, end_line) = self.parse_block_with_end()?;
                     Ok(Expr {
                         span,
                         kind: ExprKind::Closure {
@@ -4927,6 +4949,7 @@ impl Parser {
                             return_type,
                             body,
                             attributes: Vec::new(),
+                            end_line,
                         },
                     })
                 }
@@ -5411,6 +5434,85 @@ impl Parser {
         } else {
             false
         }
+    }
+
+    fn is_kind_semi_reserved(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::List
+                | TokenKind::Array
+                | TokenKind::Callable
+                | TokenKind::Static
+                | TokenKind::Abstract
+                | TokenKind::Final
+                | TokenKind::Private
+                | TokenKind::Protected
+                | TokenKind::Public
+                | TokenKind::Readonly
+                | TokenKind::Clone
+                | TokenKind::New
+                | TokenKind::Throw
+                | TokenKind::Yield
+                | TokenKind::YieldFrom
+                | TokenKind::Print
+                | TokenKind::Echo
+                | TokenKind::Isset
+                | TokenKind::Unset
+                | TokenKind::Empty
+                | TokenKind::Match
+                | TokenKind::Switch
+                | TokenKind::Case
+                | TokenKind::Default
+                | TokenKind::Break
+                | TokenKind::Continue
+                | TokenKind::Return
+                | TokenKind::If
+                | TokenKind::Else
+                | TokenKind::ElseIf
+                | TokenKind::While
+                | TokenKind::Do
+                | TokenKind::For
+                | TokenKind::Foreach
+                | TokenKind::As
+                | TokenKind::Try
+                | TokenKind::Catch
+                | TokenKind::Finally
+                | TokenKind::Class
+                | TokenKind::Interface
+                | TokenKind::Extends
+                | TokenKind::Implements
+                | TokenKind::Trait
+                | TokenKind::Const
+                | TokenKind::Enum
+                | TokenKind::Fn
+                | TokenKind::Function
+                | TokenKind::Namespace
+                | TokenKind::Use
+                | TokenKind::Var
+                | TokenKind::Global
+                | TokenKind::Goto
+                | TokenKind::Instanceof
+                | TokenKind::Insteadof
+                | TokenKind::Null
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::And
+                | TokenKind::Or
+                | TokenKind::Xor
+                | TokenKind::Exit
+                | TokenKind::Eval
+                | TokenKind::Include
+                | TokenKind::IncludeOnce
+                | TokenKind::Require
+                | TokenKind::RequireOnce
+                | TokenKind::Declare
+                | TokenKind::EndDeclare
+                | TokenKind::EndFor
+                | TokenKind::EndForeach
+                | TokenKind::EndIf
+                | TokenKind::EndSwitch
+                | TokenKind::EndWhile
+        )
     }
 
     fn is_semi_reserved_keyword(&self) -> bool {

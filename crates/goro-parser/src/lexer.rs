@@ -157,7 +157,10 @@ impl<'a> Lexer<'a> {
                     let c_line = self.line;
                     self.advance();
                     self.advance();
-                    let is_doc = self.peek() == Some(b'*') && self.peek_at(1) != Some(b'/');
+                    // A doc comment is /** ... */ where the character after the
+                    // second `*` is whitespace (space, tab, CR, LF) or `/`
+                    // (empty doc comment /**/). PHP rejects /*** ... */ etc.
+                    let is_doc = self.peek() == Some(b'*') && matches!(self.peek_at(1), Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'/'));
                     loop {
                         match self.advance() {
                             Some(b'*') if self.peek() == Some(b'/') => {
@@ -177,6 +180,16 @@ impl<'a> Lexer<'a> {
                         };
                         self.trivia_buffer.push(Token::new(
                             tok,
+                            Span::new(c_start as u32, self.pos as u32, c_line),
+                        ));
+                    } else if is_doc {
+                        // Emit doc-comments into the regular token stream even
+                        // when preserve_trivia is off — the parser uses them to
+                        // attach to the next declaration. Block (non-doc)
+                        // comments are silently skipped.
+                        let bytes = self.source[c_start..self.pos].to_vec();
+                        self.trivia_buffer.push(Token::new(
+                            TokenKind::DocComment(bytes),
                             Span::new(c_start as u32, self.pos as u32, c_line),
                         ));
                     }
