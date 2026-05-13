@@ -3460,51 +3460,58 @@ fn date_isodate_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// timezone_abbreviations_list()
 fn timezone_abbreviations_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Return a simplified version of timezone abbreviations
+    // Return a simplified version of timezone abbreviations.
+    // Each abbreviation maps to a list of timezone entries.
     let mut result = PhpArray::new();
 
-    let abbrevs = [
-        ("acst", 34200, 0, "Australia/Adelaide"),
-        ("aest", 36000, 0, "Australia/Brisbane"),
-        ("akst", -32400, 0, "America/Anchorage"),
-        ("ast", -14400, 0, "America/Halifax"),
-        ("brt", -10800, 0, "America/Sao_Paulo"),
-        ("cdt", -18000, 1, "America/Chicago"),
-        ("cest", 7200, 1, "Europe/Berlin"),
-        ("cet", 3600, 0, "Europe/Berlin"),
-        ("cst", -21600, 0, "America/Chicago"),
-        ("eat", 10800, 0, "Africa/Nairobi"),
-        ("edt", -14400, 1, "America/New_York"),
-        ("eest", 10800, 1, "Europe/Helsinki"),
-        ("eet", 7200, 0, "Europe/Helsinki"),
-        ("est", -18000, 0, "America/New_York"),
-        ("gmt", 0, 0, "UTC"),
-        ("hst", -36000, 0, "Pacific/Honolulu"),
-        ("ist", 19800, 0, "Asia/Kolkata"),
-        ("jst", 32400, 0, "Asia/Tokyo"),
-        ("kst", 32400, 0, "Asia/Seoul"),
-        ("mdt", -21600, 1, "America/Denver"),
-        ("msk", 10800, 0, "Europe/Moscow"),
-        ("mst", -25200, 0, "America/Denver"),
-        ("nzdt", 46800, 1, "Pacific/Auckland"),
-        ("nzst", 43200, 0, "Pacific/Auckland"),
-        ("pdt", -25200, 1, "America/Los_Angeles"),
-        ("pst", -28800, 0, "America/Los_Angeles"),
-        ("sast", 7200, 0, "Africa/Johannesburg"),
-        ("utc", 0, 0, "UTC"),
-        ("wat", 3600, 0, "Africa/Lagos"),
-        ("wet", 0, 0, "Europe/London"),
+    let abbrevs: &[(&str, &[(i64, i64, &str)])] = &[
+        ("acst", &[(34200, 0, "Australia/Adelaide")]),
+        ("aest", &[(36000, 0, "Australia/Brisbane")]),
+        ("akst", &[(-32400, 0, "America/Anchorage")]),
+        ("ast", &[(-14400, 0, "America/Halifax")]),
+        ("brt", &[(-10800, 0, "America/Sao_Paulo")]),
+        ("cdt", &[(-18000, 1, "America/Chicago")]),
+        ("cest", &[(7200, 1, "Europe/Berlin")]),
+        ("cet", &[(3600, 0, "Europe/Berlin")]),
+        ("cst", &[(-21600, 0, "America/Chicago")]),
+        ("eat", &[(10800, 0, "Africa/Nairobi")]),
+        ("edt", &[(-14400, 1, "America/New_York")]),
+        ("eest", &[(10800, 1, "Europe/Helsinki")]),
+        ("eet", &[(7200, 0, "Europe/Helsinki")]),
+        ("est", &[(-18000, 0, "America/New_York")]),
+        ("gmt", &[(0, 0, "UTC")]),
+        ("hst", &[(-36000, 0, "Pacific/Honolulu")]),
+        ("ist", &[(19800, 0, "Asia/Kolkata")]),
+        ("jst", &[(32400, 0, "Asia/Tokyo")]),
+        ("kst", &[(32400, 0, "Asia/Seoul")]),
+        ("mdt", &[(-21600, 1, "America/Denver")]),
+        ("msk", &[(10800, 0, "Europe/Moscow")]),
+        ("mst", &[(-25200, 0, "America/Denver")]),
+        ("nzdt", &[(46800, 1, "Pacific/Auckland")]),
+        ("nzst", &[(43200, 0, "Pacific/Auckland")]),
+        ("pdt", &[(-25200, 1, "America/Los_Angeles")]),
+        ("pst", &[(-28800, 0, "America/Los_Angeles")]),
+        ("sast", &[(7200, 0, "Africa/Johannesburg")]),
+        ("utc", &[
+            (0, 0, "Etc/Universal"),
+            (0, 0, "Etc/UTC"),
+            (0, 0, "Etc/Zulu"),
+            (0, 0, "UTC"),
+            (0, 0, "UTC"),
+        ]),
+        ("wat", &[(3600, 0, "Africa/Lagos")]),
+        ("wet", &[(0, 0, "Europe/London")]),
     ];
 
-    for (abbr, offset, dst, tz_id) in &abbrevs {
-        let mut entry = PhpArray::new();
-        entry.set(ArrayKey::String(PhpString::from_bytes(b"dst")), if *dst != 0 { Value::True } else { Value::False });
-        entry.set(ArrayKey::String(PhpString::from_bytes(b"offset")), Value::Long(*offset));
-        entry.set(ArrayKey::String(PhpString::from_bytes(b"timezone_id")), Value::String(PhpString::from_string(tz_id.to_string())));
-
+    for (abbr, entries) in abbrevs {
         let mut arr = PhpArray::new();
-        arr.push(Value::Array(Rc::new(RefCell::new(entry))));
-
+        for (offset, dst, tz_id) in *entries {
+            let mut entry = PhpArray::new();
+            entry.set(ArrayKey::String(PhpString::from_bytes(b"dst")), if *dst != 0 { Value::True } else { Value::False });
+            entry.set(ArrayKey::String(PhpString::from_bytes(b"offset")), Value::Long(*offset));
+            entry.set(ArrayKey::String(PhpString::from_bytes(b"timezone_id")), Value::String(PhpString::from_string(tz_id.to_string())));
+            arr.push(Value::Array(Rc::new(RefCell::new(entry))));
+        }
         result.set(ArrayKey::String(PhpString::from_string(abbr.to_string())), Value::Array(Rc::new(RefCell::new(arr))));
     }
 
