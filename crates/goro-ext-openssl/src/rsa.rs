@@ -481,9 +481,18 @@ pub fn openssl_pkey_get_private(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 /// openssl_pkey_get_public(string|OpenSSLAsymmetricKey $publicKey)
 pub fn openssl_pkey_get_public(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let key_arg = args.first().cloned().unwrap_or(Value::Null);
-    // Pass-through for existing key object
+    // Pass-through for existing key object: but private keys cannot be
+    // converted to a public key via this function (mirrors PHP behavior).
     if let Some(k) = key_from_object(&key_arg) {
-        return Ok(make_key_object(vm, StoredKey::Public(k.public())));
+        return match k {
+            StoredKey::Public(p) => Ok(make_key_object(vm, StoredKey::Public(p))),
+            StoredKey::Private(_) => {
+                vm.emit_warning(
+                    "openssl_pkey_get_public(): Don't know how to get public key from this private key",
+                );
+                Ok(Value::False)
+            }
+        };
     }
     let bytes = match read_key_data(&key_arg) {
         Some(b) => b,
@@ -492,7 +501,9 @@ pub fn openssl_pkey_get_public(vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
             return Ok(Value::False);
         }
     };
-    match parse_public_key(&bytes, /* allow_private */ true) {
+    // For string input, accept public-key encodings only (don't derive from
+    // private-key PEM).
+    match parse_public_key(&bytes, /* allow_private */ false) {
         Some(k) => Ok(make_key_object(vm, StoredKey::Public(k))),
         None => {
             vm.emit_warning("openssl_pkey_get_public(): Cannot parse public key");
@@ -591,6 +602,32 @@ pub fn openssl_pkey_get_details(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     );
 
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// openssl_free_key(key): void  (deprecated alias for openssl_pkey_free)
+pub fn openssl_free_key(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_deprecated(
+        "Function openssl_free_key() is deprecated since 8.0, as OpenSSLAsymmetricKey objects are freed automatically",
+    );
+    free_key_inner(args);
+    Ok(Value::Null)
+}
+
+fn free_key_inner(args: &[Value]) {
+    if let Some(arg) = args.first() {
+        let arg = match arg {
+            Value::Reference(r) => r.borrow().clone(),
+            other => other.clone(),
+        };
+        if let Value::Object(o) = arg {
+            let id = o.borrow().get_property(b"__pkey_id").to_long();
+            if id > 0 {
+                PKEY_REGISTRY.with(|r| {
+                    r.borrow_mut().remove(&(id as u64));
+                });
+            }
+        }
+    }
 }
 
 /// openssl_pkey_free(key): void

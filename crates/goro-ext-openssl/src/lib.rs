@@ -45,6 +45,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"openssl_pkey_export", rsa::openssl_pkey_export);
     vm.register_function(b"openssl_pkey_export_to_file", rsa::openssl_pkey_export_to_file);
     vm.register_function(b"openssl_pkey_free", rsa::openssl_pkey_free);
+    vm.register_function(b"openssl_free_key", rsa::openssl_free_key);
     vm.register_function(b"openssl_get_publickey", rsa::openssl_pkey_get_public);
     vm.register_function(b"openssl_get_privatekey", rsa::openssl_pkey_get_private);
     vm.register_function(b"openssl_public_encrypt", openssl_stub_false);
