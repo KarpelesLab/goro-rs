@@ -1740,19 +1740,29 @@ pub fn reflection_class_docall(
             b"getstaticpropertyvalue" => {
                 let prop_name = args.get(1)?.to_php_string();
                 let default = args.get(2);
+                // First check if the property is declared as a static prop
+                // on this class (or an ancestor).
+                let declared_static = vm.classes.get(&class_lower)
+                    .map(|ce| ce.properties.iter().any(|p| p.is_static && p.name == prop_name.as_bytes()))
+                    .unwrap_or(false);
                 if let Some(ce) = vm.classes.get(&class_lower) {
                     if let Some(val) = ce.static_properties.get(prop_name.as_bytes()) {
-                        Some(val.clone())
-                    } else if let Some(d) = default {
-                        Some(d.clone())
-                    } else {
-                        Some(Value::Null)
+                        return Some(val.clone());
                     }
-                } else if let Some(d) = default {
-                    Some(d.clone())
-                } else {
-                    Some(Value::Null)
+                    if declared_static {
+                        // Property exists but has no value: return Null.
+                        return Some(Value::Null);
+                    }
                 }
+                // Property doesn't exist on the class. PHP: if a default
+                // was provided, return it; otherwise throw.
+                if let Some(d) = default {
+                    return Some(d.clone());
+                }
+                let err_msg = format!("Property {}::${} does not exist", target, prop_name.to_string_lossy());
+                let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                Some(Value::Null)
             }
             b"setstaticpropertyvalue" => {
                 let prop_name = args.get(1)?.to_php_string();
