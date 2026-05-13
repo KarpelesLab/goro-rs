@@ -198,6 +198,22 @@ fn resolve_private_key(v: &Value, passphrase: Option<&[u8]>) -> Option<RsaPrivat
     parse_private_key(&bytes, passphrase)
 }
 
+/// Public wrapper around `resolve_private_key` for sibling modules.
+pub fn resolve_private_key_pub(v: &Value, passphrase: Option<&[u8]>) -> Option<RsaPrivateKey> {
+    resolve_private_key(v, passphrase)
+}
+
+/// Public wrapper around `resolve_public_key` for sibling modules.
+#[allow(dead_code)]
+pub fn resolve_public_key_pub(v: &Value, allow_private_data: bool) -> Option<RsaPublicKey> {
+    resolve_public_key(v, allow_private_data)
+}
+
+/// Public wrapper around `make_key_object` for sibling modules.
+pub fn make_key_object_pub(vm: &mut Vm, key: StoredKey) -> Value {
+    make_key_object(vm, key)
+}
+
 /// Resolve any kind of input (object, file://, PEM string) into a public key.
 /// `allow_private_data` controls whether a PEM/DER private-key blob can be
 /// coerced into a public key (true for `openssl_pkey_get_public`, false for

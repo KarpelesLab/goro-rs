@@ -8,6 +8,7 @@ use std::rc::Rc;
 mod aes;
 mod modes;
 mod rsa;
+mod x509;
 
 use modes::CipherMethod;
 
@@ -40,15 +41,44 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"openssl_cipher_key_length", openssl_cipher_key_length);
     vm.register_function(b"openssl_get_md_methods", openssl_get_md_methods);
     vm.register_function(b"openssl_error_string", openssl_error_string);
-    // Stub functions for commonly tested openssl functions
-    vm.register_function(b"openssl_x509_read", openssl_x509_read_stub);
-    vm.register_function(b"openssl_x509_parse", openssl_x509_parse_stub);
-    vm.register_function(b"openssl_x509_export", openssl_x509_export_stub);
-    vm.register_function(b"openssl_x509_free", openssl_stub_null);
+    // X.509 functions
+    vm.register_function_with_params(
+        b"openssl_x509_read",
+        x509::openssl_x509_read,
+        &[b"certificate"],
+    );
+    vm.register_function_with_params(
+        b"openssl_x509_parse",
+        x509::openssl_x509_parse,
+        &[b"certificate", b"short_names"],
+    );
+    vm.register_function_with_params(
+        b"openssl_x509_export",
+        x509::openssl_x509_export,
+        &[b"certificate", b"output", b"no_text"],
+    );
+    vm.register_function_with_params(
+        b"openssl_x509_export_to_file",
+        x509::openssl_x509_export_to_file,
+        &[b"certificate", b"output_filename", b"no_text"],
+    );
+    vm.register_function_with_params(
+        b"openssl_x509_free",
+        x509::openssl_x509_free,
+        &[b"certificate"],
+    );
     vm.register_function(b"openssl_x509_checkpurpose", openssl_stub_false);
-    vm.register_function(b"openssl_x509_check_private_key", openssl_stub_false);
+    vm.register_function_with_params(
+        b"openssl_x509_check_private_key",
+        x509::openssl_x509_check_private_key,
+        &[b"certificate", b"private_key"],
+    );
     vm.register_function(b"openssl_x509_verify", openssl_stub_long_neg1);
-    vm.register_function(b"openssl_x509_fingerprint", openssl_stub_false);
+    vm.register_function_with_params(
+        b"openssl_x509_fingerprint",
+        x509::openssl_x509_fingerprint,
+        &[b"certificate", b"digest_algo", b"binary"],
+    );
     vm.register_function_with_params(b"openssl_pkey_new", rsa::openssl_pkey_new, &[b"options"]);
     vm.register_function_with_params(
         b"openssl_pkey_get_public",
@@ -103,12 +133,45 @@ pub fn register(vm: &mut Vm) {
     );
     vm.register_function(b"openssl_seal", openssl_stub_false);
     vm.register_function(b"openssl_open", openssl_stub_false);
-    vm.register_function(b"openssl_csr_new", openssl_stub_false);
-    vm.register_function(b"openssl_csr_export", openssl_stub_false);
-    vm.register_function(b"openssl_csr_export_to_file", openssl_stub_false);
-    vm.register_function(b"openssl_csr_sign", openssl_stub_false);
-    vm.register_function(b"openssl_csr_get_subject", openssl_stub_false);
-    vm.register_function(b"openssl_csr_get_public_key", openssl_stub_false);
+    // CSR functions
+    vm.register_function_with_params(
+        b"openssl_csr_new",
+        x509::openssl_csr_new,
+        &[b"distinguished_names", b"private_key", b"options", b"extra_attribs"],
+    );
+    vm.register_function_with_params(
+        b"openssl_csr_export",
+        x509::openssl_csr_export,
+        &[b"csr", b"output", b"no_text"],
+    );
+    vm.register_function_with_params(
+        b"openssl_csr_export_to_file",
+        x509::openssl_csr_export_to_file,
+        &[b"csr", b"output_filename", b"no_text"],
+    );
+    vm.register_function_with_params(
+        b"openssl_csr_sign",
+        x509::openssl_csr_sign,
+        &[
+            b"csr",
+            b"ca_certificate",
+            b"private_key",
+            b"days",
+            b"options",
+            b"serial",
+            b"serial_hex",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_csr_get_subject",
+        x509::openssl_csr_get_subject,
+        &[b"csr", b"short_names"],
+    );
+    vm.register_function_with_params(
+        b"openssl_csr_get_public_key",
+        x509::openssl_csr_get_public_key,
+        &[b"csr", b"short_names"],
+    );
     vm.register_function(b"openssl_pkcs7_sign", openssl_stub_false);
     vm.register_function(b"openssl_pkcs7_verify", openssl_stub_false);
     vm.register_function(b"openssl_pkcs7_encrypt", openssl_stub_false);
@@ -962,23 +1025,6 @@ fn openssl_stub_null(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn openssl_stub_long_neg1(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(-1))
-}
-
-fn openssl_x509_read_stub(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Return an OpenSSLCertificate object (stub)
-    let _cert = args.first().unwrap_or(&Value::Null);
-    let id = vm.next_object_id();
-    let obj = goro_core::object::PhpObject::new(b"OpenSSLCertificate".to_vec(), id);
-    Ok(Value::Object(Rc::new(RefCell::new(obj))))
-}
-
-fn openssl_x509_parse_stub(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Return an empty array (stub - real implementation would parse the cert)
-    Ok(Value::Array(Rc::new(RefCell::new(goro_core::array::PhpArray::new()))))
-}
-
-fn openssl_x509_export_stub(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
 }
 
 fn openssl_get_cert_locations_stub(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
