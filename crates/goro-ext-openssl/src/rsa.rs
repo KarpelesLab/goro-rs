@@ -12,7 +12,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use rsa::pkcs1v15::{Signature as PkcsSig, SigningKey, VerifyingKey};
-use rsa::signature::{SignatureEncoding, Signer, Verifier};
+use rsa::pss::{
+    BlindedSigningKey as PssBlindedSigningKey, Signature as PssSig,
+    VerifyingKey as PssVerifyingKey,
+};
+use rsa::signature::{RandomizedSigner, SignatureEncoding, Signer, Verifier};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::{BigUint, RsaPrivateKey, RsaPublicKey};
 
@@ -28,6 +32,9 @@ const OPENSSL_ALGO_SHA1: i64 = 1;
 const OPENSSL_ALGO_SHA256: i64 = 7;
 const OPENSSL_ALGO_SHA384: i64 = 8;
 const OPENSSL_ALGO_SHA512: i64 = 9;
+
+const OPENSSL_PKCS1_PADDING: i64 = 1;
+const OPENSSL_PKCS1_PSS_PADDING: i64 = 6;
 
 /// Stored key kind: either we have a private key (which contains the public)
 /// or only a public key.
@@ -577,11 +584,12 @@ pub fn openssl_pkey_free(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     Ok(Value::Null)
 }
 
-/// openssl_sign(data, &signature, key, algo = OPENSSL_ALGO_SHA1): bool
+/// openssl_sign(data, &signature, key, algo = OPENSSL_ALGO_SHA1, padding = OPENSSL_PKCS1_PADDING): bool
 pub fn openssl_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();
     let key_arg = args.get(2).cloned().unwrap_or(Value::Null);
     let algo = args.get(3).map(|v| v.to_long()).unwrap_or(OPENSSL_ALGO_SHA1);
+    let padding = args.get(4).map(|v| v.to_long()).unwrap_or(OPENSSL_PKCS1_PADDING);
 
     let priv_key = match resolve_private_key(&key_arg, None) {
         Some(k) => k,
@@ -593,34 +601,68 @@ pub fn openssl_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    let signature_bytes: Vec<u8> = match algo {
-        OPENSSL_ALGO_SHA1 => {
-            let signing = SigningKey::<Sha1>::new(priv_key);
-            let sig: PkcsSig = signing.sign(data.as_bytes());
-            sig.to_bytes().to_vec()
+    let signature_bytes: Vec<u8> = match padding {
+        OPENSSL_PKCS1_PSS_PADDING => {
+            let mut rng = rand::thread_rng();
+            match algo {
+                OPENSSL_ALGO_SHA1 => {
+                    let signing = PssBlindedSigningKey::<Sha1>::new(priv_key);
+                    let sig: PssSig = signing.sign_with_rng(&mut rng, data.as_bytes());
+                    sig.to_bytes().to_vec()
+                }
+                OPENSSL_ALGO_SHA256 => {
+                    let signing = PssBlindedSigningKey::<Sha256>::new(priv_key);
+                    let sig: PssSig = signing.sign_with_rng(&mut rng, data.as_bytes());
+                    sig.to_bytes().to_vec()
+                }
+                OPENSSL_ALGO_SHA384 => {
+                    let signing = PssBlindedSigningKey::<Sha384>::new(priv_key);
+                    let sig: PssSig = signing.sign_with_rng(&mut rng, data.as_bytes());
+                    sig.to_bytes().to_vec()
+                }
+                OPENSSL_ALGO_SHA512 => {
+                    let signing = PssBlindedSigningKey::<Sha512>::new(priv_key);
+                    let sig: PssSig = signing.sign_with_rng(&mut rng, data.as_bytes());
+                    sig.to_bytes().to_vec()
+                }
+                _ => {
+                    vm.emit_warning(&format!(
+                        "openssl_sign(): Unknown signature algorithm (id={})",
+                        algo
+                    ));
+                    return Ok(Value::False);
+                }
+            }
         }
-        OPENSSL_ALGO_SHA256 => {
-            let signing = SigningKey::<Sha256>::new(priv_key);
-            let sig: PkcsSig = signing.sign(data.as_bytes());
-            sig.to_bytes().to_vec()
-        }
-        OPENSSL_ALGO_SHA384 => {
-            let signing = SigningKey::<Sha384>::new(priv_key);
-            let sig: PkcsSig = signing.sign(data.as_bytes());
-            sig.to_bytes().to_vec()
-        }
-        OPENSSL_ALGO_SHA512 => {
-            let signing = SigningKey::<Sha512>::new(priv_key);
-            let sig: PkcsSig = signing.sign(data.as_bytes());
-            sig.to_bytes().to_vec()
-        }
-        _ => {
-            vm.emit_warning(&format!(
-                "openssl_sign(): Unknown signature algorithm (id={})",
-                algo
-            ));
-            return Ok(Value::False);
-        }
+        OPENSSL_PKCS1_PADDING | _ => match algo {
+            OPENSSL_ALGO_SHA1 => {
+                let signing = SigningKey::<Sha1>::new(priv_key);
+                let sig: PkcsSig = signing.sign(data.as_bytes());
+                sig.to_bytes().to_vec()
+            }
+            OPENSSL_ALGO_SHA256 => {
+                let signing = SigningKey::<Sha256>::new(priv_key);
+                let sig: PkcsSig = signing.sign(data.as_bytes());
+                sig.to_bytes().to_vec()
+            }
+            OPENSSL_ALGO_SHA384 => {
+                let signing = SigningKey::<Sha384>::new(priv_key);
+                let sig: PkcsSig = signing.sign(data.as_bytes());
+                sig.to_bytes().to_vec()
+            }
+            OPENSSL_ALGO_SHA512 => {
+                let signing = SigningKey::<Sha512>::new(priv_key);
+                let sig: PkcsSig = signing.sign(data.as_bytes());
+                sig.to_bytes().to_vec()
+            }
+            _ => {
+                vm.emit_warning(&format!(
+                    "openssl_sign(): Unknown signature algorithm (id={})",
+                    algo
+                ));
+                return Ok(Value::False);
+            }
+        },
     };
 
     if let Some(Value::Reference(r)) = args.get(1) {
@@ -630,12 +672,13 @@ pub fn openssl_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-/// openssl_verify(data, signature, key, algo = OPENSSL_ALGO_SHA1): int|false
+/// openssl_verify(data, signature, key, algo = OPENSSL_ALGO_SHA1, padding = OPENSSL_PKCS1_PADDING): int|false
 pub fn openssl_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();
     let signature = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let key_arg = args.get(2).cloned().unwrap_or(Value::Null);
     let algo = args.get(3).map(|v| v.to_long()).unwrap_or(OPENSSL_ALGO_SHA1);
+    let padding = args.get(4).map(|v| v.to_long()).unwrap_or(OPENSSL_PKCS1_PADDING);
 
     let pub_key = match resolve_public_key(&key_arg) {
         Some(k) => k,
@@ -647,34 +690,65 @@ pub fn openssl_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    let sig = match PkcsSig::try_from(signature.as_bytes()) {
-        Ok(s) => s,
-        Err(_) => return Ok(Value::Long(0)),
-    };
-
-    let verified = match algo {
-        OPENSSL_ALGO_SHA1 => {
-            let v: VerifyingKey<Sha1> = VerifyingKey::new(pub_key);
-            v.verify(data.as_bytes(), &sig).is_ok()
+    let verified = if padding == OPENSSL_PKCS1_PSS_PADDING {
+        let sig = match PssSig::try_from(signature.as_bytes()) {
+            Ok(s) => s,
+            Err(_) => return Ok(Value::Long(0)),
+        };
+        match algo {
+            OPENSSL_ALGO_SHA1 => {
+                let v: PssVerifyingKey<Sha1> = PssVerifyingKey::new(pub_key);
+                v.verify(data.as_bytes(), &sig).is_ok()
+            }
+            OPENSSL_ALGO_SHA256 => {
+                let v: PssVerifyingKey<Sha256> = PssVerifyingKey::new(pub_key);
+                v.verify(data.as_bytes(), &sig).is_ok()
+            }
+            OPENSSL_ALGO_SHA384 => {
+                let v: PssVerifyingKey<Sha384> = PssVerifyingKey::new(pub_key);
+                v.verify(data.as_bytes(), &sig).is_ok()
+            }
+            OPENSSL_ALGO_SHA512 => {
+                let v: PssVerifyingKey<Sha512> = PssVerifyingKey::new(pub_key);
+                v.verify(data.as_bytes(), &sig).is_ok()
+            }
+            _ => {
+                vm.emit_warning(&format!(
+                    "openssl_verify(): Unknown signature algorithm (id={})",
+                    algo
+                ));
+                return Ok(Value::False);
+            }
         }
-        OPENSSL_ALGO_SHA256 => {
-            let v: VerifyingKey<Sha256> = VerifyingKey::new(pub_key);
-            v.verify(data.as_bytes(), &sig).is_ok()
-        }
-        OPENSSL_ALGO_SHA384 => {
-            let v: VerifyingKey<Sha384> = VerifyingKey::new(pub_key);
-            v.verify(data.as_bytes(), &sig).is_ok()
-        }
-        OPENSSL_ALGO_SHA512 => {
-            let v: VerifyingKey<Sha512> = VerifyingKey::new(pub_key);
-            v.verify(data.as_bytes(), &sig).is_ok()
-        }
-        _ => {
-            vm.emit_warning(&format!(
-                "openssl_verify(): Unknown signature algorithm (id={})",
-                algo
-            ));
-            return Ok(Value::False);
+    } else {
+        let sig = match PkcsSig::try_from(signature.as_bytes()) {
+            Ok(s) => s,
+            Err(_) => return Ok(Value::Long(0)),
+        };
+        match algo {
+            OPENSSL_ALGO_SHA1 => {
+                let v: VerifyingKey<Sha1> = VerifyingKey::new(pub_key);
+                v.verify(data.as_bytes(), &sig).is_ok()
+            }
+            OPENSSL_ALGO_SHA256 => {
+                let v: VerifyingKey<Sha256> = VerifyingKey::new(pub_key);
+                v.verify(data.as_bytes(), &sig).is_ok()
+            }
+            OPENSSL_ALGO_SHA384 => {
+                let v: VerifyingKey<Sha384> = VerifyingKey::new(pub_key);
+                v.verify(data.as_bytes(), &sig).is_ok()
+            }
+            OPENSSL_ALGO_SHA512 => {
+                let v: VerifyingKey<Sha512> = VerifyingKey::new(pub_key);
+                v.verify(data.as_bytes(), &sig).is_ok()
+            }
+            _ => {
+                vm.emit_warning(&format!(
+                    "openssl_verify(): Unknown signature algorithm (id={})",
+                    algo
+                ));
+                return Ok(Value::False);
+            }
         }
     };
 
