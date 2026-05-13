@@ -301,11 +301,27 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 class_lower.as_slice(),
                 b"spldoublylinkedlist" | b"splstack" | b"splqueue"
             );
-            // ArrayObject/ArrayIterator use a private "storage" property format
-            let is_array_object_class = matches!(
+            // ArrayObject/ArrayIterator use a private "storage" property format.
+            // Subclasses (e.g. `class Name extends ArrayObject`) inherit the
+            // same storage view — find the closest built-in ancestor.
+            let array_object_class_lower: Option<&'static [u8]> = if matches!(
                 class_lower.as_slice(),
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-            );
+            ) {
+                match class_lower.as_slice() {
+                    b"arrayobject" => Some(b"ArrayObject"),
+                    b"arrayiterator" => Some(b"ArrayIterator"),
+                    b"recursivearrayiterator" => Some(b"ArrayIterator"),
+                    _ => None,
+                }
+            } else if vm.class_extends(&class_lower, b"arrayobject") {
+                Some(b"ArrayObject")
+            } else if vm.class_extends(&class_lower, b"arrayiterator") {
+                Some(b"ArrayIterator")
+            } else {
+                None
+            };
+            let is_array_object_class = array_object_class_lower.is_some();
             // SplObjectStorage uses a private "storage" property containing an
             // indexed array of {obj, inf} entries.
             let is_spl_obj_storage = class_lower.as_slice() == b"splobjectstorage";
@@ -433,8 +449,13 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, name_str).as_bytes());
                     var_dump_value(vm, value, indent + 2, seen);
                 }
-                // Show private storage property
-                vm.write_output(format!("{}  [\"storage\":\"{}\":private]=>\n", prefix, class_name_owned).as_bytes());
+                // Show private storage property — declaring class is the
+                // closest built-in ArrayObject/ArrayIterator ancestor, not
+                // the actual subclass.
+                let storage_decl = String::from_utf8_lossy(
+                    array_object_class_lower.unwrap_or(b"ArrayObject"),
+                ).to_string();
+                vm.write_output(format!("{}  [\"storage\":\"{}\":private]=>\n", prefix, storage_decl).as_bytes());
                 var_dump_value(vm, &spl_arr, indent + 2, seen);
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 seen.remove(&oid);
