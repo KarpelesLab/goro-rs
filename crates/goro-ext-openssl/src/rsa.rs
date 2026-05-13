@@ -695,10 +695,7 @@ pub fn openssl_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     sig.to_bytes().to_vec()
                 }
                 _ => {
-                    vm.emit_warning(&format!(
-                        "openssl_sign(): Unknown signature algorithm (id={})",
-                        algo
-                    ));
+                    vm.emit_warning("openssl_sign(): Unknown digest algorithm");
                     return Ok(Value::False);
                 }
             }
@@ -725,10 +722,7 @@ pub fn openssl_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 sig.to_bytes().to_vec()
             }
             _ => {
-                vm.emit_warning(&format!(
-                    "openssl_sign(): Unknown signature algorithm (id={})",
-                    algo
-                ));
+                vm.emit_warning("openssl_sign(): Unknown digest algorithm");
                 return Ok(Value::False);
             }
         },
@@ -782,10 +776,7 @@ pub fn openssl_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 v.verify(data.as_bytes(), &sig).is_ok()
             }
             _ => {
-                vm.emit_warning(&format!(
-                    "openssl_verify(): Unknown signature algorithm (id={})",
-                    algo
-                ));
+                vm.emit_warning("openssl_verify(): Unknown digest algorithm");
                 return Ok(Value::False);
             }
         }
@@ -812,10 +803,7 @@ pub fn openssl_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 v.verify(data.as_bytes(), &sig).is_ok()
             }
             _ => {
-                vm.emit_warning(&format!(
-                    "openssl_verify(): Unknown signature algorithm (id={})",
-                    algo
-                ));
+                vm.emit_warning("openssl_verify(): Unknown digest algorithm");
                 return Ok(Value::False);
             }
         }
