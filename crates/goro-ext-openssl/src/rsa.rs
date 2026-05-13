@@ -423,11 +423,29 @@ pub fn openssl_pkey_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Value,
     }
 }
 
-/// openssl_pkey_get_private(string|OpenSSLAsymmetricKey $privateKey, ?string $passphrase = null)
+/// openssl_pkey_get_private(string|array|OpenSSLAsymmetricKey $privateKey, ?string $passphrase = null)
 pub fn openssl_pkey_get_private(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let key_arg = args.first().cloned().unwrap_or(Value::Null);
-    let passphrase = args.get(1).map(|v| v.to_php_string().as_bytes().to_vec());
-    let pw: Option<&[u8]> = passphrase.as_deref().filter(|b| !b.is_empty());
+    let raw = args.first().cloned().unwrap_or(Value::Null);
+    let passphrase_arg = args.get(1).map(|v| v.to_php_string().as_bytes().to_vec());
+
+    // Support array syntax: [file_or_pem, passphrase]
+    let (key_arg, pw_vec): (Value, Option<Vec<u8>>) = {
+        let raw_deref = match &raw {
+            Value::Reference(r) => r.borrow().clone(),
+            other => other.clone(),
+        };
+        if let Value::Array(a) = &raw_deref {
+            let arr = a.borrow();
+            let first = arr.get_int(0).cloned().unwrap_or(Value::Null);
+            let second = arr.get_int(1).cloned();
+            let pw = second.map(|v| v.to_php_string().as_bytes().to_vec());
+            (first, pw.or(passphrase_arg))
+        } else {
+            (raw, passphrase_arg)
+        }
+    };
+
+    let pw: Option<&[u8]> = pw_vec.as_deref().filter(|b| !b.is_empty());
 
     // If already an OpenSSLAsymmetricKey containing a private key, return as-is
     if let Some(StoredKey::Private(p)) = key_from_object(&key_arg) {
@@ -566,7 +584,11 @@ pub fn openssl_pkey_get_details(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 }
 
 /// openssl_pkey_free(key): void
-pub fn openssl_pkey_free(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+pub fn openssl_pkey_free(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // PHP 8.0+ deprecation notice
+    vm.emit_deprecated(
+        "Function openssl_pkey_free() is deprecated since 8.0, as OpenSSLAsymmetricKey objects are freed automatically",
+    );
     if let Some(arg) = args.first() {
         let arg = match arg {
             Value::Reference(r) => r.borrow().clone(),
