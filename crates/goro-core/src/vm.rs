@@ -8376,9 +8376,17 @@ impl Vm {
                                 let hash = format!("{:016x}", key_o.borrow().object_id);
                                 let ob = obj.borrow();
                                 let arr = ob.get_property(b"__spl_array");
-                                if let Value::Array(a) = arr {
-                                    Some(a.borrow().get(&ArrayKey::String(PhpString::from_string(hash))).cloned().unwrap_or(Value::Null))
+                                let found = if let Value::Array(a) = arr {
+                                    a.borrow().get(&ArrayKey::String(PhpString::from_string(hash))).cloned()
                                 } else {
+                                    None
+                                };
+                                drop(ob);
+                                if let Some(v) = found {
+                                    Some(v)
+                                } else {
+                                    let exc = self.create_exception(b"UnexpectedValueException", "Object not found", 0);
+                                    self.current_exception = Some(exc);
                                     Some(Value::Null)
                                 }
                             } else {
