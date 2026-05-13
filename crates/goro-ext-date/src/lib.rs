@@ -139,10 +139,20 @@ pub fn register(vm: &mut Vm) {
 fn date_default_timezone_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let tz = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     // Validate against known TZ identifiers/abbreviations/offsets.
+    let is_etc_alias = tz.starts_with("Etc/") || matches!(tz.as_str(),
+        "GMT0" | "GMT+0" | "GMT-0" | "Greenwich" | "UCT" | "Universal" | "Zulu"
+        | "Iceland" | "Egypt" | "Eire" | "Hongkong" | "Iran" | "Israel"
+        | "Jamaica" | "Japan" | "Kwajalein" | "Libya" | "NZ" | "Navajo"
+        | "PRC" | "Poland" | "Portugal" | "ROC" | "ROK" | "Singapore" | "Turkey"
+        | "EST" | "MST" | "HST" | "EST5EDT" | "CST6CDT" | "MST7MDT" | "PST8PDT"
+        | "WET" | "CET" | "EET" | "MET" | "Cuba"
+        | "W-SU"
+    );
     let is_valid = tz == "UTC" || tz == "utc" || tz == "GMT" || tz == "Z"
         || parse_tz_offset(&tz).is_some()
         || (tz.contains('/') && is_known_tz_identifier(&tz))
-        || is_known_tz_abbrev_or_name(&tz);
+        || is_known_tz_abbrev_or_name(&tz)
+        || is_etc_alias;
     if !is_valid {
         vm.emit_notice_at(
             &format!("date_default_timezone_set(): Timezone ID '{}' is invalid", tz),
