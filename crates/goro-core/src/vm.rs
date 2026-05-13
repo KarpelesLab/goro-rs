@@ -29194,13 +29194,17 @@ fn vm_calc_calendar_diff(sy: i64, sm: i64, sd: i64, sh: i64, si: i64, ss: i64,
 fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
     let now_days = now / 86400;
     let (now_year, now_month, now_day) = vm_days_to_ymd(now_days);
+    let now_tod = ((now % 86400) + 86400) % 86400;
+    let now_hour = now_tod / 3600;
+    let now_minute = (now_tod % 3600) / 60;
+    let now_second = now_tod % 60;
 
     let mut year = now_year;
     let mut month = now_month;
     let mut day = now_day;
-    let mut hour = 0i64;
-    let mut minute = 0i64;
-    let mut second = 0i64;
+    let mut hour = now_hour;
+    let mut minute = now_minute;
+    let mut second = now_second;
 
     let fmt_bytes = format.as_bytes();
     let dt_bytes = datetime.as_bytes();
@@ -29330,7 +29334,17 @@ fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
                 if fi < fmt_bytes.len() && di < dt_bytes.len() { di += 1; }
             }
             b'!' => { year = 1970; month = 1; day = 1; hour = 0; minute = 0; second = 0; }
-            b'|' => { /* reset unset fields - simplified */ }
+            b'|' => {
+                // Reset unset (still-now) date/time components to the epoch defaults.
+                // We track this in a flag — simplified: reset time-of-day only if
+                // it still equals now's, and date if still equals now's.
+                if year == now_year && month == now_month && day == now_day {
+                    year = 1970; month = 1; day = 1;
+                }
+                if hour == now_hour && minute == now_minute && second == now_second {
+                    hour = 0; minute = 0; second = 0;
+                }
+            }
             _ => { if di < dt_bytes.len() { di += 1; } }
         }
         fi += 1;
@@ -29532,7 +29546,45 @@ pub fn vm_timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, Str
                 let abbrev = format!("{}{:02}:{:02}", sign, abs / 3600, (abs % 3600) / 60);
                 (offset, abbrev)
             } else {
-                (0, "UTC".to_string())
+                // Standalone abbreviation (type 2 timezone): use known offsets.
+                let u = tz_name.to_uppercase();
+                let (off, ab): (i64, &str) = match u.as_str() {
+                    "EST" => (-5*3600, "EST"),
+                    "EDT" => (-4*3600, "EDT"),
+                    "CST" => (-6*3600, "CST"),
+                    "CDT" => (-5*3600, "CDT"),
+                    "MST" => (-7*3600, "MST"),
+                    "MDT" => (-6*3600, "MDT"),
+                    "PST" => (-8*3600, "PST"),
+                    "PDT" => (-7*3600, "PDT"),
+                    "AKST" => (-9*3600, "AKST"),
+                    "AKDT" => (-8*3600, "AKDT"),
+                    "HST" => (-10*3600, "HST"),
+                    "AST" => (-4*3600, "AST"),
+                    "ADT" => (-3*3600, "ADT"),
+                    "NST" => (-3*3600 - 1800, "NST"),
+                    "NDT" => (-2*3600 - 1800, "NDT"),
+                    "BST" => (3600, "BST"),
+                    "CET" => (3600, "CET"),
+                    "CEST" => (2*3600, "CEST"),
+                    "EET" => (2*3600, "EET"),
+                    "EEST" => (3*3600, "EEST"),
+                    "WET" => (0, "WET"),
+                    "WEST" => (3600, "WEST"),
+                    "MSK" => (3*3600, "MSK"),
+                    "JST" | "KST" => (9*3600, "JST"),
+                    "IST" => (5*3600 + 1800, "IST"),
+                    "AEST" => (10*3600, "AEST"),
+                    "AEDT" => (11*3600, "AEDT"),
+                    "ACST" => (9*3600 + 1800, "ACST"),
+                    "ACDT" => (10*3600 + 1800, "ACDT"),
+                    "AWST" => (8*3600, "AWST"),
+                    "NZST" => (12*3600, "NZST"),
+                    "NZDT" => (13*3600, "NZDT"),
+                    "GMT" | "UTC" | "Z" | "ZULU" => (0, "GMT"),
+                    _ => return (0, "UTC".to_string()),
+                };
+                (off, ab.to_string())
             }
         }
     }
