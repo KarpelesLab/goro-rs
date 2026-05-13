@@ -15,6 +15,17 @@ use modes::CipherMethod;
 const OPENSSL_RAW_DATA: i64 = 1;
 const OPENSSL_ZERO_PADDING: i64 = 2;
 
+std::thread_local! {
+    /// FIFO queue of openssl error strings produced by this extension.
+    /// `openssl_error_string()` pops one at a time.
+    pub static OPENSSL_ERROR_QUEUE: std::cell::RefCell<std::collections::VecDeque<String>> =
+        std::cell::RefCell::new(std::collections::VecDeque::new());
+}
+
+pub(crate) fn push_openssl_error(msg: impl Into<String>) {
+    OPENSSL_ERROR_QUEUE.with(|q| q.borrow_mut().push_back(msg.into()));
+}
+
 /// Register all openssl extension functions and constants
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"openssl");
@@ -896,8 +907,11 @@ fn openssl_get_md_methods(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
 
 /// openssl_error_string()
 fn openssl_error_string(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // We don't maintain an error queue; return false (no more errors)
-    Ok(Value::False)
+    let msg = OPENSSL_ERROR_QUEUE.with(|q| q.borrow_mut().pop_front());
+    match msg {
+        Some(s) => Ok(Value::String(PhpString::from_string(s))),
+        None => Ok(Value::False),
+    }
 }
 
 // ── Stub implementations for commonly tested but unimplemented openssl functions ──

@@ -3,6 +3,8 @@
 //! by an integer id stored on the `OpenSSLAsymmetricKey` object as the hidden
 //! property `__pkey_id`.
 
+use crate::push_openssl_error;
+
 use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::object::PhpObject;
 use goro_core::string::PhpString;
@@ -311,13 +313,18 @@ pub fn openssl_pkey_new(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    // Sanity: minimum bits
+    // Sanity: minimum bits. PHP does not emit a php-level warning here,
+    // it only pushes an entry into the openssl error queue.
     if bits < 512 {
-        vm.emit_warning("openssl_pkey_new(): private_key_bits must be at least 512");
+        push_openssl_error(
+            "error:0200006C:rsa routines:rsa_builtin_keygen:key size too small",
+        );
         return Ok(Value::False);
     }
     if bits > 16384 {
-        vm.emit_warning("openssl_pkey_new(): private_key_bits is too large");
+        push_openssl_error(
+            "error:0200006D:rsa routines:rsa_builtin_keygen:key size too large",
+        );
         return Ok(Value::False);
     }
 
