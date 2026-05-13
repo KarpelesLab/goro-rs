@@ -912,8 +912,14 @@ fn decode_authority_key_identifier(value: &[u8]) -> String {
                     out.push('\n');
                 }
                 out.push_str("serial:");
+                // Strip leading 0x00 sign byte if the next byte has high bit
+                // set (matches OpenSSL's display convention).
+                let mut bytes = body;
+                if bytes.len() > 1 && bytes[0] == 0 && (bytes[1] & 0x80) != 0 {
+                    bytes = &bytes[1..];
+                }
                 out.push_str(
-                    &body
+                    &bytes
                         .iter()
                         .map(|b| format!("{:02X}", b))
                         .collect::<Vec<_>>()
