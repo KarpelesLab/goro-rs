@@ -3182,7 +3182,8 @@ impl Vm {
                 || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp")
                 || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
                 || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
+                || name.starts_with(b"__pkey_id") {
                 continue;
             }
             // Skip uninitialized props (Undef).
@@ -18059,7 +18060,8 @@ impl Vm {
                                     || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp")
                                     || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
                                     || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-                                    || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                                    || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
+                                    || name.starts_with(b"__pkey_id") {
                                     continue;
                                 }
                                 if matches!(value, Value::Undef) {
@@ -18474,7 +18476,8 @@ impl Vm {
                                             || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp")
                                             || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
                                             || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-                                            || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                                            || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
+                                            || name.starts_with(b"__pkey_id") {
                                             continue;
                                         }
                                         if matches!(value, Value::Undef) {

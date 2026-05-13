@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 mod aes;
 mod modes;
+mod rsa;
 
 use modes::CipherMethod;
 
@@ -17,6 +18,7 @@ const OPENSSL_ZERO_PADDING: i64 = 2;
 /// Register all openssl extension functions and constants
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"openssl");
+    rsa::register_class(vm);
     // Functions
     vm.register_function(b"openssl_encrypt", openssl_encrypt);
     vm.register_function(b"openssl_decrypt", openssl_decrypt);
@@ -36,21 +38,21 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"openssl_x509_check_private_key", openssl_stub_false);
     vm.register_function(b"openssl_x509_verify", openssl_stub_long_neg1);
     vm.register_function(b"openssl_x509_fingerprint", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_new", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_get_public", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_get_private", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_get_details", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_export", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_export_to_file", openssl_stub_false);
-    vm.register_function(b"openssl_pkey_free", openssl_stub_null);
-    vm.register_function(b"openssl_get_publickey", openssl_stub_false);
-    vm.register_function(b"openssl_get_privatekey", openssl_stub_false);
+    vm.register_function(b"openssl_pkey_new", rsa::openssl_pkey_new);
+    vm.register_function(b"openssl_pkey_get_public", rsa::openssl_pkey_get_public);
+    vm.register_function(b"openssl_pkey_get_private", rsa::openssl_pkey_get_private);
+    vm.register_function(b"openssl_pkey_get_details", rsa::openssl_pkey_get_details);
+    vm.register_function(b"openssl_pkey_export", rsa::openssl_pkey_export);
+    vm.register_function(b"openssl_pkey_export_to_file", rsa::openssl_pkey_export_to_file);
+    vm.register_function(b"openssl_pkey_free", rsa::openssl_pkey_free);
+    vm.register_function(b"openssl_get_publickey", rsa::openssl_pkey_get_public);
+    vm.register_function(b"openssl_get_privatekey", rsa::openssl_pkey_get_private);
     vm.register_function(b"openssl_public_encrypt", openssl_stub_false);
     vm.register_function(b"openssl_private_encrypt", openssl_stub_false);
     vm.register_function(b"openssl_public_decrypt", openssl_stub_false);
     vm.register_function(b"openssl_private_decrypt", openssl_stub_false);
-    vm.register_function(b"openssl_sign", openssl_stub_false);
-    vm.register_function(b"openssl_verify", openssl_stub_long_neg1);
+    vm.register_function(b"openssl_sign", rsa::openssl_sign);
+    vm.register_function(b"openssl_verify", rsa::openssl_verify);
     vm.register_function(b"openssl_seal", openssl_stub_false);
     vm.register_function(b"openssl_open", openssl_stub_false);
     vm.register_function(b"openssl_csr_new", openssl_stub_false);
