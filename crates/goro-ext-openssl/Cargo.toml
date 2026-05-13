@@ -21,3 +21,7 @@ pkcs1 = { version = "0.7", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 pem-rfc7468 = "0.7"
 signature = { version = "2", features = ["digest"] }
+x509-cert = { version = "0.2", features = ["builder", "pem"] }
+spki = { version = "0.7", features = ["pem"] }
+const-oid = { version = "0.9", features = ["db"] }
+der = { version = "0.7", features = ["std", "pem"] }
