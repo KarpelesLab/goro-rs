@@ -4664,12 +4664,42 @@ impl Vm {
                         let ob = obj.borrow();
                         Some(ob.get_property(b"__timestamp"))
                     }
-                    b"getoffset" => Some(Value::Long(0)), // UTC
+                    b"getoffset" => {
+                        let ob = obj.borrow();
+                        let ts = ob.get_property(b"__timestamp").to_long();
+                        let tz_name = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+                        drop(ob);
+                        let tz_name = if tz_name.is_empty() { "UTC".to_string() } else { tz_name };
+                        let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, ts);
+                        Some(Value::Long(offset))
+                    }
                     b"gettimezone" => {
+                        let ob = obj.borrow();
+                        let tz = ob.get_property(b"timezone");
+                        let tz_str = tz.to_php_string();
+                        let tz_str_lossy = tz_str.to_string_lossy();
+                        let stored_type = ob.get_property(b"timezone_type");
+                        drop(ob);
+                        let final_tz = if tz_str_lossy.is_empty() {
+                            PhpString::from_bytes(b"UTC")
+                        } else {
+                            tz_str
+                        };
+                        // Determine type from stored or infer.
+                        let type_v = if !matches!(stored_type, Value::Null | Value::Undef) {
+                            stored_type
+                        } else if vm_parse_tz_offset(&tz_str_lossy).is_some() {
+                            Value::Long(1)
+                        } else if vm_is_tz_abbrev(&tz_str_lossy) {
+                            Value::Long(2)
+                        } else {
+                            Value::Long(3)
+                        };
                         let obj_id = self.next_object_id;
                         self.next_object_id += 1;
                         let mut tz_obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
-                        tz_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
+                        tz_obj.set_property(b"timezone_type".to_vec(), type_v);
+                        tz_obj.set_property(b"timezone".to_vec(), Value::String(final_tz));
                         Some(Value::Object(Rc::new(RefCell::new(tz_obj))))
                     }
                     b"__serialize" => {
