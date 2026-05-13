@@ -4395,15 +4395,33 @@ impl Vm {
         let mut current: Vec<u8> = class_name.to_vec();
         for _ in 0..50 {
             if let Some(ce) = self.classes.get(&current) {
-                // Check this class's interfaces
+                // Check this class's interfaces (and their extends chains).
                 for iface in &ce.interfaces {
                     let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
                     if iface_lower == iface_name {
                         return true;
                     }
-                    // Check if the interface itself extends the target interface
+                    // The interface itself may extend other interfaces. PHP
+                    // stores `interface I2 extends I1 {}` as I2.parent = I1.
+                    // class_implements_interface(I2, I1) won't find it via the
+                    // `interfaces` loop, so we also walk the parent chain of
+                    // the interface here.
                     if self.class_implements_interface(&iface_lower, iface_name) {
                         return true;
+                    }
+                    // Walk the iface's parent chain explicitly so interface
+                    // inheritance (via `extends`) is honoured.
+                    let mut iface_cur = iface_lower.clone();
+                    for _ in 0..50 {
+                        let parent = self.classes.get(&iface_cur).and_then(|c| c.parent.clone());
+                        match parent {
+                            Some(p) => {
+                                let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if p_lower == iface_name { return true; }
+                                iface_cur = p_lower;
+                            }
+                            None => break,
+                        }
                     }
                 }
                 // Walk up to parent
