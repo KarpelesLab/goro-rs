@@ -37,6 +37,8 @@ pub struct Parser {
     /// Pending extra properties from comma-separated property declarations
     pending_extra_properties: Vec<ClassMember>,
     class_name_stack: Vec<Vec<u8>>,
+    /// Stack of "is this class actually an interface?" for nested class parsing.
+    is_interface_stack: Vec<bool>,
 }
 
 const MAX_PARSE_DEPTH: u32 = 512;
@@ -53,6 +55,7 @@ impl Parser {
             pending_extra_constants: Vec::new(),
             pending_extra_properties: Vec::new(),
             class_name_stack: Vec::new(),
+            is_interface_stack: Vec::new(),
         }
     }
 
@@ -1661,6 +1664,7 @@ impl Parser {
         self.expect(&TokenKind::OpenBrace)?;
         let mut body = Vec::new();
         self.class_name_stack.push(name.clone());
+        self.is_interface_stack.push(modifiers.is_interface);
         let mut parse_err: Option<ParseError> = None;
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
             match self.parse_class_members() {
@@ -1669,6 +1673,7 @@ impl Parser {
             }
         }
         self.class_name_stack.pop();
+        self.is_interface_stack.pop();
         if let Some(e) = parse_err {
             return Err(e);
         }
@@ -2272,10 +2277,52 @@ impl Parser {
                     self.expect_semicolon()?;
                     (None, None, false, false, false, false)
                 };
+                // In interfaces, properties cannot be explicitly abstract — all interface
+                // members are implicitly abstract.
+                if self.is_interface_stack.last().copied().unwrap_or(false) {
+                    if is_abstract {
+                        return Err(ParseError {
+                            message: "Property in interface cannot be explicitly abstract. All interface members are implicitly abstract".into(),
+                            span: self.span(),
+                        });
+                    }
+                    if is_final {
+                        return Err(ParseError {
+                            message: "Property in interface cannot be final".into(),
+                            span: self.span(),
+                        });
+                    }
+                    if matches!(visibility, Visibility::Protected | Visibility::Private) {
+                        return Err(ParseError {
+                            message: "Property in interface cannot be protected or private".into(),
+                            span: self.span(),
+                        });
+                    }
+                }
                 // Abstract properties must have hooks
                 if is_abstract && get_hook.is_none() && set_hook.is_none() {
                     return Err(ParseError {
                         message: "Only hooked properties may be declared abstract".into(),
+                        span: self.span(),
+                    });
+                }
+                // Abstract property must have at least one abstract hook
+                if is_abstract && !get_hook_abstract && !set_hook_abstract {
+                    let class_name = self.class_name_stack.last()
+                        .map(|n| String::from_utf8_lossy(n).into_owned())
+                        .unwrap_or_else(|| "?".to_string());
+                    return Err(ParseError {
+                        message: format!(
+                            "Abstract property {}::${} must specify at least one abstract hook",
+                            class_name,
+                            String::from_utf8_lossy(&name),
+                        ),
+                        span: self.span(),
+                    });
+                }
+                if is_static && (get_hook.is_some() || set_hook.is_some()) {
+                    return Err(ParseError {
+                        message: "Cannot declare hooks for static property".into(),
                         span: self.span(),
                     });
                 }
@@ -2356,10 +2403,52 @@ impl Parser {
                     self.expect_semicolon()?;
                     (None, None, false, false, false, false)
                 };
+                // In interfaces, properties cannot be explicitly abstract — all interface
+                // members are implicitly abstract.
+                if self.is_interface_stack.last().copied().unwrap_or(false) {
+                    if is_abstract {
+                        return Err(ParseError {
+                            message: "Property in interface cannot be explicitly abstract. All interface members are implicitly abstract".into(),
+                            span: self.span(),
+                        });
+                    }
+                    if is_final {
+                        return Err(ParseError {
+                            message: "Property in interface cannot be final".into(),
+                            span: self.span(),
+                        });
+                    }
+                    if matches!(visibility, Visibility::Protected | Visibility::Private) {
+                        return Err(ParseError {
+                            message: "Property in interface cannot be protected or private".into(),
+                            span: self.span(),
+                        });
+                    }
+                }
                 // Abstract properties must have hooks
                 if is_abstract && get_hook.is_none() && set_hook.is_none() {
                     return Err(ParseError {
                         message: "Only hooked properties may be declared abstract".into(),
+                        span: self.span(),
+                    });
+                }
+                // Abstract property must have at least one abstract hook
+                if is_abstract && !get_hook_abstract && !set_hook_abstract {
+                    let class_name = self.class_name_stack.last()
+                        .map(|n| String::from_utf8_lossy(n).into_owned())
+                        .unwrap_or_else(|| "?".to_string());
+                    return Err(ParseError {
+                        message: format!(
+                            "Abstract property {}::${} must specify at least one abstract hook",
+                            class_name,
+                            String::from_utf8_lossy(&name),
+                        ),
+                        span: self.span(),
+                    });
+                }
+                if is_static && (get_hook.is_some() || set_hook.is_some()) {
+                    return Err(ParseError {
+                        message: "Cannot declare hooks for static property".into(),
                         span: self.span(),
                     });
                 }
@@ -2405,14 +2494,16 @@ impl Parser {
             let mut hook_is_final = false;
             let mut hook_is_static = false;
             let mut hook_is_private = false;
-            let mut hook_has_visibility = false;
+            let mut visibility_modifier: Option<&'static str> = None;
+            let mut hook_is_by_ref = false;
             loop {
                 match self.peek() {
                     TokenKind::Final => { hook_is_final = true; self.advance(); }
                     TokenKind::Static => { hook_is_static = true; self.advance(); }
-                    TokenKind::Private => { hook_is_private = true; hook_has_visibility = true; self.advance(); }
-                    TokenKind::Public | TokenKind::Protected => { hook_has_visibility = true; self.advance(); }
-                    TokenKind::Ampersand => { self.advance(); }
+                    TokenKind::Private => { hook_is_private = true; visibility_modifier = Some("private"); self.advance(); }
+                    TokenKind::Public => { visibility_modifier = Some("public"); self.advance(); }
+                    TokenKind::Protected => { visibility_modifier = Some("protected"); self.advance(); }
+                    TokenKind::Ampersand => { hook_is_by_ref = true; self.advance(); }
                     _ => break,
                 }
             }
@@ -2423,13 +2514,14 @@ impl Parser {
                     span: self.span(),
                 });
             }
-            if hook_has_visibility {
+            if let Some(vis) = visibility_modifier {
                 return Err(ParseError {
-                    message: "Property hooks cannot have visibility".into(),
+                    message: format!("Cannot use the {} modifier on a property hook", vis),
                     span: self.span(),
                 });
             }
             let _ = hook_is_private;
+            let _ = hook_is_by_ref;
             // Look for "get" or "set" identifier
             let hook_name = match self.peek().clone() {
                 TokenKind::Identifier(name) => name,
@@ -2450,6 +2542,19 @@ impl Parser {
                 }
                 if hook_is_final { get_hook_final = true; }
                 self.advance(); // consume 'get'
+                if matches!(self.peek(), TokenKind::OpenParen) {
+                    let class_name = self.class_name_stack.last()
+                        .map(|n| String::from_utf8_lossy(n).into_owned())
+                        .unwrap_or_else(|| "?".to_string());
+                    return Err(ParseError {
+                        message: format!(
+                            "get hook of property {}::${} must not have a parameter list",
+                            class_name,
+                            String::from_utf8_lossy(prop_name),
+                        ),
+                        span: self.span(),
+                    });
+                }
                 if matches!(self.peek(), TokenKind::OpenBrace) {
                     // get { ... }
                     let body = self.parse_block()?;
@@ -2487,6 +2592,10 @@ impl Parser {
                 let had_paren = matches!(self.peek(), TokenKind::OpenParen);
                 let (param_name, param_type_hint) = if self.eat(&TokenKind::OpenParen) {
                     // We need to handle: set($value), set(string $value), set(Type $value)
+                    // Also accept attributes #[Attr] before the parameter.
+                    while matches!(self.peek(), TokenKind::AttributeOpen) {
+                        let _ = self.parse_attributes()?;
+                    }
                     // Detect by-ref / variadic before or after type hint.
                     let mut got_by_ref = matches!(self.peek(), TokenKind::Ampersand);
                     let mut got_variadic = matches!(self.peek(), TokenKind::Ellipsis);
@@ -2643,6 +2752,12 @@ impl Parser {
         }
 
         self.expect(&TokenKind::CloseBrace)?;
+        if get_hook.is_none() && set_hook.is_none() {
+            return Err(ParseError {
+                message: "Property hook list must not be empty".into(),
+                span: self.span(),
+            });
+        }
         Ok((get_hook, set_hook, get_hook_final, set_hook_final, get_hook_abstract, set_hook_abstract))
     }
 

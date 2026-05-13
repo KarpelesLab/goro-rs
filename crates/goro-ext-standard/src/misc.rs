@@ -6258,7 +6258,7 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         // Redirect lazy proxy to real backing object.
         let obj_rc = vm.proxy_redirect(outer);
-        let obj = obj_rc.borrow();
+        let mut obj = obj_rc.borrow();
         let class_name_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
         // Get the calling class context to determine visibility
@@ -6286,9 +6286,20 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 std::collections::HashSet::new()
             };
 
+        // Iterate properties in declaration order from class def. For backed props,
+        // read the value from the instance's property bag; for hooked (virtual) props,
+        // dispatch through the get hook.
+        let class_props_order: Vec<(Vec<u8>, goro_core::object::Visibility, bool, bool, bool)> =
+            if let Some(class_def) = vm.get_class_def(&class_name_lower) {
+                class_def.properties.iter()
+                    .map(|p| (p.name.clone(), p.visibility, p.is_virtual, p.has_get_hook, p.is_static))
+                    .collect()
+            } else { Vec::new() };
+
         let mut arr = PhpArray::new();
-        for (name, val) in &obj.properties {
-            // Skip internal properties
+        for (name, vis, is_virtual, has_get_hook, is_static) in &class_props_order {
+            if *is_static { continue; }
+            // Skip internal properties (none normally collide, but just in case)
             if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
                 || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
                 || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
@@ -6298,40 +6309,64 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
                 continue;
             }
-            // Skip uninitialized typed properties
-            if matches!(val, Value::Undef) && typed_props.contains(name) {
-                continue;
-            }
-            // Skip any other uninitialized (Undef) props too.
-            if matches!(val, Value::Undef) {
-                continue;
-            }
-            // Check visibility
-            let vis = prop_visibility.get(name).copied().unwrap_or(goro_core::object::Visibility::Public);
+            // Visibility check
             let accessible = match vis {
                 goro_core::object::Visibility::Public => true,
                 goro_core::object::Visibility::Protected => {
-                    // Accessible if calling from same class or subclass
                     if let Some(ref cc) = calling_class_lower {
                         cc == &class_name_lower || vm.is_subclass_of(cc, &class_name_lower) || vm.is_subclass_of(&class_name_lower, cc)
-                    } else {
-                        false
-                    }
+                    } else { false }
                 }
                 goro_core::object::Visibility::Private => {
-                    // Only accessible from the same class
                     if let Some(ref cc) = calling_class_lower {
                         cc == &class_name_lower
-                    } else {
-                        false
-                    }
+                    } else { false }
                 }
             };
-            if accessible {
-                arr.set(
-                    goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
-                    val.clone(),
-                );
+            if !accessible { continue; }
+            if *is_virtual && *has_get_hook {
+                // Drop borrow before calling into VM.
+                let obj_v = Value::Object(obj_rc.clone());
+                drop(obj);
+                let mut hook_name = b"__property_get_".to_vec();
+                hook_name.extend_from_slice(name);
+                if let Some(v) = vm.call_object_method(&obj_v, &hook_name, &[]) {
+                    arr.set(
+                        goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
+                        v,
+                    );
+                }
+                // Re-borrow
+                obj = obj_rc.borrow();
+                continue;
+            }
+            // Read value from instance
+            let val = obj.get_property(name);
+            // Skip uninitialized
+            if matches!(val, Value::Undef) {
+                continue;
+            }
+            arr.set(
+                goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
+                val,
+            );
+        }
+        // Also include dynamic properties not declared on the class (e.g. AllowDynamicProperties)
+        for (name, val) in &obj.properties {
+            if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
+                || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
+                || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
+                || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
+                || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
+                || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
+                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+                continue;
+            }
+            if matches!(val, Value::Undef) { continue; }
+            if class_props_order.iter().any(|(n, _, _, _, _)| n == name) { continue; }
+            let key = goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone()));
+            if !arr.contains_key(&key) {
+                arr.set(key, val.clone());
             }
         }
         Ok(Value::Array(Rc::new(RefCell::new(arr))))
@@ -8801,6 +8836,10 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Non-static properties first, then static
         for prop in &class.properties {
             if !prop.is_static {
+                // Skip virtual properties (no backing storage)
+                if prop.is_virtual {
+                    continue;
+                }
                 // Uninitialized typed properties (Undef) are returned as null
                 let val = match &prop.default {
                     Value::Undef => Value::Null,

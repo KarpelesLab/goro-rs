@@ -221,7 +221,30 @@ fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     match args.first() {
         Some(Value::Array(arr)) => Ok(Value::Array(arr.clone())),
-        Some(val @ Value::Object(_)) => {
+        Some(val @ Value::Object(obj)) => {
+            // IteratorAggregate: dispatch to getIterator()'s return value.
+            let cls_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let mut is_aggregate = false;
+            let mut cur = cls_lower.clone();
+            for _ in 0..32 {
+                if let Some(c) = vm.classes.get(&cur) {
+                    if c.interfaces.iter().any(|n| n.eq_ignore_ascii_case(b"IteratorAggregate")) {
+                        is_aggregate = true;
+                        break;
+                    }
+                    if c.interfaces.iter().any(|n| n.eq_ignore_ascii_case(b"Iterator")) {
+                        break;
+                    }
+                    if let Some(p) = &c.parent {
+                        cur = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    } else { break; }
+                } else { break; }
+            }
+            if is_aggregate {
+                let iter_val = vm.call_object_method(val, b"getIterator", &[]).unwrap_or(Value::Null);
+                // Recurse with the iterator
+                return iterator_to_array_fn(vm, &[iter_val, if use_keys { Value::True } else { Value::False }]);
+            }
             let mut result = PhpArray::new();
             // Call rewind, then iterate with valid/current/key/next
             vm.call_object_method(val, b"rewind", &[]);
