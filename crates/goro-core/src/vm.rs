@@ -17421,13 +17421,13 @@ impl Vm {
                                                     }
                                                 }
                                             }
-                                            // For @timestamp, default tz is +00:00 type 1 (unless user override).
-                                            if is_at_timestamp && !user_passed_tz {
+                                            // For @timestamp, PHP forces the timezone to +00:00 type 1,
+                                            // even when an explicit DateTimeZone arg was passed.
+                                            if is_at_timestamp {
                                                 effective_tz = "+00:00".to_string();
                                                 effective_tz_type = 1;
-                                            }
-                                            // If user explicitly passed a tz arg, use it (override).
-                                            if user_passed_tz {
+                                            } else if user_passed_tz {
+                                                // If user explicitly passed a tz arg, use it (override).
                                                 if let Value::Object(tz_obj) = &call.args[2] {
                                                     let tb = tz_obj.borrow();
                                                     let typ = tb.get_property(b"timezone_type").to_long();
