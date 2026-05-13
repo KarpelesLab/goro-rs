@@ -2214,11 +2214,17 @@ pub fn reflection_method_method(
                 );
                 let mut s = format!("Method [ <user> {} method {} ] {{\n", modifiers, name);
                 s.push_str(&format!("  @@ {} {} - {}\n", vm.current_file, m.op_array.decl_line, m.op_array.decl_line));
-                s.push_str(&format!("\n  - Parameters [{}] {{\n", m.op_array.param_count));
-                for i in 0..m.op_array.param_count as usize {
-                    if i < m.op_array.cv_names.len() {
-                        let pname = String::from_utf8_lossy(&m.op_array.cv_names[i]);
-                        let required = i < m.op_array.required_param_count as usize;
+                // Skip the implicit `$this` parameter for instance methods.
+                let skip = if !m.is_static { 1usize } else { 0usize };
+                let pcount_total = m.op_array.param_count as usize;
+                let pcount = pcount_total.saturating_sub(skip);
+                let rcount = (m.op_array.required_param_count as usize).saturating_sub(skip);
+                s.push_str(&format!("\n  - Parameters [{}] {{\n", pcount));
+                for i in 0..pcount {
+                    let cv_idx = i + skip;
+                    if cv_idx < m.op_array.cv_names.len() {
+                        let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
+                        let required = i < rcount;
                         s.push_str(&format!("    Parameter #{} [ <{}> ${} ]\n", i,
                             if required { "required" } else { "optional" }, pname));
                     }
