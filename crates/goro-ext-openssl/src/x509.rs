@@ -725,8 +725,10 @@ fn encode_time(t: &Time) -> (String, i64) {
     let hour = dt.hour();
     let minute = dt.minutes();
     let second = dt.seconds();
-    let s = if year < 2050 {
-        format!(
+    // Match the format that's actually encoded on-wire: UTCTime uses 2-digit
+    // year, GeneralizedTime uses 4-digit year.
+    let s = match t {
+        Time::UtcTime(_) => format!(
             "{:02}{:02}{:02}{:02}{:02}{:02}Z",
             year % 100,
             month,
@@ -734,12 +736,11 @@ fn encode_time(t: &Time) -> (String, i64) {
             hour,
             minute,
             second
-        )
-    } else {
-        format!(
+        ),
+        Time::GeneralTime(_) => format!(
             "{:04}{:02}{:02}{:02}{:02}{:02}Z",
             year, month, day, hour, minute, second
-        )
+        ),
     };
     let unix = t.to_unix_duration().as_secs() as i64;
     (s, unix)
