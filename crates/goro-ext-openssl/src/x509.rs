@@ -1081,6 +1081,12 @@ pub fn openssl_x509_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Value,
         }
     };
     let path = filename.to_string_lossy().to_string();
+    if path.len() > 4096 || path.is_empty() {
+        vm.emit_warning(
+            "openssl_x509_export_to_file(output_filename): must be a valid file path",
+        );
+        return Ok(Value::False);
+    }
     match std::fs::write(&path, pem) {
         Ok(()) => Ok(Value::True),
         Err(e) => {
@@ -1404,6 +1410,12 @@ pub fn openssl_csr_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Value, 
         }
     };
     let path = filename.to_string_lossy().to_string();
+    if path.len() > 4096 || path.is_empty() {
+        vm.emit_warning(
+            "openssl_csr_export_to_file(output_filename): must be a valid file path",
+        );
+        return Ok(Value::False);
+    }
     match std::fs::write(&path, pem) {
         Ok(()) => Ok(Value::True),
         Err(e) => {
