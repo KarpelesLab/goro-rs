@@ -845,15 +845,20 @@ pub fn openssl_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(if verified { 1 } else { 0 }))
 }
 
-/// Register the OpenSSLAsymmetricKey class.
+/// Register the OpenSSLAsymmetricKey class (and friends). These are inserted
+/// directly into the `classes` map keyed by lowercase name -- *not* through
+/// `register_class()` (which pushes onto `pending_classes`, an index-based
+/// list keyed off the user compiler's class indices and used by `DeclareClass`
+/// at execute time).
 pub fn register_class(vm: &mut Vm) {
     use goro_core::object::ClassEntry;
-    let class = ClassEntry::new(b"OpenSSLAsymmetricKey".to_vec());
-    vm.register_class(class);
-    // Also register OpenSSLCertificate so instanceof checks pass when tests reference it
-    let cert_class = ClassEntry::new(b"OpenSSLCertificate".to_vec());
-    vm.register_class(cert_class);
-    // OpenSSLCertificateSigningRequest used by some tests
-    let csr_class = ClassEntry::new(b"OpenSSLCertificateSigningRequest".to_vec());
-    vm.register_class(csr_class);
+    for name in [
+        b"OpenSSLAsymmetricKey".as_ref(),
+        b"OpenSSLCertificate".as_ref(),
+        b"OpenSSLCertificateSigningRequest".as_ref(),
+    ] {
+        let class = ClassEntry::new(name.to_vec());
+        let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        vm.classes.insert(lower, class);
+    }
 }
