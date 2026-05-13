@@ -721,6 +721,43 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    // Detect inline timezone in the input string (e.g. "...CET" or "...+01:00")
+    // unless an explicit DateTimeZone was passed.
+    let user_passed_tz = matches!(tz_arg, Some(Value::Object(_)));
+    let is_at_timestamp = datetime_str.starts_with('@');
+    let mut effective_tz = tz_name.clone();
+    let mut effective_tz_type: i64 = 3;
+    if !is_at_timestamp && !user_passed_tz {
+        let trimmed = datetime_str.trim();
+        let is_abbrev_not_utc = |s: &str| -> bool {
+            !s.eq_ignore_ascii_case("UTC")
+                && (is_known_tz_abbrev_or_name(s) || s.eq_ignore_ascii_case("GMT"))
+                && !s.contains('/')
+        };
+        if !trimmed.is_empty() {
+            if parse_tz_offset(trimmed).is_some() {
+                effective_tz = trimmed.to_string();
+                effective_tz_type = 1;
+            } else if is_abbrev_not_utc(trimmed) {
+                effective_tz = trimmed.to_uppercase();
+                effective_tz_type = 2;
+            } else if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
+                let tail = trimmed[idx+1..].trim();
+                if parse_tz_offset(tail).is_some() {
+                    effective_tz = tail.to_string();
+                    effective_tz_type = 1;
+                } else if is_abbrev_not_utc(tail) {
+                    effective_tz = tail.to_uppercase();
+                    effective_tz_type = 2;
+                }
+            }
+        }
+    }
+    if is_at_timestamp {
+        effective_tz = "+00:00".to_string();
+        effective_tz_type = 1;
+    }
+
     let timestamp = if datetime_str.is_empty() || datetime_str.eq_ignore_ascii_case("now") {
         now_secs
     } else {
@@ -728,7 +765,7 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Some(ts) => {
                 // The parsed timestamp is assumed to be in UTC; adjust to account for
                 // the fact that the input is in the given timezone
-                let (offset, _) = timezone_offset_and_abbrev(&tz_name, ts);
+                let (offset, _) = timezone_offset_and_abbrev(&effective_tz, ts);
                 ts - offset
             }
             None => return Ok(Value::False),
@@ -740,11 +777,11 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Store timestamp internally as UTC (used by date functions)
     obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
     // Format the date for var_dump display using the timezone
-    let (offset, _) = timezone_offset_and_abbrev(&tz_name, timestamp);
+    let (offset, _) = timezone_offset_and_abbrev(&effective_tz, timestamp);
     let date_str = format_timestamp("Y-m-d H:i:s", timestamp + offset) + ".000000";
     obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-    obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
-    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
+    obj.set_property(b"timezone_type".to_vec(), Value::Long(effective_tz_type));
+    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(effective_tz)));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
@@ -1597,12 +1634,47 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    let user_passed_tz = matches!(tz_arg, Some(Value::Object(_)));
+    let is_at_timestamp = datetime_str.starts_with('@');
+    let mut effective_tz = tz_name.clone();
+    let mut effective_tz_type: i64 = 3;
+    if !is_at_timestamp && !user_passed_tz {
+        let trimmed = datetime_str.trim();
+        let is_abbrev_not_utc = |s: &str| -> bool {
+            !s.eq_ignore_ascii_case("UTC")
+                && (is_known_tz_abbrev_or_name(s) || s.eq_ignore_ascii_case("GMT"))
+                && !s.contains('/')
+        };
+        if !trimmed.is_empty() {
+            if parse_tz_offset(trimmed).is_some() {
+                effective_tz = trimmed.to_string();
+                effective_tz_type = 1;
+            } else if is_abbrev_not_utc(trimmed) {
+                effective_tz = trimmed.to_uppercase();
+                effective_tz_type = 2;
+            } else if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
+                let tail = trimmed[idx+1..].trim();
+                if parse_tz_offset(tail).is_some() {
+                    effective_tz = tail.to_string();
+                    effective_tz_type = 1;
+                } else if is_abbrev_not_utc(tail) {
+                    effective_tz = tail.to_uppercase();
+                    effective_tz_type = 2;
+                }
+            }
+        }
+    }
+    if is_at_timestamp {
+        effective_tz = "+00:00".to_string();
+        effective_tz_type = 1;
+    }
+
     let timestamp = if datetime_str.is_empty() || datetime_str.eq_ignore_ascii_case("now") {
         now_secs
     } else {
         match parse_datetime_string(&datetime_str, now_secs) {
             Some(ts) => {
-                let (offset, _) = timezone_offset_and_abbrev(&tz_name, ts);
+                let (offset, _) = timezone_offset_and_abbrev(&effective_tz, ts);
                 ts - offset
             }
             None => return Ok(Value::False),
@@ -1612,11 +1684,11 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     let obj_id = _vm.next_object_id();
     let mut obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
     obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
-    let (offset, _) = timezone_offset_and_abbrev(&tz_name, timestamp);
+    let (offset, _) = timezone_offset_and_abbrev(&effective_tz, timestamp);
     let date_str = format_timestamp("Y-m-d H:i:s", timestamp + offset) + ".000000";
     obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-    obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
-    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
+    obj.set_property(b"timezone_type".to_vec(), Value::Long(effective_tz_type));
+    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(effective_tz)));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 

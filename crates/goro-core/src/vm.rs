@@ -15032,13 +15032,14 @@ impl Vm {
                         || func_name_lower == b"datetimeimmutable::createfrommutable"
                         || func_name_lower == b"datetimeimmutable::createfrominterface" {
                         let is_immutable = func_name_lower.starts_with(b"datetimeimmutable");
-                        let (ts, src_tz) = if let Some(Value::Object(o)) = call.args.first() {
+                        let (ts, src_tz, src_tz_type) = if let Some(Value::Object(o)) = call.args.first() {
                             let ob = o.borrow();
                             let t = ob.get_property(b"__timestamp").to_long();
                             let z = ob.get_property(b"timezone").to_php_string().to_string_lossy();
-                            (t, if z.is_empty() { "UTC".to_string() } else { z })
+                            let tt = ob.get_property(b"timezone_type").to_long();
+                            (t, if z.is_empty() { "UTC".to_string() } else { z }, if tt != 0 { tt } else { 3 })
                         } else {
-                            (std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0), "UTC".to_string())
+                            (std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0), "UTC".to_string(), 3)
                         };
                         let obj_id = self.next_object_id();
                         let class_name = if is_immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() };
@@ -15047,7 +15048,7 @@ impl Vm {
                         let (offset, _) = vm_timezone_offset_and_abbrev(&src_tz, ts);
                         let date_str = Self::format_utc_datetime(ts + offset);
                         obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                        obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                        obj.set_property(b"timezone_type".to_vec(), Value::Long(src_tz_type));
                         obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(src_tz)));
                         let result = Value::Object(Rc::new(RefCell::new(obj)));
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
