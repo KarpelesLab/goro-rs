@@ -2959,11 +2959,10 @@ pub fn reflection_property_method(
                     Visibility::Protected => "protected",
                     Visibility::Private => "private",
                 };
-                let static_str = if p.is_static { "static " } else { "" };
-                let mut s = format!("Property [ {}{} ${} ]\n", static_str, vis, prop_name);
-                if !matches!(p.default, Value::Undef | Value::Null) {
-                    s = format!("Property [ {}{} ${} = {} ]\n", static_str, vis, prop_name, reflection_value_repr(&p.default));
-                }
+                // PHP order: visibility modifier first, then 'static'.
+                let static_str = if p.is_static { " static" } else { "" };
+                let default_repr = reflection_repr_for_property_default(&p.default);
+                let s = format!("Property [ {}{} ${} = {} ]\n", vis, static_str, prop_name, default_repr);
                 Some(Value::String(PhpString::from_string(s)))
             } else {
                 Some(Value::String(PhpString::from_string(format!("Property [ ${} ]\n", prop_name))))
@@ -4857,6 +4856,16 @@ fn reflection_value_repr(val: &Value) -> String {
             }
         }
         _ => String::new(),
+    }
+}
+
+/// Render a value the way ReflectionProperty::__toString does -- strings
+/// are single-quoted, undef/null both render as `NULL`.
+fn reflection_repr_for_property_default(val: &Value) -> String {
+    match val {
+        Value::Undef => "NULL".to_string(),
+        Value::String(s) => format!("'{}'", s.to_string_lossy()),
+        other => reflection_value_repr(other),
     }
 }
 
