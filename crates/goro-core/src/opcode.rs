@@ -337,6 +337,10 @@ pub struct OpArray {
     pub is_static_closure: bool,
     /// Line number of the function/method declaration (for error reporting)
     pub decl_line: u32,
+    /// Line number of the closing brace of the function/method.
+    pub end_line: u32,
+    /// Doc comment attached to the function/method declaration (if any).
+    pub doc_comment: Option<Vec<u8>>,
     /// Literal indices that contain __CLASS__ magic constant values (for trait patching)
     pub class_const_literals: Vec<u32>,
     /// Whether this file/function was declared with declare(strict_types=1)
@@ -375,6 +379,8 @@ impl OpArray {
             scope_class: None,
             is_static_closure: false,
             decl_line: 0,
+            end_line: 0,
+            doc_comment: None,
             class_const_literals: Vec::new(),
             strict_types: false,
             by_ref_params: Vec::new(),

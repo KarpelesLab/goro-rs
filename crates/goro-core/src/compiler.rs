@@ -1683,7 +1683,7 @@ impl Compiler {
             }
 
             StmtKind::FunctionDecl {
-                name, params, body, return_type, attributes: func_attributes, ..
+                name, params, body, return_type, attributes: func_attributes, end_line: func_end_line, doc_comment: func_doc_comment, ..
             } => {
                 // Check for promoted properties in free functions
                 for param in params {
@@ -1710,6 +1710,8 @@ impl Compiler {
                 func_compiler.op_array.name = qualified_name.clone();
                 func_compiler.op_array.is_generator = is_generator;
                 func_compiler.op_array.decl_line = stmt.span.line;
+                func_compiler.op_array.end_line = if *func_end_line > 0 { *func_end_line } else { stmt.span.line };
+                func_compiler.op_array.doc_comment = func_doc_comment.clone();
                 func_compiler.op_array.strict_types = self.op_array.strict_types;
                 func_compiler.op_array.attributes = self.compile_attributes(func_attributes);
                 func_compiler.source_file = self.source_file.clone();
@@ -2515,6 +2517,8 @@ impl Compiler {
                 body,
                 enum_backing_type,
                 attributes: class_attributes,
+                end_line: class_end_line,
+                doc_comment: class_doc_comment,
             } => {
                 // Determine qualified name: anonymous classes use NUL-byte PHP names
                 let is_anonymous = name.starts_with(b"__anonymous_class_");
@@ -2577,6 +2581,10 @@ impl Compiler {
                 }
                 let mut class = ClassEntry::new(qualified_name.clone());
                 class.start_line = stmt.span.line;
+                class.end_line = if *class_end_line > 0 { *class_end_line } else { stmt.span.line };
+                if let Some(dc) = class_doc_comment.as_ref() {
+                    class.doc_comment = Some(String::from_utf8_lossy(dc).into_owned());
+                }
                 // Resolve parent class name - also check for reserved names
                 if let Some(p) = extends.as_ref() {
                     let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -2674,6 +2682,7 @@ impl Compiler {
                             get_hook_abstract,
                             set_hook_abstract,
                             attributes,
+                            doc_comment: prop_doc_comment,
                         } => {
                             // Enums cannot include properties
                             if modifiers.is_enum {
@@ -3333,6 +3342,8 @@ impl Compiler {
                                 is_abstract: *prop_is_abstract,
                                 is_final: *prop_is_final,
                                 attributes: self.compile_attributes(attributes),
+                                doc_comment: prop_doc_comment.as_ref()
+                                    .map(|d| String::from_utf8_lossy(d).into_owned()),
                             });
 
                             // Compile property get hook as a method: __property_get_$propname
@@ -3458,7 +3469,9 @@ impl Compiler {
                             is_abstract,
                             is_final: method_is_final,
                             line: method_line,
+                            end_line: method_end_line,
                             attributes: method_attributes,
+                            doc_comment: method_doc_comment,
                         } => {
                             // Check: a method cannot be both abstract and final
                             if *is_abstract && *method_is_final {
@@ -3826,6 +3839,8 @@ impl Compiler {
                                                 is_abstract: false,
                                                 is_final: param.is_final,
                                                 attributes: pa,
+                                                doc_comment: param.doc_comment.as_ref()
+                                                    .map(|d| String::from_utf8_lossy(d).into_owned()),
                                             });
                                             // Compile promoted property get hook
                                             if let Some(hook_body) = &param.get_hook {
@@ -3985,6 +4000,9 @@ impl Compiler {
                                 method_compiler.is_in_trait = modifiers.is_trait;
                                 method_compiler.is_in_class_method = true;
                                 method_compiler.op_array.decl_line = *method_line;
+                                method_compiler.op_array.end_line = if *method_end_line > 0 { *method_end_line } else { *method_line };
+                                method_compiler.op_array.doc_comment = method_doc_comment.clone();
+                                method_compiler.op_array.filename = self.source_file.clone();
                                 method_compiler.op_array.strict_types = self.op_array.strict_types;
                                 method_compiler.source_file = self.source_file.clone();
                                 if let Some(hint) = method_return_type {
@@ -4219,18 +4237,21 @@ impl Compiler {
                                     });
                                 }
                                 let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let mut concrete_op_array = method_compiler.op_array;
+                                concrete_op_array.end_line = if *method_end_line > 0 { *method_end_line } else { *method_line };
                                 class.methods.insert(
                                     lower_name,
                                     MethodDef {
                                         name: method_name.clone(),
-                                        op_array: method_compiler.op_array,
+                                        op_array: concrete_op_array,
                                         param_count,
                                         is_static: *is_static,
                                         is_abstract: *is_abstract,
                                         is_final: *method_is_final,
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
-                                        doc_comment: None,
+                                        doc_comment: method_doc_comment.as_ref()
+                                            .map(|d| String::from_utf8_lossy(d).into_owned()),
                                         attributes: self.compile_attributes(method_attributes),
                                     },
                                 );
@@ -4255,6 +4276,8 @@ impl Compiler {
                                 let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 let mut abstract_op_array = OpArray::new();
                                 abstract_op_array.decl_line = *method_line;
+                                abstract_op_array.end_line = if *method_end_line > 0 { *method_end_line } else { *method_line };
+                                abstract_op_array.filename = self.source_file.clone();
                                 abstract_op_array.name = method_name.clone();
                                 abstract_op_array.scope_class = Some(declaring_class_lower.clone());
                                 // Populate parameter information for abstract methods
@@ -4322,7 +4345,8 @@ impl Compiler {
                                         is_final: *method_is_final,
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
-                                        doc_comment: None,
+                                        doc_comment: method_doc_comment.as_ref()
+                                            .map(|d| String::from_utf8_lossy(d).into_owned()),
                                         attributes: self.compile_attributes(method_attributes),
                                     },
                                 );
@@ -4334,6 +4358,8 @@ impl Compiler {
                             visibility: const_visibility,
                             is_final: const_is_final,
                             attributes: const_attributes,
+                            type_hint: const_type_hint,
+                            doc_comment: const_doc_comment,
                         } => {
                             let val = if let Some(v) = Self::eval_const_expr(const_expr) {
                                 v
@@ -4754,11 +4780,17 @@ impl Compiler {
                             };
                             let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             let const_attrs = self.compile_attributes(const_attributes);
+                            let declared_type = const_type_hint.as_ref().map(|hint| {
+                                type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
+                            });
                             class.constants_meta.insert(const_name.clone(), crate::object::ConstantMeta {
                                 visibility: const_vis,
                                 is_final: *const_is_final,
                                 declaring_class: declaring_class_lower,
                                 attributes: const_attrs,
+                                declared_type,
+                                doc_comment: const_doc_comment.as_ref()
+                                    .map(|d| String::from_utf8_lossy(d).into_owned()),
                             });
                             // Private constants cannot be final
                             if *const_is_final && const_vis == crate::object::Visibility::Private {
@@ -7704,6 +7736,7 @@ impl Compiler {
                 use_vars,
                 is_static,
                 attributes: closure_attributes,
+                end_line: closure_end_line,
                 ..
             } => {
                 // Compile closure body as a child function
@@ -7722,6 +7755,7 @@ impl Compiler {
                 closure_compiler.op_array.is_generator = is_generator;
                 closure_compiler.op_array.is_static_closure = *is_static;
                 closure_compiler.op_array.decl_line = expr.span.line;
+                closure_compiler.op_array.end_line = if *closure_end_line > 0 { *closure_end_line } else { expr.span.line };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(closure_attributes);
                 closure_compiler.op_array.filename = self.source_file.clone();
@@ -7953,7 +7987,7 @@ impl Compiler {
                 }
             }
 
-            ExprKind::ArrowFunction { params, body, attributes, .. } => {
+            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, .. } => {
                 // Arrow function: fn($x) => $x * 2
                 // Arrow functions implicitly capture outer variables by value
 
@@ -7979,6 +8013,7 @@ impl Compiler {
                 closure_compiler.op_array.display_name = display_name;
                 closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.op_array.decl_line = expr.span.line;
+                closure_compiler.op_array.end_line = if *arrow_end_line > 0 { *arrow_end_line } else { expr.span.line };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(attributes);
                 closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
