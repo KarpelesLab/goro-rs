@@ -152,7 +152,10 @@ fn parse_private_key(data: &[u8], passphrase: Option<&[u8]>) -> Option<RsaPrivat
 }
 
 /// Try parsing a PEM/DER blob as a public key in several formats.
-fn parse_public_key(data: &[u8]) -> Option<RsaPublicKey> {
+/// If `allow_private` is true, also tries parsing as a private key and
+/// extracts the public component (used by `openssl_pkey_get_public`).
+/// `openssl_verify` calls with `allow_private = false`.
+fn parse_public_key(data: &[u8], allow_private: bool) -> Option<RsaPublicKey> {
     if let Ok(s) = std::str::from_utf8(data) {
         // SPKI: BEGIN PUBLIC KEY
         if let Ok(k) = RsaPublicKey::from_public_key_pem(s) {
@@ -162,9 +165,10 @@ fn parse_public_key(data: &[u8]) -> Option<RsaPublicKey> {
         if let Ok(k) = RsaPublicKey::from_pkcs1_pem(s) {
             return Some(k);
         }
-        // Also try parsing as a private key and extracting public
-        if let Some(pk) = parse_private_key(data, None) {
-            return Some(pk.to_public_key());
+        if allow_private {
+            if let Some(pk) = parse_private_key(data, None) {
+                return Some(pk.to_public_key());
+            }
         }
     }
     if let Ok(k) = RsaPublicKey::from_public_key_der(data) {
@@ -173,8 +177,10 @@ fn parse_public_key(data: &[u8]) -> Option<RsaPublicKey> {
     if let Ok(k) = RsaPublicKey::from_pkcs1_der(data) {
         return Some(k);
     }
-    if let Some(pk) = parse_private_key(data, None) {
-        return Some(pk.to_public_key());
+    if allow_private {
+        if let Some(pk) = parse_private_key(data, None) {
+            return Some(pk.to_public_key());
+        }
     }
     None
 }
@@ -191,12 +197,16 @@ fn resolve_private_key(v: &Value, passphrase: Option<&[u8]>) -> Option<RsaPrivat
 }
 
 /// Resolve any kind of input (object, file://, PEM string) into a public key.
-fn resolve_public_key(v: &Value) -> Option<RsaPublicKey> {
+/// `allow_private_data` controls whether a PEM/DER private-key blob can be
+/// coerced into a public key (true for `openssl_pkey_get_public`, false for
+/// `openssl_verify`). Already-parsed key objects always work since the public
+/// part is derivable.
+fn resolve_public_key(v: &Value, allow_private_data: bool) -> Option<RsaPublicKey> {
     if let Some(k) = key_from_object(v) {
         return Some(k.public());
     }
     let bytes = read_key_data(v)?;
-    parse_public_key(&bytes)
+    parse_public_key(&bytes, allow_private_data)
 }
 
 // ---- Helpers for big-endian unsigned bytes (no sign byte, no leading zeros) ----
@@ -482,7 +492,7 @@ pub fn openssl_pkey_get_public(vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
             return Ok(Value::False);
         }
     };
-    match parse_public_key(&bytes) {
+    match parse_public_key(&bytes, /* allow_private */ true) {
         Some(k) => Ok(make_key_object(vm, StoredKey::Public(k))),
         None => {
             vm.emit_warning("openssl_pkey_get_public(): Cannot parse public key");
@@ -702,7 +712,7 @@ pub fn openssl_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let algo = args.get(3).map(|v| v.to_long()).unwrap_or(OPENSSL_ALGO_SHA1);
     let padding = args.get(4).map(|v| v.to_long()).unwrap_or(OPENSSL_PKCS1_PADDING);
 
-    let pub_key = match resolve_public_key(&key_arg) {
+    let pub_key = match resolve_public_key(&key_arg, /* allow_private_data */ false) {
         Some(k) => k,
         None => {
             vm.emit_warning(
