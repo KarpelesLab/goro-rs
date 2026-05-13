@@ -406,8 +406,8 @@ pub fn openssl_pkey_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Value,
         }
     };
 
-    let path = filename.to_string_lossy();
-    match std::fs::write(path.as_ref(), pem_doc) {
+    let path = filename.to_string_lossy().to_string();
+    match std::fs::write(&path, pem_doc) {
         Ok(()) => Ok(Value::True),
         Err(e) => {
             vm.emit_warning(&format!("openssl_pkey_export_to_file(): {}", e));
