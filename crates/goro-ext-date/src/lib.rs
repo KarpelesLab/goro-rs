@@ -744,9 +744,20 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 && (is_known_tz_abbrev_or_name(s) || s.eq_ignore_ascii_case("GMT"))
                 && !s.contains('/')
         };
+        let normalize_offset = |s: &str| -> String {
+            // Convert +HHMM to +HH:MM
+            let b = s.as_bytes();
+            if b.len() == 5 && (b[0] == b'+' || b[0] == b'-')
+                && b[1..].iter().all(|c| c.is_ascii_digit())
+            {
+                format!("{}{}{}:{}{}", b[0] as char, b[1] as char, b[2] as char, b[3] as char, b[4] as char)
+            } else {
+                s.to_string()
+            }
+        };
         if !trimmed.is_empty() {
             if parse_tz_offset(trimmed).is_some() {
-                effective_tz = trimmed.to_string();
+                effective_tz = normalize_offset(trimmed);
                 effective_tz_type = 1;
             } else if is_abbrev_not_utc(trimmed) {
                 effective_tz = trimmed.to_uppercase();
@@ -754,7 +765,7 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             } else if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
                 let tail = trimmed[idx+1..].trim();
                 if parse_tz_offset(tail).is_some() {
-                    effective_tz = tail.to_string();
+                    effective_tz = normalize_offset(tail);
                     effective_tz_type = 1;
                 } else if is_abbrev_not_utc(tail) {
                     effective_tz = tail.to_uppercase();
@@ -1655,9 +1666,19 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                 && (is_known_tz_abbrev_or_name(s) || s.eq_ignore_ascii_case("GMT"))
                 && !s.contains('/')
         };
+        let normalize_offset = |s: &str| -> String {
+            let b = s.as_bytes();
+            if b.len() == 5 && (b[0] == b'+' || b[0] == b'-')
+                && b[1..].iter().all(|c| c.is_ascii_digit())
+            {
+                format!("{}{}{}:{}{}", b[0] as char, b[1] as char, b[2] as char, b[3] as char, b[4] as char)
+            } else {
+                s.to_string()
+            }
+        };
         if !trimmed.is_empty() {
             if parse_tz_offset(trimmed).is_some() {
-                effective_tz = trimmed.to_string();
+                effective_tz = normalize_offset(trimmed);
                 effective_tz_type = 1;
             } else if is_abbrev_not_utc(trimmed) {
                 effective_tz = trimmed.to_uppercase();
@@ -1665,7 +1686,7 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
             } else if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
                 let tail = trimmed[idx+1..].trim();
                 if parse_tz_offset(tail).is_some() {
-                    effective_tz = tail.to_string();
+                    effective_tz = normalize_offset(tail);
                     effective_tz_type = 1;
                 } else if is_abbrev_not_utc(tail) {
                     effective_tz = tail.to_uppercase();
