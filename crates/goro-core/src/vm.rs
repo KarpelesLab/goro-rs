@@ -17680,9 +17680,12 @@ impl Vm {
                                                         return Err(VmError { message: format!("Uncaught DateInvalidTimeZoneException: {}", err_msg), line: op.line });
                                                     }
                                                 }
-                                                // Determine timezone type: 1=offset, 2=abbreviation, 3=identifier
+                                                // Determine timezone type: 1=offset, 2=abbreviation, 3=identifier.
+                                                // UTC and tz-database identifiers (containing "/") are type 3.
                                                 let tz_type = if vm_parse_tz_offset(&tz).is_some() {
                                                     1
+                                                } else if tz.eq_ignore_ascii_case("UTC") || tz.contains('/') {
+                                                    3
                                                 } else if vm_is_tz_abbrev(&tz) {
                                                     2
                                                 } else {
