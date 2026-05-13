@@ -4031,6 +4031,144 @@ impl Vm {
     }
 
     /// Check if two optional ParamTypes are structurally equal (for property type invariance)
+    /// Check that the set hook parameter type is compatible with the property type.
+    /// PHP requires the parameter to accept every value the property could hold
+    /// (contravariant: the parameter type may be wider than the property type).
+    /// Returns true if compatible.
+    fn set_param_type_compatible_runtime(vm: &Vm, prop: &ParamType, param: &ParamType) -> bool {
+        fn display(t: &ParamType) -> String {
+            match t {
+                ParamType::Simple(n) => String::from_utf8_lossy(n).to_ascii_lowercase(),
+                ParamType::Nullable(inner) => format!("?{}", display(inner)),
+                ParamType::Union(types) => {
+                    let mut parts: Vec<String> = types.iter().map(display).collect();
+                    parts.sort();
+                    parts.join("|")
+                }
+                ParamType::Intersection(types) => {
+                    let mut parts: Vec<String> = types.iter().map(display).collect();
+                    parts.sort();
+                    parts.join("&")
+                }
+            }
+        }
+        if display(prop) == display(param) {
+            return true;
+        }
+        // mixed accepts everything
+        if matches!(param, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"mixed")) {
+            return true;
+        }
+        // Walk through prop alternatives and ensure each is covered by param.
+        fn alternatives(t: &ParamType) -> Vec<&ParamType> {
+            match t {
+                ParamType::Union(parts) => parts.iter().collect(),
+                _ => vec![t],
+            }
+        }
+        let prop_alts = alternatives(prop);
+        let param_alts = alternatives(param);
+        // Helper: param-alt-covers-prop-alt
+        let covers = |pa: &ParamType, pp: &ParamType| -> bool {
+            // Exact match
+            if display(pa) == display(pp) {
+                return true;
+            }
+            // Both are simple class names: param must be the same or a supertype
+            if let (ParamType::Simple(pa_name), ParamType::Simple(pp_name)) = (pa, pp) {
+                // If param is a known scalar-builtin, doesn't match a class
+                let pa_lower: Vec<u8> = pa_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let pp_lower: Vec<u8> = pp_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if pa_lower == pp_lower {
+                    return true;
+                }
+                // Check class hierarchy: pa must be an ancestor of pp
+                if vm.class_is_subclass_of(&pp_lower, &pa_lower) {
+                    return true;
+                }
+            }
+            false
+        };
+        'outer: for pa in &prop_alts {
+            for pp in &param_alts {
+                if covers(pp, pa) {
+                    continue 'outer;
+                }
+            }
+            return false;
+        }
+        true
+    }
+
+    /// Check whether a class is a subclass of another class (including itself)
+    /// or implements it as an interface, transitively.
+    fn class_is_subclass_of(&self, sub_lower: &[u8], super_lower: &[u8]) -> bool {
+        if sub_lower == super_lower {
+            return true;
+        }
+        if let Some(sub_class) = self.classes.get(sub_lower) {
+            if let Some(parent) = &sub_class.parent {
+                let p_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if self.class_is_subclass_of(&p_lower, super_lower) {
+                    return true;
+                }
+            }
+            for iface in &sub_class.interfaces {
+                let i_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if self.class_is_subclass_of(&i_lower, super_lower) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Returns true if `child_type` is a subtype of `parent_type` (i.e. child can substitute for parent).
+    /// This is a structural check based on the alternatives in a union.
+    fn is_type_covariant(child_type: &Option<ParamType>, parent_type: &Option<ParamType>) -> bool {
+        fn display(t: &ParamType) -> String {
+            match t {
+                ParamType::Simple(n) => String::from_utf8_lossy(n).to_ascii_lowercase(),
+                ParamType::Nullable(inner) => format!("?{}", display(inner)),
+                ParamType::Union(types) => {
+                    let mut parts: Vec<String> = types.iter().map(display).collect();
+                    parts.sort();
+                    parts.join("|")
+                }
+                ParamType::Intersection(types) => {
+                    let mut parts: Vec<String> = types.iter().map(display).collect();
+                    parts.sort();
+                    parts.join("&")
+                }
+            }
+        }
+        match (child_type, parent_type) {
+            (None, None) => true,
+            (Some(c), Some(p)) => {
+                if display(c) == display(p) {
+                    return true;
+                }
+                // Every alternative of `child` must be covered by some alternative of `parent`.
+                fn alternatives(t: &ParamType) -> Vec<&ParamType> {
+                    match t {
+                        ParamType::Union(parts) => parts.iter().collect(),
+                        _ => vec![t],
+                    }
+                }
+                let child_alts = alternatives(c);
+                let parent_alts = alternatives(p);
+                for ca in &child_alts {
+                    let ca_disp = display(ca);
+                    if !parent_alts.iter().any(|pa| display(pa) == ca_disp) {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn param_types_are_equal(a: &Option<ParamType>, b: &Option<ParamType>) -> bool {
         match (a, b) {
             (None, None) => true,
@@ -22837,20 +22975,40 @@ impl Vm {
                                     }
                                 }
                                 // If the child redeclares a property as plain (no hooks, not abstract),
-                                // remove any inherited abstract hook methods for that property so they
-                                // don't appear as unimplemented.
-                                let child_plain_prop_names: Vec<Vec<u8>> = class.properties.iter()
+                                // remove any inherited *abstract* hook methods for that property so
+                                // they don't appear as unimplemented.
+                                // Concrete inherited hook methods stay — the child plain property
+                                // still uses them (PHP inherits hooks to plain properties).
+                                // Also: if the child plain prop inherits hooks from the parent,
+                                // mark has_get_hook/has_set_hook accordingly so property access
+                                // continues to dispatch through the hooks.
+                                let child_plain_props: Vec<(Vec<u8>, bool)> = class.properties.iter()
                                     .filter(|p| !p.is_abstract && !p.has_get_hook && !p.has_set_hook)
-                                    .map(|p| p.name.clone()).collect();
-                                for cp_name in &child_plain_prop_names {
+                                    .map(|p| (p.name.clone(), p.is_readonly)).collect();
+                                for (cp_name, is_readonly) in &child_plain_props {
                                     let mut get_key: Vec<u8> = b"__property_get_".to_vec();
                                     get_key.extend_from_slice(cp_name);
                                     let mut set_key: Vec<u8> = b"__property_set_".to_vec();
                                     set_key.extend_from_slice(cp_name);
                                     let get_key_lower: Vec<u8> = get_key.iter().map(|b| b.to_ascii_lowercase()).collect();
                                     let set_key_lower: Vec<u8> = set_key.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    class.methods.remove(&get_key_lower);
-                                    class.methods.remove(&set_key_lower);
+                                    let parent_has_concrete_get = parent.methods.get(&get_key_lower).map(|m| !m.is_abstract).unwrap_or(false);
+                                    let parent_has_concrete_set = parent.methods.get(&set_key_lower).map(|m| !m.is_abstract).unwrap_or(false);
+                                    if parent.methods.get(&get_key_lower).map(|m| m.is_abstract).unwrap_or(false) {
+                                        class.methods.remove(&get_key_lower);
+                                    }
+                                    // readonly child cannot satisfy abstract set hook
+                                    if !is_readonly {
+                                        if parent.methods.get(&set_key_lower).map(|m| m.is_abstract).unwrap_or(false) {
+                                            class.methods.remove(&set_key_lower);
+                                        }
+                                    }
+                                    if parent_has_concrete_get || parent_has_concrete_set {
+                                        if let Some(cp) = class.properties.iter_mut().find(|p| p.name == *cp_name) {
+                                            if parent_has_concrete_get { cp.has_get_hook = true; }
+                                            if parent_has_concrete_set && !*is_readonly { cp.has_set_hook = true; }
+                                        }
+                                    }
                                 }
                                 // Inherit properties (parent properties come first, child overrides take precedence)
                                 let child_prop_names: Vec<Vec<u8>> =
@@ -22865,17 +23023,17 @@ impl Vm {
                                         }
                                         let child_has = class.properties.iter().find(|p| p.name == parent_prop.name);
                                         let child_is_concrete = child_has.map(|p| !p.is_abstract).unwrap_or(false);
+                                        let child_is_readonly = child_has.map(|p| p.is_readonly).unwrap_or(false);
+                                        let parent_display = String::from_utf8_lossy(parent_name);
+                                        let prop_display = String::from_utf8_lossy(&parent_prop.name);
+                                        let mut get_key: Vec<u8> = b"__property_get_".to_vec();
+                                        get_key.extend_from_slice(&parent_prop.name);
+                                        let mut set_key: Vec<u8> = b"__property_set_".to_vec();
+                                        set_key.extend_from_slice(&parent_prop.name);
+                                        let get_key_lower: Vec<u8> = get_key.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let set_key_lower: Vec<u8> = set_key.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         if !child_is_concrete {
-                                            let parent_display = String::from_utf8_lossy(parent_name);
-                                            let prop_display = String::from_utf8_lossy(&parent_prop.name);
-                                            // Only report hooks that are genuinely abstract
-                                            // (i.e. `get;` / `set;` form, not `get {}` / `set {}`).
-                                            let mut get_key: Vec<u8> = b"__property_get_".to_vec();
-                                            get_key.extend_from_slice(&parent_prop.name);
-                                            let mut set_key: Vec<u8> = b"__property_set_".to_vec();
-                                            set_key.extend_from_slice(&parent_prop.name);
-                                            let get_key_lower: Vec<u8> = get_key.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                            let set_key_lower: Vec<u8> = set_key.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            // Parent has abstract prop, child either missing or also abstract.
                                             if parent_prop.has_get_hook {
                                                 let is_get_abstract = parent.methods.get(&get_key_lower)
                                                     .map(|m| m.is_abstract)
@@ -22884,6 +23042,16 @@ impl Vm {
                                                     unimplemented.push(format!("{}::${}::get", parent_display, prop_display));
                                                 }
                                             }
+                                            if parent_prop.has_set_hook {
+                                                let is_set_abstract = parent.methods.get(&set_key_lower)
+                                                    .map(|m| m.is_abstract)
+                                                    .unwrap_or(true);
+                                                if is_set_abstract {
+                                                    unimplemented.push(format!("{}::${}::set", parent_display, prop_display));
+                                                }
+                                            }
+                                        } else if child_is_readonly {
+                                            // Readonly plain child cannot satisfy abstract set hook.
                                             if parent_prop.has_set_hook {
                                                 let is_set_abstract = parent.methods.get(&set_key_lower)
                                                     .map(|m| m.is_abstract)
@@ -22976,41 +23144,91 @@ impl Vm {
                                         }
                                     }
                                 }
-                                // Check property type invariance
+                                // Check property type invariance.
+                                // Read-only properties (only get hook) → covariant child type allowed.
+                                // Write-only properties (only set hook) → contravariant child type allowed.
                                 for parent_prop in &parent.properties {
                                     if parent_prop.visibility == Visibility::Private {
                                         continue; // Private properties are not subject to invariance
                                     }
                                     if let Some(child_prop) = class.properties.iter().find(|p| p.name == parent_prop.name) {
-                                        // Property types must be exactly the same (invariant)
-                                        if !Self::param_types_are_equal(&parent_prop.property_type, &child_prop.property_type) {
+                                        if Self::param_types_are_equal(&parent_prop.property_type, &child_prop.property_type) {
+                                            continue;
+                                        }
+                                        // Relaxed type check: read-only / write-only props.
+                                        // Only relax when the parent property is virtual (no backing
+                                        // storage). Backed properties remain invariant.
+                                        let parent_read_only = parent_prop.has_get_hook && !parent_prop.has_set_hook && parent_prop.is_virtual;
+                                        let parent_write_only = !parent_prop.has_get_hook && parent_prop.has_set_hook && parent_prop.is_virtual;
+                                        if parent_read_only {
+                                            // Read-only: child's type must be a subtype (covariant).
+                                            // We allow Some<T> ⊆ Some<T> when:
+                                            //   - they're equal, OR
+                                            //   - child type alternatives are a subset of parent's.
+                                            if Self::is_type_covariant(&child_prop.property_type, &parent_prop.property_type) {
+                                                continue;
+                                            }
+                                            // Otherwise emit a hook-style declaration mismatch error.
                                             let child_display = String::from_utf8_lossy(&class.name).to_string();
                                             let parent_display = String::from_utf8_lossy(parent_name).to_string();
                                             let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
-                                            let expected_type = if let Some(ref pt) = parent_prop.property_type {
-                                                self.param_type_display(pt)
-                                            } else {
-                                                "omitted to match the parent definition".to_string()
-                                            };
-                                            if parent_prop.property_type.is_none() {
-                                                return Err(VmError {
-                                                    message: format!("Type of {}::${} must be omitted to match the parent definition in class {}",
-                                                        child_display, prop_display, parent_display),
-                                                    line: op.line,
-                                                });
-                                            } else {
-                                                return Err(VmError {
-                                                    message: format!("Type of {}::${} must be {} (as in class {})",
-                                                        child_display, prop_display, expected_type, parent_display),
-                                                    line: op.line,
-                                                });
+                                            let child_type = child_prop.property_type.as_ref().map(|t| self.param_type_display(t)).unwrap_or_default();
+                                            let parent_type = parent_prop.property_type.as_ref().map(|t| self.param_type_display(t)).unwrap_or_default();
+                                            return Err(VmError {
+                                                message: format!("Declaration of {}::${}::get(): {} must be compatible with {}::${}::get(): {}",
+                                                    child_display, prop_display, child_type,
+                                                    parent_display, prop_display, parent_type),
+                                                line: op.line,
+                                            });
+                                        }
+                                        if parent_write_only {
+                                            // Write-only: child's type must be a supertype (contravariant).
+                                            if Self::is_type_covariant(&parent_prop.property_type, &child_prop.property_type) {
+                                                continue;
                                             }
+                                            let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                            let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                            let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                            let child_type = child_prop.property_type.as_ref().map(|t| self.param_type_display(t)).unwrap_or_default();
+                                            let parent_type = parent_prop.property_type.as_ref().map(|t| self.param_type_display(t)).unwrap_or_default();
+                                            return Err(VmError {
+                                                message: format!("Declaration of {}::${}::set({} $value): void must be compatible with {}::${}::set({} $value): void",
+                                                    child_display, prop_display, child_type,
+                                                    parent_display, prop_display, parent_type),
+                                                line: op.line,
+                                            });
+                                        }
+                                        let child_display = String::from_utf8_lossy(&class.name).to_string();
+                                        let parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                        let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
+                                        let expected_type = if let Some(ref pt) = parent_prop.property_type {
+                                            self.param_type_display(pt)
+                                        } else {
+                                            "omitted to match the parent definition".to_string()
+                                        };
+                                        if parent_prop.property_type.is_none() {
+                                            return Err(VmError {
+                                                message: format!("Type of {}::${} must be omitted to match the parent definition in class {}",
+                                                    child_display, prop_display, parent_display),
+                                                line: op.line,
+                                            });
+                                        } else {
+                                            return Err(VmError {
+                                                message: format!("Type of {}::${} must be {} (as in class {})",
+                                                    child_display, prop_display, expected_type, parent_display),
+                                                line: op.line,
+                                            });
                                         }
                                     }
                                 }
-                                // Check readonly property mismatch
+                                // Check readonly property mismatch — skip for abstract or
+                                // hook-only properties in the parent (those have no real backing).
                                 for parent_prop in &parent.properties {
                                     if parent_prop.visibility == Visibility::Private {
+                                        continue;
+                                    }
+                                    // Abstract or virtual parent properties don't impose readonly invariance.
+                                    if parent_prop.is_abstract || parent_prop.is_virtual {
                                         continue;
                                     }
                                     if let Some(child_prop) = class.properties.iter().find(|p| p.name == parent_prop.name) {
@@ -23057,7 +23275,11 @@ impl Vm {
                                         // Check set-visibility compatibility
                                         let parent_set_vis = parent_prop.set_visibility;
                                         let child_set_vis = child_prop.set_visibility;
-                                        if parent_set_vis != child_set_vis {
+                                        // If the parent has no set hook (e.g. get-only abstract),
+                                        // the child is free to add asymmetric set visibility.
+                                        let parent_has_no_set_prototype = !parent_prop.has_set_hook
+                                            && parent_prop.is_virtual; // pure virtual: no backing setter either
+                                        if parent_set_vis != child_set_vis && !parent_has_no_set_prototype {
                                             let child_display = String::from_utf8_lossy(&class.name).to_string();
                                             let parent_display = String::from_utf8_lossy(parent_name).to_string();
                                             let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
@@ -23086,6 +23308,21 @@ impl Vm {
                                                     });
                                                 }
                                             }
+                                        }
+                                    }
+                                }
+                                // If the child overrides a parent's plain (non-hooked) property
+                                // with hooks, the child property is NOT virtual — it inherits
+                                // the parent's backing slot. Defaults are per-class and are NOT
+                                // inherited (each class gets its own slot, initialized from its
+                                // own declaration).
+                                for child_prop in class.properties.iter_mut() {
+                                    if let Some(parent_prop) = parent.properties.iter().find(|p| p.name == child_prop.name) {
+                                        let parent_has_backing = !parent_prop.has_get_hook
+                                            && !parent_prop.has_set_hook
+                                            && !parent_prop.is_virtual;
+                                        if parent_has_backing {
+                                            child_prop.is_virtual = false;
                                         }
                                     }
                                 }
@@ -23925,6 +24162,39 @@ impl Vm {
                                                 class_display, class_display, method_display),
                                             line: op.line,
                                         });
+                                    }
+                                }
+                            }
+                        }
+
+                        // If a class declares a property as a plain (non-hooked) property,
+                        // it satisfies any inherited abstract property-hook methods from
+                        // interfaces / abstract classes. Remove those abstract entries so
+                        // they don't appear as unimplemented below.
+                        //
+                        // Exception: readonly plain properties only satisfy the `get` hook,
+                        // not `set`, because readonly properties cannot be set externally.
+                        if !class.is_abstract && !class.is_interface && !class.is_trait {
+                            let child_plain_props: Vec<(Vec<u8>, bool)> = class.properties.iter()
+                                .filter(|p| !p.is_abstract && !p.has_get_hook && !p.has_set_hook)
+                                .map(|p| (p.name.clone(), p.is_readonly)).collect();
+                            for (cp_name, is_readonly) in &child_plain_props {
+                                let mut get_key: Vec<u8> = b"__property_get_".to_vec();
+                                get_key.extend_from_slice(cp_name);
+                                let mut set_key: Vec<u8> = b"__property_set_".to_vec();
+                                set_key.extend_from_slice(cp_name);
+                                let get_key_lower: Vec<u8> = get_key.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let set_key_lower: Vec<u8> = set_key.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(m) = class.methods.get(&get_key_lower) {
+                                    if m.is_abstract {
+                                        class.methods.remove(&get_key_lower);
+                                    }
+                                }
+                                if !is_readonly {
+                                    if let Some(m) = class.methods.get(&set_key_lower) {
+                                        if m.is_abstract {
+                                            class.methods.remove(&set_key_lower);
+                                        }
                                     }
                                 }
                             }
@@ -24823,6 +25093,59 @@ impl Vm {
                                 }
                                 let method_display_name = format!("{}::{}", class_display, String::from_utf8_lossy(&method.name));
                                 self.emit_optional_before_required_deprecation(&method.op_array, &method_display_name);
+                            }
+                        }
+                        // Validate: virtual hooked properties cannot have a default value.
+                        // (After inheritance, is_virtual may have been adjusted to false if
+                        // a parent provided a backing slot.)
+                        if !class.is_trait {
+                            for prop in &class.properties {
+                                // Only check properties declared in *this* class (not inherited)
+                                if prop.declaring_class != name_val.to_php_string().as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>() {
+                                    continue;
+                                }
+                                if prop.is_virtual && !matches!(prop.default, Value::Undef | Value::Null) {
+                                    let cls_display = String::from_utf8_lossy(&class.name).to_string();
+                                    let prop_display = String::from_utf8_lossy(&prop.name);
+                                    return Err(VmError {
+                                        message: format!("Cannot specify default value for virtual hooked property {}::${}", cls_display, prop_display),
+                                        line: op.line,
+                                    });
+                                }
+                                // Validate that the set hook's parameter type is compatible with
+                                // the property type. We use a structural check (same as the parser),
+                                // but extended to know about class/interface hierarchy.
+                                if prop.has_set_hook && prop.property_type.is_some() {
+                                    let set_method_name: Vec<u8> = {
+                                        let mut k = b"__property_set_".to_vec();
+                                        k.extend_from_slice(&prop.name);
+                                        k.iter().map(|b| b.to_ascii_lowercase()).collect()
+                                    };
+                                    if let Some(set_method) = class.methods.get(&set_method_name) {
+                                        // Skip if the set hook is in a different declaring class
+                                        // (already validated when that class was linked).
+                                        let prop_decl_lower: Vec<u8> = name_val.to_php_string().as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if set_method.declaring_class == prop_decl_lower && prop.declaring_class == prop_decl_lower {
+                                            if let Some(param_info) = set_method.op_array.param_types.iter().flatten().next() {
+                                                // Only check when the set hook parameter has an explicit type
+                                                let param_type = &param_info.param_type;
+                                                let prop_type = prop.property_type.as_ref().unwrap();
+                                                if !Self::set_param_type_compatible_runtime(self, prop_type, param_type) {
+                                                    let cls_display = String::from_utf8_lossy(&class.name);
+                                                    let prop_display = String::from_utf8_lossy(&prop.name);
+                                                    let param_name = String::from_utf8_lossy(&param_info.param_name);
+                                                    return Err(VmError {
+                                                        message: format!(
+                                                            "Type of parameter ${} of hook {}::${}::set must be compatible with property type",
+                                                            param_name, cls_display, prop_display
+                                                        ),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         self.classes.insert(name_lower, class);
@@ -25856,6 +26179,59 @@ impl Vm {
                                     continue;
                                 }
                                 return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                            }
+                        }
+                        // Before dispatching to the set hook, enforce asymmetric set
+                        // visibility (private(set) / protected(set)). For full-private hooks,
+                        // we still need to defer to __set if it exists, so we only enforce
+                        // the asymmetric (set_visibility is Some) case here.
+                        if has_set_hook && !in_set_hook {
+                            let caller_scope_for_set = self.current_class_scope()
+                                .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                            if let Some((vis, declaring_class, _prop_is_readonly, _prop_type, set_vis)) =
+                                self.find_property_def_for_scope(&class_lower, prop_name_bytes_set, caller_scope_for_set.as_deref())
+                            {
+                                if set_vis.is_some() {
+                                    let effective_write_vis = set_vis.unwrap_or(vis);
+                                    if effective_write_vis != Visibility::Public {
+                                        let caller_scope = self.current_class_scope();
+                                        let prop_name_str = String::from_utf8_lossy(prop_name_bytes_set).to_string();
+                                        let raw_error = self.check_visibility(
+                                            effective_write_vis,
+                                            &declaring_class,
+                                            &class_name_orig,
+                                            &prop_name_str,
+                                            true,
+                                            caller_scope.as_deref(),
+                                        );
+                                        if let Some(_err) = raw_error {
+                                            let vis_str = match effective_write_vis {
+                                                Visibility::Private => "private(set)",
+                                                Visibility::Protected => "protected(set)",
+                                                Visibility::Public => "public(set)",
+                                            };
+                                            let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            let class_display = self.classes.get(&declaring_lower)
+                                                .map(|c| crate::value::display_class_name(&c.name))
+                                                .unwrap_or_else(|| crate::value::display_class_name(&declaring_class));
+                                            let scope_str = if let Some(cs) = caller_scope.as_deref() {
+                                                format!("scope {}", String::from_utf8_lossy(cs))
+                                            } else {
+                                                "global scope".to_string()
+                                            };
+                                            let msg = format!("Cannot modify {} property {}::${} from {}",
+                                                vis_str, class_display, prop_name_str, scope_str);
+                                            let exc = self.create_exception(b"Error", &msg, op.line);
+                                            self.current_exception = Some(exc);
+                                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
+                                                exception_handlers.pop();
+                                                ip = catch_target as usize;
+                                                continue;
+                                            }
+                                            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                        }
+                                    }
+                                }
                             }
                         }
                         if has_set_hook && !in_set_hook {

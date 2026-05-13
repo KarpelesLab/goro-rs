@@ -3251,14 +3251,10 @@ impl Compiler {
                             } else {
                                 false
                             };
-                            // Virtual properties cannot have a default value
-                            if hooks_would_be_virtual && default.is_some() {
-                                return Err(CompileError {
-                                    message: format!("Cannot specify default value for virtual hooked property {}::${}",
-                                        String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
-                                    line: stmt.span.line,
-                                });
-                            }
+                            // Virtual properties cannot have a default value — but only
+                            // when the property doesn't inherit a backing slot from a parent.
+                            // We can't determine that at compile time, so defer this check
+                            // to link time (in vm.rs after inheritance is resolved).
                             let prop_is_virtual = hooks_would_be_virtual;
                             // Abstract+final is not allowed
                             if *prop_is_abstract && *prop_is_final {
@@ -3787,6 +3783,15 @@ impl Compiler {
                                                 return Err(CompileError {
                                                     message: format!("Readonly property {}::${} must have type",
                                                         String::from_utf8_lossy(name), String::from_utf8_lossy(&param.name)),
+                                                    line: *method_line,
+                                                });
+                                            }
+                                            // Hooked promoted properties cannot be readonly (PHP-8.4 rule)
+                                            if (param.readonly || modifiers.is_readonly)
+                                                && (param.get_hook.is_some() || param.set_hook.is_some())
+                                            {
+                                                return Err(CompileError {
+                                                    message: "Hooked properties cannot be readonly".to_string(),
                                                     line: *method_line,
                                                 });
                                             }

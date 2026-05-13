@@ -81,7 +81,7 @@ pub enum ClassMember {
     Method { name: Vec<u8>, params: Vec<Param>, return_type: Option<TypeHint>, body: Option<Vec<Statement>>, visibility: Visibility, is_static: bool, is_abstract: bool, is_final: bool, line: u32, end_line: u32, attributes: Vec<Attribute>, doc_comment: Option<Vec<u8>> },
     ClassConstant { name: Vec<u8>, value: Expr, visibility: Visibility, is_final: bool, attributes: Vec<Attribute>, type_hint: Option<TypeHint>, doc_comment: Option<Vec<u8>> },
     TraitUse { traits: Vec<Vec<u8>>, adaptations: Vec<TraitAdaptation> },
-    EnumCase { name: Vec<u8>, value: Option<Expr>, attributes: Vec<Attribute> },
+    EnumCase { name: Vec<u8>, value: Option<Expr>, attributes: Vec<Attribute>, doc_comment: Option<Vec<u8>> },
 }
 #[derive(Debug, Clone)]
 pub enum TraitAdaptation { Alias { trait_name: Option<Vec<u8>>, method: Vec<u8>, new_name: Option<Vec<u8>>, new_visibility: Option<Visibility> }, Precedence { trait_name: Vec<u8>, method: Vec<u8>, instead_of: Vec<Vec<u8>> } }

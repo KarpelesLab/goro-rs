@@ -704,10 +704,20 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 || err_msg.starts_with("Parameter $")
                 || err_msg.starts_with("set hook parameter")
                 || err_msg.starts_with("Cannot use the static modifier on a property hook")
+                || err_msg.starts_with("Cannot use the public modifier on a property hook")
+                || err_msg.starts_with("Cannot use the protected modifier on a property hook")
+                || err_msg.starts_with("Cannot use the private modifier on a property hook")
                 || err_msg.starts_with("Property hooks cannot have visibility")
                 || err_msg.starts_with("Property hook cannot be")
                 || err_msg.starts_with("Property hook list must")
                 || err_msg.starts_with("Property hook cannot have")
+                || err_msg.starts_with("Cannot declare hooks for static property")
+                || err_msg.starts_with("get hook of property")
+                || err_msg.starts_with("set hook of property")
+                || err_msg.starts_with("Abstract property")
+                || err_msg.starts_with("Property in interface cannot be explicitly abstract")
+                || err_msg.starts_with("Property in interface cannot be final")
+                || err_msg.starts_with("Property in interface cannot be protected or private")
                 || err_msg.starts_with("Final promoted property");
             let msg = if is_fatal {
                 format!(
