@@ -16859,6 +16859,8 @@ impl Vm {
                                         b"datetimezone".to_vec()
                                     } else if self.class_extends(&raw_class_lower, b"dateinterval") {
                                         b"dateinterval".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"dateperiod") {
+                                        b"dateperiod".to_vec()
                                     } else {
                                         raw_class_lower.clone()
                                     };
@@ -17716,6 +17718,35 @@ impl Vm {
                                             obj_mut.set_property(b"text".to_vec(), Value::String(text_val.to_php_string()));
                                             obj_mut.set_property(b"line".to_vec(), Value::Long(line_val.to_long()));
                                             obj_mut.set_property(b"pos".to_vec(), Value::Long(pos_val.to_long()));
+                                        }
+                                        b"dateperiod" => {
+                                            // DatePeriod::__construct(
+                                            //   DateTimeInterface $start,
+                                            //   DateInterval $interval,
+                                            //   DateTimeInterface|int $end,
+                                            //   int $options = 0
+                                            // )
+                                            // Default include_start=true, include_end=false. INCLUDE_END_DATE=8, EXCLUDE_START_DATE=1.
+                                            let start_arg = call.args.get(1).cloned().unwrap_or(Value::Null);
+                                            let interval_arg = call.args.get(2).cloned().unwrap_or(Value::Null);
+                                            let end_arg = call.args.get(3).cloned().unwrap_or(Value::Null);
+                                            let opts_arg = call.args.get(4).cloned().unwrap_or(Value::Long(0));
+                                            let opts = opts_arg.to_long();
+                                            let include_start = (opts & 1) == 0;
+                                            let include_end = (opts & 8) != 0;
+                                            obj_mut.set_property(b"start".to_vec(), start_arg);
+                                            obj_mut.set_property(b"current".to_vec(), Value::Null);
+                                            // If 3rd arg is int, it's recurrences.
+                                            let (end_v, recurrences_v) = match &end_arg {
+                                                Value::Long(n) => (Value::Null, Value::Long(*n)),
+                                                Value::Object(_) => (end_arg.clone(), Value::Long(0)),
+                                                _ => (Value::Null, Value::Long(0)),
+                                            };
+                                            obj_mut.set_property(b"end".to_vec(), end_v);
+                                            obj_mut.set_property(b"interval".to_vec(), interval_arg);
+                                            obj_mut.set_property(b"recurrences".to_vec(), recurrences_v);
+                                            obj_mut.set_property(b"include_start_date".to_vec(), if include_start { Value::True } else { Value::False });
+                                            obj_mut.set_property(b"include_end_date".to_vec(), if include_end { Value::True } else { Value::False });
                                         }
                                         b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
                                             // __construct(string $uri, ?string $baseUrl = null)
