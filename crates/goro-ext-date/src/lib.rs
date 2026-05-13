@@ -138,6 +138,28 @@ pub fn register(vm: &mut Vm) {
 
 fn date_default_timezone_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let tz = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    // Validate against known TZ identifiers/abbreviations/offsets.
+    let is_etc_alias = tz.starts_with("Etc/") || matches!(tz.as_str(),
+        "GMT0" | "GMT+0" | "GMT-0" | "Greenwich" | "UCT" | "Universal" | "Zulu"
+        | "Iceland" | "Egypt" | "Eire" | "Hongkong" | "Iran" | "Israel"
+        | "Jamaica" | "Japan" | "Kwajalein" | "Libya" | "NZ" | "Navajo"
+        | "PRC" | "Poland" | "Portugal" | "ROC" | "ROK" | "Singapore" | "Turkey"
+        | "EST" | "MST" | "HST" | "EST5EDT" | "CST6CDT" | "MST7MDT" | "PST8PDT"
+        | "WET" | "CET" | "EET" | "MET" | "Cuba"
+        | "W-SU"
+    );
+    let is_valid = tz == "UTC" || tz == "utc" || tz == "GMT" || tz == "Z"
+        || parse_tz_offset(&tz).is_some()
+        || (tz.contains('/') && is_known_tz_identifier(&tz))
+        || is_known_tz_abbrev_or_name(&tz)
+        || is_etc_alias;
+    if !is_valid {
+        vm.emit_notice_at(
+            &format!("date_default_timezone_set(): Timezone ID '{}' is invalid", tz),
+            vm.current_line,
+        );
+        return Ok(Value::False);
+    }
     vm.constants.insert(b"__default_timezone".to_vec(), Value::String(PhpString::from_string(tz)));
     Ok(Value::True)
 }
@@ -382,9 +404,15 @@ fn is_known_tz_abbrev_or_name(s: &str) -> bool {
         | "GST" | "AZOT" | "AZOST"
         => true,
         _ => {
-            // IANA zone like "Europe/Oslo"
-            if s.contains('/') && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'_' || b == b'-' || b == b'+') {
-                return true;
+            // IANA zone like "Europe/Oslo": must contain a letter on either side
+            // of `/` (rules out "2005/8/12"-style date inputs).
+            if s.contains('/')
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'_' || b == b'-' || b == b'+')
+            {
+                // Require that the first character is a letter (Continent name).
+                if s.bytes().next().map(|b| b.is_ascii_alphabetic()).unwrap_or(false) {
+                    return true;
+                }
             }
             false
         }
@@ -703,6 +731,54 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    // Detect inline timezone in the input string (e.g. "...CET" or "...+01:00")
+    // unless an explicit DateTimeZone was passed.
+    let user_passed_tz = matches!(tz_arg, Some(Value::Object(_)));
+    let is_at_timestamp = datetime_str.starts_with('@');
+    let mut effective_tz = tz_name.clone();
+    let mut effective_tz_type: i64 = 3;
+    if !is_at_timestamp && !user_passed_tz {
+        let trimmed = datetime_str.trim();
+        let is_abbrev_not_utc = |s: &str| -> bool {
+            !s.eq_ignore_ascii_case("UTC")
+                && (is_known_tz_abbrev_or_name(s) || s.eq_ignore_ascii_case("GMT"))
+                && !s.contains('/')
+        };
+        let normalize_offset = |s: &str| -> String {
+            // Convert +HHMM to +HH:MM
+            let b = s.as_bytes();
+            if b.len() == 5 && (b[0] == b'+' || b[0] == b'-')
+                && b[1..].iter().all(|c| c.is_ascii_digit())
+            {
+                format!("{}{}{}:{}{}", b[0] as char, b[1] as char, b[2] as char, b[3] as char, b[4] as char)
+            } else {
+                s.to_string()
+            }
+        };
+        if !trimmed.is_empty() {
+            if parse_tz_offset(trimmed).is_some() {
+                effective_tz = normalize_offset(trimmed);
+                effective_tz_type = 1;
+            } else if is_abbrev_not_utc(trimmed) {
+                effective_tz = trimmed.to_uppercase();
+                effective_tz_type = 2;
+            } else if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
+                let tail = trimmed[idx+1..].trim();
+                if parse_tz_offset(tail).is_some() {
+                    effective_tz = normalize_offset(tail);
+                    effective_tz_type = 1;
+                } else if is_abbrev_not_utc(tail) {
+                    effective_tz = tail.to_uppercase();
+                    effective_tz_type = 2;
+                }
+            }
+        }
+    }
+    if is_at_timestamp {
+        effective_tz = "+00:00".to_string();
+        effective_tz_type = 1;
+    }
+
     let timestamp = if datetime_str.is_empty() || datetime_str.eq_ignore_ascii_case("now") {
         now_secs
     } else {
@@ -710,7 +786,7 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Some(ts) => {
                 // The parsed timestamp is assumed to be in UTC; adjust to account for
                 // the fact that the input is in the given timezone
-                let (offset, _) = timezone_offset_and_abbrev(&tz_name, ts);
+                let (offset, _) = timezone_offset_and_abbrev(&effective_tz, ts);
                 ts - offset
             }
             None => return Ok(Value::False),
@@ -722,11 +798,11 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Store timestamp internally as UTC (used by date functions)
     obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
     // Format the date for var_dump display using the timezone
-    let (offset, _) = timezone_offset_and_abbrev(&tz_name, timestamp);
+    let (offset, _) = timezone_offset_and_abbrev(&effective_tz, timestamp);
     let date_str = format_timestamp("Y-m-d H:i:s", timestamp + offset) + ".000000";
     obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-    obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
-    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
+    obj.set_property(b"timezone_type".to_vec(), Value::Long(effective_tz_type));
+    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(effective_tz)));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
@@ -1579,12 +1655,57 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    let user_passed_tz = matches!(tz_arg, Some(Value::Object(_)));
+    let is_at_timestamp = datetime_str.starts_with('@');
+    let mut effective_tz = tz_name.clone();
+    let mut effective_tz_type: i64 = 3;
+    if !is_at_timestamp && !user_passed_tz {
+        let trimmed = datetime_str.trim();
+        let is_abbrev_not_utc = |s: &str| -> bool {
+            !s.eq_ignore_ascii_case("UTC")
+                && (is_known_tz_abbrev_or_name(s) || s.eq_ignore_ascii_case("GMT"))
+                && !s.contains('/')
+        };
+        let normalize_offset = |s: &str| -> String {
+            let b = s.as_bytes();
+            if b.len() == 5 && (b[0] == b'+' || b[0] == b'-')
+                && b[1..].iter().all(|c| c.is_ascii_digit())
+            {
+                format!("{}{}{}:{}{}", b[0] as char, b[1] as char, b[2] as char, b[3] as char, b[4] as char)
+            } else {
+                s.to_string()
+            }
+        };
+        if !trimmed.is_empty() {
+            if parse_tz_offset(trimmed).is_some() {
+                effective_tz = normalize_offset(trimmed);
+                effective_tz_type = 1;
+            } else if is_abbrev_not_utc(trimmed) {
+                effective_tz = trimmed.to_uppercase();
+                effective_tz_type = 2;
+            } else if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
+                let tail = trimmed[idx+1..].trim();
+                if parse_tz_offset(tail).is_some() {
+                    effective_tz = normalize_offset(tail);
+                    effective_tz_type = 1;
+                } else if is_abbrev_not_utc(tail) {
+                    effective_tz = tail.to_uppercase();
+                    effective_tz_type = 2;
+                }
+            }
+        }
+    }
+    if is_at_timestamp {
+        effective_tz = "+00:00".to_string();
+        effective_tz_type = 1;
+    }
+
     let timestamp = if datetime_str.is_empty() || datetime_str.eq_ignore_ascii_case("now") {
         now_secs
     } else {
         match parse_datetime_string(&datetime_str, now_secs) {
             Some(ts) => {
-                let (offset, _) = timezone_offset_and_abbrev(&tz_name, ts);
+                let (offset, _) = timezone_offset_and_abbrev(&effective_tz, ts);
                 ts - offset
             }
             None => return Ok(Value::False),
@@ -1594,11 +1715,11 @@ fn date_create_immutable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     let obj_id = _vm.next_object_id();
     let mut obj = PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
     obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
-    let (offset, _) = timezone_offset_and_abbrev(&tz_name, timestamp);
+    let (offset, _) = timezone_offset_and_abbrev(&effective_tz, timestamp);
     let date_str = format_timestamp("Y-m-d H:i:s", timestamp + offset) + ".000000";
     obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-    obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
-    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
+    obj.set_property(b"timezone_type".to_vec(), Value::Long(effective_tz_type));
+    obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(effective_tz)));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
@@ -1803,6 +1924,13 @@ pub fn parse_datetime_string(input: &str, now: i64) -> Option<i64> {
         return ts_part.parse::<i64>().ok();
     }
 
+    // Standalone timezone identifier or offset -> treat as "now in that tz".
+    if parse_tz_offset(s).is_some() || s.eq_ignore_ascii_case("UTC")
+        || s.eq_ignore_ascii_case("GMT") || is_known_tz_abbrev_or_name(s)
+    {
+        return Some(now);
+    }
+
     // Try absolute date formats first
     if let Some(ts) = try_parse_absolute(s) {
         return Some(ts);
@@ -1997,8 +2125,8 @@ fn try_parse_absolute(s: &str) -> Option<i64> {
     let parts: Vec<&str> = s.splitn(2, |c: char| c == ' ' || c == 'T').collect();
     let date_str = parts.first()?;
 
-    // Try Y-m-d format (also handles YYYY-Mon-DD or Mon-DD-YYYY)
-    let date_parts: Vec<&str> = date_str.split('-').collect();
+    // Try Y-m-d / Y/m/d format (also handles YYYY-Mon-DD or Mon-DD-YYYY)
+    let date_parts: Vec<&str> = date_str.split(|c: char| c == '-' || c == '/').collect();
     if date_parts.len() == 3 {
         // Check for month name in parts
         if let Some(month_num) = parse_month_name(date_parts[1]) {
@@ -2027,6 +2155,20 @@ fn try_parse_absolute(s: &str) -> Option<i64> {
                 let tz_offset = parse_tz_from_time_parts(parts.get(1));
                 let days = ymd_to_days(year, month, day);
                 return Some(days * 86400 + time - tz_offset);
+            }
+        }
+    }
+
+    // Try YYYY-MM (no day, defaults to day 1)
+    if date_parts.len() == 2 {
+        if let (Ok(year), Ok(month)) = (
+            date_parts[0].parse::<i64>(),
+            date_parts[1].parse::<u32>(),
+        ) {
+            if month >= 1 && month <= 12 && date_parts[0].len() == 4 {
+                let time = parse_time_from_parts(parts.get(1));
+                let days = ymd_to_days(year, month, 1);
+                return Some(days * 86400 + time);
             }
         }
     }
@@ -3238,27 +3380,79 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
 fn timezone_open_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let tz_str = args.first().unwrap_or(&Value::Null).to_php_string();
     let tz_bytes = tz_str.as_bytes();
-    let tz_name = String::from_utf8_lossy(tz_bytes);
+    let tz_name = String::from_utf8_lossy(tz_bytes).to_string();
 
-    // Basic validation - check if it resolves to a known timezone or offset
-    let (offset, _) = timezone_offset_and_abbrev(&tz_name, 0);
-    let is_known = offset != 0 || tz_name == "UTC" || tz_name == "utc"
-        || tz_name == "GMT" || tz_name.starts_with('+') || tz_name.starts_with('-')
-        || tz_name.contains('/');
+    // Validate timezone format/identity
+    let is_offset = parse_tz_offset(&tz_name).is_some();
+    let is_abbrev = is_known_tz_abbrev_or_name(&tz_name);
+    let is_known_id = matches!(tz_name.as_str(),
+        "UTC" | "utc" | "GMT" | "Z"
+    ) || (tz_name.contains('/') && is_known_tz_identifier(&tz_name));
 
-    if !is_known && tz_bytes.is_empty() {
-        vm.emit_warning_at("timezone_open(): Unknown or bad timezone ()", vm.current_line);
+    let is_valid = is_offset || is_abbrev || is_known_id;
+    if !is_valid {
+        vm.emit_warning_at(
+            &format!("timezone_open(): Unknown or bad timezone ({})", tz_name),
+            vm.current_line,
+        );
         return Ok(Value::False);
     }
 
+    let type_v = if is_offset { 1 } else if is_abbrev && !is_known_id { 2 } else { 3 };
     let obj_id = vm.next_object_id();
     let mut obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
-    obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+    obj.set_property(b"timezone_type".to_vec(), Value::Long(type_v));
     obj.set_property(
         b"timezone".to_vec(),
         Value::String(PhpString::from_vec(tz_bytes.to_vec())),
     );
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
+}
+
+fn is_known_tz_identifier(name: &str) -> bool {
+    // Common timezone identifiers we know about
+    matches!(name,
+        "UTC" | "GMT"
+        | "Europe/London" | "Europe/Paris" | "Europe/Berlin" | "Europe/Madrid"
+        | "Europe/Rome" | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Vienna"
+        | "Europe/Warsaw" | "Europe/Prague" | "Europe/Budapest" | "Europe/Zurich"
+        | "Europe/Lisbon" | "Europe/Dublin" | "Europe/Helsinki" | "Europe/Stockholm"
+        | "Europe/Oslo" | "Europe/Copenhagen" | "Europe/Athens" | "Europe/Bucharest"
+        | "Europe/Sofia" | "Europe/Belgrade" | "Europe/Zagreb" | "Europe/Tallinn"
+        | "Europe/Vilnius" | "Europe/Riga" | "Europe/Minsk" | "Europe/Moscow"
+        | "Europe/Kiev" | "Europe/Kyiv" | "Europe/Istanbul"
+        | "America/New_York" | "America/Chicago" | "America/Denver" | "America/Los_Angeles"
+        | "America/Anchorage" | "America/Honolulu" | "America/Phoenix" | "America/Indianapolis"
+        | "America/Detroit" | "America/Boise" | "America/Juneau" | "America/Toronto"
+        | "America/Montreal" | "America/Vancouver" | "America/Edmonton" | "America/Halifax"
+        | "America/St_Johns" | "America/Mexico_City" | "America/Tijuana" | "America/Bogota"
+        | "America/Lima" | "America/Caracas" | "America/La_Paz" | "America/Santiago"
+        | "America/Sao_Paulo" | "America/Buenos_Aires" | "America/Montevideo"
+        | "America/Argentina/Buenos_Aires" | "America/Costa_Rica" | "America/Panama"
+        | "America/Havana" | "America/Jamaica" | "America/Cayman"
+        | "Asia/Tokyo" | "Asia/Shanghai" | "Asia/Hong_Kong" | "Asia/Singapore"
+        | "Asia/Seoul" | "Asia/Kolkata" | "Asia/Calcutta" | "Asia/Karachi"
+        | "Asia/Dubai" | "Asia/Tehran" | "Asia/Jerusalem" | "Asia/Bangkok"
+        | "Asia/Jakarta" | "Asia/Manila" | "Asia/Taipei" | "Asia/Kuala_Lumpur"
+        | "Asia/Riyadh" | "Asia/Baghdad" | "Asia/Yerevan" | "Asia/Tbilisi"
+        | "Asia/Baku" | "Asia/Tashkent" | "Asia/Almaty" | "Asia/Bishkek"
+        | "Asia/Dhaka" | "Asia/Yangon" | "Asia/Vientiane" | "Asia/Phnom_Penh"
+        | "Asia/Ho_Chi_Minh" | "Asia/Saigon" | "Asia/Pyongyang" | "Asia/Ulaanbaatar"
+        | "Australia/Sydney" | "Australia/Melbourne" | "Australia/Brisbane"
+        | "Australia/Adelaide" | "Australia/Darwin" | "Australia/Perth"
+        | "Australia/Hobart" | "Australia/Lord_Howe" | "Australia/Eucla"
+        | "Pacific/Auckland" | "Pacific/Fiji" | "Pacific/Honolulu" | "Pacific/Pago_Pago"
+        | "Pacific/Guam" | "Pacific/Apia" | "Pacific/Tongatapu" | "Pacific/Easter"
+        | "Africa/Cairo" | "Africa/Johannesburg" | "Africa/Nairobi" | "Africa/Lagos"
+        | "Africa/Casablanca" | "Africa/Algiers" | "Africa/Tunis" | "Africa/Tripoli"
+        | "Africa/Khartoum" | "Africa/Addis_Ababa" | "Africa/Dar_es_Salaam"
+        | "Atlantic/Azores" | "Atlantic/Cape_Verde" | "Atlantic/Reykjavik"
+        | "Atlantic/Bermuda" | "Atlantic/Canary" | "Atlantic/Madeira" | "Atlantic/Stanley"
+        | "Indian/Mauritius" | "Indian/Reunion" | "Indian/Maldives" | "Indian/Antananarivo"
+        | "Antarctica/Casey" | "Antarctica/Davis" | "Antarctica/Mawson" | "Antarctica/McMurdo"
+        | "Antarctica/Vostok"
+        | "Z"
+    )
 }
 
 /// date_timezone_get() - Return the timezone of a DateTime object
@@ -3267,12 +3461,28 @@ fn date_timezone_get_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Value::Object(obj) = dt_obj {
         let obj_borrow = obj.borrow();
         let tz_prop = obj_borrow.get_property(b"timezone");
+        let stored_type = obj_borrow.get_property(b"timezone_type");
         if let Value::String(tz_str) = &tz_prop {
             let tz_bytes = tz_str.as_bytes().to_vec();
+            let tz_string = String::from_utf8_lossy(&tz_bytes).to_string();
             drop(obj_borrow);
+            // Use stored type if present, else infer from the timezone string.
+            let type_v = if !matches!(stored_type, Value::Null | Value::Undef) {
+                stored_type
+            } else if parse_tz_offset(&tz_string).is_some() {
+                Value::Long(1)
+            } else if matches!(tz_string.as_str(),
+                "GMT" | "UTC" | "EST" | "EDT" | "CST" | "CDT" | "MST" | "MDT"
+                | "PST" | "PDT" | "CET" | "CEST" | "EET" | "EEST" | "WET" | "WEST"
+                | "JST" | "KST" | "IST" | "BST" | "MSK" | "AEST" | "AEDT" | "AKST" | "AKDT"
+                | "HST" | "AST" | "ADT" | "NST" | "NDT" | "PT" | "ET" | "CT" | "MT") {
+                Value::Long(2)
+            } else {
+                Value::Long(3)
+            };
             let obj_id = vm.next_object_id();
             let mut tz_obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
-            tz_obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+            tz_obj.set_property(b"timezone_type".to_vec(), type_v);
             tz_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_vec(tz_bytes)));
             return Ok(Value::Object(Rc::new(RefCell::new(tz_obj))));
         }
@@ -3353,51 +3563,58 @@ fn date_isodate_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// timezone_abbreviations_list()
 fn timezone_abbreviations_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Return a simplified version of timezone abbreviations
+    // Return a simplified version of timezone abbreviations.
+    // Each abbreviation maps to a list of timezone entries.
     let mut result = PhpArray::new();
 
-    let abbrevs = [
-        ("acst", 34200, 0, "Australia/Adelaide"),
-        ("aest", 36000, 0, "Australia/Brisbane"),
-        ("akst", -32400, 0, "America/Anchorage"),
-        ("ast", -14400, 0, "America/Halifax"),
-        ("brt", -10800, 0, "America/Sao_Paulo"),
-        ("cdt", -18000, 1, "America/Chicago"),
-        ("cest", 7200, 1, "Europe/Berlin"),
-        ("cet", 3600, 0, "Europe/Berlin"),
-        ("cst", -21600, 0, "America/Chicago"),
-        ("eat", 10800, 0, "Africa/Nairobi"),
-        ("edt", -14400, 1, "America/New_York"),
-        ("eest", 10800, 1, "Europe/Helsinki"),
-        ("eet", 7200, 0, "Europe/Helsinki"),
-        ("est", -18000, 0, "America/New_York"),
-        ("gmt", 0, 0, "UTC"),
-        ("hst", -36000, 0, "Pacific/Honolulu"),
-        ("ist", 19800, 0, "Asia/Kolkata"),
-        ("jst", 32400, 0, "Asia/Tokyo"),
-        ("kst", 32400, 0, "Asia/Seoul"),
-        ("mdt", -21600, 1, "America/Denver"),
-        ("msk", 10800, 0, "Europe/Moscow"),
-        ("mst", -25200, 0, "America/Denver"),
-        ("nzdt", 46800, 1, "Pacific/Auckland"),
-        ("nzst", 43200, 0, "Pacific/Auckland"),
-        ("pdt", -25200, 1, "America/Los_Angeles"),
-        ("pst", -28800, 0, "America/Los_Angeles"),
-        ("sast", 7200, 0, "Africa/Johannesburg"),
-        ("utc", 0, 0, "UTC"),
-        ("wat", 3600, 0, "Africa/Lagos"),
-        ("wet", 0, 0, "Europe/London"),
+    let abbrevs: &[(&str, &[(i64, i64, &str)])] = &[
+        ("acst", &[(34200, 0, "Australia/Adelaide")]),
+        ("aest", &[(36000, 0, "Australia/Brisbane")]),
+        ("akst", &[(-32400, 0, "America/Anchorage")]),
+        ("ast", &[(-14400, 0, "America/Halifax")]),
+        ("brt", &[(-10800, 0, "America/Sao_Paulo")]),
+        ("cdt", &[(-18000, 1, "America/Chicago")]),
+        ("cest", &[(7200, 1, "Europe/Berlin")]),
+        ("cet", &[(3600, 0, "Europe/Berlin")]),
+        ("cst", &[(-21600, 0, "America/Chicago")]),
+        ("eat", &[(10800, 0, "Africa/Nairobi")]),
+        ("edt", &[(-14400, 1, "America/New_York")]),
+        ("eest", &[(10800, 1, "Europe/Helsinki")]),
+        ("eet", &[(7200, 0, "Europe/Helsinki")]),
+        ("est", &[(-18000, 0, "America/New_York")]),
+        ("gmt", &[(0, 0, "UTC")]),
+        ("hst", &[(-36000, 0, "Pacific/Honolulu")]),
+        ("ist", &[(19800, 0, "Asia/Kolkata")]),
+        ("jst", &[(32400, 0, "Asia/Tokyo")]),
+        ("kst", &[(32400, 0, "Asia/Seoul")]),
+        ("mdt", &[(-21600, 1, "America/Denver")]),
+        ("msk", &[(10800, 0, "Europe/Moscow")]),
+        ("mst", &[(-25200, 0, "America/Denver")]),
+        ("nzdt", &[(46800, 1, "Pacific/Auckland")]),
+        ("nzst", &[(43200, 0, "Pacific/Auckland")]),
+        ("pdt", &[(-25200, 1, "America/Los_Angeles")]),
+        ("pst", &[(-28800, 0, "America/Los_Angeles")]),
+        ("sast", &[(7200, 0, "Africa/Johannesburg")]),
+        ("utc", &[
+            (0, 0, "Etc/Universal"),
+            (0, 0, "Etc/UTC"),
+            (0, 0, "Etc/Zulu"),
+            (0, 0, "UTC"),
+            (0, 0, "UTC"),
+        ]),
+        ("wat", &[(3600, 0, "Africa/Lagos")]),
+        ("wet", &[(0, 0, "Europe/London")]),
     ];
 
-    for (abbr, offset, dst, tz_id) in &abbrevs {
-        let mut entry = PhpArray::new();
-        entry.set(ArrayKey::String(PhpString::from_bytes(b"dst")), if *dst != 0 { Value::True } else { Value::False });
-        entry.set(ArrayKey::String(PhpString::from_bytes(b"offset")), Value::Long(*offset));
-        entry.set(ArrayKey::String(PhpString::from_bytes(b"timezone_id")), Value::String(PhpString::from_string(tz_id.to_string())));
-
+    for (abbr, entries) in abbrevs {
         let mut arr = PhpArray::new();
-        arr.push(Value::Array(Rc::new(RefCell::new(entry))));
-
+        for (offset, dst, tz_id) in *entries {
+            let mut entry = PhpArray::new();
+            entry.set(ArrayKey::String(PhpString::from_bytes(b"dst")), if *dst != 0 { Value::True } else { Value::False });
+            entry.set(ArrayKey::String(PhpString::from_bytes(b"offset")), Value::Long(*offset));
+            entry.set(ArrayKey::String(PhpString::from_bytes(b"timezone_id")), Value::String(PhpString::from_string(tz_id.to_string())));
+            arr.push(Value::Array(Rc::new(RefCell::new(entry))));
+        }
         result.set(ArrayKey::String(PhpString::from_string(abbr.to_string())), Value::Array(Rc::new(RefCell::new(arr))));
     }
 
@@ -3593,30 +3810,213 @@ fn timezone_location_get_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
 }
 
 /// timezone_identifiers_list()
-fn timezone_identifiers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn timezone_identifiers_list_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // DateTimeZone constants:
+    //   AFRICA=1, AMERICA=2, ANTARCTICA=4, ARCTIC=8, ASIA=16, ATLANTIC=32,
+    //   AUSTRALIA=64, EUROPE=128, INDIAN=256, PACIFIC=512, UTC=1024,
+    //   ALL=2047, ALL_WITH_BC=4095, PER_COUNTRY=4096
+    let mask = args.first().map(|v| v.to_long()).unwrap_or(2047);
+    let include_bc = mask & 4095 == 4095 || mask & 2048 != 0;
+
     let mut arr = PhpArray::new();
-    let timezones = [
-        "Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers",
-        "Africa/Cairo", "Africa/Casablanca", "Africa/Johannesburg", "Africa/Lagos", "Africa/Nairobi",
-        "America/Anchorage", "America/Argentina/Buenos_Aires", "America/Chicago",
-        "America/Denver", "America/Halifax", "America/Los_Angeles", "America/New_York",
-        "America/Phoenix", "America/Sao_Paulo", "America/Toronto", "America/Vancouver",
-        "Asia/Bangkok", "Asia/Calcutta", "Asia/Dhaka", "Asia/Dubai", "Asia/Hong_Kong",
-        "Asia/Jakarta", "Asia/Karachi", "Asia/Kolkata", "Asia/Seoul", "Asia/Shanghai",
-        "Asia/Singapore", "Asia/Taipei", "Asia/Tokyo",
-        "Atlantic/Reykjavik",
-        "Australia/Adelaide", "Australia/Brisbane", "Australia/Darwin",
-        "Australia/Hobart", "Australia/Melbourne", "Australia/Perth", "Australia/Sydney",
-        "Europe/Amsterdam", "Europe/Athens", "Europe/Berlin", "Europe/Brussels",
-        "Europe/Budapest", "Europe/Copenhagen", "Europe/Helsinki", "Europe/Istanbul",
-        "Europe/Kiev", "Europe/London", "Europe/Madrid", "Europe/Moscow",
-        "Europe/Oslo", "Europe/Paris", "Europe/Prague", "Europe/Rome",
-        "Europe/Stockholm", "Europe/Vienna", "Europe/Warsaw", "Europe/Zurich",
-        "Pacific/Auckland", "Pacific/Fiji", "Pacific/Honolulu",
-        "UTC",
+    let zones: &[(i64, &str)] = &[
+        (1, "Africa/Abidjan"), (1, "Africa/Accra"), (1, "Africa/Addis_Ababa"),
+        (1, "Africa/Algiers"), (1, "Africa/Asmara"), (1, "Africa/Bamako"),
+        (1, "Africa/Bangui"), (1, "Africa/Banjul"), (1, "Africa/Bissau"),
+        (1, "Africa/Blantyre"), (1, "Africa/Brazzaville"), (1, "Africa/Bujumbura"),
+        (1, "Africa/Cairo"), (1, "Africa/Casablanca"), (1, "Africa/Ceuta"),
+        (1, "Africa/Conakry"), (1, "Africa/Dakar"), (1, "Africa/Dar_es_Salaam"),
+        (1, "Africa/Djibouti"), (1, "Africa/Douala"), (1, "Africa/El_Aaiun"),
+        (1, "Africa/Freetown"), (1, "Africa/Gaborone"), (1, "Africa/Harare"),
+        (1, "Africa/Johannesburg"), (1, "Africa/Juba"), (1, "Africa/Kampala"),
+        (1, "Africa/Khartoum"), (1, "Africa/Kigali"), (1, "Africa/Kinshasa"),
+        (1, "Africa/Lagos"), (1, "Africa/Libreville"), (1, "Africa/Lome"),
+        (1, "Africa/Luanda"), (1, "Africa/Lubumbashi"), (1, "Africa/Lusaka"),
+        (1, "Africa/Malabo"), (1, "Africa/Maputo"), (1, "Africa/Maseru"),
+        (1, "Africa/Mbabane"), (1, "Africa/Mogadishu"), (1, "Africa/Monrovia"),
+        (1, "Africa/Nairobi"), (1, "Africa/Ndjamena"), (1, "Africa/Niamey"),
+        (1, "Africa/Nouakchott"), (1, "Africa/Ouagadougou"), (1, "Africa/Porto-Novo"),
+        (1, "Africa/Sao_Tome"), (1, "Africa/Tripoli"), (1, "Africa/Tunis"),
+        (1, "Africa/Windhoek"),
+        (2, "America/Adak"), (2, "America/Anchorage"), (2, "America/Anguilla"),
+        (2, "America/Antigua"), (2, "America/Araguaina"),
+        (2, "America/Argentina/Buenos_Aires"), (2, "America/Argentina/Catamarca"),
+        (2, "America/Argentina/Cordoba"), (2, "America/Argentina/Jujuy"),
+        (2, "America/Argentina/La_Rioja"), (2, "America/Argentina/Mendoza"),
+        (2, "America/Argentina/Rio_Gallegos"), (2, "America/Argentina/Salta"),
+        (2, "America/Argentina/San_Juan"), (2, "America/Argentina/San_Luis"),
+        (2, "America/Argentina/Tucuman"), (2, "America/Argentina/Ushuaia"),
+        (2, "America/Aruba"), (2, "America/Asuncion"), (2, "America/Atikokan"),
+        (2, "America/Bahia"), (2, "America/Bahia_Banderas"), (2, "America/Barbados"),
+        (2, "America/Belem"), (2, "America/Belize"), (2, "America/Blanc-Sablon"),
+        (2, "America/Boa_Vista"), (2, "America/Bogota"), (2, "America/Boise"),
+        (2, "America/Cambridge_Bay"), (2, "America/Campo_Grande"), (2, "America/Cancun"),
+        (2, "America/Caracas"), (2, "America/Cayenne"), (2, "America/Cayman"),
+        (2, "America/Chicago"), (2, "America/Chihuahua"), (2, "America/Ciudad_Juarez"),
+        (2, "America/Costa_Rica"), (2, "America/Creston"), (2, "America/Cuiaba"),
+        (2, "America/Curacao"), (2, "America/Danmarkshavn"), (2, "America/Dawson"),
+        (2, "America/Dawson_Creek"), (2, "America/Denver"), (2, "America/Detroit"),
+        (2, "America/Dominica"), (2, "America/Edmonton"), (2, "America/Eirunepe"),
+        (2, "America/El_Salvador"), (2, "America/Fort_Nelson"), (2, "America/Fortaleza"),
+        (2, "America/Glace_Bay"), (2, "America/Goose_Bay"), (2, "America/Grand_Turk"),
+        (2, "America/Grenada"), (2, "America/Guadeloupe"), (2, "America/Guatemala"),
+        (2, "America/Guayaquil"), (2, "America/Guyana"), (2, "America/Halifax"),
+        (2, "America/Havana"), (2, "America/Hermosillo"), (2, "America/Indiana/Indianapolis"),
+        (2, "America/Indiana/Knox"), (2, "America/Indiana/Marengo"),
+        (2, "America/Indiana/Petersburg"), (2, "America/Indiana/Tell_City"),
+        (2, "America/Indiana/Vevay"), (2, "America/Indiana/Vincennes"),
+        (2, "America/Indiana/Winamac"), (2, "America/Inuvik"), (2, "America/Iqaluit"),
+        (2, "America/Jamaica"), (2, "America/Juneau"), (2, "America/Kentucky/Louisville"),
+        (2, "America/Kentucky/Monticello"), (2, "America/Kralendijk"), (2, "America/La_Paz"),
+        (2, "America/Lima"), (2, "America/Los_Angeles"), (2, "America/Lower_Princes"),
+        (2, "America/Maceio"), (2, "America/Managua"), (2, "America/Manaus"),
+        (2, "America/Marigot"), (2, "America/Martinique"), (2, "America/Matamoros"),
+        (2, "America/Mazatlan"), (2, "America/Menominee"), (2, "America/Merida"),
+        (2, "America/Metlakatla"), (2, "America/Mexico_City"), (2, "America/Miquelon"),
+        (2, "America/Moncton"), (2, "America/Monterrey"), (2, "America/Montevideo"),
+        (2, "America/Montserrat"), (2, "America/Nassau"), (2, "America/New_York"),
+        (2, "America/Nome"), (2, "America/Noronha"), (2, "America/North_Dakota/Beulah"),
+        (2, "America/North_Dakota/Center"), (2, "America/North_Dakota/New_Salem"),
+        (2, "America/Nuuk"), (2, "America/Ojinaga"), (2, "America/Panama"),
+        (2, "America/Paramaribo"), (2, "America/Phoenix"), (2, "America/Port-au-Prince"),
+        (2, "America/Port_of_Spain"), (2, "America/Porto_Velho"), (2, "America/Puerto_Rico"),
+        (2, "America/Punta_Arenas"), (2, "America/Rankin_Inlet"), (2, "America/Recife"),
+        (2, "America/Regina"), (2, "America/Resolute"), (2, "America/Rio_Branco"),
+        (2, "America/Santarem"), (2, "America/Santiago"), (2, "America/Santo_Domingo"),
+        (2, "America/Sao_Paulo"), (2, "America/Scoresbysund"), (2, "America/Sitka"),
+        (2, "America/St_Barthelemy"), (2, "America/St_Johns"), (2, "America/St_Kitts"),
+        (2, "America/St_Lucia"), (2, "America/St_Thomas"), (2, "America/St_Vincent"),
+        (2, "America/Swift_Current"), (2, "America/Tegucigalpa"), (2, "America/Thule"),
+        (2, "America/Tijuana"), (2, "America/Toronto"), (2, "America/Tortola"),
+        (2, "America/Vancouver"), (2, "America/Whitehorse"), (2, "America/Winnipeg"),
+        (2, "America/Yakutat"),
+        (4, "Antarctica/Casey"), (4, "Antarctica/Davis"), (4, "Antarctica/DumontDUrville"),
+        (4, "Antarctica/Macquarie"), (4, "Antarctica/Mawson"), (4, "Antarctica/McMurdo"),
+        (4, "Antarctica/Palmer"), (4, "Antarctica/Rothera"), (4, "Antarctica/Syowa"),
+        (4, "Antarctica/Troll"), (4, "Antarctica/Vostok"),
+        (8, "Arctic/Longyearbyen"),
+        (16, "Asia/Aden"), (16, "Asia/Almaty"), (16, "Asia/Amman"), (16, "Asia/Anadyr"),
+        (16, "Asia/Aqtau"), (16, "Asia/Aqtobe"), (16, "Asia/Ashgabat"), (16, "Asia/Atyrau"),
+        (16, "Asia/Baghdad"), (16, "Asia/Bahrain"), (16, "Asia/Baku"), (16, "Asia/Bangkok"),
+        (16, "Asia/Barnaul"), (16, "Asia/Beirut"), (16, "Asia/Bishkek"), (16, "Asia/Brunei"),
+        (16, "Asia/Chita"), (16, "Asia/Choibalsan"), (16, "Asia/Colombo"), (16, "Asia/Damascus"),
+        (16, "Asia/Dhaka"), (16, "Asia/Dili"), (16, "Asia/Dubai"), (16, "Asia/Dushanbe"),
+        (16, "Asia/Famagusta"), (16, "Asia/Gaza"), (16, "Asia/Hebron"), (16, "Asia/Ho_Chi_Minh"),
+        (16, "Asia/Hong_Kong"), (16, "Asia/Hovd"), (16, "Asia/Irkutsk"), (16, "Asia/Jakarta"),
+        (16, "Asia/Jayapura"), (16, "Asia/Jerusalem"), (16, "Asia/Kabul"), (16, "Asia/Kamchatka"),
+        (16, "Asia/Karachi"), (16, "Asia/Kathmandu"), (16, "Asia/Khandyga"), (16, "Asia/Kolkata"),
+        (16, "Asia/Krasnoyarsk"), (16, "Asia/Kuala_Lumpur"), (16, "Asia/Kuching"), (16, "Asia/Kuwait"),
+        (16, "Asia/Macau"), (16, "Asia/Magadan"), (16, "Asia/Makassar"), (16, "Asia/Manila"),
+        (16, "Asia/Muscat"), (16, "Asia/Nicosia"), (16, "Asia/Novokuznetsk"), (16, "Asia/Novosibirsk"),
+        (16, "Asia/Omsk"), (16, "Asia/Oral"), (16, "Asia/Phnom_Penh"), (16, "Asia/Pontianak"),
+        (16, "Asia/Pyongyang"), (16, "Asia/Qatar"), (16, "Asia/Qostanay"), (16, "Asia/Qyzylorda"),
+        (16, "Asia/Riyadh"), (16, "Asia/Sakhalin"), (16, "Asia/Samarkand"), (16, "Asia/Seoul"),
+        (16, "Asia/Shanghai"), (16, "Asia/Singapore"), (16, "Asia/Srednekolymsk"), (16, "Asia/Taipei"),
+        (16, "Asia/Tashkent"), (16, "Asia/Tbilisi"), (16, "Asia/Tehran"), (16, "Asia/Thimphu"),
+        (16, "Asia/Tokyo"), (16, "Asia/Tomsk"), (16, "Asia/Ulaanbaatar"), (16, "Asia/Urumqi"),
+        (16, "Asia/Ust-Nera"), (16, "Asia/Vientiane"), (16, "Asia/Vladivostok"),
+        (16, "Asia/Yakutsk"), (16, "Asia/Yangon"), (16, "Asia/Yekaterinburg"), (16, "Asia/Yerevan"),
+        (32, "Atlantic/Azores"), (32, "Atlantic/Bermuda"), (32, "Atlantic/Canary"),
+        (32, "Atlantic/Cape_Verde"), (32, "Atlantic/Faroe"), (32, "Atlantic/Madeira"),
+        (32, "Atlantic/Reykjavik"), (32, "Atlantic/South_Georgia"), (32, "Atlantic/St_Helena"),
+        (32, "Atlantic/Stanley"),
+        (64, "Australia/Adelaide"), (64, "Australia/Brisbane"), (64, "Australia/Broken_Hill"),
+        (64, "Australia/Darwin"), (64, "Australia/Eucla"), (64, "Australia/Hobart"),
+        (64, "Australia/Lindeman"), (64, "Australia/Lord_Howe"), (64, "Australia/Melbourne"),
+        (64, "Australia/Perth"), (64, "Australia/Sydney"),
+        (128, "Europe/Amsterdam"), (128, "Europe/Andorra"), (128, "Europe/Astrakhan"),
+        (128, "Europe/Athens"), (128, "Europe/Belgrade"), (128, "Europe/Berlin"),
+        (128, "Europe/Bratislava"), (128, "Europe/Brussels"), (128, "Europe/Bucharest"),
+        (128, "Europe/Budapest"), (128, "Europe/Busingen"), (128, "Europe/Chisinau"),
+        (128, "Europe/Copenhagen"), (128, "Europe/Dublin"), (128, "Europe/Gibraltar"),
+        (128, "Europe/Guernsey"), (128, "Europe/Helsinki"), (128, "Europe/Isle_of_Man"),
+        (128, "Europe/Istanbul"), (128, "Europe/Jersey"), (128, "Europe/Kaliningrad"),
+        (128, "Europe/Kirov"), (128, "Europe/Kyiv"), (128, "Europe/Lisbon"),
+        (128, "Europe/Ljubljana"), (128, "Europe/London"), (128, "Europe/Luxembourg"),
+        (128, "Europe/Madrid"), (128, "Europe/Malta"), (128, "Europe/Mariehamn"),
+        (128, "Europe/Minsk"), (128, "Europe/Monaco"), (128, "Europe/Moscow"),
+        (128, "Europe/Oslo"), (128, "Europe/Paris"), (128, "Europe/Podgorica"),
+        (128, "Europe/Prague"), (128, "Europe/Riga"), (128, "Europe/Rome"),
+        (128, "Europe/Samara"), (128, "Europe/San_Marino"), (128, "Europe/Sarajevo"),
+        (128, "Europe/Saratov"), (128, "Europe/Simferopol"), (128, "Europe/Skopje"),
+        (128, "Europe/Sofia"), (128, "Europe/Stockholm"), (128, "Europe/Tallinn"),
+        (128, "Europe/Tirane"), (128, "Europe/Ulyanovsk"), (128, "Europe/Vaduz"),
+        (128, "Europe/Vatican"), (128, "Europe/Vienna"), (128, "Europe/Vilnius"),
+        (128, "Europe/Volgograd"), (128, "Europe/Warsaw"), (128, "Europe/Zagreb"),
+        (128, "Europe/Zurich"),
+        (256, "Indian/Antananarivo"), (256, "Indian/Chagos"), (256, "Indian/Christmas"),
+        (256, "Indian/Cocos"), (256, "Indian/Comoro"), (256, "Indian/Kerguelen"),
+        (256, "Indian/Mahe"), (256, "Indian/Maldives"), (256, "Indian/Mauritius"),
+        (256, "Indian/Mayotte"), (256, "Indian/Reunion"),
+        (512, "Pacific/Apia"), (512, "Pacific/Auckland"), (512, "Pacific/Bougainville"),
+        (512, "Pacific/Chatham"), (512, "Pacific/Chuuk"), (512, "Pacific/Easter"),
+        (512, "Pacific/Efate"), (512, "Pacific/Fakaofo"), (512, "Pacific/Fiji"),
+        (512, "Pacific/Funafuti"), (512, "Pacific/Galapagos"), (512, "Pacific/Gambier"),
+        (512, "Pacific/Guadalcanal"), (512, "Pacific/Guam"), (512, "Pacific/Honolulu"),
+        (512, "Pacific/Kanton"), (512, "Pacific/Kiritimati"), (512, "Pacific/Kosrae"),
+        (512, "Pacific/Kwajalein"), (512, "Pacific/Majuro"), (512, "Pacific/Marquesas"),
+        (512, "Pacific/Midway"), (512, "Pacific/Nauru"), (512, "Pacific/Niue"),
+        (512, "Pacific/Norfolk"), (512, "Pacific/Noumea"), (512, "Pacific/Pago_Pago"),
+        (512, "Pacific/Palau"), (512, "Pacific/Pitcairn"), (512, "Pacific/Pohnpei"),
+        (512, "Pacific/Port_Moresby"), (512, "Pacific/Rarotonga"), (512, "Pacific/Saipan"),
+        (512, "Pacific/Tahiti"), (512, "Pacific/Tarawa"), (512, "Pacific/Tongatapu"),
+        (512, "Pacific/Wake"), (512, "Pacific/Wallis"),
+        (1024, "UTC"),
     ];
-    for tz in &timezones {
-        arr.push(Value::String(PhpString::from_string(tz.to_string())));
+    let bc_zones: &[&str] = &[
+        "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana",
+        "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain",
+        "US/Pacific", "US/Samoa",
+        "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain",
+        "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon",
+        "Asia/Calcutta", "Asia/Saigon", "Asia/Katmandu", "Asia/Rangoon",
+        "Asia/Chongqing", "Asia/Ujung_Pandang", "Asia/Macao", "Asia/Thimbu",
+        "Asia/Ulan_Bator", "Asia/Istanbul", "Asia/Tel_Aviv", "Asia/Ashkhabad",
+        "Europe/Kiev", "Europe/Tiraspol", "Europe/Nicosia", "Europe/Belfast",
+        "Africa/Asmera", "Africa/Timbuktu",
+        "America/Buenos_Aires", "America/Catamarca", "America/Cordoba",
+        "America/Jujuy", "America/Mendoza", "America/Indianapolis",
+        "America/Louisville", "America/Knox_IN", "America/Atka",
+        "America/Coral_Harbour", "America/Ensenada", "America/Fort_Wayne",
+        "America/Nipigon", "America/Pangnirtung", "America/Porto_Acre",
+        "America/Rainy_River", "America/Rosario", "America/Shiprock",
+        "America/Thunder_Bay", "America/Virgin", "America/Yellowknife",
+        "America/Argentina/ComodRivadavia",
+        "Australia/ACT", "Australia/Canberra", "Australia/LHI", "Australia/NSW",
+        "Australia/North", "Australia/Queensland", "Australia/South",
+        "Australia/Tasmania", "Australia/Victoria", "Australia/West",
+        "Australia/Yancowinna", "Pacific/Truk", "Pacific/Ponape", "Pacific/Samoa",
+        "Pacific/Yap", "Pacific/Johnston", "Pacific/Enderbury",
+        "Atlantic/Faeroe", "Atlantic/Jan_Mayen",
+        "GMT", "GMT0", "GMT+0", "GMT-0", "Greenwich", "UCT", "Universal", "Zulu",
+        "Etc/GMT", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4",
+        "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT-10",
+        "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT0",
+        "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4",
+        "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9",
+        "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/Greenwich", "Etc/UCT",
+        "Etc/UTC", "Etc/Universal", "Etc/Zulu",
+        "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West",
+        "Chile/Continental", "Chile/EasterIsland",
+        "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General",
+        "Egypt", "Eire", "Hongkong", "Iceland", "Iran", "Israel",
+        "Jamaica", "Japan", "Kwajalein", "Libya", "NZ", "NZ-CHAT", "Navajo",
+        "PRC", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "W-SU",
+        "EST", "MST", "HST", "EST5EDT", "CST6CDT", "MST7MDT", "PST8PDT",
+        "WET", "CET", "EET", "MET", "Cuba",
+    ];
+    let effective_mask = if mask == 4095 { 2047 } else { mask & 2047 };
+    let utc_only_in_special = mask == 1024;
+    let _ = utc_only_in_special;
+    for (region, name) in zones {
+        if effective_mask & region != 0 {
+            arr.push(Value::String(PhpString::from_string(name.to_string())));
+        }
+    }
+    if include_bc {
+        for name in bc_zones {
+            arr.push(Value::String(PhpString::from_string(name.to_string())));
+        }
     }
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }

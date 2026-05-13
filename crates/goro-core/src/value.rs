@@ -749,14 +749,24 @@ impl Value {
                 }
                 CMP_DEPTH.with(|d| d.set(depth + 1));
                 let result = {
-                    let a = a.borrow();
-                    let b = b.borrow();
-                    if a.class_name.eq_ignore_ascii_case(&b.class_name)
-                        && a.properties.len() == b.properties.len()
+                    let a_b = a.borrow();
+                    let b_b = b.borrow();
+                    // Built-in DateTime hierarchy: compare by timestamp.
+                    // Use presence of internal __timestamp property as a marker.
+                    let a_has_ts = !matches!(a_b.get_property(b"__timestamp"), Value::Null | Value::Undef);
+                    let b_has_ts = !matches!(b_b.get_property(b"__timestamp"), Value::Null | Value::Undef);
+                    let a_has_tzt = !matches!(a_b.get_property(b"timezone_type"), Value::Null | Value::Undef);
+                    let b_has_tzt = !matches!(b_b.get_property(b"timezone_type"), Value::Null | Value::Undef);
+                    if a_has_ts && b_has_ts && a_has_tzt && b_has_tzt {
+                        let ta = a_b.get_property(b"__timestamp").to_long();
+                        let tb = b_b.get_property(b"__timestamp").to_long();
+                        ta == tb
+                    } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
+                        && a_b.properties.len() == b_b.properties.len()
                     {
                         let mut eq = true;
-                        for (name, a_val) in &a.properties {
-                            let b_val = b.get_property(name);
+                        for (name, a_val) in &a_b.properties {
+                            let b_val = b_b.get_property(name);
                             if !a_val.equals(&b_val) {
                                 eq = false;
                                 break;

@@ -1170,6 +1170,62 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                         return false;
                     }
                 }
+                b'r' => {
+                    // %r...%r delimits an embedded regex pattern. Find the closing %r.
+                    pi += 2;
+                    let start = pi;
+                    let mut found = None;
+                    while pi + 1 < pb.len() {
+                        if pb[pi] == b'%' && pb[pi + 1] == b'r' {
+                            found = Some(pi);
+                            break;
+                        }
+                        pi += 1;
+                    }
+                    if let Some(end) = found {
+                        let regex_pat = match std::str::from_utf8(&pb[start..end]) {
+                            Ok(s) => s,
+                            Err(_) => return false,
+                        };
+                        // Anchored prefix match against actual.
+                        let anchored = format!("^(?:{})", regex_pat);
+                        let re = match regex::Regex::new(&anchored) {
+                            Ok(r) => r,
+                            Err(_) => return false,
+                        };
+                        let rest = match std::str::from_utf8(&ab[ai..]) {
+                            Ok(s) => s,
+                            Err(_) => return false,
+                        };
+                        // Try each match length, longest first, with backtracking.
+                        let mut candidates: Vec<usize> = Vec::new();
+                        if let Some(m) = re.find(rest) {
+                            if m.start() == 0 {
+                                candidates.push(m.end());
+                            }
+                        }
+                        // Also try shorter matches (regex isn't backtracking-friendly here).
+                        // Just use the single longest match for simplicity.
+                        pi = end + 2;
+                        if candidates.is_empty() {
+                            return false;
+                        }
+                        let mut any = false;
+                        for &consumed in &candidates {
+                            if match_expectf_at(pb, pi, ab, ai + consumed) {
+                                any = true;
+                                break;
+                            }
+                        }
+                        if !any {
+                            return false;
+                        }
+                        // Caller already advanced `pi` to after closing %r. Compute new ai based on consumption.
+                        // For simplicity, return true now since the recursive call did the rest.
+                        return true;
+                    }
+                    return false;
+                }
                 b'0' => {
                     // %0 matches a null byte in PHPT tests
                     pi += 2;

@@ -4682,12 +4682,42 @@ impl Vm {
                         let ob = obj.borrow();
                         Some(ob.get_property(b"__timestamp"))
                     }
-                    b"getoffset" => Some(Value::Long(0)), // UTC
+                    b"getoffset" => {
+                        let ob = obj.borrow();
+                        let ts = ob.get_property(b"__timestamp").to_long();
+                        let tz_name = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+                        drop(ob);
+                        let tz_name = if tz_name.is_empty() { "UTC".to_string() } else { tz_name };
+                        let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, ts);
+                        Some(Value::Long(offset))
+                    }
                     b"gettimezone" => {
+                        let ob = obj.borrow();
+                        let tz = ob.get_property(b"timezone");
+                        let tz_str = tz.to_php_string();
+                        let tz_str_lossy = tz_str.to_string_lossy();
+                        let stored_type = ob.get_property(b"timezone_type");
+                        drop(ob);
+                        let final_tz = if tz_str_lossy.is_empty() {
+                            PhpString::from_bytes(b"UTC")
+                        } else {
+                            tz_str
+                        };
+                        // Determine type from stored or infer.
+                        let type_v = if !matches!(stored_type, Value::Null | Value::Undef) {
+                            stored_type
+                        } else if vm_parse_tz_offset(&tz_str_lossy).is_some() {
+                            Value::Long(1)
+                        } else if vm_is_tz_abbrev(&tz_str_lossy) {
+                            Value::Long(2)
+                        } else {
+                            Value::Long(3)
+                        };
                         let obj_id = self.next_object_id;
                         self.next_object_id += 1;
                         let mut tz_obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
-                        tz_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_bytes(b"UTC")));
+                        tz_obj.set_property(b"timezone_type".to_vec(), type_v);
+                        tz_obj.set_property(b"timezone".to_vec(), Value::String(final_tz));
                         Some(Value::Object(Rc::new(RefCell::new(tz_obj))))
                     }
                     b"__serialize" => {
@@ -4719,7 +4749,7 @@ impl Vm {
                             Some(tz)
                         }
                     }
-                    b"getoffset" => Some(Value::Long(0)),
+                    // getoffset takes a $datetime arg - handled in handle_spl_docall.
                     b"__serialize" => {
                         let ob = obj.borrow();
                         let mut arr = PhpArray::new();
@@ -9525,15 +9555,43 @@ impl Vm {
                         }
                         b"getoffset" => {
                             // DateTimeZone::getOffset(DateTimeInterface $datetime)
+                            // Validate the argument type first.
+                            let dt_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            let dt_obj = match &dt_arg {
+                                Value::Object(o) => {
+                                    let cl: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if cl == b"datetime" || cl == b"datetimeimmutable"
+                                        || self.class_extends(&cl, b"datetime")
+                                        || self.class_extends(&cl, b"datetimeimmutable")
+                                    {
+                                        Some(o.clone())
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                            let dt_obj = if let Some(o) = dt_obj { o } else {
+                                let actual = match &dt_arg {
+                                    Value::Null => "null".to_string(),
+                                    Value::Long(_) => "int".to_string(),
+                                    Value::Double(_) => "float".to_string(),
+                                    Value::String(_) => "string".to_string(),
+                                    Value::Array(_) => "array".to_string(),
+                                    Value::Object(o) => String::from_utf8_lossy(&o.borrow().class_name).to_string(),
+                                    Value::True | Value::False => "bool".to_string(),
+                                    _ => "value".to_string(),
+                                };
+                                let msg = format!("DateTimeZone::getOffset(): Argument #1 ($datetime) must be of type DateTimeInterface, {} given", actual);
+                                let exc = self.create_exception(b"TypeError", &msg, self.current_line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            };
                             let ob = obj.borrow();
                             let tz_name = ob.get_property(b"timezone").to_php_string().to_string_lossy();
                             drop(ob);
                             let tz_name = if tz_name.is_empty() { "UTC".to_string() } else { tz_name };
-                            let ts = if let Some(Value::Object(dt_obj)) = args.get(1) {
-                                dt_obj.borrow().get_property(b"__timestamp").to_long()
-                            } else {
-                                0
-                            };
+                            let ts = dt_obj.borrow().get_property(b"__timestamp").to_long();
                             let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, ts);
                             Some(Value::Long(offset))
                         }
@@ -15065,13 +15123,14 @@ impl Vm {
                         || func_name_lower == b"datetimeimmutable::createfrommutable"
                         || func_name_lower == b"datetimeimmutable::createfrominterface" {
                         let is_immutable = func_name_lower.starts_with(b"datetimeimmutable");
-                        let (ts, src_tz) = if let Some(Value::Object(o)) = call.args.first() {
+                        let (ts, src_tz, src_tz_type) = if let Some(Value::Object(o)) = call.args.first() {
                             let ob = o.borrow();
                             let t = ob.get_property(b"__timestamp").to_long();
                             let z = ob.get_property(b"timezone").to_php_string().to_string_lossy();
-                            (t, if z.is_empty() { "UTC".to_string() } else { z })
+                            let tt = ob.get_property(b"timezone_type").to_long();
+                            (t, if z.is_empty() { "UTC".to_string() } else { z }, if tt != 0 { tt } else { 3 })
                         } else {
-                            (std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0), "UTC".to_string())
+                            (std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0), "UTC".to_string(), 3)
                         };
                         let obj_id = self.next_object_id();
                         let class_name = if is_immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() };
@@ -15080,7 +15139,7 @@ impl Vm {
                         let (offset, _) = vm_timezone_offset_and_abbrev(&src_tz, ts);
                         let date_str = Self::format_utc_datetime(ts + offset);
                         obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                        obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                        obj.set_property(b"timezone_type".to_vec(), Value::Long(src_tz_type));
                         obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(src_tz)));
                         let result = Value::Object(Rc::new(RefCell::new(obj)));
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
@@ -16800,6 +16859,8 @@ impl Vm {
                                         b"datetimezone".to_vec()
                                     } else if self.class_extends(&raw_class_lower, b"dateinterval") {
                                         b"dateinterval".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"dateperiod") {
+                                        b"dateperiod".to_vec()
                                     } else {
                                         raw_class_lower.clone()
                                     };
@@ -17493,9 +17554,19 @@ impl Vm {
                                                     !s.eq_ignore_ascii_case("UTC")
                                                         && (vm_is_tz_abbrev(s) || s.eq_ignore_ascii_case("GMT"))
                                                 };
+                                                let normalize_offset = |s: &str| -> String {
+                                                    let b = s.as_bytes();
+                                                    if b.len() == 5 && (b[0] == b'+' || b[0] == b'-')
+                                                        && b[1..].iter().all(|c| c.is_ascii_digit())
+                                                    {
+                                                        format!("{}{}{}:{}{}", b[0] as char, b[1] as char, b[2] as char, b[3] as char, b[4] as char)
+                                                    } else {
+                                                        s.to_string()
+                                                    }
+                                                };
                                                 if !trimmed.is_empty() {
                                                     if vm_parse_tz_offset(trimmed).is_some() {
-                                                        effective_tz = trimmed.to_string();
+                                                        effective_tz = normalize_offset(trimmed);
                                                         effective_tz_type = 1;
                                                     } else if is_abbrev_not_utc(trimmed) {
                                                         effective_tz = trimmed.to_uppercase();
@@ -17503,7 +17574,7 @@ impl Vm {
                                                     } else if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
                                                         let tail = trimmed[idx+1..].trim();
                                                         if vm_parse_tz_offset(tail).is_some() {
-                                                            effective_tz = tail.to_string();
+                                                            effective_tz = normalize_offset(tail);
                                                             effective_tz_type = 1;
                                                         } else if is_abbrev_not_utc(tail) {
                                                             effective_tz = tail.to_uppercase();
@@ -17512,13 +17583,13 @@ impl Vm {
                                                     }
                                                 }
                                             }
-                                            // For @timestamp, default tz is +00:00 type 1 (unless user override).
-                                            if is_at_timestamp && !user_passed_tz {
+                                            // For @timestamp, PHP forces the timezone to +00:00 type 1,
+                                            // even when an explicit DateTimeZone arg was passed.
+                                            if is_at_timestamp {
                                                 effective_tz = "+00:00".to_string();
                                                 effective_tz_type = 1;
-                                            }
-                                            // If user explicitly passed a tz arg, use it (override).
-                                            if user_passed_tz {
+                                            } else if user_passed_tz {
+                                                // If user explicitly passed a tz arg, use it (override).
                                                 if let Value::Object(tz_obj) = &call.args[2] {
                                                     let tb = tz_obj.borrow();
                                                     let typ = tb.get_property(b"timezone_type").to_long();
@@ -17611,9 +17682,12 @@ impl Vm {
                                                         return Err(VmError { message: format!("Uncaught DateInvalidTimeZoneException: {}", err_msg), line: op.line });
                                                     }
                                                 }
-                                                // Determine timezone type: 1=offset, 2=abbreviation, 3=identifier
+                                                // Determine timezone type: 1=offset, 2=abbreviation, 3=identifier.
+                                                // UTC and tz-database identifiers (containing "/") are type 3.
                                                 let tz_type = if vm_parse_tz_offset(&tz).is_some() {
                                                     1
+                                                } else if tz.eq_ignore_ascii_case("UTC") || tz.contains('/') {
+                                                    3
                                                 } else if vm_is_tz_abbrev(&tz) {
                                                     2
                                                 } else {
@@ -17644,6 +17718,35 @@ impl Vm {
                                             obj_mut.set_property(b"text".to_vec(), Value::String(text_val.to_php_string()));
                                             obj_mut.set_property(b"line".to_vec(), Value::Long(line_val.to_long()));
                                             obj_mut.set_property(b"pos".to_vec(), Value::Long(pos_val.to_long()));
+                                        }
+                                        b"dateperiod" => {
+                                            // DatePeriod::__construct(
+                                            //   DateTimeInterface $start,
+                                            //   DateInterval $interval,
+                                            //   DateTimeInterface|int $end,
+                                            //   int $options = 0
+                                            // )
+                                            // Default include_start=true, include_end=false. INCLUDE_END_DATE=8, EXCLUDE_START_DATE=1.
+                                            let start_arg = call.args.get(1).cloned().unwrap_or(Value::Null);
+                                            let interval_arg = call.args.get(2).cloned().unwrap_or(Value::Null);
+                                            let end_arg = call.args.get(3).cloned().unwrap_or(Value::Null);
+                                            let opts_arg = call.args.get(4).cloned().unwrap_or(Value::Long(0));
+                                            let opts = opts_arg.to_long();
+                                            let include_start = (opts & 1) == 0;
+                                            let include_end = (opts & 8) != 0;
+                                            obj_mut.set_property(b"start".to_vec(), start_arg);
+                                            obj_mut.set_property(b"current".to_vec(), Value::Null);
+                                            // If 3rd arg is int, it's recurrences.
+                                            let (end_v, recurrences_v) = match &end_arg {
+                                                Value::Long(n) => (Value::Null, Value::Long(*n)),
+                                                Value::Object(_) => (end_arg.clone(), Value::Long(0)),
+                                                _ => (Value::Null, Value::Long(0)),
+                                            };
+                                            obj_mut.set_property(b"end".to_vec(), end_v);
+                                            obj_mut.set_property(b"interval".to_vec(), interval_arg);
+                                            obj_mut.set_property(b"recurrences".to_vec(), recurrences_v);
+                                            obj_mut.set_property(b"include_start_date".to_vec(), if include_start { Value::True } else { Value::False });
+                                            obj_mut.set_property(b"include_end_date".to_vec(), if include_end { Value::True } else { Value::False });
                                         }
                                         b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
                                             // __construct(string $uri, ?string $baseUrl = null)
@@ -29038,7 +29141,8 @@ pub fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
     } else {
         (1, *date_str_raw)
     };
-    let date_parts: Vec<&str> = date_str.split('-').collect();
+    // Support `-` and `/` as date separators (e.g. "2005/8/12").
+    let date_parts: Vec<&str> = date_str.split(|c: char| c == '-' || c == '/').collect();
     if date_parts.len() == 3 {
         if let (Ok(year_abs), Ok(month), Ok(day)) = (date_parts[0].parse::<i64>(), date_parts[1].parse::<u32>(), date_parts[2].parse::<u32>()) {
             let year = year_abs * year_sign;
@@ -29323,13 +29427,17 @@ fn vm_calc_calendar_diff(sy: i64, sm: i64, sd: i64, sh: i64, si: i64, ss: i64,
 fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
     let now_days = now / 86400;
     let (now_year, now_month, now_day) = vm_days_to_ymd(now_days);
+    let now_tod = ((now % 86400) + 86400) % 86400;
+    let now_hour = now_tod / 3600;
+    let now_minute = (now_tod % 3600) / 60;
+    let now_second = now_tod % 60;
 
     let mut year = now_year;
     let mut month = now_month;
     let mut day = now_day;
-    let mut hour = 0i64;
-    let mut minute = 0i64;
-    let mut second = 0i64;
+    let mut hour = now_hour;
+    let mut minute = now_minute;
+    let mut second = now_second;
 
     let fmt_bytes = format.as_bytes();
     let dt_bytes = datetime.as_bytes();
@@ -29459,7 +29567,17 @@ fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
                 if fi < fmt_bytes.len() && di < dt_bytes.len() { di += 1; }
             }
             b'!' => { year = 1970; month = 1; day = 1; hour = 0; minute = 0; second = 0; }
-            b'|' => { /* reset unset fields - simplified */ }
+            b'|' => {
+                // Reset unset (still-now) date/time components to the epoch defaults.
+                // We track this in a flag — simplified: reset time-of-day only if
+                // it still equals now's, and date if still equals now's.
+                if year == now_year && month == now_month && day == now_day {
+                    year = 1970; month = 1; day = 1;
+                }
+                if hour == now_hour && minute == now_minute && second == now_second {
+                    hour = 0; minute = 0; second = 0;
+                }
+            }
             _ => { if di < dt_bytes.len() { di += 1; } }
         }
         fi += 1;
@@ -29661,7 +29779,45 @@ pub fn vm_timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, Str
                 let abbrev = format!("{}{:02}:{:02}", sign, abs / 3600, (abs % 3600) / 60);
                 (offset, abbrev)
             } else {
-                (0, "UTC".to_string())
+                // Standalone abbreviation (type 2 timezone): use known offsets.
+                let u = tz_name.to_uppercase();
+                let (off, ab): (i64, &str) = match u.as_str() {
+                    "EST" => (-5*3600, "EST"),
+                    "EDT" => (-4*3600, "EDT"),
+                    "CST" => (-6*3600, "CST"),
+                    "CDT" => (-5*3600, "CDT"),
+                    "MST" => (-7*3600, "MST"),
+                    "MDT" => (-6*3600, "MDT"),
+                    "PST" => (-8*3600, "PST"),
+                    "PDT" => (-7*3600, "PDT"),
+                    "AKST" => (-9*3600, "AKST"),
+                    "AKDT" => (-8*3600, "AKDT"),
+                    "HST" => (-10*3600, "HST"),
+                    "AST" => (-4*3600, "AST"),
+                    "ADT" => (-3*3600, "ADT"),
+                    "NST" => (-3*3600 - 1800, "NST"),
+                    "NDT" => (-2*3600 - 1800, "NDT"),
+                    "BST" => (3600, "BST"),
+                    "CET" => (3600, "CET"),
+                    "CEST" => (2*3600, "CEST"),
+                    "EET" => (2*3600, "EET"),
+                    "EEST" => (3*3600, "EEST"),
+                    "WET" => (0, "WET"),
+                    "WEST" => (3600, "WEST"),
+                    "MSK" => (3*3600, "MSK"),
+                    "JST" | "KST" => (9*3600, "JST"),
+                    "IST" => (5*3600 + 1800, "IST"),
+                    "AEST" => (10*3600, "AEST"),
+                    "AEDT" => (11*3600, "AEDT"),
+                    "ACST" => (9*3600 + 1800, "ACST"),
+                    "ACDT" => (10*3600 + 1800, "ACDT"),
+                    "AWST" => (8*3600, "AWST"),
+                    "NZST" => (12*3600, "NZST"),
+                    "NZDT" => (13*3600, "NZDT"),
+                    "GMT" | "UTC" | "Z" | "ZULU" => (0, "GMT"),
+                    _ => return (0, "UTC".to_string()),
+                };
+                (off, ab.to_string())
             }
         }
     }
