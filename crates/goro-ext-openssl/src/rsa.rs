@@ -261,9 +261,11 @@ pub fn openssl_pkey_new(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if let Some(rsa_v) = arr.get(&ArrayKey::String(PhpString::from_bytes(b"rsa"))) {
                 if let Value::Array(rsa_arr) = rsa_v {
                     let rsa_arr = rsa_arr.borrow();
-                    if !rsa_arr.is_empty() {
-                        explicit_rsa = Some(rsa_arr.clone());
+                    if rsa_arr.is_empty() {
+                        // Explicit empty rsa subarray => no components, fail
+                        return Ok(Value::False);
                     }
+                    explicit_rsa = Some(rsa_arr.clone());
                 }
             }
             // Look for private_key_bits
@@ -286,14 +288,12 @@ pub fn openssl_pkey_new(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     return Ok(Value::False);
                 }
             }
-            // If 'dsa' or 'dh' sub-arrays exist, we don't support those yet
+            // If 'dsa' or 'dh' or 'ec' sub-arrays exist, we don't support
+            // those yet. Return false silently (PHP would also fail without
+            // a printed warning when the config can't produce the params).
             for unsupported in [b"dsa".as_ref(), b"dh".as_ref(), b"ec".as_ref()] {
                 if let Some(v) = arr.get(&ArrayKey::String(PhpString::from_bytes(unsupported))) {
                     if let Value::Array(_) = v {
-                        vm.emit_warning(&format!(
-                            "openssl_pkey_new(): {} key generation not supported",
-                            std::str::from_utf8(unsupported).unwrap_or("unknown")
-                        ));
                         return Ok(Value::False);
                     }
                 }
@@ -518,10 +518,36 @@ pub fn openssl_pkey_get_details(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     let stored = match key_from_object(&key_arg) {
         Some(k) => k,
         None => {
-            vm.emit_warning(
-                "openssl_pkey_get_details(): supplied key is not a valid OpenSSLAsymmetricKey",
-            );
-            return Ok(Value::False);
+            // PHP throws TypeError for non-OpenSSLAsymmetricKey input.
+            let deref = match &key_arg {
+                Value::Reference(r) => r.borrow().clone(),
+                other => other.clone(),
+            };
+            let type_str = match &deref {
+                Value::Null => "null",
+                Value::True | Value::False => {
+                    if matches!(deref, Value::True) {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                }
+                Value::Long(_) => "int",
+                Value::Double(_) => "float",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+                _ => "unknown",
+            };
+            let exc = vm.throw_type_error(format!(
+                "openssl_pkey_get_details(): Argument #1 ($key) must be of type OpenSSLAsymmetricKey, {} given",
+                type_str
+            ));
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: "Uncaught TypeError".to_string(),
+                line: 0,
+            });
         }
     };
     let pubkey = stored.public();
