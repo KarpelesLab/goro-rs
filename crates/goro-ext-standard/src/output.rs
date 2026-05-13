@@ -291,6 +291,51 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 return;
             }
 
+            // User-defined __debugInfo on a subclass of an SPL/built-in class
+            // takes precedence over the storage view: PHP calls the override.
+            let has_user_debug_info = {
+                let class_entry = vm.classes.get(&class_lower).cloned();
+                class_entry.as_ref().and_then(|c| c.get_method(b"__debuginfo")).is_some()
+            };
+            if has_user_debug_info {
+                let debug_result = vm.call_object_method(val, b"__debugInfo", &[]);
+                let debug_result = match debug_result {
+                    Some(Value::Reference(r)) => Some(r.borrow().clone()),
+                    other => other,
+                };
+                if let Some(Value::Array(debug_arr)) = debug_result {
+                    let arr_borrow = debug_arr.borrow();
+                    let count = arr_borrow.len();
+                    let class_name_owned = class_name.to_string();
+                    drop(obj_borrow);
+                    vm.write_output(
+                        format!("{}object({})#{} ({}) {{\n", prefix, class_name_owned, oid, count).as_bytes(),
+                    );
+                    if !seen.insert(oid) {
+                        vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                        vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                        return;
+                    }
+                    let items: Vec<_> = arr_borrow.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    drop(arr_borrow);
+                    for (key, value) in &items {
+                        match key {
+                            goro_core::array::ArrayKey::Int(n) => {
+                                vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
+                            }
+                            goro_core::array::ArrayKey::String(s) => {
+                                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                            }
+                        }
+                        var_dump_value(vm, value, indent + 2, seen);
+                    }
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    seen.remove(&oid);
+                    return;
+                }
+                // __debugInfo returned non-array or null - fall through to
+                // normal display.
+            }
             // Check if this is an SPL class with __spl_array - display array contents instead
             let is_spl_array_class = matches!(
                 class_lower.as_slice(),
