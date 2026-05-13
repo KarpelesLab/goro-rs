@@ -291,6 +291,51 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 return;
             }
 
+            // User-defined __debugInfo on a subclass of an SPL/built-in class
+            // takes precedence over the storage view: PHP calls the override.
+            let has_user_debug_info = {
+                let class_entry = vm.classes.get(&class_lower).cloned();
+                class_entry.as_ref().and_then(|c| c.get_method(b"__debuginfo")).is_some()
+            };
+            if has_user_debug_info {
+                let debug_result = vm.call_object_method(val, b"__debugInfo", &[]);
+                let debug_result = match debug_result {
+                    Some(Value::Reference(r)) => Some(r.borrow().clone()),
+                    other => other,
+                };
+                if let Some(Value::Array(debug_arr)) = debug_result {
+                    let arr_borrow = debug_arr.borrow();
+                    let count = arr_borrow.len();
+                    let class_name_owned = class_name.to_string();
+                    drop(obj_borrow);
+                    vm.write_output(
+                        format!("{}object({})#{} ({}) {{\n", prefix, class_name_owned, oid, count).as_bytes(),
+                    );
+                    if !seen.insert(oid) {
+                        vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                        vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                        return;
+                    }
+                    let items: Vec<_> = arr_borrow.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    drop(arr_borrow);
+                    for (key, value) in &items {
+                        match key {
+                            goro_core::array::ArrayKey::Int(n) => {
+                                vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
+                            }
+                            goro_core::array::ArrayKey::String(s) => {
+                                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                            }
+                        }
+                        var_dump_value(vm, value, indent + 2, seen);
+                    }
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    seen.remove(&oid);
+                    return;
+                }
+                // __debugInfo returned non-array or null - fall through to
+                // normal display.
+            }
             // Check if this is an SPL class with __spl_array - display array contents instead
             let is_spl_array_class = matches!(
                 class_lower.as_slice(),
@@ -301,11 +346,73 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 class_lower.as_slice(),
                 b"spldoublylinkedlist" | b"splstack" | b"splqueue"
             );
-            // ArrayObject/ArrayIterator use a private "storage" property format
-            let is_array_object_class = matches!(
+            // ArrayObject/ArrayIterator use a private "storage" property format.
+            // Subclasses (e.g. `class Name extends ArrayObject`) inherit the
+            // same storage view — find the closest built-in ancestor.
+            let array_object_class_lower: Option<&'static [u8]> = if matches!(
                 class_lower.as_slice(),
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-            );
+            ) {
+                match class_lower.as_slice() {
+                    b"arrayobject" => Some(b"ArrayObject"),
+                    b"arrayiterator" => Some(b"ArrayIterator"),
+                    b"recursivearrayiterator" => Some(b"ArrayIterator"),
+                    _ => None,
+                }
+            } else if vm.class_extends(&class_lower, b"arrayobject") {
+                Some(b"ArrayObject")
+            } else if vm.class_extends(&class_lower, b"arrayiterator") {
+                Some(b"ArrayIterator")
+            } else {
+                None
+            };
+            let is_array_object_class = array_object_class_lower.is_some();
+            // SplObjectStorage uses a private "storage" property containing an
+            // indexed array of {obj, inf} entries.
+            let is_spl_obj_storage = class_lower.as_slice() == b"splobjectstorage";
+
+            if is_spl_obj_storage {
+                let objs_val = obj_borrow.get_property(b"__spl_objects");
+                let infos_val = obj_borrow.get_property(b"__spl_array");
+                let class_name_owned = class_name.to_string();
+                drop(obj_borrow);
+                // PHP suppresses the object header when this object is already
+                // being walked: just emit *RECURSION*.
+                if !seen.insert(oid) {
+                    vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+                    return;
+                }
+                vm.write_output(
+                    format!("{}object({})#{} (1) {{\n", prefix, class_name_owned, oid).as_bytes(),
+                );
+                vm.write_output(format!("{}  [\"storage\":\"SplObjectStorage\":private]=>\n", prefix).as_bytes());
+                // Build the storage array view: [0 => {"obj" => X, "inf" => Y}, ...]
+                let mut storage_view = goro_core::array::PhpArray::new();
+                if let (Value::Array(objs), Value::Array(infos)) = (&objs_val, &infos_val) {
+                    let ob = objs.borrow();
+                    let inb = infos.borrow();
+                    for (idx, ((_, o), (_, inf))) in ob.iter().zip(inb.iter()).enumerate() {
+                        let mut entry = goro_core::array::PhpArray::new();
+                        entry.set(
+                            goro_core::array::ArrayKey::String(goro_core::string::PhpString::from_bytes(b"obj")),
+                            o.clone(),
+                        );
+                        entry.set(
+                            goro_core::array::ArrayKey::String(goro_core::string::PhpString::from_bytes(b"inf")),
+                            inf.clone(),
+                        );
+                        storage_view.set(
+                            goro_core::array::ArrayKey::Int(idx as i64),
+                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(entry))),
+                        );
+                    }
+                }
+                let view_val = Value::Array(std::rc::Rc::new(std::cell::RefCell::new(storage_view)));
+                var_dump_value(vm, &view_val, indent + 2, seen);
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
 
             // Uri classes: expose __uri_* properties as scheme/username/... for var_dump
             let is_uri_class = matches!(
@@ -387,8 +494,13 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, name_str).as_bytes());
                     var_dump_value(vm, value, indent + 2, seen);
                 }
-                // Show private storage property
-                vm.write_output(format!("{}  [\"storage\":\"{}\":private]=>\n", prefix, class_name_owned).as_bytes());
+                // Show private storage property — declaring class is the
+                // closest built-in ArrayObject/ArrayIterator ancestor, not
+                // the actual subclass.
+                let storage_decl = String::from_utf8_lossy(
+                    array_object_class_lower.unwrap_or(b"ArrayObject"),
+                ).to_string();
+                vm.write_output(format!("{}  [\"storage\":\"{}\":private]=>\n", prefix, storage_decl).as_bytes());
                 var_dump_value(vm, &spl_arr, indent + 2, seen);
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 seen.remove(&oid);

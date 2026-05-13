@@ -6510,6 +6510,10 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
                 };
             if has_serialize {
                 let result = vm.call_object_method(val, b"__serialize", &[]);
+                // If __serialize threw, propagate without producing output.
+                if vm.current_exception.is_some() {
+                    return String::new();
+                }
                 if let Some(Value::Array(arr)) = result {
                     let arr = arr.borrow();
                     let mut s = format!("O:{}:\"{}\":{}:{{", class_name.len(), class_name, arr.len());

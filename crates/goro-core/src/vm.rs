@@ -5745,6 +5745,15 @@ impl Vm {
             b"rewind" => {
                 Some(Value::Null) // PriorityQueue rewind does nothing special
             }
+            b"recoverfromcorruption" => {
+                let mut ob = obj.borrow_mut();
+                ob.set_property(b"__spl_corrupted".to_vec(), Value::False);
+                Some(Value::Null)
+            }
+            b"iscorrupted" => {
+                let ob = obj.borrow();
+                Some(if matches!(ob.get_property(b"__spl_corrupted"), Value::True) { Value::True } else { Value::False })
+            }
             b"setextractflags" => None, // handled in handle_spl_docall
             b"getextractflags" => {
                 let ob = obj.borrow();
@@ -5752,6 +5761,12 @@ impl Vm {
                 Some(if let Value::Long(f) = flags { Value::Long(f) } else { Value::Long(1) }) // EXTR_DATA = 1
             }
             b"__serialize" => {
+                // PHP refuses to serialize a corrupted priority queue.
+                if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
+                    let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let ob = obj.borrow();
                 let arr = ob.get_property(b"__spl_array");
                 let priorities = ob.get_property(b"__spl_priorities");
@@ -5872,6 +5887,12 @@ impl Vm {
                 Some(if matches!(ob.get_property(b"__spl_corrupted"), Value::True) { Value::True } else { Value::False })
             }
             b"__serialize" => {
+                // PHP refuses to serialize a corrupted heap.
+                if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
+                    let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let ob = obj.borrow();
                 let arr = ob.get_property(storage_prop);
                 let mut result = PhpArray::new();
@@ -8385,9 +8406,17 @@ impl Vm {
                                 let hash = format!("{:016x}", key_o.borrow().object_id);
                                 let ob = obj.borrow();
                                 let arr = ob.get_property(b"__spl_array");
-                                if let Value::Array(a) = arr {
-                                    Some(a.borrow().get(&ArrayKey::String(PhpString::from_string(hash))).cloned().unwrap_or(Value::Null))
+                                let found = if let Value::Array(a) = arr {
+                                    a.borrow().get(&ArrayKey::String(PhpString::from_string(hash))).cloned()
                                 } else {
+                                    None
+                                };
+                                drop(ob);
+                                if let Some(v) = found {
+                                    Some(v)
+                                } else {
+                                    let exc = self.create_exception(b"UnexpectedValueException", "Object not found", 0);
+                                    self.current_exception = Some(exc);
                                     Some(Value::Null)
                                 }
                             } else {
@@ -8619,8 +8648,20 @@ impl Vm {
                 b"splpriorityqueue" => {
                     match method {
                         b"insert" => {
+                            // Reject if heap is already corrupted.
+                            if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
+                                let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let val = args.get(1).cloned().unwrap_or(Value::Null);
                             let priority = args.get(2).cloned().unwrap_or(Value::Long(0));
+                            // Check for user-overridden compare method.
+                            let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let has_user_compare = self.classes.get(&obj_class_lower)
+                                .map(|c| c.get_method(b"compare").is_some())
+                                .unwrap_or(false);
+                            let this_val = this.clone();
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
                             let priorities = ob.get_property(b"__spl_priorities");
@@ -8629,7 +8670,7 @@ impl Vm {
                                 if let Value::Array(ref p) = priorities {
                                     p.borrow_mut().push(priority);
                                 }
-                                // Sort by priority (descending) - simple insertion sort
+                                // Sort by priority (descending) - simple insertion sort.
                                 let mut entries: Vec<(Value, Value)> = {
                                     let ab = a.borrow();
                                     let pri = if let Value::Array(ref p) = priorities {
@@ -8640,17 +8681,49 @@ impl Vm {
                                     };
                                     pri
                                 };
-                                entries.sort_by(|(_, pa), (_, pb)| {
-                                    Self::php_compare_values(pb, pa) // descending by priority
-                                });
+                                drop(ob);
+                                if has_user_compare {
+                                    // Insertion sort using user comparator with corruption tracking.
+                                    let mut aborted = false;
+                                    'outer: for i in 1..entries.len() {
+                                        let mut j = i;
+                                        while j > 0 {
+                                            let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j].1.clone(), entries[j-1].1.clone()])
+                                                .unwrap_or(Value::Long(0));
+                                            if self.current_exception.is_some() {
+                                                aborted = true;
+                                                break 'outer;
+                                            }
+                                            let cmp = cmp_v.to_long();
+                                            if cmp > 0 {
+                                                entries.swap(j-1, j);
+                                                j -= 1;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if aborted {
+                                        obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
+                                        return Some(Value::Null);
+                                    }
+                                } else {
+                                    entries.sort_by(|(_, pa), (_, pb)| {
+                                        Self::php_compare_values(pb, pa) // descending by priority
+                                    });
+                                }
                                 let mut new_arr = PhpArray::new();
                                 let mut new_pri = PhpArray::new();
                                 for (v, p) in entries {
                                     new_arr.push(v);
                                     new_pri.push(p);
                                 }
-                                *a.borrow_mut() = new_arr;
-                                if let Value::Array(ref p) = priorities {
+                                let arr_ref = obj.borrow().get_property(b"__spl_array");
+                                let pri_ref = obj.borrow().get_property(b"__spl_priorities");
+                                if let Value::Array(a) = arr_ref {
+                                    *a.borrow_mut() = new_arr;
+                                }
+                                if let Value::Array(p) = pri_ref {
                                     *p.borrow_mut() = new_pri;
                                 }
                             }
@@ -21042,12 +21115,21 @@ impl Vm {
                             // is replaced by a snapshot array of its visible
                             // properties so the clone is detached from future
                             // mutations of the wrapped object.
+                            // ArrayObject deep-clones its storage; ArrayIterator
+                            // shares the backing storage (PHP behaviour). We still
+                            // snapshot a wrapped object into a fresh array in
+                            // both cases because the wrapped object lifecycle is
+                            // separate.
                             let is_array_object_like = matches!(class_lower.as_slice(),
                                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator");
+                            let deep_clone_storage = class_lower.as_slice() == b"arrayobject";
                             // Copy all properties, deep-cloning arrays for SPL classes
                             // and deep-cloning __lazy_real for lazy proxies.
                             for (name, value) in &obj_borrow.properties {
-                                let cloned_value = if name == b"__spl_array" && is_array_object_like {
+                                let cloned_value = if name == b"__spl_array" && is_array_object_like && !deep_clone_storage && matches!(value, Value::Array(_)) {
+                                    // Share storage by reference (ArrayIterator semantics).
+                                    value.clone()
+                                } else if name == b"__spl_array" && is_array_object_like {
                                     match value {
                                         Value::Array(a) => {
                                             Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
@@ -25078,21 +25160,51 @@ impl Vm {
                         }
                         _ => {}
                     }
-                    // Also check parent classes for SPL initialization
-                    if let Some(parent) = get_builtin_parent(&name_lower) {
-                        let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        match parent_lower.as_slice() {
-                            b"spldoublylinkedlist" => {
-                                if !matches!(obj.get_property(b"__spl_array"), Value::Array(_)) {
-                                    obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                    // Also check parent classes (built-in or user-defined chain)
+                    // for SPL initialization. Walk up so that arbitrary subclasses
+                    // of e.g. SplPriorityQueue get their backing storage set up.
+                    {
+                        let mut check = name_lower.clone();
+                        for _ in 0..10 {
+                            let next: Option<Vec<u8>> = self.classes.get(&check)
+                                .and_then(|c| c.parent.clone())
+                                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
+                                .or_else(|| get_builtin_parent(&check).map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect()));
+                            let parent_lower = match next {
+                                Some(p) => p,
+                                None => break,
+                            };
+                            match parent_lower.as_slice() {
+                                b"spldoublylinkedlist" => {
+                                    if !matches!(obj.get_property(b"__spl_array"), Value::Array(_)) {
+                                        obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                    }
                                 }
-                            }
-                            b"splheap" => {
-                                if !matches!(obj.get_property(b"__spl_array"), Value::Array(_)) {
-                                    obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                b"splheap" => {
+                                    if !matches!(obj.get_property(b"__spl_array"), Value::Array(_)) {
+                                        obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                    }
                                 }
+                                b"splpriorityqueue" => {
+                                    if !matches!(obj.get_property(b"__spl_array"), Value::Array(_)) {
+                                        obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                        obj.set_property(b"__spl_priorities".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                    }
+                                }
+                                b"splobjectstorage" => {
+                                    if !matches!(obj.get_property(b"__spl_array"), Value::Array(_)) {
+                                        obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                        obj.set_property(b"__spl_objects".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                    }
+                                }
+                                b"arrayobject" | b"arrayiterator" => {
+                                    if !matches!(obj.get_property(b"__spl_array"), Value::Array(_)) {
+                                        obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                    }
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                            check = parent_lower;
                         }
                     }
 

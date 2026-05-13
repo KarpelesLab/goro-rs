@@ -220,7 +220,18 @@ fn spl_object_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     match args.first() {
-        Some(Value::Array(arr)) => Ok(Value::Array(arr.clone())),
+        Some(Value::Array(arr)) => {
+            if use_keys {
+                Ok(Value::Array(arr.clone()))
+            } else {
+                // Reindex with sequential integer keys.
+                let mut result = PhpArray::new();
+                for (_, v) in arr.borrow().iter() {
+                    result.push(v.clone());
+                }
+                Ok(Value::Array(Rc::new(RefCell::new(result))))
+            }
+        }
         Some(val @ Value::Object(_)) => {
             let mut result = PhpArray::new();
             // Call rewind, then iterate with valid/current/key/next
