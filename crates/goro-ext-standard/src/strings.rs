@@ -3332,7 +3332,8 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::False)
         }
     } else {
-        // Negative offset: search from beginning, but limit end position
+        // Negative offset for strrpos: limit how far from the end the match
+        // *start* may be. Match start must be <= (h.len() + offset).
         let abs = (-offset) as usize;
         if abs > h.len() {
             let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
@@ -3340,15 +3341,18 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.into(), line: vm.current_line });
         }
-        let end = h.len() - abs;
-        if end == 0 || n.len() > end {
+        if h.len() < n.len() {
             return Ok(Value::False);
         }
-        if let Some(pos) = h[..end].windows(n.len()).rposition(|w| w == n) {
-            Ok(Value::Long(pos as i64))
-        } else {
-            Ok(Value::False)
+        let limit = h.len() - abs;
+        // Find rightmost match whose start is <= limit.
+        for (i, w) in h.windows(n.len()).enumerate().rev() {
+            if i > limit { continue; }
+            if w == n {
+                return Ok(Value::Long(i as i64));
+            }
         }
+        Ok(Value::False)
     }
 }
 
@@ -3452,7 +3456,7 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::False)
         }
     } else {
-        // Negative offset: search from beginning, but limit end position
+        // Negative offset for strripos: match start must be <= (h.len() + offset).
         let abs = (-offset) as usize;
         if abs > h.len() {
             let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
@@ -3460,15 +3464,17 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.into(), line: vm.current_line });
         }
-        let end = h.len() - abs;
-        if end == 0 || n.len() > end {
+        if h.len() < n.len() {
             return Ok(Value::False);
         }
-        if let Some(pos) = h[..end].windows(n.len()).rposition(|w| w == n.as_slice()) {
-            Ok(Value::Long(pos as i64))
-        } else {
-            Ok(Value::False)
+        let limit = h.len() - abs;
+        for (i, w) in h.windows(n.len()).enumerate().rev() {
+            if i > limit { continue; }
+            if w == n.as_slice() {
+                return Ok(Value::Long(i as i64));
+            }
         }
+        Ok(Value::False)
     }
 }
 

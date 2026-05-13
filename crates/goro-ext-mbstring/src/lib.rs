@@ -69,6 +69,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_ereg_search_getregs", mb_ereg_search_getregs_fn);
     vm.register_function(b"mb_ereg_search_getpos", mb_ereg_search_getpos_fn);
     vm.register_function(b"mb_ereg_search_setpos", mb_ereg_search_setpos_fn);
+    vm.register_function(b"mb_split", mb_split_fn);
     vm.register_function(b"mb_send_mail", mb_send_mail_fn);
 
     // Register parameter names for named argument support
@@ -188,6 +189,108 @@ fn resolve_encoding(name: &str) -> Option<&'static encoding_rs::Encoding> {
     }
 }
 
+/// Decode bytes in a UCS-4/UTF-32 encoding to a UTF-8 string.
+fn decode_ucs4(bytes: &[u8], be: bool) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        let cp = if be {
+            ((bytes[i] as u32) << 24)
+                | ((bytes[i+1] as u32) << 16)
+                | ((bytes[i+2] as u32) << 8)
+                | (bytes[i+3] as u32)
+        } else {
+            (bytes[i] as u32)
+                | ((bytes[i+1] as u32) << 8)
+                | ((bytes[i+2] as u32) << 16)
+                | ((bytes[i+3] as u32) << 24)
+        };
+        if let Some(c) = char::from_u32(cp) {
+            out.push(c);
+        } else {
+            out.push('\u{FFFD}');
+        }
+        i += 4;
+    }
+    out
+}
+
+/// Encode a UTF-8 string to UCS-4/UTF-32 bytes.
+fn encode_ucs4(s: &str, be: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    for c in s.chars() {
+        let cp = c as u32;
+        if be {
+            out.push((cp >> 24) as u8);
+            out.push((cp >> 16) as u8);
+            out.push((cp >> 8) as u8);
+            out.push(cp as u8);
+        } else {
+            out.push(cp as u8);
+            out.push((cp >> 8) as u8);
+            out.push((cp >> 16) as u8);
+            out.push((cp >> 24) as u8);
+        }
+    }
+    out
+}
+
+/// Decode HTML numeric entities (&#N; and &#xH;) to UTF-8.
+fn decode_html_entities(data: &[u8]) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == b'&' && i + 1 < data.len() && data[i+1] == b'#' {
+            let start = i;
+            let mut j = i + 2;
+            let is_hex = j < data.len() && (data[j] == b'x' || data[j] == b'X');
+            if is_hex { j += 1; }
+            let num_start = j;
+            while j < data.len() {
+                let c = data[j];
+                let ok = if is_hex {
+                    c.is_ascii_hexdigit()
+                } else {
+                    c.is_ascii_digit()
+                };
+                if !ok { break; }
+                j += 1;
+            }
+            if j > num_start && j < data.len() && data[j] == b';' {
+                let num_str = std::str::from_utf8(&data[num_start..j]).unwrap_or("0");
+                let parsed = if is_hex {
+                    u32::from_str_radix(num_str, 16).ok()
+                } else {
+                    num_str.parse::<u32>().ok()
+                };
+                if let Some(cp) = parsed {
+                    // Codepoints > 0x10FFFF are out of Unicode range: leave
+                    // the entity unchanged. Codepoints in surrogate range
+                    // (D800..DFFF) are also invalid; treat them the same.
+                    if cp <= 0x10FFFF {
+                        if let Some(c) = char::from_u32(cp) {
+                            out.push(c);
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+                    // Fall through: pass-through unchanged.
+                }
+            }
+            out.push(data[start] as char);
+            i = start + 1;
+        } else {
+            if data[i] < 0x80 {
+                out.push(data[i] as char);
+            } else {
+                out.push(data[i] as char);
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Convert bytes from one encoding to another, returning the result as bytes
 fn convert_encoding(data: &[u8], to_enc: &str, from_enc: &str) -> Option<Vec<u8>> {
     if data.is_empty() {
@@ -200,6 +303,48 @@ fn convert_encoding(data: &[u8], to_enc: &str, from_enc: &str) -> Option<Vec<u8>
     // Same encoding - pass through
     if to_lower == from_lower {
         return Some(data.to_vec());
+    }
+
+    // UCS-4 / UTF-32 family
+    let is_ucs4_be = |s: &str| matches!(s, "ucs-4" | "ucs-4be" | "utf-32be");
+    let is_ucs4_le = |s: &str| matches!(s, "ucs-4le" | "utf-32" | "utf-32le");
+    if is_ucs4_be(&from_lower) || is_ucs4_le(&from_lower) {
+        let s = decode_ucs4(data, is_ucs4_be(&from_lower));
+        if to_lower == "utf-8" || to_lower == "utf8" {
+            return Some(s.into_bytes());
+        }
+        if is_ucs4_be(&to_lower) || is_ucs4_le(&to_lower) {
+            return Some(encode_ucs4(&s, is_ucs4_be(&to_lower)));
+        }
+        if let Some(enc) = resolve_encoding(&to_lower) {
+            let (cow, _, _) = enc.encode(&s);
+            return Some(cow.to_vec());
+        }
+        return Some(s.into_bytes());
+    }
+    if is_ucs4_be(&to_lower) || is_ucs4_le(&to_lower) {
+        let utf8_str = if from_lower == "utf-8" || from_lower == "utf8" || from_lower == "ascii" {
+            String::from_utf8_lossy(data).to_string()
+        } else if let Some(enc) = resolve_encoding(&from_lower) {
+            let (cow, _, _) = enc.decode(data);
+            cow.to_string()
+        } else {
+            String::from_utf8_lossy(data).to_string()
+        };
+        return Some(encode_ucs4(&utf8_str, is_ucs4_be(&to_lower)));
+    }
+
+    // HTML-ENTITIES source: decode numeric entities
+    if from_lower == "html-entities" || from_lower == "html" {
+        let decoded = decode_html_entities(data);
+        if to_lower == "utf-8" || to_lower == "utf8" {
+            return Some(decoded.into_bytes());
+        }
+        if let Some(enc) = resolve_encoding(&to_lower) {
+            let (cow, _, _) = enc.encode(&decoded);
+            return Some(cow.to_vec());
+        }
+        return Some(decoded.into_bytes());
     }
 
     // Handle "Base64" encoding
@@ -279,6 +424,7 @@ fn base64_encode(data: &[u8]) -> String {
         }
         // Add line break every 76 chars (MIME style) for multi-line
         if (i + 1) % 19 == 0 && i + 1 < total_chunks {
+            result.push('\r');
             result.push('\n');
         }
     }
@@ -438,9 +584,123 @@ fn mb_strlen(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(count as i64))
 }
 
+/// Lowercase a string with PHP/Unicode semantics:
+/// - Titlecase characters (Lt) lowercase to the simple lowercase mapping.
+/// - Capital sigma Σ at end-of-word becomes final sigma ς; otherwise σ.
+///   End-of-word scan-back is limited to 64 characters to match PHP behavior.
+fn php_lowercase(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c == '\u{03A3}' {
+            let cased_before = {
+                let mut found = false;
+                let mut scanned = 0usize;
+                for j in (0..i).rev() {
+                    if scanned >= 64 { break; }
+                    scanned += 1;
+                    let cj = chars[j];
+                    if is_case_ignorable(cj) { continue; }
+                    found = cj.is_alphabetic() && (cj.is_lowercase() || cj.is_uppercase());
+                    break;
+                }
+                found
+            };
+            let cased_after = if cased_before {
+                let mut found = false;
+                for &cj in chars.iter().skip(i+1) {
+                    if is_case_ignorable(cj) { continue; }
+                    found = cj.is_alphabetic() && (cj.is_lowercase() || cj.is_uppercase());
+                    break;
+                }
+                found
+            } else {
+                false
+            };
+            if cased_before && !cased_after {
+                out.push('\u{03C2}');
+            } else {
+                out.push('\u{03C3}');
+            }
+            continue;
+        }
+        if let Some(lc) = titlecase_to_lowercase(c) {
+            out.push(lc);
+            continue;
+        }
+        for lc in c.to_lowercase() {
+            out.push(lc);
+        }
+    }
+    out
+}
+
+fn is_case_ignorable(c: char) -> bool {
+    matches!(c,
+        '\'' | '\u{2019}' | '.' | ':' | '\u{00B7}' | '\u{2027}' | '\u{05F4}' | '\u{02BC}'
+    )
+    || ('\u{0300}'..='\u{036F}').contains(&c)
+    || ('\u{1AB0}'..='\u{1AFF}').contains(&c)
+    || ('\u{1DC0}'..='\u{1DFF}').contains(&c)
+    || ('\u{20D0}'..='\u{20FF}').contains(&c)
+    || ('\u{FE20}'..='\u{FE2F}').contains(&c)
+}
+
+fn titlecase_to_lowercase(c: char) -> Option<char> {
+    match c {
+        '\u{01C5}' => Some('\u{01C6}'),
+        '\u{01C8}' => Some('\u{01C9}'),
+        '\u{01CB}' => Some('\u{01CC}'),
+        '\u{01F2}' => Some('\u{01F3}'),
+        '\u{1F88}'..='\u{1F8F}' => Some(char::from_u32(c as u32 - 0x08).unwrap()),
+        '\u{1F98}'..='\u{1F9F}' => Some(char::from_u32(c as u32 - 0x08).unwrap()),
+        '\u{1FA8}'..='\u{1FAF}' => Some(char::from_u32(c as u32 - 0x08).unwrap()),
+        '\u{1FBC}' => Some('\u{1FB3}'),
+        '\u{1FCC}' => Some('\u{1FC3}'),
+        '\u{1FFC}' => Some('\u{1FF3}'),
+        _ => None,
+    }
+}
+
+/// Map a character to its titlecase form, for MB_CASE_TITLE. Returns None
+/// to fall back to uppercase semantics.
+fn to_titlecase_char(c: char) -> Option<char> {
+    match c {
+        '\u{01C4}' | '\u{01C5}' | '\u{01C6}' => Some('\u{01C5}'),
+        '\u{01C7}' | '\u{01C8}' | '\u{01C9}' => Some('\u{01C8}'),
+        '\u{01CA}' | '\u{01CB}' | '\u{01CC}' => Some('\u{01CB}'),
+        '\u{01F1}' | '\u{01F2}' | '\u{01F3}' => Some('\u{01F2}'),
+        '\u{1FB3}' | '\u{1FBC}' => Some('\u{1FBC}'),
+        '\u{1FC3}' | '\u{1FCC}' => Some('\u{1FCC}'),
+        '\u{1FF3}' | '\u{1FFC}' => Some('\u{1FFC}'),
+        _ => None,
+    }
+}
+
+fn php_uppercase(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        // Lt digraphs -> uppercase digraph (Ǆ).
+        if let Some(uc) = match c {
+            '\u{01C5}' => Some('\u{01C4}'),
+            '\u{01C8}' => Some('\u{01C7}'),
+            '\u{01CB}' => Some('\u{01CA}'),
+            '\u{01F2}' => Some('\u{01F1}'),
+            _ => None,
+        } {
+            out.push(uc);
+            continue;
+        }
+        for uc in c.to_uppercase() {
+            out.push(uc);
+        }
+    }
+    out
+}
+
 fn mb_strtolower(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    // Validate encoding parameter if provided
     if let Some(enc_arg) = args.get(1) {
         let enc = enc_arg.to_php_string().to_string_lossy();
         if enc.is_empty() {
@@ -452,7 +712,7 @@ fn mb_strtolower(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let bytes = s.as_bytes();
     if let Ok(s) = std::str::from_utf8(bytes) {
-        let lower = s.to_lowercase();
+        let lower = php_lowercase(s);
         Ok(Value::String(PhpString::from_vec(lower.into_bytes())))
     } else {
         let lower: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -473,7 +733,7 @@ fn mb_strtoupper(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let bytes = s.as_bytes();
     if let Ok(s) = std::str::from_utf8(bytes) {
-        let upper = s.to_uppercase();
+        let upper = php_uppercase(s);
         Ok(Value::String(PhpString::from_vec(upper.into_bytes())))
     } else {
         let upper: Vec<u8> = bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
@@ -484,6 +744,18 @@ fn mb_strtoupper(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn mb_substr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // UTF-8 aware substr
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    // Validate encoding argument
+    if let Some(enc_arg) = args.get(3) {
+        if !matches!(enc_arg, Value::Null) {
+            let enc = enc_arg.to_php_string().to_string_lossy();
+            if !enc.is_empty() && resolve_encoding(&enc).is_none() && !is_pseudo_encoding(&enc) {
+                let msg = format!("mb_substr(): Argument #4 ($encoding) must be a valid encoding, \"{}\" given", enc);
+                let exc = _vm.create_exception(b"ValueError", &msg, 0);
+                _vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: _vm.current_line });
+            }
+        }
+    }
     let bytes = s.as_bytes();
     let chars: Vec<&[u8]> = utf8_chars(bytes);
     let char_count = chars.len() as i64;
@@ -599,21 +871,29 @@ fn mb_strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let char_count = chars.len() as i64;
 
     if offset < 0 {
-        // Negative offset: search from start but only up to (char_count + offset) chars from end
-        let end_char = char_count + offset;
-        if end_char < 0 {
+        // For mb_strrpos, valid negative offset must satisfy
+        // -char_count <= offset (i.e. abs(offset) <= char_count). The match's
+        // start position is constrained to be <= char_count + offset.
+        if offset.unsigned_abs() as i64 > char_count {
             let msg = "mb_strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.to_string(), line: vm.current_line });
         }
-        // Search in h[0..end_byte] for the last occurrence
-        let end_byte = if (end_char as usize) < chars.len() { chars[end_char as usize] } else { h.len() };
-        // Need enough bytes for needle
-        if end_byte < n.len() {
+        let max_start_char = (char_count + offset).max(0) as usize;
+        let limit_byte = if max_start_char < chars.len() { chars[max_start_char] } else { h.len() };
+        if h.len() < n.len() {
             return Ok(Value::False);
         }
-        match h[..end_byte].windows(n.len()).rposition(|w| w == n) {
+        let mut found: Option<usize> = None;
+        for (i, w) in h.windows(n.len()).enumerate().rev() {
+            if i > limit_byte { continue; }
+            if w == n {
+                found = Some(i);
+                break;
+            }
+        }
+        match found {
             Some(byte_pos) => {
                 let char_pos = chars.iter().position(|&p| p == byte_pos).unwrap_or(byte_pos);
                 Ok(Value::Long(char_pos as i64))
@@ -621,7 +901,6 @@ fn mb_strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             None => Ok(Value::False),
         }
     } else {
-        // Positive offset: search from offset char position to end
         if offset > char_count {
             let msg = "mb_strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
@@ -732,18 +1011,26 @@ fn mb_strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let char_count = chars.len() as i64;
 
     if offset < 0 {
-        let end_char = char_count + offset;
-        if end_char < 0 {
+        if offset.unsigned_abs() as i64 > char_count {
             let msg = "mb_strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg.to_string(), line: vm.current_line });
         }
-        let end_byte = if (end_char as usize) < chars.len() { chars[end_char as usize] } else { h.len() };
-        if end_byte < n.len() {
+        let max_start_char = (char_count + offset).max(0) as usize;
+        let limit_byte = if max_start_char < chars.len() { chars[max_start_char] } else { h.len() };
+        if h.len() < n.len() {
             return Ok(Value::False);
         }
-        match h[..end_byte].windows(n.len()).rposition(|w| w == n) {
+        let mut found: Option<usize> = None;
+        for (i, w) in h.windows(n.len()).enumerate().rev() {
+            if i > limit_byte { continue; }
+            if w == n {
+                found = Some(i);
+                break;
+            }
+        }
+        match found {
             Some(byte_pos) => {
                 let char_pos = chars.iter().position(|&p| p == byte_pos).unwrap_or(byte_pos);
                 Ok(Value::Long(char_pos as i64))
@@ -777,14 +1064,29 @@ fn mb_convert_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let to_enc = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "UTF-8".to_string());
     let from = get_from_encoding(args);
 
-    // Emit deprecation for Base64 and HTML-ENTITIES
-    let to_lower = to_enc.to_ascii_lowercase();
-    let from_lower = from.to_ascii_lowercase();
-    if to_lower == "base64" || from_lower == "base64" {
-        _vm.emit_deprecated("mb_convert_encoding(): Handling Base64 via mbstring is deprecated; use base64_encode/base64_decode instead");
-    }
-    if to_lower == "html-entities" || to_lower == "html" || from_lower == "html-entities" || from_lower == "html" {
-        _vm.emit_deprecated("mb_convert_encoding(): Handling HTML entities via mbstring is deprecated; use htmlspecialchars, htmlentities, or mb_encode_numericentity/mb_decode_numericentity instead");
+    // Emit deprecation for the target encoding (PHP only emits for to_encoding,
+    // because from_encoding is parsed via a different code path that does not
+    // use the cache-aware php_mb_get_encoding helper). The cache key tracks
+    // the last target encoding so successive calls with the same target don't
+    // re-emit (matching PHP's last_used_encoding behaviour).
+    {
+        let to_lower = to_enc.to_ascii_lowercase();
+        let prev = _vm.constants.get(b"__mbstring_last_target_encoding".as_ref())
+            .map(|v| v.to_php_string().to_string_lossy())
+            .unwrap_or_default();
+        if to_lower != prev {
+            if to_lower == "base64" {
+                _vm.emit_deprecated("mb_convert_encoding(): Handling Base64 via mbstring is deprecated; use base64_encode/base64_decode instead");
+            } else if to_lower == "html-entities" || to_lower == "html" {
+                _vm.emit_deprecated("mb_convert_encoding(): Handling HTML entities via mbstring is deprecated; use htmlspecialchars, htmlentities, or mb_encode_numericentity/mb_decode_numericentity instead");
+            } else if to_lower == "qprint" || to_lower == "quoted-printable" {
+                _vm.emit_deprecated("mb_convert_encoding(): Handling QPrint via mbstring is deprecated; use quoted_printable_encode/quoted_printable_decode instead");
+            } else if to_lower == "uuencode" {
+                _vm.emit_deprecated("mb_convert_encoding(): Handling Uuencode via mbstring is deprecated; use convert_uuencode/convert_uudecode instead");
+            }
+            _vm.constants.insert(b"__mbstring_last_target_encoding".to_vec(),
+                Value::String(PhpString::from_string(to_lower)));
+        }
     }
 
     // Handle array input
@@ -879,14 +1181,27 @@ fn mb_check_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn mb_substr_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    // Validate encoding argument
+    if let Some(enc_arg) = args.get(2) {
+        if !matches!(enc_arg, Value::Null) {
+            let enc = enc_arg.to_php_string().to_string_lossy();
+            if !enc.is_empty() && resolve_encoding(&enc).is_none() && !is_pseudo_encoding(&enc) {
+                let msg = format!("mb_substr_count(): Argument #3 ($encoding) must be a valid encoding, \"{}\" given", enc);
+                let exc = _vm.create_exception(b"ValueError", &msg, 0);
+                _vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: _vm.current_line });
+            }
+        }
+    }
     let h = haystack.as_bytes();
     let n = needle.as_bytes();
     if n.is_empty() {
-        // PHP 8.x: mb_substr_count() with empty needle returns 0
-        // But actually PHP raises ValueError for empty needle
-        return Ok(Value::Long(0));
+        // PHP raises ValueError on empty needle.
+        let msg = "mb_substr_count(): Argument #2 ($needle) must not be empty";
+        let exc = _vm.create_exception(b"ValueError", msg, 0);
+        _vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: _vm.current_line });
     }
-    // Non-overlapping count (like PHP's substr_count)
     let mut count = 0;
     let mut pos = 0;
     while pos + n.len() <= h.len() {
@@ -1014,16 +1329,71 @@ fn mb_str_split_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg.to_string(), line: vm.current_line });
     }
+    // Encoding validation
+    let mut encoding_name = String::from("UTF-8");
+    if let Some(enc_arg) = args.get(2) {
+        if !matches!(enc_arg, Value::Null) {
+            let enc = enc_arg.to_php_string().to_string_lossy();
+            if !enc.is_empty() && resolve_encoding(&enc).is_none() && !is_pseudo_encoding(&enc) {
+                let msg = format!("mb_str_split(): Argument #3 ($encoding) must be a valid encoding, \"{}\" given", enc);
+                let exc = vm.create_exception(b"ValueError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            if !enc.is_empty() {
+                encoding_name = enc;
+            }
+        }
+    }
     let split_length = split_length as usize;
     let bytes = s.as_bytes();
+    let enc_lower = encoding_name.to_ascii_lowercase();
     let mut result = PhpArray::new();
-    let chars: Vec<&[u8]> = utf8_chars(bytes);
-    for chunk in chars.chunks(split_length) {
-        let mut s = Vec::new();
-        for c in chunk { s.extend_from_slice(c); }
-        result.push(Value::String(PhpString::from_vec(s)));
+
+    if enc_lower == "utf-8" || enc_lower == "utf8" || enc_lower == "ascii" {
+        let chars: Vec<&[u8]> = utf8_chars(bytes);
+        for chunk in chars.chunks(split_length) {
+            let mut s = Vec::new();
+            for c in chunk { s.extend_from_slice(c); }
+            result.push(Value::String(PhpString::from_vec(s)));
+        }
+    } else {
+        let utf8_str: String = if let Some(enc) = resolve_encoding(&enc_lower) {
+            let (cow, _, _) = enc.decode(bytes);
+            cow.to_string()
+        } else {
+            String::from_utf8_lossy(bytes).to_string()
+        };
+        let chars: Vec<char> = utf8_str.chars().collect();
+        for chunk in chars.chunks(split_length) {
+            let s: String = chunk.iter().collect();
+            let encoded: Vec<u8> = if let Some(enc) = resolve_encoding(&enc_lower) {
+                let (cow, _, _) = enc.encode(&s);
+                cow.to_vec()
+            } else {
+                s.into_bytes()
+            };
+            result.push(Value::String(PhpString::from_vec(encoded)));
+        }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn is_pseudo_encoding(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(),
+        "auto" | "pass" | "wchar" | "byte2be" | "byte2le" | "byte4be" | "byte4le"
+        | "ucs-4" | "ucs-4be" | "ucs-4le" | "ucs-2" | "ucs-2be" | "ucs-2le"
+        | "utf-32" | "utf-32be" | "utf-32le"
+        | "utf-7" | "utf7" | "utf7-imap" | "utf-7-imap"
+        | "7bit" | "8bit" | "binary"
+        | "base64" | "uuencode" | "html-entities" | "html" | "quoted-printable" | "qprint"
+        | "armscii-8" | "armscii8" | "cp866"
+        | "hz" | "jis" | "iso-2022-jp" | "iso-2022-jp-ms" | "iso-2022-jp-2004" | "iso-2022-kr"
+        | "eucjp-win" | "sjis-mac" | "sjis-mobile#docomo" | "sjis-mobile#kddi" | "sjis-mobile#softbank"
+        | "utf8-mobile#docomo" | "utf8-mobile#kddi-a" | "utf8-mobile#kddi-b" | "utf8-mobile#softbank"
+        | "cp50220" | "cp50221" | "cp50222" | "cp51932"
+    )
 }
 
 fn mb_convert_case_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1033,23 +1403,29 @@ fn mb_convert_case_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     if let Ok(s) = std::str::from_utf8(bytes) {
         let result = match mode {
-            0 | 3 => s.to_uppercase(), // MB_CASE_UPPER / MB_CASE_UPPER_SIMPLE
-            1 | 4 | 5 => s.to_lowercase(), // MB_CASE_LOWER / MB_CASE_LOWER_SIMPLE / MB_CASE_FOLD_SIMPLE
+            0 | 3 => php_uppercase(s), // MB_CASE_UPPER / MB_CASE_UPPER_SIMPLE
+            1 | 4 | 5 => php_lowercase(s), // MB_CASE_LOWER / MB_CASE_LOWER_SIMPLE / MB_CASE_FOLD_SIMPLE
             2 => {
-                // MB_CASE_TITLE - capitalize first letter of each word
+                // MB_CASE_TITLE - capitalize first letter of each word.
                 let mut result = String::new();
                 let mut cap_next = true;
                 for c in s.chars() {
                     if cap_next && c.is_alphabetic() {
-                        for uc in c.to_uppercase() {
-                            result.push(uc);
+                        if let Some(tc) = to_titlecase_char(c) {
+                            result.push(tc);
+                        } else {
+                            for uc in c.to_uppercase() {
+                                result.push(uc);
+                            }
                         }
                         cap_next = false;
                     } else {
                         for lc in c.to_lowercase() {
                             result.push(lc);
                         }
-                        if !c.is_alphabetic() && c != '\'' {
+                        // Case-ignorable characters (apostrophes, modifier
+                        // letters, combining marks) don't break the word.
+                        if !c.is_alphabetic() && !is_case_ignorable(c) {
                             cap_next = true;
                         }
                     }
@@ -1113,24 +1489,31 @@ fn mb_encoding_aliases_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         }
         "ascii" | "us-ascii" => {
             result.push(Value::String(PhpString::from_bytes(b"ANSI_X3.4-1968")));
-            result.push(Value::String(PhpString::from_bytes(b"iso-ir-6")));
             result.push(Value::String(PhpString::from_bytes(b"ANSI_X3.4-1986")));
+            result.push(Value::String(PhpString::from_bytes(b"IBM-367")));
+            result.push(Value::String(PhpString::from_bytes(b"IBM367")));
+            result.push(Value::String(PhpString::from_bytes(b"ISO646-US")));
             result.push(Value::String(PhpString::from_bytes(b"ISO_646.irv:1991")));
             result.push(Value::String(PhpString::from_bytes(b"US-ASCII")));
-            result.push(Value::String(PhpString::from_bytes(b"ISO646-US")));
-            result.push(Value::String(PhpString::from_bytes(b"us")));
-            result.push(Value::String(PhpString::from_bytes(b"IBM367")));
             result.push(Value::String(PhpString::from_bytes(b"cp367")));
             result.push(Value::String(PhpString::from_bytes(b"csASCII")));
+            result.push(Value::String(PhpString::from_bytes(b"iso-ir-6")));
+            result.push(Value::String(PhpString::from_bytes(b"us")));
         }
         "iso-8859-1" | "iso8859-1" | "latin1" => {
             result.push(Value::String(PhpString::from_bytes(b"ISO_8859-1")));
             result.push(Value::String(PhpString::from_bytes(b"latin1")));
         }
+        "7bit" => {}
+        "8bit" => {
+            result.push(Value::String(PhpString::from_bytes(b"binary")));
+        }
+        "binary" => {
+            result.push(Value::String(PhpString::from_bytes(b"8bit")));
+        }
         _ => {
-            // Check if encoding exists
-            if resolve_encoding(&enc_lower).is_none() {
-                let msg = format!("mb_encoding_aliases(): Unknown encoding \"{}\"", enc);
+            if resolve_encoding(&enc_lower).is_none() && !is_pseudo_encoding(&enc_lower) {
+                let msg = format!("mb_encoding_aliases(): Argument #1 ($encoding) must be a valid encoding, \"{}\" given", enc);
                 let exc = vm.create_exception(b"ValueError", &msg, 0);
                 vm.current_exception = Some(exc);
                 return Err(VmError { message: msg, line: vm.current_line });
@@ -1347,10 +1730,17 @@ fn mb_http_input_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn mb_regex_set_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.is_empty() {
-        return Ok(Value::String(PhpString::from_bytes(b"msr")));
+    let prev = _vm.constants.get(b"__mb_regex_options".as_ref())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| "msr".to_string());
+    if let Some(arg) = args.first() {
+        if !matches!(arg, Value::Null) {
+            let opts = arg.to_php_string().to_string_lossy();
+            _vm.constants.insert(b"__mb_regex_options".to_vec(),
+                Value::String(PhpString::from_string(opts)));
+        }
     }
-    Ok(Value::String(PhpString::from_bytes(b"msr")))
+    Ok(Value::String(PhpString::from_string(prev)))
 }
 
 // ========== Newly added functions ==========
@@ -1572,14 +1962,16 @@ fn mb_convert_kana_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn mb_decode_numericentity_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let text = String::from_utf8_lossy(s.as_bytes()).to_string();
+    let input_bytes = s.as_bytes().to_vec();
+    let encoding = args.get(2).map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| "UTF-8".to_string());
+    let enc_lower = encoding.to_ascii_lowercase();
 
-    // Parse the convmap: array of [start, end, offset, mask] quadruples
-    let convmap = if let Some(Value::Array(arr)) = args.get(1) {
+    // Parse convmap as unsigned 32-bit quadruples (start, end, offset, mask).
+    let convmap: Vec<(u32, u32, u32, u32)> = if let Some(Value::Array(arr)) = args.get(1) {
         let arr_borrow = arr.borrow();
-        let values: Vec<i64> = arr_borrow.iter().map(|(_, v)| v.to_long()).collect();
-        // Group into quadruples
-        let mut quads: Vec<(i64, i64, i64, i64)> = Vec::new();
+        let values: Vec<u32> = arr_borrow.iter().map(|(_, v)| v.to_long() as u32).collect();
+        let mut quads: Vec<(u32, u32, u32, u32)> = Vec::new();
         let mut i = 0;
         while i + 3 < values.len() {
             quads.push((values[i], values[i+1], values[i+2], values[i+3]));
@@ -1587,67 +1979,153 @@ fn mb_decode_numericentity_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
         }
         quads
     } else {
-        vec![(0, 0x10ffff, 0, 0xffffff)] // default: decode all
+        vec![(0, 0x10ffff, 0, 0xffffff)]
     };
 
-    // Parse numeric entities (&#xHH; and &#DD;) with convmap
-    let mut result = String::new();
+    // Decode input to a stream of u32 codepoints. UCS-4 can hold any u32; for
+    // other encodings codepoints fit in 0..=0x10FFFF.
+    let codepoints: Vec<u32> = if enc_lower == "ucs-4" || enc_lower == "ucs-4be" {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 3 < input_bytes.len() {
+            let cp = ((input_bytes[i] as u32) << 24)
+                | ((input_bytes[i+1] as u32) << 16)
+                | ((input_bytes[i+2] as u32) << 8)
+                | (input_bytes[i+3] as u32);
+            out.push(cp);
+            i += 4;
+        }
+        out
+    } else if enc_lower == "ucs-4le" {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 3 < input_bytes.len() {
+            let cp = (input_bytes[i] as u32)
+                | ((input_bytes[i+1] as u32) << 8)
+                | ((input_bytes[i+2] as u32) << 16)
+                | ((input_bytes[i+3] as u32) << 24);
+            out.push(cp);
+            i += 4;
+        }
+        out
+    } else {
+        let utf8_text: String = if enc_lower == "utf-8" || enc_lower == "utf8" {
+            String::from_utf8_lossy(&input_bytes).to_string()
+        } else if let Some(enc) = resolve_encoding(&enc_lower) {
+            let (cow, _, _) = enc.decode(&input_bytes);
+            cow.to_string()
+        } else {
+            String::from_utf8_lossy(&input_bytes).to_string()
+        };
+        utf8_text.chars().map(|c| c as u32).collect()
+    };
+
+    let mut out_cps: Vec<u32> = Vec::with_capacity(codepoints.len());
     let mut i = 0;
-    let chars: Vec<char> = text.chars().collect();
-    while i < chars.len() {
-        if i + 2 < chars.len() && chars[i] == '&' && chars[i+1] == '#' {
+    while i < codepoints.len() {
+        if codepoints[i] == b'&' as u32 && i + 1 < codepoints.len() && codepoints[i+1] == b'#' as u32 {
             let start = i;
-            i += 2;
-            let is_hex = i < chars.len() && (chars[i] == 'x' || chars[i] == 'X');
-            if is_hex { i += 1; }
-            let num_start = i;
-            let mut num = String::new();
-            let mut valid_digits = true;
-            while i < chars.len() && chars[i] != ';' {
-                let c = chars[i];
-                if is_hex {
-                    if !c.is_ascii_hexdigit() { valid_digits = false; }
+            let mut j = i + 2;
+            let is_hex = j < codepoints.len() && (codepoints[j] == b'x' as u32 || codepoints[j] == b'X' as u32);
+            if is_hex { j += 1; }
+            let num_start = j;
+            let max_digits = if is_hex { 8 } else { 10 };
+            let mut digit_count = 0usize;
+            while j < codepoints.len() && digit_count < max_digits {
+                let cp = codepoints[j];
+                let ok = if is_hex {
+                    cp <= 0x7F && (cp as u8 as char).is_ascii_hexdigit()
                 } else {
-                    if !c.is_ascii_digit() { valid_digits = false; }
-                }
-                num.push(c);
-                i += 1;
-            }
-            if i < chars.len() && chars[i] == ';' && valid_digits && !num.is_empty() {
-                i += 1;
-                let codepoint = if is_hex {
-                    u32::from_str_radix(&num, 16).ok()
-                } else {
-                    num.parse::<u32>().ok()
+                    cp <= 0x7F && (cp as u8 as char).is_ascii_digit()
                 };
-                if let Some(cp) = codepoint {
-                    // Apply convmap: find matching range and apply offset
-                    let mut decoded = false;
+                if !ok { break; }
+                j += 1;
+                digit_count += 1;
+            }
+            let too_many = digit_count == max_digits && j < codepoints.len() && {
+                let cp = codepoints[j];
+                if is_hex {
+                    cp <= 0x7F && (cp as u8 as char).is_ascii_hexdigit()
+                } else {
+                    cp <= 0x7F && (cp as u8 as char).is_ascii_digit()
+                }
+            };
+            let parsed_ok = digit_count > 0 && !too_many;
+            if parsed_ok {
+                let num_str: String = codepoints[num_start..j].iter()
+                    .map(|&c| c as u8 as char).collect();
+                let parsed = if is_hex {
+                    u32::from_str_radix(&num_str, 16).ok()
+                } else {
+                    num_str.parse::<u32>().ok()
+                };
+                if let Some(cp) = parsed {
+                    let mut decoded: Option<u32> = None;
                     for &(range_start, range_end, offset, mask) in &convmap {
-                        let actual_cp = (cp as i64) - offset;
-                        if actual_cp >= range_start && actual_cp <= range_end {
-                            let final_cp = actual_cp & mask;
-                            if let Some(c) = char::from_u32(final_cp as u32) {
-                                result.push(c);
-                                decoded = true;
-                                break;
-                            }
+                        let actual = cp.wrapping_sub(offset);
+                        if actual >= range_start && actual <= range_end {
+                            decoded = Some(actual & mask);
+                            break;
                         }
                     }
-                    if decoded { continue; }
+                    if let Some(final_cp) = decoded {
+                        if j < codepoints.len() && codepoints[j] == b';' as u32 {
+                            j += 1;
+                        }
+                        out_cps.push(final_cp);
+                        i = j;
+                        continue;
+                    }
                 }
             }
-            // Invalid entity or not in convmap - output as-is
-            for c in &chars[start..i] {
-                result.push(*c);
-            }
+            out_cps.push(codepoints[start]);
+            i = start + 1;
         } else {
-            result.push(chars[i]);
+            out_cps.push(codepoints[i]);
             i += 1;
         }
     }
 
-    Ok(Value::String(PhpString::from_vec(result.into_bytes())))
+    // Re-encode. UCS-4 keeps raw u32; others use char::from_u32, falling
+    // back to '?' for invalid codepoints.
+    let out_bytes: Vec<u8> = if enc_lower == "ucs-4" || enc_lower == "ucs-4be" {
+        let mut out = Vec::with_capacity(out_cps.len() * 4);
+        for cp in &out_cps {
+            out.push((*cp >> 24) as u8);
+            out.push((*cp >> 16) as u8);
+            out.push((*cp >> 8) as u8);
+            out.push(*cp as u8);
+        }
+        out
+    } else if enc_lower == "ucs-4le" {
+        let mut out = Vec::with_capacity(out_cps.len() * 4);
+        for cp in &out_cps {
+            out.push(*cp as u8);
+            out.push((*cp >> 8) as u8);
+            out.push((*cp >> 16) as u8);
+            out.push((*cp >> 24) as u8);
+        }
+        out
+    } else {
+        let mut result = String::new();
+        for cp in &out_cps {
+            if let Some(c) = char::from_u32(*cp) {
+                result.push(c);
+            } else {
+                result.push('?');
+            }
+        }
+        if enc_lower == "utf-8" || enc_lower == "utf8" {
+            result.into_bytes()
+        } else if let Some(enc) = resolve_encoding(&enc_lower) {
+            let (cow, _, _) = enc.encode(&result);
+            cow.to_vec()
+        } else {
+            result.into_bytes()
+        }
+    };
+
+    Ok(Value::String(PhpString::from_vec(out_bytes)))
 }
 
 fn mb_encode_numericentity_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1848,44 +2326,67 @@ fn mb_scrub_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(cleaned.into_bytes())))
 }
 
+/// PHP's default trim characters: " \t\n\r\0\v" plus Unicode whitespace.
+/// PHP 8.4+ mb_trim defaults to Unicode whitespace (including BOM, NBSP, etc).
+fn is_default_trim_char(c: char) -> bool {
+    matches!(c,
+        ' ' | '\t' | '\n' | '\r' | '\0' | '\x0B' | '\x0C'
+        | '\u{00A0}' | '\u{2000}'..='\u{200A}' | '\u{2028}' | '\u{2029}'
+        | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
+        | '\u{0085}' | '\u{180E}'
+    )
+}
+
 fn mb_trim_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let chars_to_trim = args.get(1).map(|v| v.to_php_string().to_string_lossy());
-
     let text = String::from_utf8_lossy(s.as_bytes()).to_string();
-    let trimmed = if let Some(chars) = chars_to_trim {
-        let trim_chars: Vec<char> = chars.chars().collect();
-        text.trim_matches(|c: char| trim_chars.contains(&c)).to_string()
-    } else {
-        text.trim().to_string()
+    let chars_to_trim = args.get(1).and_then(|v| match v {
+        Value::Null => None,
+        _ => Some(v.to_php_string().to_string_lossy()),
+    });
+    let trimmed = match chars_to_trim {
+        Some(ref chars) if chars.is_empty() => text.clone(),
+        Some(chars) => {
+            let trim_chars: Vec<char> = chars.chars().collect();
+            text.trim_matches(|c: char| trim_chars.contains(&c)).to_string()
+        }
+        None => text.trim_matches(is_default_trim_char).to_string(),
     };
     Ok(Value::String(PhpString::from_vec(trimmed.into_bytes())))
 }
 
 fn mb_ltrim_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let chars_to_trim = args.get(1).map(|v| v.to_php_string().to_string_lossy());
-
     let text = String::from_utf8_lossy(s.as_bytes()).to_string();
-    let trimmed = if let Some(chars) = chars_to_trim {
-        let trim_chars: Vec<char> = chars.chars().collect();
-        text.trim_start_matches(|c: char| trim_chars.contains(&c)).to_string()
-    } else {
-        text.trim_start().to_string()
+    let chars_to_trim = args.get(1).and_then(|v| match v {
+        Value::Null => None,
+        _ => Some(v.to_php_string().to_string_lossy()),
+    });
+    let trimmed = match chars_to_trim {
+        Some(ref chars) if chars.is_empty() => text.clone(),
+        Some(chars) => {
+            let trim_chars: Vec<char> = chars.chars().collect();
+            text.trim_start_matches(|c: char| trim_chars.contains(&c)).to_string()
+        }
+        None => text.trim_start_matches(is_default_trim_char).to_string(),
     };
     Ok(Value::String(PhpString::from_vec(trimmed.into_bytes())))
 }
 
 fn mb_rtrim_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let chars_to_trim = args.get(1).map(|v| v.to_php_string().to_string_lossy());
-
     let text = String::from_utf8_lossy(s.as_bytes()).to_string();
-    let trimmed = if let Some(chars) = chars_to_trim {
-        let trim_chars: Vec<char> = chars.chars().collect();
-        text.trim_end_matches(|c: char| trim_chars.contains(&c)).to_string()
-    } else {
-        text.trim_end().to_string()
+    let chars_to_trim = args.get(1).and_then(|v| match v {
+        Value::Null => None,
+        _ => Some(v.to_php_string().to_string_lossy()),
+    });
+    let trimmed = match chars_to_trim {
+        Some(ref chars) if chars.is_empty() => text.clone(),
+        Some(chars) => {
+            let trim_chars: Vec<char> = chars.chars().collect();
+            text.trim_end_matches(|c: char| trim_chars.contains(&c)).to_string()
+        }
+        None => text.trim_end_matches(is_default_trim_char).to_string(),
     };
     Ok(Value::String(PhpString::from_vec(trimmed.into_bytes())))
 }
@@ -1896,7 +2397,13 @@ fn mb_ucfirst_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut chars = text.chars();
     let result = match chars.next() {
         Some(c) => {
-            let mut s = c.to_uppercase().to_string();
+            // mb_ucfirst uses titlecase mapping where available (Lt category),
+            // so digraphs like ǆ become ǅ (not Ǆ).
+            let mut s = if let Some(tc) = to_titlecase_char(c) {
+                tc.to_string()
+            } else {
+                c.to_uppercase().to_string()
+            };
             s.extend(chars);
             s
         }
@@ -1911,7 +2418,12 @@ fn mb_lcfirst_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut chars = text.chars();
     let result = match chars.next() {
         Some(c) => {
-            let mut s = c.to_lowercase().to_string();
+            // Lt -> simple lowercase mapping; ordinary chars use Unicode lc.
+            let mut s = if let Some(lc) = titlecase_to_lowercase(c) {
+                lc.to_string()
+            } else {
+                c.to_lowercase().to_string()
+            };
             s.extend(chars);
             s
         }
@@ -1934,8 +2446,10 @@ fn mb_ereg_impl(_vm: &mut Vm, args: &[Value], case_insensitive: bool) -> Result<
         let ps = pattern.to_php_string().to_string_lossy();
         if ps.is_empty() {
             let fn_name = if case_insensitive { "mb_eregi" } else { "mb_ereg" };
-            _vm.emit_warning_at(&format!("{}(): Argument #1 ($pattern) must not be empty", fn_name), _vm.current_line);
-            return Ok(Value::False);
+            let msg = format!("{}(): Argument #1 ($pattern) must not be empty", fn_name);
+            let exc = _vm.create_exception(b"ValueError", &msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: _vm.current_line });
         }
         ps
     };
@@ -2087,11 +2601,26 @@ fn set_ereg_search_regs(vm: &mut Vm, regs: Value) {
 
 fn mb_ereg_search_init_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let string = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
-    let pattern = args.get(1).map(|v| v.to_php_string().to_string_lossy());
+    let pattern_arg = args.get(1);
+
+    if let Some(pat_arg) = pattern_arg {
+        if !matches!(pat_arg, Value::Null) {
+            let pat = pat_arg.to_php_string();
+            if pat.as_bytes().is_empty() {
+                let msg = "mb_ereg_search_init(): Argument #2 ($pattern) must not be empty";
+                let exc = _vm.create_exception(b"ValueError", msg, 0);
+                _vm.current_exception = Some(exc);
+                return Err(VmError { message: msg.to_string(), line: _vm.current_line });
+            }
+        }
+    }
 
     _vm.constants.insert(b"__mb_ereg_search_string".to_vec(), Value::String(PhpString::from_string(string)));
-    if let Some(pat) = pattern {
-        _vm.constants.insert(b"__mb_ereg_search_pattern".to_vec(), Value::String(PhpString::from_string(pat)));
+    if let Some(pat_arg) = pattern_arg {
+        if !matches!(pat_arg, Value::Null) {
+            let pat = pat_arg.to_php_string().to_string_lossy();
+            _vm.constants.insert(b"__mb_ereg_search_pattern".to_vec(), Value::String(PhpString::from_string(pat)));
+        }
     }
     _vm.constants.insert(b"__mb_ereg_search_pos".to_vec(), Value::Long(0));
     Ok(Value::True)
@@ -2116,12 +2645,10 @@ fn mb_ereg_search_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     if let Some(m) = re.find(&string[pos..]) {
+        // PHP/Oniguruma: zero-width matches do NOT advance the search position.
         let new_pos = pos + m.end();
-        // If zero-width match, advance by one byte to avoid infinite loop
-        let new_pos = if m.start() == m.end() { (new_pos + 1).min(string.len()) } else { new_pos };
         set_ereg_search_pos(_vm, new_pos);
 
-        // Store match info for getregs
         let captures = re.captures(&string[pos..]).unwrap();
         let mut arr = PhpArray::new();
         for (i, cap) in captures.iter().enumerate() {
@@ -2158,7 +2685,6 @@ fn mb_ereg_search_pos_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         let match_start = pos + m.start();
         let match_len = m.len();
         let new_pos = pos + m.end();
-        let new_pos = if m.start() == m.end() { (new_pos + 1).min(string.len()) } else { new_pos };
         set_ereg_search_pos(_vm, new_pos);
 
         let mut arr = PhpArray::new();
@@ -2175,7 +2701,13 @@ fn mb_ereg_search_regs_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     if let Some(pat) = args.first() {
         pattern = pat.to_php_string().to_string_lossy();
     }
-    if pattern.is_empty() || string.is_empty() {
+    if pattern.is_empty() {
+        let msg = "No pattern was provided";
+        let exc = _vm.create_exception(b"Error", msg, 0);
+        _vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: _vm.current_line });
+    }
+    if string.is_empty() {
         return Ok(Value::False);
     }
 
@@ -2190,7 +2722,6 @@ fn mb_ereg_search_regs_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     if let Some(captures) = re.captures(&string[pos..]) {
         let m = captures.get(0).unwrap();
         let new_pos = pos + m.end();
-        let new_pos = if m.start() == m.end() { (new_pos + 1).min(string.len()) } else { new_pos };
         set_ereg_search_pos(_vm, new_pos);
 
         let mut arr = PhpArray::new();
@@ -2237,6 +2768,90 @@ fn mb_send_mail_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
+/// Escape non-ASCII bytes in a byte slice as `\xHH` for use with regex::bytes.
+fn escape_pattern_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for &b in bytes {
+        if b < 0x80 {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\x{:02x}", b));
+        }
+    }
+    out
+}
+
+fn mb_split_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let pattern_bytes = args.first().unwrap_or(&Value::Null).to_php_string();
+    let string_bytes = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let limit = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+
+    if pattern_bytes.as_bytes().is_empty() {
+        // PHP's mb_split returns false on empty pattern (no exception).
+        return Ok(Value::False);
+    }
+
+    let translated = escape_pattern_bytes(pattern_bytes.as_bytes());
+
+    let opts = _vm.constants.get(b"__mb_regex_options".as_ref())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    let multiline = opts.contains('m');
+    let case_insensitive = opts.contains('i');
+
+    let re = match regex::bytes::RegexBuilder::new(&translated)
+        .unicode(false)
+        .multi_line(multiline)
+        .case_insensitive(case_insensitive)
+        .build()
+    {
+        Ok(r) => r,
+        Err(_) => {
+            match regex::bytes::Regex::new(&translated) {
+                Ok(r) => r,
+                Err(_) => return Ok(Value::False),
+            }
+        }
+    };
+
+    let mut result = PhpArray::new();
+    let s = string_bytes.as_bytes();
+
+    let max_splits: Option<usize> = if limit > 0 {
+        Some((limit as usize).saturating_sub(1))
+    } else {
+        None
+    };
+
+    let mut last_end: usize = 0;
+    let mut splits_done: usize = 0;
+    let mut first_iter = true;
+    for m in re.find_iter(s) {
+        if let Some(max) = max_splits {
+            if splits_done >= max {
+                break;
+            }
+        }
+        if m.start() == m.end() && m.start() == last_end && !first_iter {
+            continue;
+        }
+        if m.start() == m.end() && m.start() == 0 && first_iter {
+            first_iter = false;
+            last_end = m.end();
+            continue;
+        }
+        let piece = &s[last_end..m.start()];
+        result.push(Value::String(PhpString::from_bytes(piece)));
+        last_end = m.end();
+        splits_done += 1;
+        first_iter = false;
+    }
+    let rest = &s[last_end..];
+    result.push(Value::String(PhpString::from_bytes(rest)));
+
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
 // ========== Helper functions ==========
 
 /// Get byte positions of each UTF-8 character
@@ -2262,8 +2877,26 @@ fn utf8_chars(bytes: &[u8]) -> Vec<&[u8]> {
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        let len = if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 };
-        let end = (i + len).min(bytes.len());
+        let expected_len = if b < 0x80 { 1 }
+            else if (0xC2..=0xDF).contains(&b) { 2 }
+            else if (0xE0..=0xEF).contains(&b) { 3 }
+            else if (0xF0..=0xF4).contains(&b) { 4 }
+            else { 0 };
+        let len = if expected_len == 0 {
+            1
+        } else if i + expected_len > bytes.len() {
+            1
+        } else {
+            let mut valid = true;
+            for j in 1..expected_len {
+                if (bytes[i+j] & 0xC0) != 0x80 {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid { expected_len } else { 1 }
+        };
+        let end = i + len;
         result.push(&bytes[i..end]);
         i = end;
     }
