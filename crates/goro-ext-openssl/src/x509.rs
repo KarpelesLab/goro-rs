@@ -475,6 +475,8 @@ fn name_to_php_string(name: &Name) -> String {
 
 // ── Signature algorithm OIDs ──
 
+const OID_MD2_RSA: &str = "1.2.840.113549.1.1.2";
+const OID_MD5_RSA: &str = "1.2.840.113549.1.1.4";
 const OID_SHA1_RSA: &str = "1.2.840.113549.1.1.5";
 const OID_SHA224_RSA: &str = "1.2.840.113549.1.1.14";
 const OID_SHA256_RSA: &str = "1.2.840.113549.1.1.11";
@@ -484,6 +486,8 @@ const OID_SHA512_RSA: &str = "1.2.840.113549.1.1.13";
 fn sig_alg_info(oid: &ObjectIdentifier) -> (String, String, i64) {
     let oid_str = oid.to_string();
     match oid_str.as_str() {
+        OID_MD2_RSA => ("RSA-MD2".into(), "md2WithRSAEncryption".into(), 7),
+        OID_MD5_RSA => ("RSA-MD5".into(), "md5WithRSAEncryption".into(), 8),
         OID_SHA1_RSA => ("RSA-SHA1".into(), "sha1WithRSAEncryption".into(), 65),
         OID_SHA224_RSA => ("RSA-SHA224".into(), "sha224WithRSAEncryption".into(), 671),
         OID_SHA256_RSA => ("RSA-SHA256".into(), "sha256WithRSAEncryption".into(), 668),
