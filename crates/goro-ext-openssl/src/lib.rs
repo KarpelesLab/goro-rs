@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 mod aes;
 mod modes;
+mod pkcs7;
 mod rsa;
 mod x509;
 
@@ -172,24 +173,149 @@ pub fn register(vm: &mut Vm) {
         x509::openssl_csr_get_public_key,
         &[b"csr", b"short_names"],
     );
-    vm.register_function(b"openssl_pkcs7_sign", openssl_stub_false);
-    vm.register_function(b"openssl_pkcs7_verify", openssl_stub_false);
-    vm.register_function(b"openssl_pkcs7_encrypt", openssl_stub_false);
-    vm.register_function(b"openssl_pkcs7_decrypt", openssl_stub_false);
-    vm.register_function(b"openssl_pkcs7_read", openssl_stub_false);
-    vm.register_function(b"openssl_pkcs12_export", openssl_stub_false);
-    vm.register_function(b"openssl_pkcs12_read", openssl_stub_false);
+    vm.register_function_with_params(
+        b"openssl_pkcs7_sign",
+        pkcs7::openssl_pkcs7_sign,
+        &[
+            b"input_filename",
+            b"output_filename",
+            b"certificate",
+            b"private_key",
+            b"headers",
+            b"flags",
+            b"untrusted_certificates_filename",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkcs7_verify",
+        pkcs7::openssl_pkcs7_verify,
+        &[
+            b"input_filename",
+            b"flags",
+            b"signers_certificates_filename",
+            b"ca_info",
+            b"untrusted_certificates_filename",
+            b"content",
+            b"output_filename",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkcs7_encrypt",
+        pkcs7::openssl_pkcs7_encrypt,
+        &[
+            b"input_filename",
+            b"output_filename",
+            b"certificate",
+            b"headers",
+            b"flags",
+            b"cipher_algo",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkcs7_decrypt",
+        pkcs7::openssl_pkcs7_decrypt,
+        &[
+            b"input_filename",
+            b"output_filename",
+            b"certificate",
+            b"private_key",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkcs7_read",
+        pkcs7::openssl_pkcs7_read,
+        &[b"input_filename", b"certificates"],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkcs12_export",
+        pkcs7::openssl_pkcs12_export,
+        &[
+            b"certificate",
+            b"output",
+            b"private_key",
+            b"passphrase",
+            b"options",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkcs12_export_to_file",
+        pkcs7::openssl_pkcs12_export_to_file,
+        &[
+            b"certificate",
+            b"filename",
+            b"private_key",
+            b"passphrase",
+            b"options",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_pkcs12_read",
+        pkcs7::openssl_pkcs12_read,
+        &[b"pkcs12", b"certificates", b"passphrase"],
+    );
     vm.register_function(b"openssl_dh_compute_key", openssl_stub_false);
     vm.register_function(b"openssl_spki_new", openssl_stub_false);
     vm.register_function(b"openssl_spki_verify", openssl_stub_false);
     vm.register_function(b"openssl_spki_export", openssl_stub_false);
     vm.register_function(b"openssl_spki_export_challenge", openssl_stub_false);
     vm.register_function(b"openssl_get_cert_locations", openssl_get_cert_locations_stub);
-    vm.register_function(b"openssl_cms_sign", openssl_stub_false);
-    vm.register_function(b"openssl_cms_verify", openssl_stub_false);
-    vm.register_function(b"openssl_cms_encrypt", openssl_stub_false);
-    vm.register_function(b"openssl_cms_decrypt", openssl_stub_false);
-    vm.register_function(b"openssl_cms_read", openssl_stub_false);
+    vm.register_function_with_params(
+        b"openssl_cms_sign",
+        pkcs7::openssl_cms_sign,
+        &[
+            b"input_filename",
+            b"output_filename",
+            b"certificate",
+            b"private_key",
+            b"headers",
+            b"flags",
+            b"encoding",
+            b"untrusted_certificates_filename",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_cms_verify",
+        pkcs7::openssl_cms_verify,
+        &[
+            b"input_filename",
+            b"flags",
+            b"signers_certificates_filename",
+            b"ca_info",
+            b"untrusted_certificates_filename",
+            b"content",
+            b"output_filename",
+            b"sigfile",
+            b"encoding",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_cms_encrypt",
+        pkcs7::openssl_cms_encrypt,
+        &[
+            b"input_filename",
+            b"output_filename",
+            b"certificate",
+            b"headers",
+            b"flags",
+            b"cipher_algo",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_cms_decrypt",
+        pkcs7::openssl_cms_decrypt,
+        &[
+            b"input_filename",
+            b"output_filename",
+            b"certificate",
+            b"private_key",
+            b"encoding",
+        ],
+    );
+    vm.register_function_with_params(
+        b"openssl_cms_read",
+        pkcs7::openssl_cms_read,
+        &[b"input_filename", b"certificates"],
+    );
 
     // Constants
     vm.constants.insert(b"OPENSSL_RAW_DATA".to_vec(), Value::Long(1));
@@ -210,9 +336,6 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"OPENSSL_ALGO_SHA384".to_vec(), Value::Long(8));
     vm.constants.insert(b"OPENSSL_ALGO_SHA512".to_vec(), Value::Long(9));
     vm.constants.insert(b"OPENSSL_ALGO_MD5".to_vec(), Value::Long(2));
-    vm.constants.insert(b"OPENSSL_CIPHER_AES_128_CBC".to_vec(), Value::Long(0));
-    vm.constants.insert(b"OPENSSL_CIPHER_AES_192_CBC".to_vec(), Value::Long(1));
-    vm.constants.insert(b"OPENSSL_CIPHER_AES_256_CBC".to_vec(), Value::Long(2));
     vm.constants.insert(b"OPENSSL_KEYTYPE_RSA".to_vec(), Value::Long(0));
     vm.constants.insert(b"OPENSSL_KEYTYPE_DSA".to_vec(), Value::Long(1));
     vm.constants.insert(b"OPENSSL_KEYTYPE_DH".to_vec(), Value::Long(2));
@@ -248,6 +371,17 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"OPENSSL_ENCODING_SMIME".to_vec(), Value::Long(1));
     vm.constants.insert(b"OPENSSL_ENCODING_DER".to_vec(), Value::Long(0));
     vm.constants.insert(b"OPENSSL_ENCODING_PEM".to_vec(), Value::Long(2));
+    vm.constants.insert(b"OPENSSL_CMS_OLDMIMETYPE".to_vec(), Value::Long(0x400));
+    vm.constants.insert(b"PKCS7_NOOLDMIMETYPE".to_vec(), Value::Long(0x4000));
+    vm.constants.insert(b"OPENSSL_CMS_DETACHED".to_vec(), Value::Long(64));
+    vm.constants.insert(b"OPENSSL_CIPHER_RC2_40".to_vec(), Value::Long(0));
+    vm.constants.insert(b"OPENSSL_CIPHER_RC2_128".to_vec(), Value::Long(1));
+    vm.constants.insert(b"OPENSSL_CIPHER_RC2_64".to_vec(), Value::Long(2));
+    vm.constants.insert(b"OPENSSL_CIPHER_DES".to_vec(), Value::Long(3));
+    vm.constants.insert(b"OPENSSL_CIPHER_3DES".to_vec(), Value::Long(4));
+    vm.constants.insert(b"OPENSSL_CIPHER_AES_128_CBC".to_vec(), Value::Long(6));
+    vm.constants.insert(b"OPENSSL_CIPHER_AES_192_CBC".to_vec(), Value::Long(7));
+    vm.constants.insert(b"OPENSSL_CIPHER_AES_256_CBC".to_vec(), Value::Long(8));
 }
 
 /// Supported cipher method names
@@ -270,7 +404,7 @@ const DIGEST_METHODS: &[&str] = &["md5", "sha1", "sha256", "sha384", "sha512"];
 
 const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -305,7 +439,7 @@ fn base64_decode_char(c: u8) -> Option<u8> {
     }
 }
 
-fn base64_decode(data: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_decode(data: &str) -> Option<Vec<u8>> {
     // Strip whitespace
     let clean: Vec<u8> = data.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     if clean.is_empty() {
