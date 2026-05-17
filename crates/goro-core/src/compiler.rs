@@ -196,6 +196,9 @@ impl Compiler {
                     (b"openssl_x509_export", 1) => true,
                     (b"openssl_pkey_export", 1) => true,
                     (b"openssl_pkcs12_export", 1) => true,
+                    (b"openssl_pkcs12_read", 1) => true,
+                    (b"openssl_pkcs7_read", 1) => true,
+                    (b"openssl_cms_read", 1) => true,
                     // socket functions with output params
                     (b"socket_create_pair", 3) => true,
                     (b"socket_getpeername", 1) => true,

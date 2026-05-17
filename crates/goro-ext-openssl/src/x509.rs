@@ -254,6 +254,27 @@ fn resolve_cert(v: &Value) -> Option<Certificate> {
     parse_certificate_blob(&bytes)
 }
 
+/// Public wrapper for sibling modules.
+pub fn resolve_cert_pub(v: &Value) -> Option<Certificate> {
+    resolve_cert(v)
+}
+
+/// Public helper: returns true if the given private key matches the
+/// certificate's public key (RSA only).
+pub fn key_matches_cert(cert: &Certificate, key: &RsaPrivateKey) -> bool {
+    use rsa::pkcs8::EncodePublicKey;
+    let cert_spki = match cert.tbs_certificate.subject_public_key_info.to_der() {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let pub_from_priv = key.to_public_key();
+    let priv_spki = match pub_from_priv.to_public_key_der() {
+        Ok(d) => d.as_bytes().to_vec(),
+        Err(_) => return false,
+    };
+    cert_spki == priv_spki
+}
+
 fn resolve_csr(v: &Value) -> Option<CertReq> {
     if let Some(c) = csr_from_object(v) {
         return Some(c);
