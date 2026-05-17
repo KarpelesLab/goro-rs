@@ -49,6 +49,20 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
         Value::Long(n) => {
             vm.write_output(format!("{}int({})\n", prefix, n).as_bytes());
         }
+        Value::Resource(id) => {
+            if goro_core::value::is_open_resource(*id) {
+                let t = goro_core::value::resource_type_of(*id)
+                    .map(|v| String::from_utf8_lossy(&v).to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                vm.write_output(
+                    format!("{}resource({}) of type ({})\n", prefix, id, t).as_bytes(),
+                );
+            } else {
+                vm.write_output(
+                    format!("{}resource(Unknown)\n", prefix).as_bytes(),
+                );
+            }
+        }
         Value::Double(f) => {
             // var_dump uses serialize_precision (-1 in PHP 8 = shortest representation)
             let sp = goro_core::value::get_php_serialize_precision();
@@ -838,6 +852,20 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, see
         Value::Long(n) => {
             vm.write_output(format!("{}&int({})\n", prefix, n).as_bytes());
         }
+        Value::Resource(id) => {
+            if goro_core::value::is_open_resource(*id) {
+                let t = goro_core::value::resource_type_of(*id)
+                    .map(|v| String::from_utf8_lossy(&v).to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                vm.write_output(
+                    format!("{}&resource({}) of type ({})\n", prefix, id, t).as_bytes(),
+                );
+            } else {
+                vm.write_output(
+                    format!("{}&resource(Unknown)\n", prefix).as_bytes(),
+                );
+            }
+        }
         Value::Double(f) => {
             vm.write_output(
                 format!("{}&float({})\n", prefix, format_php_float_serialize(*f)).as_bytes(),
@@ -1033,6 +1061,9 @@ fn print_r_value(
         Value::False => {}
         Value::Long(n) => {
             buf.extend_from_slice(n.to_string().as_bytes());
+        }
+        Value::Resource(id) => {
+            buf.extend_from_slice(format!("Resource id #{}", id).as_bytes());
         }
         Value::Double(f) => buf.extend_from_slice(format_float(*f).as_bytes()),
         Value::String(s) => {
@@ -1311,6 +1342,9 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
             } else {
                 buf.extend_from_slice(n.to_string().as_bytes());
             }
+        }
+        Value::Resource(_) => {
+            buf.extend_from_slice(b"NULL");
         }
         Value::Double(f) => {
             // var_export uses a representation that can be parsed back

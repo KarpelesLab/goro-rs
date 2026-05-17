@@ -122,6 +122,9 @@ pub enum Value {
     Reference(Rc<RefCell<Value>>),
     /// A PHP Generator object
     Generator(Rc<RefCell<PhpGenerator>>),
+    /// A PHP resource (e.g. file handle, dir handle). Holds the resource id.
+    /// The resource_type/closed-state is looked up from RESOURCE_REGISTRY.
+    Resource(i64),
 }
 
 thread_local! {
@@ -226,6 +229,7 @@ impl Value {
             Value::Array(arr) => !arr.borrow().is_empty(),
             Value::Object(_) | Value::Generator(_) => true,
             Value::Reference(r) => r.borrow().is_truthy(),
+            Value::Resource(_) => true,
         }
     }
 
@@ -236,25 +240,22 @@ impl Value {
             Value::Undef => "NULL",
             Value::Null => "NULL",
             Value::False | Value::True => "bool",
-            Value::Long(n) => {
-                if is_registered_resource(*n) {
-                    if is_open_resource(*n) { "resource" } else { "resource (closed)" }
-                } else {
-                    "int"
-                }
-            }
+            Value::Long(_) => "int",
             Value::Double(_) => "float",
             Value::String(_) => "string",
             Value::Array(_) => "array",
             Value::Object(_) | Value::Generator(_) => "object",
             Value::Reference(r) => r.borrow().type_name(),
+            Value::Resource(id) => {
+                if is_open_resource(*id) { "resource" } else { "resource (closed)" }
+            }
         }
     }
 
-    /// Returns true if this value is a registered resource (as Long id).
+    /// Returns true if this value is a resource (open or closed).
     pub fn is_resource(&self) -> bool {
         match self {
-            Value::Long(n) => is_registered_resource(*n),
+            Value::Resource(_) => true,
             Value::Reference(r) => r.borrow().is_resource(),
             _ => false,
         }
@@ -263,7 +264,7 @@ impl Value {
     /// Returns the resource id if this is a resource, or -1 otherwise.
     pub fn resource_id(&self) -> i64 {
         match self {
-            Value::Long(n) if is_registered_resource(*n) => *n,
+            Value::Resource(n) => *n,
             Value::Reference(r) => r.borrow().resource_id(),
             _ => -1,
         }
@@ -272,7 +273,7 @@ impl Value {
     /// Returns the resource type name (e.g. "stream") if this is a resource.
     pub fn resource_type_name(&self) -> Option<Vec<u8>> {
         match self {
-            Value::Long(n) => resource_type_of(*n),
+            Value::Resource(n) => resource_type_of(*n),
             Value::Reference(r) => r.borrow().resource_type_name(),
             _ => None,
         }
@@ -303,6 +304,7 @@ impl Value {
             Value::Undef | Value::Null | Value::False => 0,
             Value::True => 1,
             Value::Long(n) => *n,
+            Value::Resource(n) => *n,
             Value::Double(f) => *f as i64,
             Value::String(s) => {
                 let s = s.to_string_lossy();
@@ -350,6 +352,7 @@ impl Value {
             Value::Undef | Value::Null | Value::False => 0.0,
             Value::True => 1.0,
             Value::Long(n) => *n as f64,
+            Value::Resource(n) => *n as f64,
             Value::Double(f) => *f,
             Value::String(s) => {
                 let str = s.to_string_lossy();
@@ -375,6 +378,7 @@ impl Value {
             Value::False => PhpString::empty(),
             Value::True => PhpString::from_bytes(b"1"),
             Value::Long(n) => PhpString::from_string(n.to_string()),
+            Value::Resource(n) => PhpString::from_string(format!("Resource id #{}", n)),
             Value::Double(f) => PhpString::from_string(format_php_float(*f)),
             Value::String(s) => s.clone(),
             Value::Array(_) => PhpString::from_bytes(b"Array"),
@@ -612,6 +616,7 @@ impl Value {
     fn to_numeric(&self) -> Value {
         match self {
             Value::Long(_) | Value::Double(_) => self.clone(),
+            Value::Resource(n) => Value::Long(*n),
             Value::True => Value::Long(1),
             Value::False | Value::Null | Value::Undef => Value::Long(0),
             Value::String(s) => {
@@ -791,6 +796,18 @@ impl Value {
                 // Object compared to string: not equal in PHP 8
                 false
             }
+            (Value::Resource(a), Value::Resource(b)) => a == b,
+            (Value::Resource(a), Value::Long(b)) | (Value::Long(b), Value::Resource(a)) => a == b,
+            (Value::Resource(a), Value::Double(f)) | (Value::Double(f), Value::Resource(a)) => {
+                *a as f64 == *f
+            }
+            (Value::Resource(a), Value::String(s)) | (Value::String(s), Value::Resource(a)) => {
+                if let Some(num) = parse_numeric_string(s.as_bytes()) {
+                    num == *a as f64
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -839,6 +856,7 @@ impl Value {
                 // === for objects means same instance
                 std::ptr::eq(a.as_ptr(), b.as_ptr())
             }
+            (Value::Resource(a), Value::Resource(b)) => a == b,
             _ => false,
         }
     }
@@ -852,6 +870,23 @@ impl Value {
             return self.compare(&r.borrow());
         }
         match (self, other) {
+            (Value::Resource(a), Value::Resource(b)) => {
+                if a < b { -1 } else if a > b { 1 } else { 0 }
+            }
+            (Value::Resource(a), Value::Long(b)) => {
+                if a < b { -1 } else if a > b { 1 } else { 0 }
+            }
+            (Value::Long(a), Value::Resource(b)) => {
+                if a < b { -1 } else if a > b { 1 } else { 0 }
+            }
+            (Value::Resource(a), Value::Double(b)) => {
+                let a = *a as f64;
+                if a < *b { -1 } else if a > *b { 1 } else { 0 }
+            }
+            (Value::Double(a), Value::Resource(b)) => {
+                let b = *b as f64;
+                if *a < b { -1 } else if *a > b { 1 } else { 0 }
+            }
             (Value::Long(a), Value::Long(b)) => {
                 if a < b {
                     -1
@@ -1380,6 +1415,7 @@ impl fmt::Debug for Value {
                 write!(f, "object({})", String::from_utf8_lossy(&obj.class_name))
             }
             Value::Generator(_) => write!(f, "object(Generator)"),
+            Value::Resource(n) => write!(f, "resource({})", n),
             Value::Reference(r) => {
                 write!(f, "&{:?}", *r.borrow())
             }
@@ -1393,6 +1429,7 @@ impl fmt::Display for Value {
             Value::Undef | Value::Null | Value::False => Ok(()),
             Value::True => write!(f, "1"),
             Value::Long(n) => write!(f, "{}", n),
+            Value::Resource(n) => write!(f, "Resource id #{}", n),
             Value::Double(d) => {
                 write!(f, "{}", format_php_float(*d))
             }

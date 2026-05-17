@@ -490,10 +490,10 @@ impl Vm {
                     b"PHP_CONFIG_FILE_SCAN_DIR".to_vec(),
                     Value::String(PhpString::from_bytes(b"")),
                 );
-                // File handles - use Long as resource placeholders (non-zero so they are truthy)
-                c.insert(b"STDIN".to_vec(), Value::Long(1));
-                c.insert(b"STDOUT".to_vec(), Value::Long(2));
-                c.insert(b"STDERR".to_vec(), Value::Long(3));
+                // File handles - actual Resource values
+                c.insert(b"STDIN".to_vec(), Value::Resource(1));
+                c.insert(b"STDOUT".to_vec(), Value::Resource(2));
+                c.insert(b"STDERR".to_vec(), Value::Resource(3));
                 crate::value::register_resource(1, b"stream");
                 crate::value::register_resource(2, b"stream");
                 crate::value::register_resource(3, b"stream");
@@ -1147,9 +1147,9 @@ impl Vm {
                 c.insert(b"FALSE".to_vec(), Value::False);
                 c.insert(b"NULL".to_vec(), Value::Null);
                 // Additional type-checking constants
-                c.insert(b"STDIN".to_vec(), Value::Long(1));
-                c.insert(b"STDOUT".to_vec(), Value::Long(2));
-                c.insert(b"STDERR".to_vec(), Value::Long(3));
+                c.insert(b"STDIN".to_vec(), Value::Resource(1));
+                c.insert(b"STDOUT".to_vec(), Value::Resource(2));
+                c.insert(b"STDERR".to_vec(), Value::Resource(3));
                 crate::value::register_resource(1, b"stream");
                 crate::value::register_resource(2, b"stream");
                 crate::value::register_resource(3, b"stream");
@@ -1928,6 +1928,7 @@ impl Vm {
             Value::Object(obj) => crate::value::display_class_name(&obj.borrow().class_name),
             Value::Generator(_) => "Generator".to_string(),
             Value::Reference(r) => Self::value_type_name(&r.borrow()),
+            Value::Resource(_) => "resource".to_string(),
         }
     }
 
@@ -4403,6 +4404,7 @@ impl Vm {
                 Self::format_trace_arg(&inner)
             }
             Value::Generator(_) => "Object(Generator)".to_string(),
+            Value::Resource(n) => format!("Resource id #{}", n),
         }
     }
 
@@ -27653,6 +27655,7 @@ impl Vm {
     pub fn value_to_array_key(val: Value) -> ArrayKey {
         match val {
             Value::Long(n) => ArrayKey::Int(n),
+            Value::Resource(n) => ArrayKey::Int(n),
             Value::String(s) => {
                 // PHP converts numeric strings to integer keys
                 // In PHP 8, only strings that are exactly integer representations
