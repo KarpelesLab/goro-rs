@@ -41,6 +41,11 @@ pub struct Parser {
     pending_extra_constants: Vec<ClassMember>,
     /// Pending extra properties from comma-separated property declarations
     pending_extra_properties: Vec<ClassMember>,
+    /// A doc-comment captured at the start of an assignment statement that
+    /// should be applied to a closure/arrow function on the right-hand side.
+    /// Set in parse_statement() when we see `/** doc */ $x = function/fn/static
+    /// function ...`, and consumed by parse_primary at the closure entry.
+    pending_closure_doc: Option<Vec<u8>>,
     class_name_stack: Vec<Vec<u8>>,
     /// Stack of "is this class actually an interface?" for nested class parsing.
     is_interface_stack: Vec<bool>,
@@ -75,6 +80,7 @@ impl Parser {
             first_class_callable_flag: false,
             pending_extra_constants: Vec::new(),
             pending_extra_properties: Vec::new(),
+            pending_closure_doc: None,
             class_name_stack: Vec::new(),
             is_interface_stack: Vec::new(),
         }
@@ -826,9 +832,48 @@ impl Parser {
                         span,
                     });
                 }
+                // PHP attaches a doc-comment that appears directly before an
+                // assignment of a closure/arrow function to the closure/fn
+                // itself (so reflection getDocComment() works on the closure).
+                // Detect `/** doc */ $x = function/fn/static function/static fn ...`
+                // and stash the doc for parse_primary to pick up.
+                self.pending_closure_doc = None;
+                if let Some(doc) = self.peek_doc_comment().cloned() {
+                    let is_closure_assign = match self.peek() {
+                        TokenKind::Variable(_) => {
+                            // Look ahead for Assign followed by Function/Fn/Static(Function|Fn)
+                            let mut p = self.pos + 1;
+                            // Allow array-/object-access between var and =
+                            while p < self.tokens.len() {
+                                match self.tokens.get(p).map(|t| &t.kind) {
+                                    Some(TokenKind::OpenBracket) => {
+                                        // Skip a bracketed expression — too complex to
+                                        // walk by hand; bail out unless it's empty
+                                        break;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            let after = self.tokens.get(p).map(|t| &t.kind);
+                            let then = self.tokens.get(p + 1).map(|t| &t.kind);
+                            let then2 = self.tokens.get(p + 2).map(|t| &t.kind);
+                            matches!(after, Some(TokenKind::Assign))
+                                && (matches!(then, Some(TokenKind::Function) | Some(TokenKind::Fn))
+                                    || (matches!(then, Some(TokenKind::Static))
+                                        && matches!(then2, Some(TokenKind::Function) | Some(TokenKind::Fn))))
+                        }
+                        _ => false,
+                    };
+                    if is_closure_assign {
+                        // Consume the doc-comment and stash it for the closure.
+                        let _ = self.take_doc_comment();
+                        self.pending_closure_doc = Some(doc);
+                    }
+                }
                 // Expression statement
                 let expr = self.parse_expression()?;
                 self.expect_semicolon()?;
+                self.pending_closure_doc = None;
                 Ok(Statement {
                     kind: StmtKind::Expression(expr),
                     span,
@@ -1917,7 +1962,7 @@ impl Parser {
                     None
                 };
                 self.expect(&TokenKind::Semicolon)?;
-                return Ok(ClassMember::EnumCase { name, value, attributes: member_attributes, doc_comment: None });
+                return Ok(ClassMember::EnumCase { name, value, attributes: member_attributes, doc_comment: member_doc_comment });
             }
             TokenKind::Use => {
                 // trait use
@@ -2255,6 +2300,12 @@ impl Parser {
                     // Parse comma-separated additional properties
                     self.pending_extra_properties.clear();
                     while self.eat(&TokenKind::Comma) {
+                        // PHP captures a doc-comment that appears immediately
+                        // before each individual property in a comma list.
+                        // Only the first property gets the outer member doc-
+                        // comment; for subsequent ones, only an explicit
+                        // doc-comment between commas applies.
+                        let extra_doc = self.take_doc_comment();
                         if let TokenKind::Variable(extra_name) = self.peek().clone() {
                             self.advance();
                             let extra_default = if self.eat(&TokenKind::Assign) {
@@ -2279,7 +2330,7 @@ impl Parser {
                                 get_hook_abstract: false,
                                 set_hook_abstract: false,
                                 attributes: member_attributes.clone(),
-                                doc_comment: member_doc_comment.clone(),
+                                doc_comment: extra_doc,
                             });
                         } else {
                             break;
@@ -2383,6 +2434,10 @@ impl Parser {
                 } else {
                     // Parse comma-separated additional properties (they share the same type)
                     while self.eat(&TokenKind::Comma) {
+                        // See note on the untyped path: each comma-listed
+                        // property gets its own doc-comment if one appears
+                        // immediately before it; otherwise None.
+                        let extra_doc = self.take_doc_comment();
                         if let TokenKind::Variable(extra_name) = self.peek().clone() {
                             self.advance();
                             let extra_default = if self.eat(&TokenKind::Assign) {
@@ -2407,7 +2462,7 @@ impl Parser {
                                 get_hook_abstract: false,
                                 set_hook_abstract: false,
                                 attributes: member_attributes.clone(),
-                                doc_comment: member_doc_comment.clone(),
+                                doc_comment: extra_doc,
                             });
                         } else {
                             break;
@@ -4216,6 +4271,7 @@ impl Parser {
         let span = self.span();
         match self.peek().clone() {
             TokenKind::AttributeOpen => {
+                let attr_doc = self.take_doc_comment();
                 let attributes = self.parse_attributes()?;
                 let span = self.span();
                 match self.peek() {
@@ -4225,7 +4281,7 @@ impl Parser {
                         let use_vars = if matches!(self.peek(), TokenKind::Use) { self.advance(); self.expect(&TokenKind::OpenParen)?; let mut v = Vec::new(); loop { let br = self.eat(&TokenKind::Ampersand); match self.peek().clone() { TokenKind::Variable(n) => { self.advance(); v.push(ClosureUse{variable:n,by_ref:br}); } _ => break }; if !self.eat(&TokenKind::Comma) { break; } } self.expect(&TokenKind::CloseParen)?; v } else { Vec::new() };
                         let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
                         let (body, end_line) = self.parse_block_with_end()?;
-                        Ok(Expr { span, kind: ExprKind::Closure { is_static: false, params, use_vars, return_type, body, attributes, end_line } })
+                        Ok(Expr { span, kind: ExprKind::Closure { is_static: false, params, use_vars, return_type, body, attributes, end_line, doc_comment: attr_doc } })
                     }
                     TokenKind::Fn => {
                         self.advance(); self.eat(&TokenKind::Ampersand);
@@ -4233,7 +4289,7 @@ impl Parser {
                         let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
                         self.expect(&TokenKind::DoubleArrow)?; let body = self.parse_expression()?;
                         let end_line = body.span.line;
-                        Ok(Expr { span, kind: ExprKind::ArrowFunction { is_static: false, params, return_type, body: Box::new(body), attributes, end_line } })
+                        Ok(Expr { span, kind: ExprKind::ArrowFunction { is_static: false, params, return_type, body: Box::new(body), attributes, end_line, doc_comment: attr_doc } })
                     }
                     _ => Err(ParseError { message: "expected function or fn after attribute".into(), span: self.span() })
                 }
@@ -4886,7 +4942,11 @@ impl Parser {
                 })
             }
             TokenKind::Function => {
-                // Anonymous function
+                // Anonymous function. Prefer a stashed closure doc-comment
+                // from an enclosing `$var = function(){}` assignment, falling
+                // back to a doc-comment directly attached to this token.
+                let closure_doc = self.pending_closure_doc.take()
+                    .or_else(|| self.take_doc_comment());
                 self.advance();
                 // Optional & for reference return
                 let _by_ref_return = self.eat(&TokenKind::Ampersand);
@@ -4948,6 +5008,7 @@ impl Parser {
                         body,
                         attributes: Vec::new(),
                         end_line,
+                        doc_comment: closure_doc,
                     },
                 })
             }
@@ -4957,6 +5018,8 @@ impl Parser {
                     Some(TokenKind::Backslash)
                 ) =>
             {
+                let arrow_doc = self.pending_closure_doc.take()
+                    .or_else(|| self.take_doc_comment());
                 self.advance();
                 // Optional & for reference return
                 let _by_ref_return = self.eat(&TokenKind::Ampersand);
@@ -4980,6 +5043,7 @@ impl Parser {
                         body: Box::new(body),
                         attributes: Vec::new(),
                         end_line,
+                        doc_comment: arrow_doc,
                     },
                 })
             }
@@ -4989,6 +5053,8 @@ impl Parser {
                     Some(TokenKind::Function | TokenKind::Fn)
                 ) =>
             {
+                let static_doc = self.pending_closure_doc.take()
+                    .or_else(|| self.take_doc_comment());
                 self.advance(); // static
                 if matches!(self.peek(), TokenKind::Fn) {
                     self.advance();
@@ -5013,6 +5079,7 @@ impl Parser {
                             body: Box::new(body),
                             attributes: Vec::new(),
                             end_line,
+                            doc_comment: static_doc,
                         },
                     })
                 } else {
@@ -5065,6 +5132,7 @@ impl Parser {
                             body,
                             attributes: Vec::new(),
                             end_line,
+                            doc_comment: static_doc,
                         },
                     })
                 }

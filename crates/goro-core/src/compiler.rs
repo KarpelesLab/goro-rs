@@ -4807,7 +4807,7 @@ impl Compiler {
                                 });
                             }
                         }
-                        ClassMember::EnumCase { name: case_name, value, .. } => {
+                        ClassMember::EnumCase { name: case_name, value, doc_comment: case_doc_comment, .. } => {
                             // 'case' can only be used in enums
                             if !modifiers.is_enum {
                                 return Err(CompileError {
@@ -4935,6 +4935,19 @@ impl Compiler {
                                 [b"__enum_case__::" as &[u8], case_name.as_slice()].concat()
                             ));
                             class.constants.insert(case_name.clone(), marker);
+                            // Insert metadata so getDocComment() works on enum cases via
+                            // ReflectionClassConstant / ReflectionEnumUnitCase / BackedCase.
+                            let declaring_class_lower_ec: Vec<u8> = qualified_name
+                                .iter().map(|b| b.to_ascii_lowercase()).collect();
+                            class.constants_meta.insert(case_name.clone(), crate::object::ConstantMeta {
+                                visibility: crate::object::Visibility::Public,
+                                is_final: false,
+                                declaring_class: declaring_class_lower_ec,
+                                attributes: Vec::new(),
+                                declared_type: None,
+                                doc_comment: case_doc_comment.as_ref()
+                                    .map(|d| String::from_utf8_lossy(d).into_owned()),
+                            });
                         }
                         ClassMember::TraitUse { traits, adaptations } => {
                             // Interfaces cannot use traits
@@ -7742,6 +7755,7 @@ impl Compiler {
                 is_static,
                 attributes: closure_attributes,
                 end_line: closure_end_line,
+                doc_comment: closure_doc_comment,
                 ..
             } => {
                 // Compile closure body as a child function
@@ -7763,6 +7777,7 @@ impl Compiler {
                 closure_compiler.op_array.end_line = if *closure_end_line > 0 { *closure_end_line } else { expr.span.line };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(closure_attributes);
+                closure_compiler.op_array.doc_comment = closure_doc_comment.clone();
                 closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
@@ -7992,7 +8007,7 @@ impl Compiler {
                 }
             }
 
-            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, .. } => {
+            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, doc_comment: arrow_doc_comment, .. } => {
                 // Arrow function: fn($x) => $x * 2
                 // Arrow functions implicitly capture outer variables by value
 
@@ -8021,6 +8036,7 @@ impl Compiler {
                 closure_compiler.op_array.end_line = if *arrow_end_line > 0 { *arrow_end_line } else { expr.span.line };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(attributes);
+                closure_compiler.op_array.doc_comment = arrow_doc_comment.clone();
                 closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();

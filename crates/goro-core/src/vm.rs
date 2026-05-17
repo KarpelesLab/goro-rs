@@ -17529,7 +17529,7 @@ impl Vm {
                                                 }
                                             }
                                         }
-                                        b"reflectionclassconstant" => {
+                                        b"reflectionclassconstant" | b"reflectionenumunitcase" | b"reflectionenumbackedcase" => {
                                             drop(obj_mut);
                                             let ctor_handled = crate::reflection::reflection_class_constant_construct(self, &call.args, op.line);
                                             if !ctor_handled {

@@ -547,16 +547,11 @@ pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u3
         .map(|c| String::from_utf8_lossy(&c.name).to_string())
         .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower));
 
-    // Check constant exists
+    // Check constant exists. PHP says "Constant {}::{} does not exist" in
+    // both the ReflectionClassConstant and ReflectionEnumUnit/BackedCase paths.
     let const_val = reflection_class_get_constant(vm, &class_lower, const_name.as_bytes());
     if const_val.is_none() {
-        let err_msg = if reflector_name.eq_ignore_ascii_case("ReflectionEnumUnitCase")
-            || reflector_name.eq_ignore_ascii_case("ReflectionEnumBackedCase")
-        {
-            format!("Case {}::{} does not exist", canonical_class, const_name)
-        } else {
-            format!("Constant {}::{} does not exist", canonical_class, const_name)
-        };
+        let err_msg = format!("Constant {}::{} does not exist", canonical_class, const_name);
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
         vm.current_exception = Some(exc);
         return false;
@@ -2007,10 +2002,11 @@ pub fn reflection_method_method(
         b"getnumberofrequiredparameters" => {
             let method_def = vm.classes.get(&class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()));
-            let count = method_def.map(|m| {
-                let skip = if !m.is_static { 1u32 } else { 0u32 };
-                m.op_array.required_param_count.saturating_sub(skip)
-            }).unwrap_or(0);
+            // The compiler stores `required_param_count` as the count of
+            // user-declared parameters without defaults — it does NOT include
+            // the implicit `$this` slot. So we should NOT subtract for
+            // instance methods.
+            let count = method_def.map(|m| m.op_array.required_param_count).unwrap_or(0);
             Some(Value::Long(count as i64))
         }
         b"getparameters" => {
@@ -2211,30 +2207,57 @@ pub fn reflection_method_method(
                     Visibility::Protected => "protected",
                     Visibility::Private => "private",
                 };
-                let modifiers = format!("{}{}{}",
+                let static_str = if m.is_static { "static " } else { "" };
+                let modifiers = format!("{}{}{}{}",
                     if m.is_abstract { "abstract " } else { "" },
                     if m.is_final { "final " } else { "" },
+                    static_str,
                     vis,
                 );
-                let mut s = format!("Method [ <user> {} method {} ] {{\n", modifiers, name);
+                // Determine if this method is inherited from a different
+                // declaring class — for "<user, inherits Parent>" header.
+                let declaring_lower = &m.declaring_class;
+                let owner_display = if declaring_lower != &class_lower {
+                    vm.classes.get(declaring_lower.as_slice())
+                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                } else {
+                    None
+                };
+                let scope_str = if let Some(owner) = &owner_display {
+                    format!("<user, inherits {}>", owner)
+                } else {
+                    "<user>".to_string()
+                };
+                let mut s = format!("Method [ {} {} method {} ] {{\n", scope_str, modifiers, name);
                 let m_end = if m.op_array.end_line > 0 { m.op_array.end_line } else { m.op_array.decl_line };
-                s.push_str(&format!("  @@ {} {} - {}\n", vm.current_file, m.op_array.decl_line, m_end));
-                // Skip the implicit `$this` parameter for instance methods.
+                let filename_str = if m.op_array.filename.is_empty() {
+                    String::from_utf8_lossy(vm.current_file.as_bytes()).into_owned()
+                } else {
+                    String::from_utf8_lossy(&m.op_array.filename).into_owned()
+                };
+                s.push_str(&format!("  @@ {} {} - {}\n", filename_str, m.op_array.decl_line, m_end));
+                // Skip the implicit `$this` parameter for instance methods —
+                // when counting visible parameters (param_count includes $this).
                 let skip = if !m.is_static { 1usize } else { 0usize };
                 let pcount_total = m.op_array.param_count as usize;
                 let pcount = pcount_total.saturating_sub(skip);
-                let rcount = (m.op_array.required_param_count as usize).saturating_sub(skip);
-                s.push_str(&format!("\n  - Parameters [{}] {{\n", pcount));
-                for i in 0..pcount {
-                    let cv_idx = i + skip;
-                    if cv_idx < m.op_array.cv_names.len() {
-                        let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
-                        let required = i < rcount;
-                        s.push_str(&format!("    Parameter #{} [ <{}> ${} ]\n", i,
-                            if required { "required" } else { "optional" }, pname));
+                // required_param_count does NOT include $this (compiler stores
+                // raw user-declared count), so do not subtract `skip` here.
+                let rcount = m.op_array.required_param_count as usize;
+                if pcount > 0 {
+                    s.push_str(&format!("\n  - Parameters [{}] {{\n", pcount));
+                    for i in 0..pcount {
+                        let cv_idx = i + skip;
+                        if cv_idx < m.op_array.cv_names.len() {
+                            let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
+                            let required = i < rcount;
+                            s.push_str(&format!("    Parameter #{} [ <{}> ${} ]\n", i,
+                                if required { "required" } else { "optional" }, pname));
+                        }
                     }
+                    s.push_str("  }\n");
                 }
-                s.push_str("  }\n}\n");
+                s.push_str("}\n");
                 Some(Value::String(PhpString::from_string(s)))
             } else {
                 Some(Value::String(PhpString::from_string(format!("Method [ {} {} ]", class, name))))
@@ -4758,7 +4781,7 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8], kind: Ref
             .collect();
         s.push_str(&format!("\n  - Static methods [{}] {{\n", static_methods.len()));
         for m in static_methods {
-            reflection_method_to_string_section(&mut s, m);
+            reflection_method_to_string_section(&mut s, m, vm, class_lower);
         }
         s.push_str("  }\n");
     } else {
@@ -4804,7 +4827,7 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8], kind: Ref
             .collect();
         s.push_str(&format!("\n  - Methods [{}] {{\n", inst_methods.len()));
         for m in inst_methods {
-            reflection_method_to_string_section(&mut s, m);
+            reflection_method_to_string_section(&mut s, m, vm, class_lower);
         }
         s.push_str("  }\n");
     } else {
@@ -4816,7 +4839,7 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8], kind: Ref
 }
 
 /// Helper to add a method's __toString to the class output
-fn reflection_method_to_string_section(s: &mut String, m: &crate::object::MethodDef) {
+fn reflection_method_to_string_section(s: &mut String, m: &crate::object::MethodDef, vm: &Vm, owner_lower: &[u8]) {
     let vis = match m.visibility {
         Visibility::Public => "public",
         Visibility::Protected => "protected",
@@ -4836,12 +4859,22 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
     // Check if it's a constructor
     let ctor_str = if method_name.eq_ignore_ascii_case("__construct") { ", ctor" } else { "" };
 
+    // For inherited methods, PHP renders "<user, inherits Parent>" in
+    // ReflectionClass::__toString output. Determine the declaring class.
+    let inherits_str = if m.declaring_class.as_slice() != owner_lower {
+        vm.classes.get(m.declaring_class.as_slice())
+            .map(|c| format!(", inherits {}", String::from_utf8_lossy(&c.name)))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     let mod_vis = if modifiers.is_empty() {
         vis.to_string()
     } else {
         format!("{}{}", modifiers, vis)
     };
-    s.push_str(&format!("    Method [ <user{}> {} method {} ] {{\n", ctor_str, mod_vis, method_name));
+    s.push_str(&format!("    Method [ <user{}{}> {} method {} ] {{\n", ctor_str, inherits_str, mod_vis, method_name));
 
     // Add @@ filename startline - endline for the method.
     let m_end = if m.op_array.end_line > 0 { m.op_array.end_line } else { m.op_array.decl_line };
@@ -4859,10 +4892,13 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
         }
     }
 
-    // Parameters - skip $this (first param for non-static methods)
+    // Parameters - skip $this (first param for non-static methods).
+    // The compiler stores `param_count` as user-declared params + 1 for $this
+    // on instance methods, but `required_param_count` is just the user-declared
+    // count without $this. So we subtract `skip` from `param_count` only.
     let skip = if !m.is_static { 1usize } else { 0usize };
     let param_count = if m.op_array.param_count as usize > skip { m.op_array.param_count as usize - skip } else { 0 };
-    let required_count = if m.op_array.required_param_count as usize > skip { m.op_array.required_param_count as usize - skip } else { 0 };
+    let required_count = m.op_array.required_param_count as usize;
 
     s.push_str(&format!("\n      - Parameters [{}] {{\n", param_count));
     for i in 0..param_count {
