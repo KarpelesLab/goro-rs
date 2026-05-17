@@ -9,3 +9,4 @@ goro-parser = { path = "../goro-parser" }
 indexmap = "2"
 url = "2"
 idna = "1"
+corosensei = "0.2"
