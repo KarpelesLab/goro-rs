@@ -79,6 +79,7 @@ fn gettype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::Array(_) => "array",
         Value::Object(_) | Value::Generator(_) => "object",
         Value::Reference(r) => return gettype(_vm, &[r.borrow().clone()]),
+        Value::Resource(_) => unreachable!(),
     };
     Ok(Value::String(PhpString::from_bytes(type_name.as_bytes())))
 }
@@ -573,6 +574,17 @@ fn get_debug_type(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::Reference(r) => {
             let args = [r.borrow().clone()];
             return get_debug_type(_vm, &args);
+        }
+        Value::Resource(id) => {
+            let t = goro_core::value::resource_type_of(*id)
+                .map(|v| String::from_utf8_lossy(&v).to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+            let s = if goro_core::value::is_open_resource(*id) {
+                format!("resource ({})", t)
+            } else {
+                "resource (closed)".to_string()
+            };
+            return Ok(Value::String(PhpString::from_string(s)));
         }
     };
     Ok(Value::String(goro_core::string::PhpString::from_bytes(

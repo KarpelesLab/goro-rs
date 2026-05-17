@@ -3040,7 +3040,7 @@ fn type_priority(v: &Value) -> u8 {
         Value::Null | Value::Undef => 0,
         Value::False => 1,
         Value::True => 2,
-        Value::Long(_) | Value::Double(_) => 3,
+        Value::Long(_) | Value::Double(_) | Value::Resource(_) => 3,
         Value::String(_) => 4,
         Value::Array(_) => 5,
         Value::Object(_) | Value::Generator(_) => 6,
@@ -6787,6 +6787,7 @@ fn serialize_value_depth(val: &Value, depth: usize) -> String {
         }
         Value::Generator(_) => "N;".to_string(),
         Value::Reference(r) => serialize_value_depth(&r.borrow(), depth),
+        Value::Resource(_) => "i:0;".to_string(),
     }
 }
 fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -7833,12 +7834,12 @@ fn alloc_dir_handle(path: String) -> i64 {
     })
 }
 
-/// Return the resource id from a directory handle Value. Accepts a direct Long
-/// (resource id), a Directory object whose `handle` property holds the resource
-/// id, or a Reference wrapping either of those. Returns None for any other
-/// shape.
+/// Return the resource id from a directory handle Value. Accepts a Resource
+/// or Long id (back-compat), a Directory object whose `handle` property holds
+/// the resource id, or a Reference wrapping either of those.
 fn dir_handle_resource_id(val: &Value) -> Option<i64> {
     match val {
+        Value::Resource(n) => Some(*n),
         Value::Long(n) => Some(*n),
         Value::Reference(r) => dir_handle_resource_id(&r.borrow()),
         Value::Object(obj) => {
@@ -7846,6 +7847,7 @@ fn dir_handle_resource_id(val: &Value) -> Option<i64> {
             if ob.class_name.eq_ignore_ascii_case(b"Directory") {
                 let handle = ob.get_property(b"handle");
                 match handle {
+                    Value::Resource(n) => Some(n),
                     Value::Long(n) => Some(n),
                     _ => None,
                 }
@@ -7903,7 +7905,7 @@ fn fopen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(f) => {
             let fid = alloc_file_handle(f, &mode);
             goro_core::value::register_resource(fid, b"stream");
-            Ok(Value::Long(fid))
+            Ok(Value::Resource(fid))
         }
         Err(_) => Ok(Value::False),
     }
@@ -9040,7 +9042,7 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match std::fs::read_dir(dir_path) {
             Ok(_) => {
                 let did = alloc_dir_handle(path_str.to_string());
-                Ok(Value::Long(did))
+                Ok(Value::Resource(did))
             }
             Err(e) => {
                 vm.emit_warning(&format!(
@@ -9094,21 +9096,22 @@ fn resolve_dir_handle(
             );
             Ok(CURRENT_DIR_RESOURCE.with(|c| c.get()))
         }
-        Value::Long(n) => {
-            if !goro_core::value::is_registered_resource(n) {
-                let exc = vm.throw_type_error(format!(
+        Value::Long(_) => {
+            // PHP TypeError: arg is int, not resource.
+            let exc = vm.throw_type_error(format!(
+                "{}(): Argument #1 ($dir_handle) must be of type resource, int given",
+                func_name
+            ));
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!(
                     "{}(): Argument #1 ($dir_handle) must be of type resource, int given",
                     func_name
-                ));
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: format!(
-                        "{}(): Argument #1 ($dir_handle) must be of type resource, int given",
-                        func_name
-                    ),
-                    line: vm.current_line,
-                });
-            }
+                ),
+                line: vm.current_line,
+            });
+        }
+        Value::Resource(n) => {
             let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(&n));
             if is_dir {
                 Ok(Some(n))
@@ -9813,17 +9816,7 @@ fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     if let Some(t) = val.resource_type_name() {
         return Ok(Value::String(PhpString::from_vec(t)));
     }
-    match val {
-        Value::Long(id) => {
-            // Fallback: recognize well-known fd ids even without registration
-            if *id == 0 || *id == 1 || *id == 2 {
-                Ok(Value::String(PhpString::from_bytes(b"stream")))
-            } else {
-                Ok(Value::String(PhpString::from_bytes(b"Unknown")))
-            }
-        }
-        _ => Ok(Value::String(PhpString::from_bytes(b"Unknown"))),
-    }
+    Ok(Value::String(PhpString::from_bytes(b"Unknown")))
 }
 
 fn link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -10933,7 +10926,7 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     let fid = alloc_file_handle(file, "w+b");
     goro_core::value::register_resource(fid, b"stream");
-    Ok(Value::Long(fid))
+    Ok(Value::Resource(fid))
 }
 
 fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -11823,9 +11816,10 @@ fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
 }
 
 fn get_resource_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Resources are represented as Long (file handle IDs)
-    if let Some(Value::Long(id)) = args.first() {
-        Ok(Value::Long(*id))
+    let val = args.first().unwrap_or(&Value::Null);
+    let id = val.resource_id();
+    if id >= 0 {
+        Ok(Value::Long(id))
     } else {
         Ok(Value::Long(0))
     }
@@ -12191,19 +12185,22 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if has_stdin_pipe {
                 if let Some(stdin) = child.stdin.take() {
                     let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) }, "w");
-                    pipes_arr.set(ArrayKey::Int(0), Value::Long(fid));
+                    goro_core::value::register_resource(fid, b"stream");
+                    pipes_arr.set(ArrayKey::Int(0), Value::Resource(fid));
                 }
             }
             if has_stdout_pipe {
                 if let Some(stdout) = child.stdout.take() {
                     let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) }, "r");
-                    pipes_arr.set(ArrayKey::Int(1), Value::Long(fid));
+                    goro_core::value::register_resource(fid, b"stream");
+                    pipes_arr.set(ArrayKey::Int(1), Value::Resource(fid));
                 }
             }
             if has_stderr_pipe {
                 if let Some(stderr) = child.stderr.take() {
                     let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stderr.into_raw_fd()) }, "r");
-                    pipes_arr.set(ArrayKey::Int(2), Value::Long(fid));
+                    goro_core::value::register_resource(fid, b"stream");
+                    pipes_arr.set(ArrayKey::Int(2), Value::Resource(fid));
                 }
             }
             if let Some(Value::Reference(r)) = pipes_ref {
@@ -12214,7 +12211,8 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 PROC_HANDLES.with(|h| h.borrow_mut().insert(pid, child));
                 pid
             });
-            Ok(Value::Long(proc_id))
+            goro_core::value::register_resource(proc_id, b"process");
+            Ok(Value::Resource(proc_id))
         }
         Err(_) => Ok(Value::False),
     }
@@ -12540,7 +12538,7 @@ fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         b"path".to_vec(),
         Value::String(PhpString::from_string(path_str.to_string())),
     );
-    obj.set_property(b"handle".to_vec(), Value::Long(did));
+    obj.set_property(b"handle".to_vec(), Value::Resource(did));
     obj.set_property(b"__dir_pos".to_vec(), Value::Long(0));
     obj.set_property(
         b"__dir_entries".to_vec(),
@@ -12567,12 +12565,12 @@ fn popen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if let Some(stdout) = child.stdout {
                     let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) }, &mode_str);
                     goro_core::value::register_resource(fid, b"stream");
-                    return Ok(Value::Long(fid));
+                    return Ok(Value::Resource(fid));
                 }
             } else if let Some(stdin) = child.stdin {
                 let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) }, &mode_str);
                 goro_core::value::register_resource(fid, b"stream");
-                return Ok(Value::Long(fid));
+                return Ok(Value::Resource(fid));
             }
             Ok(Value::False)
         }
@@ -12696,7 +12694,7 @@ fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
             let fid = alloc_file_handle(file, "r+");
             goro_core::value::register_resource(fid, b"stream");
-            Ok(Value::Long(fid))
+            Ok(Value::Resource(fid))
         }
         Err(e) => {
             if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(111); } // ECONNREFUSED

@@ -275,6 +275,7 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, max_de
         Value::True => "true".to_string(),
         Value::False => "false".to_string(),
         Value::Long(n) => n.to_string(),
+        Value::Resource(_) => "0".to_string(),
         Value::Double(f) => {
             if f.is_infinite() || f.is_nan() {
                 "null".to_string()
