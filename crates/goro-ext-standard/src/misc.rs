@@ -5721,6 +5721,30 @@ fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::False
     })
 }
+/// Read a file with optional compress.zlib:// (gzip/zlib decompression) prefix.
+pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    if let Some(real_path) = path_str.strip_prefix("compress.zlib://") {
+        let real_path = real_path.strip_prefix("file://").unwrap_or(real_path);
+        let data = std::fs::read(real_path)?;
+        if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+            let mut dec = flate2::read::GzDecoder::new(data.as_slice());
+            let mut buf = Vec::new();
+            dec.read_to_end(&mut buf)?;
+            return Ok(buf);
+        }
+        if data.len() >= 2 && (data[0] & 0x0F) == 8 {
+            let mut dec = flate2::read::ZlibDecoder::new(data.as_slice());
+            let mut buf = Vec::new();
+            if dec.read_to_end(&mut buf).is_ok() {
+                return Ok(buf);
+            }
+        }
+        return Ok(data);
+    }
+    std::fs::read(path_str)
+}
+
 fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let _use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
@@ -5739,12 +5763,12 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let path_str = path.to_string_lossy();
-    if !path_str.starts_with("php://") && !path_str.starts_with("http://") && !path_str.starts_with("data://") {
+    if !path_str.starts_with("php://") && !path_str.starts_with("http://") && !path_str.starts_with("data://") && !path_str.starts_with("compress.zlib://") && !path_str.starts_with("compress.bzip2://") {
         if !vm.check_open_basedir("file_get_contents", &path_str) {
             return Ok(Value::False);
         }
     }
-    match std::fs::read(&*path_str as &str) {
+    match read_path_with_wrappers(&path_str) {
         Ok(data) => {
             let start = if offset >= 0 { offset as usize } else { 0 };
             if start >= data.len() && start > 0 {
@@ -5784,6 +5808,27 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => data_val.to_php_string().as_bytes().to_vec(),
     };
     let path_str = path.to_string_lossy();
+
+    // Handle compress.zlib:// scheme for writes (gzip-compress the data)
+    if let Some(real_path) = path_str.strip_prefix("compress.zlib://") {
+        let real_path = real_path.strip_prefix("file://").unwrap_or(real_path);
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        if enc.write_all(&data_bytes).is_err() {
+            return Ok(Value::False);
+        }
+        match enc.finish() {
+            Ok(compressed) => match std::fs::write(real_path, &compressed) {
+                Ok(_) => return Ok(Value::Long(data_bytes.len() as i64)),
+                Err(e) => {
+                    vm.emit_warning(&format!("file_put_contents({}): Failed to open stream: {}", path_str, e));
+                    return Ok(Value::False);
+                }
+            },
+            Err(_) => return Ok(Value::False),
+        }
+    }
+
     let p = std::path::Path::new(&*path_str);
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -7881,12 +7926,62 @@ fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
     })
 }
 
-fn fopen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let mode = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
 
     // Normalize mode: strip 'b' (binary) and 't' (text) flags - they're all the same on Linux
     let mode_clean: String = mode.chars().filter(|&c| c != 'b' && c != 't').collect();
+
+    // Handle compress.zlib:// scheme: read+decompress to a temporary file (read-only).
+    if let Some(real_path) = filename.strip_prefix("compress.zlib://") {
+        let real_path = real_path.strip_prefix("file://").unwrap_or(real_path);
+        if mode_clean == "r" {
+            match std::fs::read(real_path) {
+                Ok(data) => {
+                    // Detect gzip vs zlib vs raw
+                    use std::io::Read;
+                    let decompressed = if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+                        let mut dec = flate2::read::GzDecoder::new(data.as_slice());
+                        let mut buf = Vec::new();
+                        if dec.read_to_end(&mut buf).is_err() {
+                            vm.emit_warning(&format!("fopen({}): Failed to open stream: operation failed", filename));
+                            return Ok(Value::False);
+                        }
+                        buf
+                    } else if data.len() >= 2 && (data[0] & 0x0F) == 8 {
+                        let mut dec = flate2::read::ZlibDecoder::new(data.as_slice());
+                        let mut buf = Vec::new();
+                        if dec.read_to_end(&mut buf).is_err() {
+                            data.clone()
+                        } else {
+                            buf
+                        }
+                    } else {
+                        data
+                    };
+                    // Create a tempfile
+                    let mut tmp = match tempfile::tempfile() {
+                        Ok(f) => f,
+                        Err(_) => return Ok(Value::False),
+                    };
+                    use std::io::{Seek, SeekFrom, Write};
+                    if tmp.write_all(&decompressed).is_err() {
+                        return Ok(Value::False);
+                    }
+                    let _ = tmp.seek(SeekFrom::Start(0));
+                    let fid = alloc_file_handle(tmp, &mode);
+                    goro_core::value::register_resource(fid, b"stream");
+                    return Ok(Value::Resource(fid));
+                }
+                Err(_) => {
+                    vm.emit_warning(&format!("fopen({}): Failed to open stream: No such file or directory", filename));
+                    return Ok(Value::False);
+                }
+            }
+        }
+    }
+
     let file = match mode_clean.as_str() {
         "r" => std::fs::File::open(&filename),
         "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&filename),
@@ -9856,7 +9951,7 @@ fn copy_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::read(&*path.to_string_lossy()) {
+    match read_path_with_wrappers(&path.to_string_lossy()) {
         Ok(data) => {
             let len = data.len();
             vm.write_output(&data);
@@ -9871,7 +9966,7 @@ fn file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let ignore_new_lines = flags & 2 != 0; // FILE_IGNORE_NEW_LINES
     let skip_empty = flags & 4 != 0; // FILE_SKIP_EMPTY_LINES
-    match std::fs::read(&*path.to_string_lossy()) {
+    match read_path_with_wrappers(&path.to_string_lossy()) {
         Ok(content) => {
             let mut result = PhpArray::new();
             if content.is_empty() {

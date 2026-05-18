@@ -134,6 +134,30 @@ thread_local! {
     /// Removing an entry (on fclose etc.) marks the resource as closed.
     static RESOURCE_REGISTRY: RefCell<std::collections::HashMap<i64, ResourceRegistryEntry>> =
         RefCell::new(std::collections::HashMap::new());
+
+    /// Registry of close callbacks for resources. When fclose() (or similar)
+    /// is invoked, any registered callback is invoked exactly once and removed.
+    /// This lets extensions (e.g. zlib's gzopen handle) cleanly flush data on
+    /// fclose without requiring fclose to know about every extension's handle
+    /// types.
+    static RESOURCE_CLOSE_HOOKS: RefCell<std::collections::HashMap<i64, Box<dyn FnOnce()>>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Register a closure to run when the resource id is closed (via close_resource).
+/// The closure will be called exactly once. Any previously registered hook is replaced.
+pub fn register_close_hook(id: i64, hook: Box<dyn FnOnce()>) {
+    RESOURCE_CLOSE_HOOKS.with(|r| {
+        r.borrow_mut().insert(id, hook);
+    });
+}
+
+/// Invoke (and remove) the close hook for a resource id, if registered.
+pub fn run_close_hook(id: i64) {
+    let hook = RESOURCE_CLOSE_HOOKS.with(|r| r.borrow_mut().remove(&id));
+    if let Some(h) = hook {
+        h();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -155,8 +179,10 @@ pub fn register_resource(id: i64, resource_type: &[u8]) {
     });
 }
 
-/// Mark a resource as closed (for fclose/curl_close semantics).
+/// Mark a resource as closed (for fclose/curl_close semantics). Also invokes
+/// any registered close hook.
 pub fn close_resource(id: i64) {
+    run_close_hook(id);
     RESOURCE_REGISTRY.with(|r| {
         if let Some(entry) = r.borrow_mut().get_mut(&id) {
             entry.closed = true;
