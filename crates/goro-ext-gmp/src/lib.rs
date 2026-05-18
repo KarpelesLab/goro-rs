@@ -125,6 +125,7 @@ pub fn register(vm: &mut Vm) {
         is_abstract: false,
         is_final: false,
         attributes: Vec::new(),
+        doc_comment: None,
     });
     vm.classes.insert(b"gmp".to_vec(), ce);
 }
