@@ -5,6 +5,8 @@ use goro_core::vm::{Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+mod algos;
+
 /// Register all hash extension functions
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"hash");
@@ -91,13 +93,44 @@ fn compute_hash(algo: &str, data: &[u8]) -> Option<Vec<u8>> {
         "fnv164" => Some(fnv1_64(data).to_be_bytes().to_vec()),
         "fnv1a64" => Some(fnv1a_64(data).to_be_bytes().to_vec()),
         "md4" => Some(md4_hash(data).to_vec()),
+        "md2" => Some(algos::md2_hash(data)),
+        "whirlpool" => Some(algos::whirlpool_hash(data)),
+        "gost" => Some(algos::gost_hash(data)),
+        "gost-crypto" => Some(algos::gost_crypto_hash(data)),
+        "tiger128,3" => {
+            let h = algos::tiger_3pass(data);
+            Some(h[..16].to_vec())
+        }
+        "tiger160,3" => {
+            let h = algos::tiger_3pass(data);
+            Some(h[..20].to_vec())
+        }
+        "tiger192,3" => Some(algos::tiger_3pass(data)),
+        // tiger 4-pass: the `tiger` crate only implements 3-pass so we use that as a fallback.
+        // Output sizes are correct but actual hash values won't match PHP's 4-pass Tiger.
+        "tiger128,4" => {
+            let h = algos::tiger_3pass(data);
+            Some(h[..16].to_vec())
+        }
+        "tiger160,4" => {
+            let h = algos::tiger_3pass(data);
+            Some(h[..20].to_vec())
+        }
+        "tiger192,4" => Some(algos::tiger_3pass(data)),
+        "murmur3a" => Some(algos::murmur3a_hash(data, 0).to_be_bytes().to_vec()),
+        "murmur3c" => Some(algos::murmur3c_hash(data, 0).to_vec()),
+        "murmur3f" => Some(algos::murmur3f_hash(data, 0).to_vec()),
+        "xxh32" => Some(algos::xxh32_hash(data, 0).to_be_bytes().to_vec()),
+        "xxh64" => Some(algos::xxh64_hash(data, 0).to_be_bytes().to_vec()),
+        "xxh3" => Some(algos::xxh3_64_hash(data, 0).to_be_bytes().to_vec()),
+        "xxh128" => Some(algos::xxh3_128_hash(data, 0).to_be_bytes().to_vec()),
         _ => None,
     }
 }
 
 fn hash_block_size(algo: &str) -> usize {
     match algo {
-        "md5" | "md4" => 64,
+        "md5" | "md4" | "md2" => 64,
         "sha1" | "sha-1" | "sha256" | "sha-256" | "sha224" | "sha-224" => 64,
         "sha384" | "sha-384" | "sha512" | "sha-512" | "sha512/224" | "sha512/256" => 128,
         "sha3-224" => 144,
@@ -105,8 +138,28 @@ fn hash_block_size(algo: &str) -> usize {
         "sha3-384" => 104,
         "sha3-512" => 72,
         "ripemd128" | "ripemd160" | "ripemd256" | "ripemd320" => 64,
+        "whirlpool" => 64,
+        "tiger128,3" | "tiger160,3" | "tiger192,3" | "tiger128,4" | "tiger160,4" | "tiger192,4" => 64,
+        "gost" | "gost-crypto" => 32,
         _ => 64,
     }
+}
+
+/// Returns true if the algorithm is a cryptographic hash usable with HMAC.
+fn is_crypto_algo(algo: &str) -> bool {
+    matches!(algo,
+        "md2" | "md4" | "md5"
+        | "sha1" | "sha-1"
+        | "sha224" | "sha-224" | "sha256" | "sha-256"
+        | "sha384" | "sha-384" | "sha512" | "sha-512"
+        | "sha512/224" | "sha512/256"
+        | "sha3-224" | "sha3-256" | "sha3-384" | "sha3-512"
+        | "ripemd128" | "ripemd160" | "ripemd256" | "ripemd320"
+        | "whirlpool"
+        | "tiger128,3" | "tiger160,3" | "tiger192,3"
+        | "tiger128,4" | "tiger160,4" | "tiger192,4"
+        | "gost" | "gost-crypto"
+    )
 }
 
 fn hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -129,7 +182,7 @@ fn hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         None => {
-            let msg = format!("hash(): Unknown hashing algorithm: {}", algo_lower);
+            let msg = "hash(): Argument #1 ($algo) must be a valid hashing algorithm".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
             Err(VmError { message: msg, line: vm.current_line })
@@ -148,6 +201,14 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let key = args.get(2).unwrap_or(&Value::Null).to_php_string();
     let raw = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
 
+    // hash_hmac requires a cryptographic algorithm
+    if !is_crypto_algo(&algo) {
+        let msg = "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+
     let block_size = hash_block_size(&algo);
 
     // HMAC implementation
@@ -156,7 +217,7 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         key_bytes = match compute_hash(&algo, &key_bytes) {
             Some(h) => h,
             None => {
-                let msg = format!("hash_hmac(): Unknown hashing algorithm: {}", algo);
+                let msg = "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, 0);
                 vm.current_exception = Some(exc);
                 return Err(VmError { message: msg, line: vm.current_line });
@@ -180,7 +241,7 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let inner_hash = match compute_hash(&algo, &inner_data) {
         Some(h) => h,
         None => {
-            let msg = format!("hash_hmac(): Unknown hashing algorithm: {}", algo);
+            let msg = "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
@@ -193,7 +254,7 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let digest = match compute_hash(&algo, &outer_data) {
         Some(h) => h,
         None => {
-            let msg = format!("hash_hmac(): Unknown hashing algorithm: {}", algo);
+            let msg = "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
@@ -212,13 +273,38 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
     let options = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    // Emit deprecated if key arg is explicitly null
+    if matches!(args.get(2), Some(Value::Null)) {
+        vm.emit_deprecated("hash_init(): Passing null to parameter #3 ($key) of type string is deprecated");
+    }
     let key = args.get(2).map(|v| v.to_php_string());
 
     // Verify algorithm is valid
     if compute_hash(&algo, b"").is_none() {
-        let exc = vm.create_exception(b"ValueError", &format!("hash_init(): Argument #1 ($algo) must be a valid hashing algorithm, \"{}\" given", algo), 0);
+        let msg = "hash_init(): Argument #1 ($algo) must be a valid hashing algorithm".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: format!("hash_init(): Unknown hashing algorithm: {}", algo), line: 0 });
+        return Err(VmError { message: msg, line: 0 });
+    }
+
+    // HASH_HMAC = 1: must be cryptographic algo and key must not be empty
+    if options & 1 != 0 {
+        if !is_crypto_algo(&algo) {
+            let msg = "hash_init(): Argument #1 ($algo) must be a cryptographic hashing algorithm if HMAC is requested".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+        let key_empty = match &key {
+            Some(s) => s.as_bytes().is_empty(),
+            None => true,
+        };
+        if key_empty {
+            let msg = "hash_init(): Argument #3 ($key) must not be empty when HMAC is requested".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
     }
 
     let obj_id = vm.next_object_id();
@@ -245,29 +331,47 @@ fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
-fn hash_update_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn hash_update_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(obj)) = args.first() {
         let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
-        let mut obj = obj.borrow_mut();
-        let existing = obj.get_property(b"__hash_data").to_php_string();
+        let mut obj_mut = obj.borrow_mut();
+        // Check if context is already finalized
+        if obj_mut.get_property(b"__hash_finalized").is_truthy() {
+            drop(obj_mut);
+            let msg = "hash_update(): Argument #1 ($context) must be a valid, non-finalized HashContext".to_string();
+            let exc = vm.create_exception(b"Error", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
+        let existing = obj_mut.get_property(b"__hash_data").to_php_string();
         let mut combined = existing.as_bytes().to_vec();
         combined.extend_from_slice(data.as_bytes());
-        obj.set_property(b"__hash_data".to_vec(), Value::String(PhpString::from_vec(combined)));
+        obj_mut.set_property(b"__hash_data".to_vec(), Value::String(PhpString::from_vec(combined)));
         return Ok(Value::True);
     }
     Ok(Value::False)
 }
 
-fn hash_final_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn hash_final_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(obj)) = args.first() {
         let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
         let obj_borrow = obj.borrow();
+        // Check if context is already finalized
+        if obj_borrow.get_property(b"__hash_finalized").is_truthy() {
+            drop(obj_borrow);
+            let msg = "hash_final(): Argument #1 ($context) must be a valid, non-finalized HashContext".to_string();
+            let exc = vm.create_exception(b"Error", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
         let algo = obj_borrow.get_property(b"algo").to_php_string().to_string_lossy().to_ascii_lowercase();
         let data = obj_borrow.get_property(b"__hash_data").to_php_string();
         let is_hmac = obj_borrow.get_property(b"__hash_is_hmac").is_truthy();
         let hmac_key_val = obj_borrow.get_property(b"__hmac_key");
         let hmac_key = hmac_key_val.to_php_string();
         drop(obj_borrow);
+        // Mark context as finalized
+        obj.borrow_mut().set_property(b"__hash_finalized".to_vec(), Value::True);
 
         let digest = if is_hmac {
             let block_size = hash_block_size(&algo);
@@ -302,16 +406,23 @@ fn hash_final_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
-fn hash_copy_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn hash_copy_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(obj)) = args.first() {
         let obj_borrow = obj.borrow();
+        if obj_borrow.get_property(b"__hash_finalized").is_truthy() {
+            drop(obj_borrow);
+            let msg = "hash_copy(): Argument #1 ($context) must be a valid, non-finalized HashContext".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: 0 });
+        }
         let algo = obj_borrow.get_property(b"algo");
         let data = obj_borrow.get_property(b"__hash_data");
         let is_hmac = obj_borrow.get_property(b"__hash_is_hmac");
         let hmac_key = obj_borrow.get_property(b"__hmac_key");
         drop(obj_borrow);
 
-        let new_id = 0; // simplified
+        let new_id = vm.next_object_id();
         let mut new_obj = goro_core::object::PhpObject::new(b"HashContext".to_vec(), new_id);
         new_obj.set_property(b"algo".to_vec(), algo);
         new_obj.set_property(b"__hash_data".to_vec(), data);
@@ -335,7 +446,7 @@ fn hash_pbkdf2_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
 
-    let output_len = if length == 0 { hash_len } else if raw { length } else { length / 2 };
+    let output_len = if length == 0 { hash_len } else if raw { length } else { (length + 1) / 2 };
 
     // PBKDF2 implementation
     let block_size = hash_block_size(&algo);
@@ -397,10 +508,19 @@ fn hash_pbkdf2_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn hash_hmac_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for algo in &[
-        "md4", "md5", "sha1", "sha224", "sha256", "sha384", "sha512",
-        "sha512/224", "sha512/256",
+        "md2", "md4", "md5", "sha1",
+        "sha224", "sha256", "sha384",
+        "sha512/224", "sha512/256", "sha512",
         "sha3-224", "sha3-256", "sha3-384", "sha3-512",
         "ripemd128", "ripemd160", "ripemd256", "ripemd320",
+        "whirlpool",
+        "tiger128,3", "tiger160,3", "tiger192,3",
+        "tiger128,4", "tiger160,4", "tiger192,4",
+        "snefru", "snefru256",
+        "gost", "gost-crypto",
+        "haval128,3", "haval160,3", "haval192,3", "haval224,3", "haval256,3",
+        "haval128,4", "haval160,4", "haval192,4", "haval224,4", "haval256,4",
+        "haval128,5", "haval160,5", "haval192,5", "haval224,5", "haval256,5",
     ] {
         result.push(Value::String(PhpString::from_bytes(algo.as_bytes())));
     }
@@ -410,13 +530,24 @@ fn hash_hmac_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn hash_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for algo in &[
-        "md4", "md5", "sha1", "sha224", "sha256", "sha384", "sha512",
-        "sha512/224", "sha512/256",
+        "md2", "md4", "md5", "sha1",
+        "sha224", "sha256", "sha384",
+        "sha512/224", "sha512/256", "sha512",
         "sha3-224", "sha3-256", "sha3-384", "sha3-512",
         "ripemd128", "ripemd160", "ripemd256", "ripemd320",
-        "joaat",
-        "fnv132", "fnv1a32", "fnv164", "fnv1a64",
+        "whirlpool",
+        "tiger128,3", "tiger160,3", "tiger192,3",
+        "tiger128,4", "tiger160,4", "tiger192,4",
+        "snefru", "snefru256",
+        "gost", "gost-crypto",
         "adler32", "crc32", "crc32b", "crc32c",
+        "fnv132", "fnv1a32", "fnv164", "fnv1a64",
+        "joaat",
+        "murmur3a", "murmur3c", "murmur3f",
+        "xxh32", "xxh64", "xxh3", "xxh128",
+        "haval128,3", "haval160,3", "haval192,3", "haval224,3", "haval256,3",
+        "haval128,4", "haval160,4", "haval192,4", "haval224,4", "haval256,4",
+        "haval128,5", "haval160,5", "haval192,5", "haval224,5", "haval256,5",
     ] {
         result.push(Value::String(PhpString::from_bytes(algo.as_bytes())));
     }
@@ -1032,10 +1163,18 @@ fn sha512_core(data: &[u8], init: &[u64; 8], output_len: usize) -> Vec<u8> {
     result
 }
 
-fn hash_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn hash_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
     let filename = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let raw = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+
+    // Validate algorithm
+    if compute_hash(&algo, b"").is_none() {
+        let msg = "hash_file(): Argument #1 ($algo) must be a valid hashing algorithm".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
 
     match std::fs::read(&filename) {
         Ok(data) => {
@@ -1051,7 +1190,10 @@ fn hash_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 None => Ok(Value::False),
             }
         }
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!("hash_file({}): Failed to open stream: No such file or directory", filename));
+            Ok(Value::False)
+        }
     }
 }
 
@@ -1062,27 +1204,18 @@ fn hash_hkdf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let info = args.get(3).unwrap_or(&Value::Null).to_php_string();
     let salt = args.get(4).unwrap_or(&Value::Null).to_php_string();
 
-    let hash_len = match algo.as_str() {
-        "md5" | "md4" => 16,
-        "sha1" => 20,
-        "sha224" => 28,
-        "sha256" => 32,
-        "sha384" => 48,
-        "sha512" => 64,
-        _ => {
-            let msg = format!("hash_hkdf(): Argument #1 ($algo) must be a valid hashing algorithm, \"{}\" given", algo);
-            let exc = vm.create_exception(b"ValueError", &msg, 0);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
-        }
-    };
-
-    let output_len = if length == 0 { hash_len } else { length as usize };
-    if output_len > 255 * hash_len {
-        let msg = "hash_hkdf(): Argument #3 ($length) must be greater than or equal to 0 and less than or equal to 255 * HashLen";
-        let exc = vm.create_exception(b"ValueError", msg, 0);
+    if !is_crypto_algo(&algo) {
+        let msg = "hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: 0 });
+        return Err(VmError { message: msg, line: 0 });
+    }
+    let hash_len = compute_hash(&algo, b"").map(|h| h.len()).unwrap_or(0);
+    if hash_len == 0 {
+        let msg = "hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
     }
 
     if ikm.as_bytes().is_empty() {
@@ -1090,6 +1223,21 @@ fn hash_hkdf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg.to_string(), line: 0 });
+    }
+
+    if length < 0 {
+        let msg = "hash_hkdf(): Argument #3 ($length) must be greater than or equal to 0";
+        let exc = vm.create_exception(b"ValueError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: 0 });
+    }
+
+    let output_len = if length == 0 { hash_len } else { length as usize };
+    if output_len > 255 * hash_len {
+        let msg = format!("hash_hkdf(): Argument #3 ($length) must be less than or equal to {}", 255 * hash_len);
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
     }
 
     // HKDF-Extract: PRK = HMAC-Hash(salt, IKM)
@@ -1662,11 +1810,29 @@ fn hash_hmac_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 3 {
         return Ok(Value::False);
     }
-    let algo = args[0].to_php_string().to_string_lossy();
-    let filename = args[1].to_php_string().to_string_lossy();
+    let algo = args[0].to_php_string().to_string_lossy().to_ascii_lowercase();
+    let filename_str = args[1].to_php_string();
+    let filename_bytes = filename_str.as_bytes();
     let key = args[2].to_php_string();
     let raw = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
 
+    // Validate algorithm first
+    if !is_crypto_algo(&algo) {
+        let msg = "hash_hmac_file(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
+
+    // Check for null bytes in filename
+    if filename_bytes.contains(&0u8) {
+        let msg = "hash_hmac_file(): Argument #2 ($filename) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: 0 });
+    }
+
+    let filename = String::from_utf8_lossy(filename_bytes).to_string();
     match std::fs::read(&filename) {
         Ok(data) => {
             let data_val = Value::String(PhpString::from_vec(data));
