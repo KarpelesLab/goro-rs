@@ -1609,6 +1609,9 @@ fn build_simplexml_subtree(
     let mut text_content = String::new();
     let mut child_order: Vec<String> = Vec::new();
 
+    // Allocate object id parent-first to match PHP's allocation order.
+    let obj_id = vm.next_object_id();
+
     while *pos < events.len() {
         match &events[*pos] {
             XmlEvent::StartElement {
@@ -1640,7 +1643,6 @@ fn build_simplexml_subtree(
         }
     }
 
-    let obj_id = vm.next_object_id();
     let mut obj = PhpObject::new(b"SimpleXMLElement".to_vec(), obj_id);
 
     // Store the tag name as an internal property (for getName())
@@ -1661,14 +1663,13 @@ fn build_simplexml_subtree(
         );
     }
 
-    if children.is_empty() {
-        // Leaf node: if has non-whitespace text, the object stringifies to the text
-        // We store it as "0" property (internal) for __toString
-        // PHP SimpleXML does not create text nodes for whitespace-only content
-        if !text_content.is_empty() && text_content.chars().any(|c| !c.is_whitespace()) {
-            obj.set_property(b"0".to_vec(), Value::String(PhpString::from_string(text_content)));
-        }
-    } else {
+    // Store text content (non-whitespace) — for both leaf and non-leaf nodes.
+    // For non-leaf nodes this is the text directly inside (mixed content).
+    // PHP SimpleXML does not create text nodes for whitespace-only content.
+    if !text_content.is_empty() && text_content.chars().any(|c| !c.is_whitespace()) {
+        obj.set_property(b"0".to_vec(), Value::String(PhpString::from_string(text_content)));
+    }
+    if !children.is_empty() {
         for key in &child_order {
             let vals = children.get(key).unwrap();
             if vals.len() == 1 {
@@ -1731,6 +1732,10 @@ fn simplexml_load_string(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
             pos += 1;
 
             let root = build_simplexml_subtree(vm, &events, &mut pos, &root_name, &root_attrs);
+            // Mark the root for XML declaration emission in asXML/saveXML
+            if let Value::Object(ref obj) = root {
+                obj.borrow_mut().set_property(b"__sxml_is_root".to_vec(), Value::True);
+            }
             Ok(root)
         }
         Err(_) => Ok(Value::False),

@@ -3259,6 +3259,27 @@ impl Vm {
             return Rc::new(RefCell::new(a.borrow().clone()));
         }
         let class_name_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        // SimpleXMLElement with __sxml_list: cast to array of sibling values (as strings).
+        if class_name_lower == b"simplexmlelement" {
+            let list = ob.get_property(b"__sxml_list");
+            if let Value::Array(arr) = &list {
+                let mut result = PhpArray::new();
+                for (_k, v) in arr.borrow().iter() {
+                    // Convert each sibling to its text content (string).
+                    if let Value::Object(sib) = v {
+                        let text = sib.borrow().get_property(b"0");
+                        if !matches!(text, Value::Null | Value::Undef) {
+                            result.push(text);
+                        } else {
+                            result.push(Value::String(PhpString::empty()));
+                        }
+                    } else {
+                        result.push(v.clone());
+                    }
+                }
+                return Rc::new(RefCell::new(result));
+            }
+        }
         let prop_info: std::collections::HashMap<Vec<u8>, (Visibility, Vec<u8>)> =
             if let Some(class_def) = self.classes.get(&class_name_lower) {
                 class_def.properties.iter()
@@ -5078,6 +5099,16 @@ impl Vm {
             }
             b"count" => {
                 let ob = obj.borrow();
+                // If this SXE is wrapping a sibling list, count = list length.
+                let list = ob.get_property(b"__sxml_list");
+                if let Value::Array(arr) = &list {
+                    return Some(Value::Long(arr.borrow().len() as i64));
+                }
+                // If this is a name-bound single SXE, count = 1.
+                if ob.get_property(b"__sxml_named").is_truthy() {
+                    return Some(Value::Long(1));
+                }
+                // Otherwise return the count of immediate element children.
                 let mut count = 0i64;
                 for (name, val) in ob.properties.iter() {
                     if !name.starts_with(b"@") && !name.starts_with(b"__sxml_") && name != b"0" {
@@ -5094,8 +5125,16 @@ impl Vm {
                 let flat = Self::simplexml_flatten_children(obj);
                 let ob = obj.borrow();
                 let pos = ob.get_property(b"__sxml_iter_pos");
-                let pos_val = if matches!(pos, Value::Null | Value::Undef) { 0usize } else { pos.to_long() as usize };
-                Some(if pos_val < flat.len() { Value::True } else { Value::False })
+                // valid() returns false if not initialized (Null) instead of throwing
+                if matches!(pos, Value::Null | Value::Undef) {
+                    return Some(Value::False);
+                }
+                let pos_val = pos.to_long();
+                if pos_val < 0 {
+                    return Some(Value::False);
+                }
+                let pos_usize = pos_val as usize;
+                Some(if pos_usize < flat.len() { Value::True } else { Value::False })
             }
             b"rewind" => {
                 obj.borrow_mut().set_property(b"__sxml_iter_pos".to_vec(), Value::Long(0));
@@ -5105,15 +5144,45 @@ impl Vm {
                 let flat = Self::simplexml_flatten_children(obj);
                 let ob = obj.borrow();
                 let pos = ob.get_property(b"__sxml_iter_pos");
-                let pos_val = if matches!(pos, Value::Null | Value::Undef) { 0usize } else { pos.to_long() as usize };
-                Some(flat.get(pos_val).map(|(_, v)| v.clone()).unwrap_or(Value::Null))
+                if matches!(pos, Value::Null | Value::Undef) {
+                    drop(ob);
+                    let exc = self.create_exception(b"Error",
+                        "Iterator not initialized or already consumed", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                let pos_val = pos.to_long();
+                let pos_usize = if pos_val < 0 { usize::MAX } else { pos_val as usize };
+                if pos_usize >= flat.len() {
+                    drop(ob);
+                    let exc = self.create_exception(b"Error",
+                        "Iterator not initialized or already consumed", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                Some(flat.get(pos_usize).map(|(_, v)| v.clone()).unwrap_or(Value::Null))
             }
             b"key" => {
                 let flat = Self::simplexml_flatten_children(obj);
                 let ob = obj.borrow();
                 let pos = ob.get_property(b"__sxml_iter_pos");
-                let pos_val = if matches!(pos, Value::Null | Value::Undef) { 0usize } else { pos.to_long() as usize };
-                Some(flat.get(pos_val).map(|(k, _)| Value::String(PhpString::from_vec(k.clone()))).unwrap_or(Value::Null))
+                if matches!(pos, Value::Null | Value::Undef) {
+                    drop(ob);
+                    let exc = self.create_exception(b"Error",
+                        "Iterator not initialized or already consumed", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                let pos_val = pos.to_long();
+                let pos_usize = if pos_val < 0 { usize::MAX } else { pos_val as usize };
+                if pos_usize >= flat.len() {
+                    drop(ob);
+                    let exc = self.create_exception(b"Error",
+                        "Iterator not initialized or already consumed", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                Some(flat.get(pos_usize).map(|(k, _)| Value::String(PhpString::from_vec(k.clone()))).unwrap_or(Value::Null))
             }
             b"next" => {
                 let ob = obj.borrow();
@@ -5130,6 +5199,29 @@ impl Vm {
     /// Flatten SimpleXMLElement children: expand Array properties into individual (name, value) pairs
     fn simplexml_flatten_children(obj: &Rc<RefCell<PhpObject>>) -> Vec<(Vec<u8>, Value)> {
         let ob = obj.borrow();
+        // If __sxml_list is present, this SXE represents one of a sibling list.
+        // Iteration should yield each sibling under the same name.
+        let list = ob.get_property(b"__sxml_list");
+        if let Value::Array(arr) = &list {
+            // Name = the SXE's tag name
+            let name_bytes: Vec<u8> = match ob.get_property(b"__sxml_name") {
+                Value::String(s) => s.as_bytes().to_vec(),
+                _ => Vec::new(),
+            };
+            let mut result = Vec::new();
+            for (_k, v) in arr.borrow().iter() {
+                result.push((name_bytes.clone(), v.clone()));
+            }
+            return result;
+        }
+        // If this is a name-bound single SXE, iteration yields itself once.
+        if ob.get_property(b"__sxml_named").is_truthy() {
+            let name_bytes: Vec<u8> = match ob.get_property(b"__sxml_name") {
+                Value::String(s) => s.as_bytes().to_vec(),
+                _ => Vec::new(),
+            };
+            return vec![(name_bytes, Value::Object(obj.clone()))];
+        }
         let mut result = Vec::new();
         for (name, val) in ob.properties.iter() {
             if name.starts_with(b"@") || name.starts_with(b"__sxml_") || name == b"0" {
@@ -6140,6 +6232,17 @@ impl Vm {
                 let inner = ob.get_property(b"__spl_inner");
                 drop(ob);
                 let r = self.call_object_method(&inner, b"current", &[]).unwrap_or(Value::Null);
+                // RecursiveIteratorIterator absorbs "Iterator not initialized" from inner
+                if let Some(Value::Object(exc_obj)) = &self.current_exception {
+                    let msg = exc_obj.borrow()
+                        .get_property(b"message")
+                        .to_php_string()
+                        .to_string_lossy();
+                    if msg == "Iterator not initialized or already consumed" {
+                        self.current_exception = None;
+                        return Some(Value::Null);
+                    }
+                }
                 Some(r)
             }
             b"key" => {
@@ -6147,6 +6250,16 @@ impl Vm {
                 let inner = ob.get_property(b"__spl_inner");
                 drop(ob);
                 let r = self.call_object_method(&inner, b"key", &[]).unwrap_or(Value::Null);
+                if let Some(Value::Object(exc_obj)) = &self.current_exception {
+                    let msg = exc_obj.borrow()
+                        .get_property(b"message")
+                        .to_php_string()
+                        .to_string_lossy();
+                    if msg == "Iterator not initialized or already consumed" {
+                        self.current_exception = None;
+                        return Some(Value::Null);
+                    }
+                }
                 Some(r)
             }
             b"next" => {
@@ -7475,6 +7588,9 @@ impl Vm {
                 method,
                 b"children" | b"attributes" | b"asxml" | b"xpath"
                     | b"addchild" | b"addattribute"
+                    | b"savexml" | b"getdocnamespaces" | b"getnamespaces"
+                    | b"registerxpathnamespace"
+                    | b"__construct"
             ),
             b"random\\engine\\mt19937"
             | b"random\\engine\\xoshiro256starstar"
@@ -10146,6 +10262,24 @@ impl Vm {
     }
 
 
+    /// Parse XML using the registered simplexml_load_string function, returning the parsed Value::Object or None on failure.
+    fn simplexml_parse_into(&mut self, xml: &str) -> Option<Value> {
+        // Use the registered simplexml_load_string function
+        let func_name = b"simplexml_load_string";
+        let f = self.functions.get(func_name.as_slice()).copied()?;
+        let args = vec![Value::String(PhpString::from_string(xml.to_string()))];
+        match f(self, &args) {
+            Ok(v) => {
+                if matches!(v, Value::False | Value::Null) {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
     fn simplexml_docall(
         &mut self,
         method: &[u8],
@@ -10153,6 +10287,50 @@ impl Vm {
         args: &[Value],
     ) -> Option<Value> {
         match method {
+            b"__construct" => {
+                // __construct(string $data, int $options = 0, bool $dataIsURL = false,
+                //             string $namespaceOrPrefix = "", bool $isPrefix = false)
+                let data = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                let data_is_url = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
+                let xml_content = if data_is_url {
+                    match std::fs::read_to_string(&data) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            // throw exception
+                            let exc = self.create_exception(b"Exception",
+                                "String could not be parsed as XML", 0);
+                            self.current_exception = Some(exc);
+                            return Some(Value::Null);
+                        }
+                    }
+                } else {
+                    data
+                };
+                // Parse the XML and populate the receiver object
+                if let Some(populated) = self.simplexml_parse_into(&xml_content) {
+                    if let Value::Object(src) = &populated {
+                        let src_borrow = src.borrow();
+                        let mut tgt = obj.borrow_mut();
+                        // Copy all properties from the parsed root to the target
+                        let props: Vec<(Vec<u8>, Value)> = src_borrow.properties
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        drop(src_borrow);
+                        for (k, v) in props {
+                            tgt.set_property(k, v);
+                        }
+                        // The constructed receiver is the root.
+                        tgt.set_property(b"__sxml_is_root".to_vec(), Value::True);
+                    }
+                    Some(Value::Null)
+                } else {
+                    // Emit a warning; the SimpleXMLElement remains uninitialized.
+                    self.emit_warning("SimpleXMLElement::__construct(): String could not be parsed as XML");
+                    obj.borrow_mut().set_property(b"__sxml_uninit".to_vec(), Value::True);
+                    Some(Value::Null)
+                }
+            }
             b"children" => {
                 // children(?string $namespaceOrPrefix = null, bool $isPrefix = false): SimpleXMLElement
                 let ob = obj.borrow();
@@ -10170,20 +10348,30 @@ impl Vm {
                 // attributes(?string $namespaceOrPrefix = null, bool $isPrefix = false): ?SimpleXMLElement
                 let ob = obj.borrow();
                 let attrs = ob.get_property(b"@attributes");
+                let obj_id = self.next_object_id();
+                let mut attr_obj = PhpObject::new(b"SimpleXMLElement".to_vec(), obj_id);
+                attr_obj.set_property(b"__sxml_name".to_vec(), Value::String(PhpString::from_bytes(b"@attributes")));
                 if let Value::Array(attrs_arr) = &attrs {
-                    let obj_id = self.next_object_id();
-                    let mut attr_obj = PhpObject::new(b"SimpleXMLElement".to_vec(), obj_id);
-                    attr_obj.set_property(b"__sxml_name".to_vec(), Value::String(PhpString::from_bytes(b"@attributes")));
                     attr_obj.set_property(b"@attributes".to_vec(), Value::Array(attrs_arr.clone()));
-                    Some(Value::Object(Rc::new(RefCell::new(attr_obj))))
                 } else {
-                    Some(Value::Null)
+                    // Empty SXE that iterates 0 times
+                    attr_obj.set_property(b"@attributes".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
                 }
+                Some(Value::Object(Rc::new(RefCell::new(attr_obj))))
             }
             b"asxml" => {
                 // asXML(?string $filename = null): string|bool
                 let filename = args.get(1);
-                let xml = self.simplexml_to_xml_string(obj);
+                // The root element's asXML includes the XML declaration.
+                // We approximate "root" by treating any element without a parent as root.
+                // Since we don't track parents, we infer from __sxml_is_root flag if set.
+                let is_root = obj.borrow().get_property(b"__sxml_is_root").is_truthy();
+                let body = self.simplexml_to_xml_string(obj);
+                let xml = if is_root {
+                    format!("<?xml version=\"1.0\"?>\n{}", body)
+                } else {
+                    body
+                };
                 if let Some(fname_val) = filename {
                     if !matches!(fname_val, Value::Null | Value::Undef) {
                         let fname = fname_val.to_php_string().to_string_lossy();
@@ -10200,6 +10388,12 @@ impl Vm {
             }
             b"xpath" => {
                 // xpath(string $expression): array|null|false
+                if obj.borrow().get_property(b"__sxml_uninit").is_truthy() {
+                    let exc = self.create_exception(b"Error",
+                        "SimpleXMLElement is not properly initialized", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let expr = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
                 let results = self.simplexml_xpath(obj, &expr);
                 Some(results)
@@ -10243,6 +10437,10 @@ impl Vm {
                 let name = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
                 let value = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
                 if name.is_empty() {
+                    let exc = self.create_exception(b"ValueError",
+                        "SimpleXMLElement::addAttribute(): Argument #1 ($qualifiedName) must not be empty",
+                        0);
+                    self.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
                 let mut ob = obj.borrow_mut();
@@ -10262,11 +10460,100 @@ impl Vm {
                 }
                 Some(Value::Null)
             }
+            b"getdocnamespaces" | b"getnamespaces" => {
+                // getDocNamespaces(bool $recursive = false, bool $fromRoot = true): array|false
+                let ob = obj.borrow();
+                if ob.get_property(b"__sxml_uninit").is_truthy() {
+                    return Some(Value::False);
+                }
+                let recursive = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+                let mut result = PhpArray::new();
+                Self::simplexml_collect_namespaces_recursive(&ob, &mut result, recursive);
+                drop(ob);
+                Some(Value::Array(Rc::new(RefCell::new(result))))
+            }
+            b"savexml" => {
+                // saveXML alias of asXML
+                let filename = args.get(1);
+                let is_root = obj.borrow().get_property(b"__sxml_is_root").is_truthy();
+                let body = self.simplexml_to_xml_string(obj);
+                let xml = if is_root {
+                    format!("<?xml version=\"1.0\"?>\n{}", body)
+                } else {
+                    body
+                };
+                if let Some(fname_val) = filename {
+                    if !matches!(fname_val, Value::Null | Value::Undef) {
+                        let fname = fname_val.to_php_string().to_string_lossy();
+                        match std::fs::write(&fname, &xml) {
+                            Ok(_) => return Some(Value::True),
+                            Err(_) => return Some(Value::False),
+                        }
+                    }
+                }
+                Some(Value::String(PhpString::from_string(xml)))
+            }
+            b"registerxpathnamespace" => {
+                // registerXPathNamespace(string $prefix, string $namespace): bool
+                let prefix = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                let ns = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                if prefix.is_empty() {
+                    return Some(Value::False);
+                }
+                // Store in @xpath_namespaces
+                let mut ob = obj.borrow_mut();
+                let xp_ns = ob.get_property(b"__sxml_xpath_ns");
+                let arr_rc = if let Value::Array(a) = xp_ns {
+                    a
+                } else {
+                    let a = Rc::new(RefCell::new(PhpArray::new()));
+                    ob.set_property(b"__sxml_xpath_ns".to_vec(), Value::Array(a.clone()));
+                    a
+                };
+                arr_rc.borrow_mut().set(
+                    ArrayKey::String(PhpString::from_string(prefix)),
+                    Value::String(PhpString::from_string(ns)),
+                );
+                Some(Value::True)
+            }
             b"offsetget" => {
                 // ArrayAccess: $xml['attr'] -> access @attributes
+                // Integer key: access sibling list at index (if there's a __sxml_list)
                 let key = args.get(1)?;
-                let key_str = key.to_php_string();
                 let ob = obj.borrow();
+                // Integer key: index into __sxml_list (sibling list) if present.
+                let is_int_key = matches!(key, Value::Long(_) | Value::Double(_))
+                    || (matches!(key, Value::String(_))
+                        && key.to_php_string().to_string_lossy().parse::<i64>().is_ok());
+                if is_int_key {
+                    let idx = key.to_long();
+                    let list = ob.get_property(b"__sxml_list");
+                    if let Value::Array(arr) = &list {
+                        let v_opt = arr.borrow().get(&ArrayKey::Int(idx)).cloned();
+                        drop(ob);
+                        if let Some(v) = v_opt {
+                            // After indexing, the resulting SXE represents a single element
+                            // — strip __sxml_list and __sxml_named so iteration/count
+                            // operates on children.
+                            if let Value::Object(o) = &v {
+                                let mut mo = o.borrow_mut();
+                                mo.remove_property(b"__sxml_list");
+                                mo.remove_property(b"__sxml_named");
+                            }
+                            return Some(v);
+                        }
+                        return Some(Value::Null);
+                    }
+                    drop(ob);
+                    // No sibling list — only valid integer key is 0 (or string "0"):
+                    if idx == 0 {
+                        // Strip __sxml_named since indexed access counts children
+                        obj.borrow_mut().remove_property(b"__sxml_named");
+                        return Some(Value::Object(obj.clone()));
+                    }
+                    return Some(Value::Null);
+                }
+                let key_str = key.to_php_string();
                 let attrs = ob.get_property(b"@attributes");
                 if let Value::Array(attrs_arr) = &attrs {
                     let k = ArrayKey::String(key_str);
@@ -10485,6 +10772,60 @@ impl Vm {
             results.push(node);
         }
         Value::Array(Rc::new(RefCell::new(results)))
+    }
+
+    /// Collect namespace declarations from @attributes (entries starting with "xmlns" or "xmlns:prefix").
+    /// If recursive_descend is true, walks into all descendants.
+    fn simplexml_collect_namespaces_recursive(
+        obj: &std::cell::Ref<'_, PhpObject>,
+        result: &mut PhpArray,
+        recursive_descend: bool,
+    ) {
+        let attrs = obj.get_property(b"@attributes");
+        if let Value::Array(attrs_arr) = &attrs {
+            let attrs_borrow = attrs_arr.borrow();
+            for (key, val) in attrs_borrow.iter() {
+                if let ArrayKey::String(k) = key {
+                    let kb = k.as_bytes();
+                    if kb == b"xmlns" {
+                        // default namespace; key is ""
+                        let prefix = ArrayKey::String(PhpString::from_bytes(b""));
+                        if result.get(&prefix).is_none() {
+                            result.set(prefix, val.clone());
+                        }
+                    } else if kb.starts_with(b"xmlns:") {
+                        let prefix_bytes = &kb[6..];
+                        let prefix = ArrayKey::String(PhpString::from_bytes(prefix_bytes));
+                        if result.get(&prefix).is_none() {
+                            result.set(prefix, val.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if recursive_descend {
+            for (name, val) in obj.properties.iter() {
+                if name.starts_with(b"@") || name.starts_with(b"__sxml_") || name == b"0" {
+                    continue;
+                }
+                match val {
+                    Value::Object(child_obj) => {
+                        let cb = child_obj.borrow();
+                        Self::simplexml_collect_namespaces_recursive(&cb, result, true);
+                    }
+                    Value::Array(arr) => {
+                        let arr_borrow = arr.borrow();
+                        for (_k, v) in arr_borrow.iter() {
+                            if let Value::Object(child_obj) = v {
+                                let cb = child_obj.borrow();
+                                Self::simplexml_collect_namespaces_recursive(&cb, result, true);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn simplexml_collect_descendants(&self, node: &Value, results: &mut Vec<Value>) {
@@ -25977,7 +26318,31 @@ impl Vm {
                                 }
                             }
                         } else {
-                            let prop = obj.borrow().get_property(prop_name.as_bytes());
+                            let mut prop = obj.borrow().get_property(prop_name.as_bytes());
+                            // SimpleXMLElement: when accessing `$x->name`, the resulting SXE is
+                            // "name-bound" — iteration/count operates over the named sibling
+                            // list. For multi-sibling (Array property), wrap the first with
+                            // __sxml_list. For single, mark __sxml_named so count returns 1.
+                            if class_lower == b"simplexmlelement" {
+                                if let Value::Array(arr) = &prop {
+                                    let arr_clone = arr.clone();
+                                    let first_val = arr_clone.borrow().iter().next().map(|(_k, v)| v.clone());
+                                    if let Some(v) = first_val {
+                                        if let Value::Object(ref first_obj) = v {
+                                            first_obj.borrow_mut().set_property(
+                                                b"__sxml_list".to_vec(),
+                                                Value::Array(arr_clone),
+                                            );
+                                        }
+                                        prop = v;
+                                    } else {
+                                        prop = Value::Null;
+                                    }
+                                } else if let Value::Object(o) = &prop {
+                                    // Single name-bound SXE: mark to signal "1 element"
+                                    o.borrow_mut().set_property(b"__sxml_named".to_vec(), Value::True);
+                                }
+                            }
                             // Check for typed property accessed before initialization
                             // Skip this check when error reporting is suppressed (empty(), @)
                             if matches!(prop, Value::Undef) && obj.borrow().has_property(prop_name.as_bytes()) && self.error_reporting != 0 {
