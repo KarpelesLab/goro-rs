@@ -332,6 +332,14 @@ pub struct Vm {
     pub object_to_double: Option<fn(&Value) -> Option<f64>>,
     /// Object type checker (e.g., is GMP?)
     pub object_is_operator_type: Option<fn(&Value) -> bool>,
+    /// Native constructor handler keyed by lowercase class name.
+    /// Called for `new ClassName(args...)` where `args[0]` is `$this` (the
+    /// freshly-allocated object). On success, return Ok(()). On error, the
+    /// handler must set `vm.current_exception` and return Err with a message.
+    /// If no entry exists for a class, the VM falls through to its built-in
+    /// constructor dispatch (SPL/Reflection/etc.).
+    pub object_construct_handlers:
+        std::collections::HashMap<Vec<u8>, fn(&mut Vm, &[Value], u32) -> Result<(), String>>,
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
     /// Parameter types for built-in functions (for strict_types enforcement)
@@ -1191,6 +1199,7 @@ impl Vm {
             object_to_long: None,
             object_to_double: None,
             object_is_operator_type: None,
+            object_construct_handlers: std::collections::HashMap::new(),
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();
                 // Core extensions always available
@@ -2087,6 +2096,33 @@ impl Vm {
     /// Returns the error message for use in VmError if no exception handler is available.
     pub fn throw_type_error(&mut self, message: String) -> Value {
         self.create_exception(b"TypeError", &message, self.current_line)
+    }
+
+    /// Parse a prefixed error message from an object operator hook (e.g. GMP)
+    /// and return (class_name, clean_message). Supports prefixes:
+    ///   "\x01V\x01<msg>" => ValueError
+    ///   "\x01D\x01<msg>" => DivisionByZeroError
+    ///   else => TypeError
+    pub fn classify_object_op_error(msg: &str) -> (&'static [u8], String) {
+        let bytes = msg.as_bytes();
+        if bytes.len() >= 3 && bytes[0] == 0x01 && bytes[2] == 0x01 {
+            let class: &[u8] = match bytes[1] {
+                b'V' => b"ValueError",
+                b'D' => b"DivisionByZeroError",
+                _ => b"TypeError",
+            };
+            return (class, String::from_utf8_lossy(&bytes[3..]).into_owned());
+        }
+        (b"TypeError", msg.to_string())
+    }
+
+    /// Throw the appropriate exception for an object operator hook error.
+    /// Sets current_exception and returns the (class_name, message).
+    pub fn throw_object_op_error(&mut self, msg: &str) -> (&'static [u8], String) {
+        let (class, clean_msg) = Self::classify_object_op_error(msg);
+        let exc = self.create_exception(class, &clean_msg, self.current_line);
+        self.current_exception = Some(exc);
+        (class, clean_msg)
     }
 
     /// Allocate an object ID. Prefers a recently freed ID (via the global
@@ -12776,18 +12812,10 @@ impl Vm {
 
                 OpCode::Assign => {
                     let val = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, &op_array, op.line);
-                    // Recycle old object ID before overwriting
-                    if let OperandType::Cv(idx) = op.op1 {
-                        if let Some(old_val) = cvs.get(idx as usize) {
-                            if let Value::Object(rc) = old_val {
-                                // In global scope, the value may also be in self.globals (strong_count +1)
-                                let threshold = if self.is_global_scope { 2 } else { 1 };
-                                if Rc::strong_count(rc) <= threshold {
-                                    self.free_object_ids.push(rc.borrow().object_id);
-                                }
-                            }
-                        }
-                    }
+                    // The previous CV slot's object id (if any) is recycled
+                    // via PhpObject::drop when Rc<...> hits zero. Pushing here
+                    // as well caused duplicates in the free pool and silent
+                    // object-id collisions (e.g. catch-reusing `$e`).
                     self.write_operand(&op.op1, val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
                     if let OperandType::Tmp(idx) = op.op2 {
                         if let Some(slot) = tmps.get_mut(idx as usize) { *slot = Value::Undef; }
@@ -12860,15 +12888,14 @@ impl Vm {
                                         continue;
                                     }
                                     Some(Err(msg)) => {
-                                        let exc_val = self.throw_type_error(msg.clone());
-                                        self.current_exception = Some(exc_val);
+                                        let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
                                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
                                             continue;
                                         } else {
-                                            return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
+                                            return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line });
                                         }
-                                    }
+                                        }
                                     None => {}
                                 }
                             }
@@ -12903,10 +12930,9 @@ impl Vm {
                                         continue;
                                     }
                                     Some(Err(msg)) => {
-                                        let exc_val = self.throw_type_error(msg.clone());
-                                        self.current_exception = Some(exc_val);
+                                        let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
                                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
-                                        else { return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line }); }
+                                        else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); }
                                     }
                                     None => {}
                                 }
@@ -12942,10 +12968,9 @@ impl Vm {
                                         continue;
                                     }
                                     Some(Err(msg)) => {
-                                        let exc_val = self.throw_type_error(msg.clone());
-                                        self.current_exception = Some(exc_val);
+                                        let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
                                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
-                                        else { return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line }); }
+                                        else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); }
                                     }
                                     None => {}
                                 }
@@ -12981,10 +13006,9 @@ impl Vm {
                                         continue;
                                     }
                                     Some(Err(msg)) => {
-                                        let exc = self.create_exception(b"DivisionByZeroError", &msg, op.line);
-                                        self.current_exception = Some(exc);
+                                        let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
                                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
-                                        else { return Err(VmError { message: format!("Uncaught DivisionByZeroError: {}", msg), line: op.line }); }
+                                        else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); }
                                     }
                                     None => {}
                                 }
@@ -13049,10 +13073,9 @@ impl Vm {
                                         continue;
                                     }
                                     Some(Err(msg)) => {
-                                        let exc = self.create_exception(b"DivisionByZeroError", &msg, op.line);
-                                        self.current_exception = Some(exc);
+                                        let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
                                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
-                                        else { return Err(VmError { message: format!("Uncaught DivisionByZeroError: {}", msg), line: op.line }); }
+                                        else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); }
                                     }
                                     None => {}
                                 }
@@ -13126,10 +13149,9 @@ impl Vm {
                                         continue;
                                     }
                                     Some(Err(msg)) => {
-                                        let exc_val = self.throw_type_error(msg.clone());
-                                        self.current_exception = Some(exc_val);
+                                        let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
                                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = catch_target as usize; continue; }
-                                        else { return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line }); }
+                                        else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); }
                                     }
                                     None => {}
                                 }
@@ -13253,7 +13275,7 @@ impl Vm {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "&", &a, &b) {
                                     Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let (class_bytes, clean_msg) = self.throw_object_op_error(&msg); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -13299,7 +13321,7 @@ impl Vm {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "|", &a, &b) {
                                     Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let (class_bytes, clean_msg) = self.throw_object_op_error(&msg); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -13349,7 +13371,7 @@ impl Vm {
                             if is_type(&a) || is_type(&b) {
                                 match handler(self, "^", &a, &b) {
                                     Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let (class_bytes, clean_msg) = self.throw_object_op_error(&msg); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -13454,10 +13476,9 @@ impl Vm {
                                 match handler(self, "<<", &a, &b) {
                                     Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
                                     Some(Err(msg)) => {
-                                        let exc = self.create_exception(b"ValueError", &msg, op.line);
-                                        self.current_exception = Some(exc);
+                                        let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
                                         if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; }
-                                        else { return Err(VmError { message: msg, line: op.line }); }
+                                        else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); }
                                     }
                                     None => {}
                                 }
@@ -13492,10 +13513,9 @@ impl Vm {
                                 match handler(self, ">>", &a, &b) {
                                     Some(Ok(result)) => { self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
                                     Some(Err(msg)) => {
-                                        let exc = self.create_exception(b"ValueError", &msg, op.line);
-                                        self.current_exception = Some(exc);
+                                        let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
                                         if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; }
-                                        else { return Err(VmError { message: msg, line: op.line }); }
+                                        else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); }
                                     }
                                     None => {}
                                 }
@@ -13882,7 +13902,7 @@ impl Vm {
                             if is_type(&cv_val) || is_type(&rhs) {
                                 match handler(self, "+", &cv_val, &rhs) {
                                     Some(Ok(result)) => { self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let (class_bytes, clean_msg) = self.throw_object_op_error(&msg); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -13918,7 +13938,7 @@ impl Vm {
                             if is_type(&cv_val) || is_type(&rhs) {
                                 match handler(self, "-", &cv_val, &rhs) {
                                     Some(Ok(result)) => { self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let (class_bytes, clean_msg) = self.throw_object_op_error(&msg); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -13954,7 +13974,7 @@ impl Vm {
                             if is_type(&cv_val) || is_type(&rhs) {
                                 match handler(self, "*", &cv_val, &rhs) {
                                     Some(Ok(result)) => { self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys); continue; }
-                                    Some(Err(msg)) => { let exc_val = self.throw_type_error(msg.clone()); self.current_exception = Some(exc_val); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: msg, line: op.line }); } }
+                                    Some(Err(msg)) => { let (class_bytes, clean_msg) = self.throw_object_op_error(&msg); if let Some((ct, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc); ip = ct as usize; continue; } else { return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(class_bytes), clean_msg), line: op.line }); } }
                                     None => {}
                                 }
                             }
@@ -17412,6 +17432,31 @@ impl Vm {
                                         raw_class_lower.clone()
                                     };
 
+                                    // Extension-registered native constructor handlers (e.g. GMP).
+                                    if let Some(&handler) = self.object_construct_handlers.get(class_lower.as_slice()) {
+                                        drop(obj_mut);
+                                        let args_clone = call.args.clone();
+                                        match handler(self, &args_clone, op.line) {
+                                            Ok(()) => {
+                                                self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                                                continue;
+                                            }
+                                            Err(_msg) => {
+                                                // current_exception should already be set by the handler.
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                                    pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                } else {
+                                                    let class_disp = self.current_exception.as_ref()
+                                                        .and_then(|v| if let Value::Object(o) = v { Some(String::from_utf8_lossy(&o.borrow().class_name).into_owned()) } else { None })
+                                                        .unwrap_or_else(|| "TypeError".to_string());
+                                                    return Err(VmError { message: format!("Uncaught {}: {}", class_disp, _msg), line: op.line });
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // SPL class constructors and Reflection class constructors
                                     match class_lower.as_slice() {
                                         b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
@@ -18758,22 +18803,37 @@ impl Vm {
                 // Casts
                 OpCode::CastInt => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    if let Value::Object(obj) = &val {
-                        let class_name = {
-                            let borrowed = obj.borrow();
-                            crate::value::display_class_name(&borrowed.class_name)
-                        };
-                        self.emit_warning_at(
-                            &format!(
-                                "Object of class {} could not be converted to int",
-                                class_name
-                            ),
-                            op.line,
-                        );
-                    }
+                    // Try extension-provided long cast (e.g. GMP).
+                    let long_val = if let Some(handler) = self.object_to_long {
+                        if let Some(n) = handler(&val) {
+                            Some(n)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let result = if let Some(n) = long_val {
+                        n
+                    } else {
+                        if let Value::Object(obj) = &val {
+                            let class_name = {
+                                let borrowed = obj.borrow();
+                                crate::value::display_class_name(&borrowed.class_name)
+                            };
+                            self.emit_warning_at(
+                                &format!(
+                                    "Object of class {} could not be converted to int",
+                                    class_name
+                                ),
+                                op.line,
+                            );
+                        }
+                        val.to_long()
+                    };
                     self.write_operand(
                         &op.result,
-                        Value::Long(val.to_long()),
+                        Value::Long(result),
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -18781,22 +18841,36 @@ impl Vm {
                 }
                 OpCode::CastFloat => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    if let Value::Object(obj) = &val {
-                        let class_name = {
-                            let borrowed = obj.borrow();
-                            crate::value::display_class_name(&borrowed.class_name)
-                        };
-                        self.emit_warning_at(
-                            &format!(
-                                "Object of class {} could not be converted to float",
-                                class_name
-                            ),
-                            op.line,
-                        );
-                    }
+                    let double_val = if let Some(handler) = self.object_to_double {
+                        if let Some(d) = handler(&val) {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let result = if let Some(d) = double_val {
+                        d
+                    } else {
+                        if let Value::Object(obj) = &val {
+                            let class_name = {
+                                let borrowed = obj.borrow();
+                                crate::value::display_class_name(&borrowed.class_name)
+                            };
+                            self.emit_warning_at(
+                                &format!(
+                                    "Object of class {} could not be converted to float",
+                                    class_name
+                                ),
+                                op.line,
+                            );
+                        }
+                        val.to_double()
+                    };
                     self.write_operand(
                         &op.result,
-                        Value::Double(val.to_double()),
+                        Value::Double(result),
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -18830,13 +18904,24 @@ impl Vm {
                 }
                 OpCode::CastBool => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // For objects that opt in to scalar casts (e.g. GMP),
+                    // use the registered to_long handler to decide truthiness.
+                    let truthy = if matches!(&val, Value::Object(_)) {
+                        if let Some(handler) = self.object_to_long {
+                            if let Some(n) = handler(&val) {
+                                n != 0
+                            } else {
+                                val.is_truthy()
+                            }
+                        } else {
+                            val.is_truthy()
+                        }
+                    } else {
+                        val.is_truthy()
+                    };
                     self.write_operand(
                         &op.result,
-                        if val.is_truthy() {
-                            Value::True
-                        } else {
-                            Value::False
-                        },
+                        if truthy { Value::True } else { Value::False },
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
