@@ -18286,6 +18286,27 @@ impl Vm {
                                         | b"regexiterator" | b"recursiveregexiterator"
                                         | b"parentiterator" => {
                                             // __construct(Iterator $iterator, ...)
+                                            // Require at least 1 user arg (the iterator)
+                                            if call.args.len() <= 1 {
+                                                drop(obj_mut);
+                                                let class_canonical = self.builtin_canonical_name(&class_lower);
+                                                let msg = format!(
+                                                    "{}::__construct() expects at least 1 argument, 0 given",
+                                                    class_canonical
+                                                );
+                                                let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    let ct = *catch_target;
+                                                    ip = ct as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError {
+                                                    message: format!("Uncaught ArgumentCountError: {}", msg),
+                                                    line: op.line,
+                                                });
+                                            }
                                             // For RecursiveIteratorIterator, if the inner is an IteratorAggregate,
                                             // validate that getIterator() returns a Traversable, then cache the
                                             // resolved iterator.
@@ -18376,11 +18397,43 @@ impl Vm {
                                         }
                                         b"limititerator" => {
                                             // __construct(Iterator $iterator, int $offset = 0, int $count = -1)
+                                            let offset = if call.args.len() > 2 { call.args[2].to_long() } else { 0 };
+                                            let count = if call.args.len() > 3 { call.args[3].to_long() } else { -1 };
+                                            if offset < 0 {
+                                                drop(obj_mut);
+                                                let msg = "LimitIterator::__construct(): Argument #2 ($offset) must be greater than or equal to 0";
+                                                let exc = self.create_exception(b"ValueError", msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    let ct = *catch_target;
+                                                    ip = ct as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError {
+                                                    message: format!("Uncaught ValueError: {}", msg),
+                                                    line: op.line,
+                                                });
+                                            }
+                                            if count < -1 {
+                                                drop(obj_mut);
+                                                let msg = "LimitIterator::__construct(): Argument #3 ($count) must be greater than or equal to -1";
+                                                let exc = self.create_exception(b"ValueError", msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    let ct = *catch_target;
+                                                    ip = ct as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError {
+                                                    message: format!("Uncaught ValueError: {}", msg),
+                                                    line: op.line,
+                                                });
+                                            }
                                             if call.args.len() > 1 {
                                                 obj_mut.set_property(b"__spl_inner".to_vec(), call.args[1].clone());
                                             }
-                                            let offset = if call.args.len() > 2 { call.args[2].to_long() } else { 0 };
-                                            let count = if call.args.len() > 3 { call.args[3].to_long() } else { -1 };
                                             obj_mut.set_property(b"__spl_offset".to_vec(), Value::Long(offset));
                                             obj_mut.set_property(b"__spl_count".to_vec(), Value::Long(count));
                                         }
