@@ -30,7 +30,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gmp_div_q", gmp_div_q);
     vm.register_function(b"gmp_div_r", gmp_div_r);
     vm.register_function(b"gmp_div_qr", gmp_div_qr);
-    vm.register_function(b"gmp_div", gmp_div_q); // alias
+    vm.register_function(b"gmp_div", gmp_div); // alias of gmp_div_q
     vm.register_function(b"gmp_divexact", gmp_divexact);
     vm.register_function(b"gmp_mod", gmp_mod);
     vm.register_function(b"gmp_neg", gmp_neg);
@@ -1591,13 +1591,21 @@ fn throw_div_by_zero(vm: &mut Vm, func_name: &str, arg_num: u32, arg_name: &str,
 }
 
 fn gmp_div_q(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = get_gmp_arg(vm, args, 0, "gmp_div_q", "num1")?;
-    let b = get_gmp_arg(vm, args, 1, "gmp_div_q", "num2")?;
+    gmp_div_q_with_name(vm, args, "gmp_div_q")
+}
+
+fn gmp_div(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    gmp_div_q_with_name(vm, args, "gmp_div")
+}
+
+fn gmp_div_q_with_name(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, func_name, "num1")?;
+    let b = get_gmp_arg(vm, args, 1, func_name, "num2")?;
     let round = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    validate_rounding_mode(vm, round, "gmp_div_q")?;
+    validate_rounding_mode(vm, round, func_name)?;
 
     if b.is_zero() {
-        return Err(throw_div_by_zero(vm, "gmp_div_q", 2, "num2", "Division by zero"));
+        return Err(throw_div_by_zero(vm, func_name, 2, "num2", "Division by zero"));
     }
 
     let (q, r) = a.div_rem(&b);
