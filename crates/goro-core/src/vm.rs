@@ -13093,10 +13093,38 @@ impl Vm {
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
         let result = self.execute_op_array(op_array, cvs);
 
+        // The Return path in global scope force-closes outstanding generator CVs
+        // so their finally blocks can run on shutdown. If any such finally raised
+        // an Error (e.g., "Cannot yield from finally in a force-closed
+        // generator"), convert it into a Fatal-error result so the engine surfaces
+        // it after main returned cleanly.
+        let mut result = result;
+        if result.is_ok() && self.current_exception.is_some() {
+            let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                let ob = obj.borrow();
+                let class = crate::value::display_class_name(&ob.class_name);
+                let msg = ob
+                    .get_property(b"message")
+                    .to_php_string()
+                    .to_string_lossy()
+                    .to_string();
+                if msg.is_empty() {
+                    format!("Uncaught {}", class)
+                } else {
+                    format!("Uncaught {}: {}", class, msg)
+                }
+            } else {
+                "Uncaught exception".to_string()
+            };
+            result = Err(VmError {
+                message: exc_msg,
+                line: self.current_line,
+            });
+        }
+
         // If there's an uncaught exception and a user exception handler is set, call it
         // Support chaining: if the handler throws and a new handler was registered inside it,
         // that new handler should catch the new exception.
-        let mut result = result;
         loop {
             match result {
                 Err(ref _e) if self.exception_handler.is_some() && self.current_exception.is_some() => {
@@ -19522,13 +19550,26 @@ impl Vm {
                             self.globals.insert(name.clone(), cv_val.clone());
                         }
                     }
-                    // In global scope, save all CVs as globals
+                    // In global scope, save all CVs as globals AND force-close any
+                    // suspended generators so their finally blocks run on script exit
+                    // (matches PHP's "shutdown" semantics).
                     if self.is_global_scope {
                         for (i, cv) in cvs.iter().enumerate() {
                             if !matches!(cv, Value::Undef)
                                 && let Some(name) = op_array.cv_names.get(i)
                             {
                                 self.globals.insert(name.clone(), cv.clone());
+                            }
+                        }
+                        // Close any generator CVs (top-level script ending). Any
+                        // exception they produce is surfaced as a Fatal error below.
+                        for cv in cvs.iter() {
+                            if let Value::Generator(gen_rc) = cv {
+                                if let Ok(mut g) = gen_rc.try_borrow_mut() {
+                                    let prev_caller = self.generator_caller.take();
+                                    g.close(self);
+                                    self.generator_caller = prev_caller;
+                                }
                             }
                         }
                     }
@@ -22928,8 +22969,54 @@ impl Vm {
                             if let Value::Generator(gen_rc) = slot {
                                 let gen_clone = gen_rc.clone();
                                 *slot = Value::Undef;
-                                let mut gen_borrow = gen_clone.borrow_mut();
-                                gen_borrow.close(self);
+                                {
+                                    let mut gen_borrow = gen_clone.borrow_mut();
+                                    let prev_caller = self.generator_caller.take();
+                                    self.generator_caller =
+                                        Some((self.current_file.clone(), op.line));
+                                    gen_borrow.close(self);
+                                    self.generator_caller = prev_caller;
+                                }
+                                // close() may leave an Error in current_exception
+                                // (e.g. "Cannot yield from finally in a force-closed
+                                // generator"). Propagate it through outer handlers.
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, finally_target, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        if catch_target > 0 {
+                                            ip = catch_target as usize;
+                                            continue;
+                                        } else if finally_target > 0 {
+                                            ip = finally_target as usize;
+                                            continue;
+                                        }
+                                    }
+                                    let exc_msg = if let Some(Value::Object(obj)) =
+                                        &self.current_exception
+                                    {
+                                        let ob = obj.borrow();
+                                        let class =
+                                            crate::value::display_class_name(&ob.class_name);
+                                        let msg = ob
+                                            .get_property(b"message")
+                                            .to_php_string()
+                                            .to_string_lossy()
+                                            .to_string();
+                                        if msg.is_empty() {
+                                            format!("Uncaught {}", class)
+                                        } else {
+                                            format!("Uncaught {}: {}", class, msg)
+                                        }
+                                    } else {
+                                        "Uncaught exception".to_string()
+                                    };
+                                    return Err(VmError {
+                                        message: exc_msg,
+                                        line: op.line,
+                                    });
+                                }
                             } else if let Value::Object(obj_rc) = slot {
                                 // Check if this is a Fiber object that needs cleanup
                                 let is_fiber = {
@@ -28763,6 +28850,17 @@ impl Vm {
                                 }
                             }
                             b"rewind" => {
+                                // Push a Generator->rewind frame for the duration of
+                                // the resume() so backtraces inside the generator can
+                                // see the rewind() call site. We pop it on the success
+                                // path here, and at each early-return below.
+                                self.call_stack.push((
+                                    "Generator->rewind".to_string(),
+                                    self.current_file.clone(),
+                                    op.line,
+                                    Vec::new(),
+                                    true,
+                                ));
                                 let gen_borrow = gen_rc.borrow();
                                 if gen_borrow.state == crate::generator::GeneratorState::Created {
                                     drop(gen_borrow);
@@ -28771,6 +28869,7 @@ impl Vm {
                                     let resume_result = gen_borrow.resume(self);
                                     drop(gen_borrow);
                                     if resume_result.is_err() || self.current_exception.is_some() {
+                                        self.call_stack.pop();
                                         // Exception during priming - propagate
                                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
@@ -28783,17 +28882,10 @@ impl Vm {
                                         return Err(VmError { message: "Uncaught exception in generator".to_string(), line: op.line });
                                     }
                                 } else if gen_borrow.advanced_past_first {
-                                    // Cannot rewind a generator that has been advanced past the first yield
+                                    // Cannot rewind a generator that has been advanced past the first yield.
+                                    // The Generator->rewind frame pushed above is already on the stack so
+                                    // create_exception captures it; pop after capturing.
                                     drop(gen_borrow);
-                                    // Push a trace frame for Generator->rewind() so the
-                                    // exception backtrace shows the call site.
-                                    self.call_stack.push((
-                                        "Generator->rewind".to_string(),
-                                        self.current_file.clone(),
-                                        op.line,
-                                        Vec::new(),
-                                        true,
-                                    ));
                                     let msg = "Cannot rewind a generator that was already run";
                                     let exc = self.create_exception(b"Exception", msg, op.line);
                                     self.call_stack.pop();
@@ -28804,7 +28896,9 @@ impl Vm {
                                     }
                                     return Err(VmError { message: format!("Uncaught Exception: {}", msg), line: op.line });
                                 }
-                                // If at first yield or completed, rewind is a no-op
+                                // If at first yield or completed, rewind is a no-op.
+                                // Pop the rewind trace frame before returning.
+                                self.call_stack.pop();
                                 Value::Null
                             }
                             b"send" => {
@@ -29666,7 +29760,10 @@ impl Vm {
                         func_cvs[i] = arg.clone();
                     }
                 }
-                let generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
+                let mut generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
+                generator.args = call.args.clone();
+                generator.call_file = self.current_file.clone();
+                generator.call_line = line;
                 let gen_rc = Rc::new(RefCell::new(generator));
                 Ok(Value::Generator(gen_rc))
             } else {
@@ -29694,7 +29791,27 @@ impl Vm {
                         }
                     }
                 }
+                // Push a call_stack frame so backtrace_from_inside_the_call can see
+                // this function. (The main DoFCall opcode path already pushes a
+                // frame for non-generator calls; generator_do_fcall historically
+                // didn't, so backtraces inside a generator-called function lost
+                // the intermediate frame.)
+                let raw_name = String::from_utf8_lossy(&user_fn.name).to_string();
+                let display = if !user_fn.display_name.is_empty() {
+                    String::from_utf8_lossy(&user_fn.display_name).to_string()
+                } else {
+                    raw_name
+                };
+                let trace_args = call.args.clone();
+                self.call_stack.push((
+                    display,
+                    self.current_file.clone(),
+                    line,
+                    trace_args,
+                    user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this"),
+                ));
                 let result = self.execute_op_array(&user_fn, func_cvs);
+                self.call_stack.pop();
                 self.is_global_scope = was_global;
                 result
             }

@@ -227,92 +227,11 @@ impl PhpGenerator {
             self.pending_return = Some(Value::Null);
             self.state = GeneratorState::Suspended; // Keep suspended so resume works
 
-            // Resume to execute the finally block(s)
-            match self.resume(vm) {
-                Err(e) => {
-                    // Output the error (e.g., "Cannot yield from finally in a force-closed generator")
-                    if let Some(exc) = vm.current_exception.take() {
-                        if let Value::Object(obj) = &exc {
-                            let obj_b = obj.borrow();
-                            let class = String::from_utf8_lossy(&obj_b.class_name).to_string();
-                            let message = obj_b.get_property(b"message").to_php_string().to_string_lossy().to_string();
-                            let line = obj_b.get_property(b"line").to_long();
-                            let file = vm.current_file.clone();
-                            // Build a trace from the exception's own trace property so
-                            // that the generator's call site appears in the report.
-                            let trace_lines = if let Value::Array(arr) =
-                                obj_b.get_property(b"trace")
-                            {
-                                let arr = arr.borrow();
-                                let mut lines = Vec::new();
-                                for (i, (_k, frame_val)) in arr.iter().enumerate() {
-                                    if let Value::Array(frame) = frame_val {
-                                        let frame = frame.borrow();
-                                        let func = frame
-                                            .get(&crate::array::ArrayKey::String(
-                                                crate::string::PhpString::from_bytes(b"function"),
-                                            ))
-                                            .map(|v| v.to_php_string().to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        let class_p = frame
-                                            .get(&crate::array::ArrayKey::String(
-                                                crate::string::PhpString::from_bytes(b"class"),
-                                            ))
-                                            .map(|v| v.to_php_string().to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        let type_p = frame
-                                            .get(&crate::array::ArrayKey::String(
-                                                crate::string::PhpString::from_bytes(b"type"),
-                                            ))
-                                            .map(|v| v.to_php_string().to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        let file_p = frame
-                                            .get(&crate::array::ArrayKey::String(
-                                                crate::string::PhpString::from_bytes(b"file"),
-                                            ))
-                                            .map(|v| v.to_php_string().to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        let line_p = frame
-                                            .get(&crate::array::ArrayKey::String(
-                                                crate::string::PhpString::from_bytes(b"line"),
-                                            ))
-                                            .map(|v| v.to_long())
-                                            .unwrap_or(0);
-                                        let display = if class_p.is_empty() {
-                                            func.clone()
-                                        } else {
-                                            format!("{}{}{}", class_p, type_p, func)
-                                        };
-                                        let loc = if file_p.is_empty() {
-                                            "[internal function]".to_string()
-                                        } else {
-                                            format!("{}({})", file_p, line_p)
-                                        };
-                                        lines.push(format!("#{} {}: {}()", i, loc, display));
-                                    }
-                                }
-                                lines.push(format!("#{} {{main}}", lines.len()));
-                                lines.join("\n")
-                            } else {
-                                "#0 {main}".to_string()
-                            };
-                            drop(obj_b);
-                            let output = format!(
-                                "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n{}\n  thrown in {} on line {}\n",
-                                class, message, file, line, trace_lines, file, line
-                            );
-                            vm.write_output(output.as_bytes());
-                        } else {
-                            let output = format!("\nFatal error: {}\n", e.message);
-                            vm.write_output(output.as_bytes());
-                        }
-                    } else {
-                        let output = format!("\nFatal error: {}\n", e.message);
-                        vm.write_output(output.as_bytes());
-                    }
-                }
-                _ => {}
-            }
+            // Resume to execute the finally block(s). If the finally produced
+            // an Error (e.g., "Cannot yield from finally in a force-closed
+            // generator"), leave the exception on the VM so the caller can
+            // catch it (or surface it as a fatal error at the top level).
+            let _ = self.resume(vm);
         }
 
         self.state = GeneratorState::Completed;
@@ -471,6 +390,19 @@ impl PhpGenerator {
                 }
 
                 OpCode::YieldFrom => {
+                    // If generator is force-closed, yield-from in finally is an error.
+                    if self.force_closed && self.yield_from_source.is_none() {
+                        let err_msg = "Cannot use \"yield from\" in a force-closed generator";
+                        let exc = vm.create_exception(b"Error", err_msg, op.line);
+                        vm.current_exception = Some(exc);
+                        self.state = GeneratorState::Completed;
+                        self.current_value = Value::Null;
+                        self.ip = ip;
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", err_msg),
+                            line: op.line,
+                        });
+                    }
                     // Check if we're resuming a yield-from iteration
                     if let Some(ref source) = self.yield_from_source.clone() {
                         match source {
@@ -506,7 +438,15 @@ impl PhpGenerator {
                                 if self.yield_from_observed {
                                     let mut inner = inner_gen.borrow_mut();
                                     inner.write_send_value();
+                                    let prev_caller = vm.generator_caller.take();
+                                    let caller_file = if !op_array.filename.is_empty() {
+                                        String::from_utf8_lossy(&op_array.filename).to_string()
+                                    } else {
+                                        vm.current_file.clone()
+                                    };
+                                    vm.generator_caller = Some((caller_file, op.line));
                                     let resume_outcome = inner.resume(vm);
+                                    vm.generator_caller = prev_caller;
                                     drop(inner);
                                     if resume_outcome.is_err() || vm.current_exception.is_some() {
                                         // Inner threw - clear delegation and propagate
@@ -571,10 +511,21 @@ impl PhpGenerator {
                                 ip -= 1; // Will re-execute this opcode
                             }
                             Value::Generator(inner_gen) => {
-                                // Initialize inner generator if needed
+                                // Initialize inner generator if needed. The "caller"
+                                // for the inner's trace is the yield-from site in
+                                // the current op_array, so set generator_caller
+                                // accordingly.
                                 let mut inner = inner_gen.borrow_mut();
                                 if inner.state == GeneratorState::Created {
+                                    let prev_caller = vm.generator_caller.take();
+                                    let caller_file = if !op_array.filename.is_empty() {
+                                        String::from_utf8_lossy(&op_array.filename).to_string()
+                                    } else {
+                                        vm.current_file.clone()
+                                    };
+                                    vm.generator_caller = Some((caller_file, op.line));
                                     let _ = inner.resume(vm);
+                                    vm.generator_caller = prev_caller;
                                 }
                                 drop(inner);
                                 self.yield_from_source = Some(iterable);

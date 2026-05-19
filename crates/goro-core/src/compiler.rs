@@ -10531,6 +10531,28 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         ExprKind::CloneWith { object, with_args } => expr_contains_yield(object) || with_args.iter().any(|(_, e)| expr_contains_yield(e)),
         ExprKind::PropertyAccess { object, .. } => expr_contains_yield(object),
         ExprKind::Include { path, .. } => expr_contains_yield(path),
+        ExprKind::New { class, args } => {
+            expr_contains_yield(class) || args.iter().any(|a| expr_contains_yield(&a.value))
+        }
+        ExprKind::StaticMethodCall { class, args, .. } => {
+            expr_contains_yield(class) || args.iter().any(|a| expr_contains_yield(&a.value))
+        }
+        ExprKind::Match { subject, arms } => {
+            expr_contains_yield(subject)
+                || arms.iter().any(|arm| {
+                    arm.conditions
+                        .as_ref()
+                        .map(|cs| cs.iter().any(expr_contains_yield))
+                        .unwrap_or(false)
+                        || expr_contains_yield(&arm.body)
+                })
+        }
+        ExprKind::AssignRef { target, value } => {
+            expr_contains_yield(target) || expr_contains_yield(value)
+        }
+        ExprKind::Instanceof { expr, class } => {
+            expr_contains_yield(expr) || expr_contains_yield(class)
+        }
         _ => false,
     }
 }

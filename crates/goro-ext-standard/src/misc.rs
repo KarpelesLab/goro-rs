@@ -9880,11 +9880,6 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         if i >= max_frames {
             break;
         }
-        let file_display = if file == "Unknown.php" || file.is_empty() {
-            &vm.current_file
-        } else {
-            file
-        };
         let args_str = if ignore_args {
             String::new()
         } else {
@@ -9896,7 +9891,19 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         } else {
             func_name.clone()
         };
-        lines.push(format!("#{} {}({}): {}({})", i, file_display, line, display_name, args_str));
+        // Frames with empty file/line=0 represent an internal-engine call
+        // (e.g. a generator body resumed by VM machinery, or a Fiber callback).
+        let loc = if *line == 0 || file.is_empty() {
+            "[internal function]".to_string()
+        } else {
+            let file_display = if file == "Unknown.php" {
+                vm.current_file.as_str()
+            } else {
+                file.as_str()
+            };
+            format!("{}({})", file_display, line)
+        };
+        lines.push(format!("#{} {}: {}({})", i, loc, display_name, args_str));
     }
 
     let mut output = lines.join("\n");
