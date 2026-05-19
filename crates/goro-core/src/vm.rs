@@ -4803,6 +4803,79 @@ impl Vm {
             b"arrayobject" | b"arrayiterator" => {
                 self.spl_array_method(method_lower, obj)
             }
+            b"recursivearrayiterator" => {
+                // hasChildren/getChildren are specific to RecursiveArrayIterator
+                match method_lower {
+                    b"haschildren" => {
+                        let ob = obj.borrow();
+                        let arr = ob.get_property(b"__spl_array");
+                        let pos = ob.get_property(b"__spl_pos");
+                        let flags = if let Value::Long(f) = ob.get_property(b"__spl_flags") { f } else { 0 };
+                        let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
+                        match arr {
+                            Value::Array(a) => {
+                                let a = a.borrow();
+                                let current = a.values().nth(pos_val);
+                                let r = match current {
+                                    Some(Value::Array(_)) => Value::True,
+                                    // CHILD_ARRAYS_ONLY (4): only arrays count as children
+                                    Some(Value::Object(_)) if (flags & 4) == 0 => Value::True,
+                                    _ => Value::False,
+                                };
+                                Some(r)
+                            }
+                            _ => Some(Value::False),
+                        }
+                    }
+                    b"getchildren" => {
+                        // Return a new RecursiveArrayIterator wrapping the current value
+                        let ob = obj.borrow();
+                        let arr = ob.get_property(b"__spl_array");
+                        let pos = ob.get_property(b"__spl_pos");
+                        let flags = ob.get_property(b"__spl_flags");
+                        let class_name = ob.class_name.clone();
+                        let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
+                        drop(ob);
+                        let inner_val = if let Value::Array(a) = arr {
+                            let a = a.borrow();
+                            a.values().nth(pos_val).cloned().unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        };
+                        let obj_id = self.next_object_id;
+                        self.next_object_id += 1;
+                        let mut child_obj = PhpObject::new(class_name, obj_id);
+                        let inner_arr = match &inner_val {
+                            Value::Array(a) => Value::Array(a.clone()),
+                            Value::Object(_) => {
+                                // For objects, build an array from visible properties
+                                let mut arr = PhpArray::new();
+                                if let Value::Object(o) = &inner_val {
+                                    for (name, v) in self.visible_properties(o) {
+                                        // Try parsing as int key first
+                                        if let Ok(s) = std::str::from_utf8(&name) {
+                                            if let Ok(n) = s.parse::<i64>() {
+                                                arr.set(ArrayKey::Int(n), v);
+                                                continue;
+                                            }
+                                        }
+                                        arr.set(ArrayKey::String(PhpString::from_vec(name)), v);
+                                    }
+                                }
+                                Value::Array(Rc::new(RefCell::new(arr)))
+                            }
+                            _ => Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                        };
+                        child_obj.set_property(b"__spl_array".to_vec(), inner_arr);
+                        child_obj.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                        if !matches!(flags, Value::Null | Value::Undef) {
+                            child_obj.set_property(b"__spl_flags".to_vec(), flags);
+                        }
+                        Some(Value::Object(Rc::new(RefCell::new(child_obj))))
+                    }
+                    _ => self.spl_array_method(method_lower, obj),
+                }
+            }
             b"splfixedarray" => {
                 self.spl_fixed_array_method(method_lower, obj)
             }
@@ -4822,17 +4895,24 @@ impl Vm {
                 match method_lower {
                     b"rewind" | b"next" => Some(Value::Null),
                     b"valid" => Some(Value::False),
-                    b"current" | b"key" => {
-                        // These throw RuntimeException
-                        let exc = self.create_exception(b"RuntimeException", "Accessing the value of an EmptyIterator", 0);
+                    b"current" => {
+                        let exc = self.create_exception(b"BadMethodCallException", "Accessing the value of an EmptyIterator", 0);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    }
+                    b"key" => {
+                        let exc = self.create_exception(b"BadMethodCallException", "Accessing the key of an EmptyIterator", 0);
                         self.current_exception = Some(exc);
                         Some(Value::Null)
                     }
                     _ => None,
                 }
             }
-            b"iteratoriterator" | b"recursiveiteratoriterator" => {
+            b"iteratoriterator" => {
                 self.spl_outer_iterator_method(method_lower, obj)
+            }
+            b"recursiveiteratoriterator" => {
+                self.spl_recursive_iterator_iterator_method(method_lower, obj)
             }
             b"norewinditerator" => {
                 match method_lower {
@@ -6243,6 +6323,332 @@ impl Vm {
         }
     }
 
+    /// Resolve the inner iterator of an outer iterator. If it's an
+    /// IteratorAggregate, call getIterator() (descending through nested
+    /// IteratorAggregate chains) and cache the resolved Iterator on the
+    /// outer object. Used by IteratorIterator and subclasses.
+    ///
+    /// If the inner is Null/Undef (object was constructed without
+    /// calling __construct, e.g. via Reflection), throw an Error
+    /// "Object is not initialized" and return Null.
+    fn spl_outer_resolve_inner(&mut self, obj: &Rc<RefCell<PhpObject>>) -> Value {
+        let inner = obj.borrow().get_property(b"__spl_inner");
+        if matches!(inner, Value::Null | Value::Undef) {
+            let exc = self.create_exception(b"Error", "Object is not initialized", 0);
+            self.current_exception = Some(exc);
+            return Value::Null;
+        }
+        // Only resolve Object inners
+        if let Value::Object(inner_obj) = &inner {
+            let inner_class_lower: Vec<u8> = inner_obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // If inner is IteratorAggregate (not also Iterator), call getIterator()
+            let is_aggregate = self.class_implements_interface(&inner_class_lower, b"iteratoraggregate")
+                || self.builtin_implements_interface(&inner_class_lower, b"iteratoraggregate");
+            let is_iterator = self.class_implements_interface(&inner_class_lower, b"iterator")
+                || self.builtin_implements_interface(&inner_class_lower, b"iterator");
+            if is_aggregate && !is_iterator {
+                let resolved = self.call_object_method(&inner, b"getIterator", &[]).unwrap_or(Value::Null);
+                // Chain: resolved might itself be an IteratorAggregate
+                let mut cur = resolved;
+                for _ in 0..16 {
+                    if let Value::Object(o) = &cur {
+                        let c_lower: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let is_agg = self.class_implements_interface(&c_lower, b"iteratoraggregate")
+                            || self.builtin_implements_interface(&c_lower, b"iteratoraggregate");
+                        let is_iter = self.class_implements_interface(&c_lower, b"iterator")
+                            || self.builtin_implements_interface(&c_lower, b"iterator");
+                        if is_agg && !is_iter {
+                            cur = self.call_object_method(&cur, b"getIterator", &[]).unwrap_or(Value::Null);
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                // Cache the resolved iterator
+                obj.borrow_mut().set_property(b"__spl_inner".to_vec(), cur.clone());
+                return cur;
+            }
+        }
+        inner
+    }
+
+    /// RecursiveIteratorIterator: maintains a stack of (iterator, hooks_called) descents.
+    /// Mode constants: LEAVES_ONLY=0, SELF_FIRST=1, CHILD_FIRST=2.
+    fn spl_recursive_iterator_iterator_method(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        match method {
+            b"getinneriterator" => {
+                // Return the current sub-iterator (top of stack), or the original inner if stack is empty.
+                let ob = obj.borrow();
+                let stack = ob.get_property(b"__spl_iter_stack");
+                if let Value::Array(s) = &stack {
+                    let s = s.borrow();
+                    if let Some((_, v)) = s.iter().last() {
+                        return Some(v.clone());
+                    }
+                }
+                Some(ob.get_property(b"__spl_inner"))
+            }
+            b"getsubiterator" => {
+                // Returns the iterator at the given level (default current depth)
+                let level = None::<i64>;
+                let ob = obj.borrow();
+                let stack = ob.get_property(b"__spl_iter_stack");
+                if let Value::Array(s) = &stack {
+                    let s = s.borrow();
+                    let len = s.len() as i64;
+                    let idx = if let Some(l) = level { l } else { len - 1 };
+                    if idx >= 0 && idx < len {
+                        return Some(s.values().nth(idx as usize).cloned().unwrap_or(Value::Null));
+                    }
+                }
+                Some(ob.get_property(b"__spl_inner"))
+            }
+            b"getdepth" => {
+                let ob = obj.borrow();
+                let stack = ob.get_property(b"__spl_iter_stack");
+                if let Value::Array(s) = &stack {
+                    let len = s.borrow().len() as i64;
+                    return Some(Value::Long((len - 1).max(0)));
+                }
+                Some(Value::Long(0))
+            }
+            b"beginchildren" | b"endchildren" | b"beginiteration" | b"enditeration" => {
+                Some(Value::Null)
+            }
+            b"callhaschildren" => {
+                let ob = obj.borrow();
+                let stack = ob.get_property(b"__spl_iter_stack");
+                let inner = if let Value::Array(s) = &stack {
+                    let s = s.borrow();
+                    s.values().last().cloned().unwrap_or(ob.get_property(b"__spl_inner"))
+                } else {
+                    ob.get_property(b"__spl_inner")
+                };
+                drop(ob);
+                let r = self.call_object_method(&inner, b"hasChildren", &[]).unwrap_or(Value::False);
+                Some(r)
+            }
+            b"callgetchildren" => {
+                let ob = obj.borrow();
+                let stack = ob.get_property(b"__spl_iter_stack");
+                let inner = if let Value::Array(s) = &stack {
+                    let s = s.borrow();
+                    s.values().last().cloned().unwrap_or(ob.get_property(b"__spl_inner"))
+                } else {
+                    ob.get_property(b"__spl_inner")
+                };
+                drop(ob);
+                let r = self.call_object_method(&inner, b"getChildren", &[]).unwrap_or(Value::Null);
+                Some(r)
+            }
+            b"setmaxdepth" => Some(Value::Null),
+            b"getmaxdepth" => {
+                let ob = obj.borrow();
+                let d = ob.get_property(b"__spl_max_depth");
+                if matches!(d, Value::Null) { Some(Value::False) } else { Some(d) }
+            }
+            b"rewind" => {
+                // Resolve initial inner iterator (IteratorAggregate may need resolution)
+                let inner = self.spl_outer_resolve_inner(obj);
+                if matches!(inner, Value::Null) { return Some(Value::Null); }
+                // Initialize stack with the root iterator
+                let mut stack_arr = PhpArray::new();
+                stack_arr.push(inner.clone());
+                obj.borrow_mut().set_property(b"__spl_iter_stack".to_vec(), Value::Array(Rc::new(RefCell::new(stack_arr))));
+                // Rewind the root
+                self.call_object_method(&inner, b"rewind", &[]);
+                // Call beginIteration hook
+                let obj_val = Value::Object(obj.clone());
+                self.call_object_method(&obj_val, b"beginIteration", &[]);
+                // Advance to first emitted element per mode
+                self.spl_rii_advance_to_emit(obj, true);
+                Some(Value::Null)
+            }
+            b"valid" => {
+                let stack = obj.borrow().get_property(b"__spl_iter_stack");
+                if let Value::Array(s) = &stack {
+                    if let Some((_, top)) = s.borrow().iter().last() {
+                        let v = self.call_object_method(top, b"valid", &[]).unwrap_or(Value::False);
+                        return Some(v);
+                    }
+                }
+                Some(Value::False)
+            }
+            b"current" => {
+                let stack = obj.borrow().get_property(b"__spl_iter_stack");
+                if let Value::Array(s) = &stack {
+                    if let Some((_, top)) = s.borrow().iter().last() {
+                        return Some(self.call_object_method(top, b"current", &[]).unwrap_or(Value::Null));
+                    }
+                }
+                Some(Value::Null)
+            }
+            b"key" => {
+                let stack = obj.borrow().get_property(b"__spl_iter_stack");
+                if let Value::Array(s) = &stack {
+                    if let Some((_, top)) = s.borrow().iter().last() {
+                        return Some(self.call_object_method(top, b"key", &[]).unwrap_or(Value::Null));
+                    }
+                }
+                Some(Value::Null)
+            }
+            b"next" => {
+                self.spl_rii_advance(obj);
+                Some(Value::Null)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the current mode for RecursiveIteratorIterator (default LEAVES_ONLY=0)
+    fn spl_rii_mode(&self, obj: &Rc<RefCell<PhpObject>>) -> i64 {
+        let m = obj.borrow().get_property(b"__spl_mode");
+        if let Value::Long(n) = m { n } else { 0 }
+    }
+
+    /// Pop the top of the iter stack.
+    fn spl_rii_pop_stack(&mut self, obj: &Rc<RefCell<PhpObject>>) -> Option<Value> {
+        let stack = obj.borrow().get_property(b"__spl_iter_stack");
+        if let Value::Array(s) = &stack {
+            let last_key = s.borrow().keys().last().cloned();
+            if let Some(k) = last_key {
+                let popped = s.borrow().get(&k).cloned();
+                s.borrow_mut().remove(&k);
+                return popped;
+            }
+        }
+        None
+    }
+
+    /// Push a child iterator onto the stack.
+    fn spl_rii_push_stack(&mut self, obj: &Rc<RefCell<PhpObject>>, iter: Value) {
+        let stack = obj.borrow().get_property(b"__spl_iter_stack");
+        if let Value::Array(s) = &stack {
+            s.borrow_mut().push(iter);
+        } else {
+            let mut a = PhpArray::new();
+            a.push(iter);
+            obj.borrow_mut().set_property(b"__spl_iter_stack".to_vec(), Value::Array(Rc::new(RefCell::new(a))));
+        }
+    }
+
+    /// Get the top iterator of the stack.
+    fn spl_rii_top(&self, obj: &Rc<RefCell<PhpObject>>) -> Option<Value> {
+        let stack = obj.borrow().get_property(b"__spl_iter_stack");
+        if let Value::Array(s) = &stack {
+            return s.borrow().values().last().cloned();
+        }
+        None
+    }
+
+    /// After rewind() or next(), advance to the next "emittable" position
+    /// per the mode (LEAVES_ONLY=0 only emits leaves; SELF_FIRST=1 emits
+    /// inner nodes before descending; CHILD_FIRST=2 emits after descending).
+    /// `is_initial` indicates this is being called immediately after rewind.
+    fn spl_rii_advance_to_emit(&mut self, obj: &Rc<RefCell<PhpObject>>, _is_initial: bool) {
+        let mode = self.spl_rii_mode(obj);
+        // Loop until current position is something we should emit.
+        loop {
+            let top = match self.spl_rii_top(obj) {
+                Some(t) => t,
+                None => return,
+            };
+            let valid = self.call_object_method(&top, b"valid", &[]).unwrap_or(Value::False);
+            if !valid.is_truthy() {
+                // End of current level - pop, call endChildren hook, advance parent
+                let stack_len = obj.borrow().get_property(b"__spl_iter_stack");
+                let len = if let Value::Array(s) = &stack_len { s.borrow().len() } else { 0 };
+                if len <= 1 {
+                    // Done - call endIteration hook
+                    let obj_val = Value::Object(obj.clone());
+                    self.call_object_method(&obj_val, b"endIteration", &[]);
+                    return;
+                }
+                // Pop child
+                self.spl_rii_pop_stack(obj);
+                let obj_val = Value::Object(obj.clone());
+                self.call_object_method(&obj_val, b"endChildren", &[]);
+                // For CHILD_FIRST mode: now that children are done, emit the parent
+                if mode == 2 {
+                    return;
+                }
+                // Advance parent
+                if let Some(parent) = self.spl_rii_top(obj) {
+                    self.call_object_method(&parent, b"next", &[]);
+                }
+                continue;
+            }
+            // We have a valid position. Check if it has children via callHasChildren
+            // on the outer object (which may have a user override).
+            let obj_val = Value::Object(obj.clone());
+            let has_children = self.call_object_method(&obj_val, b"callHasChildren", &[]).unwrap_or(Value::False);
+            if has_children.is_truthy() {
+                match mode {
+                    1 => {
+                        // SELF_FIRST: emit parent before descending
+                        // We mark that we've emitted this so next() will descend instead
+                        // Use property __spl_emitted_self per stack level
+                        let stack_arr = obj.borrow().get_property(b"__spl_iter_stack");
+                        let depth = if let Value::Array(s) = &stack_arr { s.borrow().len() - 1 } else { 0 };
+                        let key = format!("__spl_emitted_self_{}", depth).into_bytes();
+                        let already = matches!(obj.borrow().get_property(&key), Value::True);
+                        if !already {
+                            obj.borrow_mut().set_property(key, Value::True);
+                            return; // emit
+                        }
+                        // Already emitted, descend
+                        obj.borrow_mut().set_property(format!("__spl_emitted_self_{}", depth).into_bytes(), Value::Undef);
+                    }
+                    0 | 2 | _ => {}
+                }
+                // Descend: get children via callGetChildren on outer, push, rewind, call beginChildren
+                let obj_val = Value::Object(obj.clone());
+                let children = self.call_object_method(&obj_val, b"callGetChildren", &[]).unwrap_or(Value::Null);
+                if matches!(children, Value::Null) {
+                    // No children despite hasChildren - skip
+                    self.call_object_method(&top, b"next", &[]);
+                    continue;
+                }
+                self.spl_rii_push_stack(obj, children.clone());
+                self.call_object_method(&children, b"rewind", &[]);
+                self.call_object_method(&obj_val, b"beginChildren", &[]);
+                continue;
+            } else {
+                // No children: this is a leaf. Always emit.
+                return;
+            }
+        }
+    }
+
+    /// Advance the iterator by one step (after the current element).
+    fn spl_rii_advance(&mut self, obj: &Rc<RefCell<PhpObject>>) {
+        let mode = self.spl_rii_mode(obj);
+        // If mode is SELF_FIRST and we just emitted a parent node, descend instead of advancing
+        if mode == 1 {
+            let stack_arr = obj.borrow().get_property(b"__spl_iter_stack");
+            let depth = if let Value::Array(s) = &stack_arr { s.borrow().len() } else { 0 };
+            if depth > 0 {
+                let key = format!("__spl_emitted_self_{}", depth - 1).into_bytes();
+                let emitted = matches!(obj.borrow().get_property(&key), Value::True);
+                if emitted {
+                    // We emitted the parent - we need to descend on next()
+                    // Actually advance_to_emit will check this flag and descend
+                    self.spl_rii_advance_to_emit(obj, false);
+                    return;
+                }
+            }
+        }
+        // Standard: advance current top
+        if let Some(top) = self.spl_rii_top(obj) {
+            self.call_object_method(&top, b"next", &[]);
+        }
+        self.spl_rii_advance_to_emit(obj, false);
+    }
+
     /// Method dispatch for outer iterator wrappers (IteratorIterator, etc.)
     fn spl_outer_iterator_method(
         &mut self,
@@ -6255,23 +6661,17 @@ impl Vm {
                 Some(ob.get_property(b"__spl_inner"))
             }
             b"rewind" => {
-                let ob = obj.borrow();
-                let inner = ob.get_property(b"__spl_inner");
-                drop(ob);
+                let inner = self.spl_outer_resolve_inner(obj);
                 self.call_object_method(&inner, b"rewind", &[]);
                 Some(Value::Null)
             }
             b"valid" => {
-                let ob = obj.borrow();
-                let inner = ob.get_property(b"__spl_inner");
-                drop(ob);
+                let inner = self.spl_outer_resolve_inner(obj);
                 let r = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
                 Some(r)
             }
             b"current" => {
-                let ob = obj.borrow();
-                let inner = ob.get_property(b"__spl_inner");
-                drop(ob);
+                let inner = self.spl_outer_resolve_inner(obj);
                 let r = self.call_object_method(&inner, b"current", &[]).unwrap_or(Value::Null);
                 // RecursiveIteratorIterator absorbs "Iterator not initialized" from inner
                 if let Some(Value::Object(exc_obj)) = &self.current_exception {
@@ -6287,9 +6687,7 @@ impl Vm {
                 Some(r)
             }
             b"key" => {
-                let ob = obj.borrow();
-                let inner = ob.get_property(b"__spl_inner");
-                drop(ob);
+                let inner = self.spl_outer_resolve_inner(obj);
                 let r = self.call_object_method(&inner, b"key", &[]).unwrap_or(Value::Null);
                 if let Some(Value::Object(exc_obj)) = &self.current_exception {
                     let msg = exc_obj.borrow()
@@ -6304,9 +6702,7 @@ impl Vm {
                 Some(r)
             }
             b"next" => {
-                let ob = obj.borrow();
-                let inner = ob.get_property(b"__spl_inner");
-                drop(ob);
+                let inner = self.spl_outer_resolve_inner(obj);
                 self.call_object_method(&inner, b"next", &[]);
                 Some(Value::Null)
             }
@@ -6378,15 +6774,32 @@ impl Vm {
                 let offset_val = if let Value::Long(o) = offset { o } else { 0 };
                 drop(ob);
                 self.call_object_method(&inner, b"rewind", &[]);
-                // Skip to offset
-                for _ in 0..offset_val {
-                    let valid = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
-                    if !valid.is_truthy() { break; }
-                    self.call_object_method(&inner, b"next", &[]);
+                // Skip to offset: use seek() if inner is SeekableIterator
+                let inner_is_seekable = if let Value::Object(io) = &inner {
+                    let c_lower: Vec<u8> = io.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    self.class_implements_interface(&c_lower, b"seekableiterator")
+                        || self.builtin_implements_interface(&c_lower, b"seekableiterator")
+                        || matches!(c_lower.as_slice(),
+                            b"arrayiterator" | b"recursivearrayiterator" | b"splfixedarray"
+                            | b"directoryiterator" | b"filesystemiterator" | b"recursivedirectoryiterator"
+                            | b"globiterator" | b"splfileobject" | b"spltempfileobject"
+                            | b"spldoublylinkedlist" | b"splstack" | b"splqueue")
+                } else { false };
+                if offset_val > 0 {
+                    if inner_is_seekable {
+                        self.call_object_method(&inner, b"seek", &[Value::Long(offset_val)]);
+                    } else {
+                        for _ in 0..offset_val {
+                            let valid = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
+                            if !valid.is_truthy() { break; }
+                            self.call_object_method(&inner, b"next", &[]);
+                        }
+                    }
                 }
                 obj.borrow_mut().set_property(b"__spl_pos".to_vec(), Value::Long(0));
                 Some(Value::Null)
             }
+            b"seek" => None, // handled in handle_spl_docall with args
             b"valid" => {
                 let ob = obj.borrow();
                 let inner = ob.get_property(b"__spl_inner");
@@ -7059,10 +7472,18 @@ impl Vm {
                 Some(Value::Object(Rc::new(RefCell::new(fi_obj))))
             }
             b"openfile" => {
-                // Opens an SplFileObject for the file
+                // Opens a file object (default SplFileObject, or the class set via setFileClass)
                 let obj_id = self.next_object_id;
                 self.next_object_id += 1;
-                let mut fo_obj = PhpObject::new(b"SplFileObject".to_vec(), obj_id);
+                let file_class = {
+                    let ob = obj.borrow();
+                    ob.get_property(b"__spl_file_class")
+                };
+                let class_name: Vec<u8> = match file_class {
+                    Value::String(s) if !s.as_bytes().is_empty() => s.as_bytes().to_vec(),
+                    _ => b"SplFileObject".to_vec(),
+                };
+                let mut fo_obj = PhpObject::new(class_name, obj_id);
                 fo_obj.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(path_str.clone())));
                 // Read all lines
                 if let Ok(content) = std::fs::read_to_string(&path_str) {
@@ -7317,6 +7738,22 @@ impl Vm {
                     let a = a.borrow();
                     if let Some(line) = a.get(&ArrayKey::Int(pos)) {
                         let line_str = line.to_php_string().to_string_lossy();
+                        // READ_CSV flag = 8: return parsed CSV array
+                        if flags & 8 != 0 {
+                            let trimmed = line_str.trim_end_matches('\n').trim_end_matches('\r');
+                            let delim = ob.get_property(b"__spl_csv_delimiter");
+                            let enclosure = ob.get_property(b"__spl_csv_enclosure");
+                            let d = if let Value::String(s) = delim { s.to_string_lossy() } else { ",".to_string() };
+                            let e = if let Value::String(s) = enclosure { s.to_string_lossy() } else { "\"".to_string() };
+                            let delim_char = d.chars().next().unwrap_or(',');
+                            let encl_char = e.chars().next().unwrap_or('"');
+                            let fields = Self::parse_csv_line(trimmed, delim_char, encl_char);
+                            let mut arr = PhpArray::new();
+                            for f in fields {
+                                arr.push(Value::String(PhpString::from_string(f)));
+                            }
+                            return Some(Value::Array(Rc::new(RefCell::new(arr))));
+                        }
                         // DROP_NEW_LINE flag = 1
                         if flags & 1 != 0 {
                             let trimmed = line_str.trim_end_matches('\n').trim_end_matches('\r');
@@ -7550,6 +7987,7 @@ impl Vm {
             ),
             b"appenditerator" => matches!(method, b"append"),
             b"multipleiterator" => matches!(method, b"attachiterator"),
+            b"limititerator" => matches!(method, b"seek"),
             b"cachingiterator" | b"recursivecachingiterator" => matches!(method, b"setflags"),
             b"splfileobject" | b"spltempfileobject" => matches!(
                 method,
@@ -9317,6 +9755,56 @@ impl Vm {
                         _ => None,
                     }
                 }
+                b"limititerator" => {
+                    match method {
+                        b"seek" => {
+                            // LimitIterator::seek($position)
+                            let pos = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                            let ob = obj.borrow();
+                            let inner = ob.get_property(b"__spl_inner");
+                            let offset = if let Value::Long(o) = ob.get_property(b"__spl_offset") { o } else { 0 };
+                            let count = if let Value::Long(c) = ob.get_property(b"__spl_count") { c } else { -1 };
+                            drop(ob);
+                            // Validate position against offset+count range
+                            if pos < offset {
+                                let msg = format!("Cannot seek to {} which is below the offset {}", pos, offset);
+                                let exc = self.create_exception(b"OutOfBoundsException", &msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            if count != -1 && pos >= offset + count {
+                                let msg = format!("Cannot seek to {} which is behind offset {} plus count {}", pos, offset, count);
+                                let exc = self.create_exception(b"OutOfBoundsException", &msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            // Seek the inner if Seekable, else advance step by step
+                            let inner_is_seekable = if let Value::Object(io) = &inner {
+                                let c_lower: Vec<u8> = io.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                self.class_implements_interface(&c_lower, b"seekableiterator")
+                                    || self.builtin_implements_interface(&c_lower, b"seekableiterator")
+                                    || matches!(c_lower.as_slice(),
+                                        b"arrayiterator" | b"recursivearrayiterator" | b"splfixedarray"
+                                        | b"directoryiterator" | b"filesystemiterator" | b"recursivedirectoryiterator"
+                                        | b"globiterator" | b"splfileobject" | b"spltempfileobject"
+                                        | b"spldoublylinkedlist" | b"splstack" | b"splqueue")
+                            } else { false };
+                            if inner_is_seekable {
+                                self.call_object_method(&inner, b"seek", &[Value::Long(pos)]);
+                            } else {
+                                self.call_object_method(&inner, b"rewind", &[]);
+                                for _ in 0..pos {
+                                    let valid = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
+                                    if !valid.is_truthy() { break; }
+                                    self.call_object_method(&inner, b"next", &[]);
+                                }
+                            }
+                            obj.borrow_mut().set_property(b"__spl_pos".to_vec(), Value::Long(pos - offset));
+                            Some(Value::Long(pos))
+                        }
+                        _ => None,
+                    }
+                }
                 b"multipleiterator" => {
                     match method {
                         b"attachiterator" => {
@@ -9998,6 +10486,28 @@ impl Vm {
                             let delim = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b",")));
                             let enclosure = args.get(2).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"\"")));
                             let escape = args.get(3).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"\\")));
+                            // Validate single-character constraints
+                            let delim_len = delim.to_php_string().as_bytes().len();
+                            let enclosure_len = enclosure.to_php_string().as_bytes().len();
+                            let escape_len = escape.to_php_string().as_bytes().len();
+                            if delim_len != 1 {
+                                let msg = "SplFileObject::setCsvControl(): Argument #1 ($separator) must be a single character";
+                                let exc = self.create_exception(b"ValueError", msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            if enclosure_len != 1 {
+                                let msg = "SplFileObject::setCsvControl(): Argument #2 ($enclosure) must be a single character";
+                                let exc = self.create_exception(b"ValueError", msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            if escape_len > 1 {
+                                let msg = "SplFileObject::setCsvControl(): Argument #3 ($escape) must be empty or a single character";
+                                let exc = self.create_exception(b"ValueError", msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
                             ob.set_property(b"__spl_csv_delimiter".to_vec(), delim);
                             ob.set_property(b"__spl_csv_enclosure".to_vec(), enclosure);
@@ -10011,6 +10521,34 @@ impl Vm {
                             Some(Value::Null)
                         }
                         b"fgetcsv" => {
+                            // Validate single-character args if explicitly provided
+                            if let Some(d_arg) = args.get(1) {
+                                let d_bytes = d_arg.to_php_string();
+                                if d_bytes.as_bytes().len() != 1 {
+                                    let msg = "SplFileObject::fgetcsv(): Argument #1 ($separator) must be a single character";
+                                    let exc = self.create_exception(b"ValueError", msg, 0);
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                            }
+                            if let Some(e_arg) = args.get(2) {
+                                let e_bytes = e_arg.to_php_string();
+                                if e_bytes.as_bytes().len() != 1 {
+                                    let msg = "SplFileObject::fgetcsv(): Argument #2 ($enclosure) must be a single character";
+                                    let exc = self.create_exception(b"ValueError", msg, 0);
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                            }
+                            if let Some(esc_arg) = args.get(3) {
+                                let esc_bytes = esc_arg.to_php_string();
+                                if esc_bytes.as_bytes().len() > 1 {
+                                    let msg = "SplFileObject::fgetcsv(): Argument #3 ($escape) must be empty or a single character";
+                                    let exc = self.create_exception(b"ValueError", msg, 0);
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                            }
                             let delim = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| {
                                 let ob = obj.borrow();
                                 let d = ob.get_property(b"__spl_csv_delimiter");
@@ -10110,7 +10648,16 @@ impl Vm {
                             Some(Value::Long(bytes_written))
                         }
                         b"fwrite" => {
-                            let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
+                            let data_full = args.get(1).unwrap_or(&Value::Null).to_php_string();
+                            // Optional length: truncate data to length bytes
+                            let data = if let Some(len_val) = args.get(2) {
+                                let len = len_val.to_long().max(0) as usize;
+                                let bytes = data_full.as_bytes();
+                                let take = len.min(bytes.len());
+                                PhpString::from_vec(bytes[..take].to_vec())
+                            } else {
+                                data_full
+                            };
                             let ob = obj.borrow();
                             let path_val = ob.get_property(b"__spl_file_path");
                             let path_str = path_val.to_php_string().to_string_lossy();
@@ -17413,6 +17960,39 @@ impl Vm {
                                     // user subclasses of ArrayObject/ArrayIterator inherit
                                     // the built-in constructor behaviour (e.g. argument
                                     // validation and the deprecation notice).
+                                    // List of built-in SPL outer-iterator classes (longest-name first
+                                    // so subclass detection picks the most specific ancestor).
+                                    let builtin_outer_iters: &[&[u8]] = &[
+                                        b"recursivecallbackfilteriterator",
+                                        b"recursivecachingiterator",
+                                        b"recursivefilteriterator",
+                                        b"recursiveregexiterator",
+                                        b"recursiveiteratoriterator",
+                                        b"recursivetreeiterator",
+                                        b"callbackfilteriterator",
+                                        b"cachingiterator",
+                                        b"filteriterator",
+                                        b"regexiterator",
+                                        b"limititerator",
+                                        b"appenditerator",
+                                        b"multipleiterator",
+                                        b"iteratoriterator",
+                                        b"norewinditerator",
+                                        b"infiniteiterator",
+                                        b"parentiterator",
+                                        b"splfileobject",
+                                        b"spltempfileobject",
+                                        b"splfileinfo",
+                                        b"splfixedarray",
+                                        b"spldoublylinkedlist",
+                                        b"splstack",
+                                        b"splqueue",
+                                        b"splobjectstorage",
+                                        b"splpriorityqueue",
+                                        b"splheap",
+                                        b"splminheap",
+                                        b"splmaxheap",
+                                    ];
                                     let class_lower: Vec<u8> = if matches!(raw_class_lower.as_slice(),
                                         b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator")
                                     {
@@ -17433,6 +18013,11 @@ impl Vm {
                                         b"dateinterval".to_vec()
                                     } else if self.class_extends(&raw_class_lower, b"dateperiod") {
                                         b"dateperiod".to_vec()
+                                    } else if let Some(found) = builtin_outer_iters.iter().find(|c|
+                                        raw_class_lower.as_slice() == **c
+                                            || self.class_extends(&raw_class_lower, c)
+                                    ) {
+                                        found.to_vec()
                                     } else {
                                         raw_class_lower.clone()
                                     };
@@ -17701,8 +18286,52 @@ impl Vm {
                                         | b"regexiterator" | b"recursiveregexiterator"
                                         | b"parentiterator" => {
                                             // __construct(Iterator $iterator, ...)
+                                            // For RecursiveIteratorIterator, if the inner is an IteratorAggregate,
+                                            // validate that getIterator() returns a Traversable, then cache the
+                                            // resolved iterator.
+                                            let mut inner_iter = if call.args.len() > 1 { call.args[1].clone() } else { Value::Null };
+                                            if class_lower == b"recursiveiteratoriterator" {
+                                                if let Value::Object(io) = &inner_iter {
+                                                    let io_class_lower: Vec<u8> = io.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                    let is_agg = self.class_implements_interface(&io_class_lower, b"iteratoraggregate")
+                                                        || self.builtin_implements_interface(&io_class_lower, b"iteratoraggregate");
+                                                    let is_iter = self.class_implements_interface(&io_class_lower, b"iterator")
+                                                        || self.builtin_implements_interface(&io_class_lower, b"iterator");
+                                                    if is_agg && !is_iter {
+                                                        drop(obj_mut);
+                                                        let class_disp = crate::value::display_class_name(&io.borrow().class_name);
+                                                        let resolved = self.call_object_method(&inner_iter, b"getIterator", &[]).unwrap_or(Value::Null);
+                                                        let is_traversable = if let Value::Object(ro) = &resolved {
+                                                            let rc: Vec<u8> = ro.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                            self.class_implements_interface(&rc, b"traversable")
+                                                                || self.class_implements_interface(&rc, b"iterator")
+                                                                || self.class_implements_interface(&rc, b"iteratoraggregate")
+                                                                || self.builtin_implements_interface(&rc, b"traversable")
+                                                                || self.builtin_implements_interface(&rc, b"iterator")
+                                                                || self.builtin_implements_interface(&rc, b"iteratoraggregate")
+                                                        } else { false };
+                                                        if !is_traversable {
+                                                            let msg = format!("{}::getIterator() must return an object that implements Traversable", class_disp);
+                                                            let exc = self.create_exception(b"LogicException", &msg, op.line);
+                                                            self.current_exception = Some(exc);
+                                                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                                let ct = *catch_target;
+                                                                ip = ct as usize;
+                                                                continue;
+                                                            }
+                                                            return Err(VmError {
+                                                                message: format!("Uncaught LogicException: {}", msg),
+                                                                line: op.line,
+                                                            });
+                                                        }
+                                                        inner_iter = resolved;
+                                                        obj_mut = obj.borrow_mut();
+                                                    }
+                                                }
+                                            }
                                             if call.args.len() > 1 {
-                                                obj_mut.set_property(b"__spl_inner".to_vec(), call.args[1].clone());
+                                                obj_mut.set_property(b"__spl_inner".to_vec(), inner_iter);
                                             }
                                             // CachingIterator takes flags as second arg
                                             if call.args.len() > 2 && matches!(
@@ -17756,6 +18385,28 @@ impl Vm {
                                             obj_mut.set_property(b"__spl_count".to_vec(), Value::Long(count));
                                         }
                                         b"appenditerator" => {
+                                            // AppendIterator::__construct() expects exactly 0 arguments
+                                            // call.args[0] is $this; args beyond that are user-passed
+                                            if call.args.len() > 1 {
+                                                drop(obj_mut);
+                                                let given = call.args.len() - 1;
+                                                let msg = format!(
+                                                    "AppendIterator::__construct() expects exactly 0 arguments, {} given",
+                                                    given
+                                                );
+                                                let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    let ct = *catch_target;
+                                                    ip = ct as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError {
+                                                    message: format!("Uncaught ArgumentCountError: {}", msg),
+                                                    line: op.line,
+                                                });
+                                            }
                                             obj_mut.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
                                             obj_mut.set_property(b"__spl_idx".to_vec(), Value::Long(0));
                                         }
