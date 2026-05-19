@@ -1771,7 +1771,15 @@ impl Parser {
                 implements.push(self.parse_class_name_ref()?);
             }
         }
-        if self.eat(&TokenKind::Implements) {
+        if matches!(self.peek(), TokenKind::Implements) {
+            // Traits cannot implement interfaces — PHP raises a parse error here.
+            if modifiers.is_trait {
+                return Err(ParseError {
+                    message: "syntax error, unexpected token \"implements\", expecting \"{\"".into(),
+                    span: self.span(),
+                });
+            }
+            self.advance(); // eat implements
             loop {
                 implements.push(self.parse_class_name_ref()?);
                 if !self.eat(&TokenKind::Comma) {

@@ -240,6 +240,9 @@ pub struct Vm {
     pub current_exception: Option<Value>,
     /// Error reporting level
     pub error_reporting: i64,
+    /// `zend.exception_string_param_max_len` — maximum chars per string arg in stack traces.
+    /// Default 15. Values outside [0,1_000_000] are silently rejected (matches PHP).
+    pub exception_string_param_max_len: usize,
     /// Recursion depth for magic methods (prevent infinite recursion)
     magic_depth: u32,
     /// Objects with __destruct methods, tracked for shutdown-time destruction
@@ -398,6 +401,7 @@ impl Vm {
             is_global_scope: true,
             current_exception: None,
             error_reporting: 30719, // E_ALL
+            exception_string_param_max_len: 15,
             magic_depth: 0,
             destructible_objects: Vec::new(),
             called_class_stack: Vec::new(),
@@ -4416,7 +4420,7 @@ impl Vm {
             } else {
                 file
             };
-            let args_str = format_trace_args(args);
+            let args_str = format_trace_args_with_limit(args, self.exception_string_param_max_len);
             // For instance methods, replace `::` with `->`. Skip the rewrite for
             // closure display names (`{closure:...}`) which may embed `Class::method()`.
             let display_name = if *is_instance && !func_name.starts_with("{closure:") {
@@ -4435,8 +4439,14 @@ impl Vm {
         &self.output
     }
 
-    /// Format a single argument value for a stack trace
+    /// Format a single argument value for a stack trace (uses default 15-char string limit)
     pub fn format_trace_arg(val: &Value) -> String {
+        Self::format_trace_arg_with_limit(val, 15)
+    }
+
+    /// Format a single argument value for a stack trace with a configurable max string length
+    /// (corresponds to `zend.exception_string_param_max_len`).
+    pub fn format_trace_arg_with_limit(val: &Value, max_len: usize) -> String {
         match val {
             Value::Null | Value::Undef => "NULL".to_string(),
             Value::True => "true".to_string(),
@@ -4472,7 +4482,7 @@ impl Vm {
                 let mut char_count = 0;
                 let mut truncated = false;
                 for &b in bytes {
-                    if char_count >= 15 {
+                    if char_count >= max_len {
                         truncated = true;
                         break;
                     }
@@ -4523,7 +4533,7 @@ impl Vm {
             }
             Value::Reference(r) => {
                 let inner = r.borrow();
-                Self::format_trace_arg(&inner)
+                Self::format_trace_arg_with_limit(&inner, max_len)
             }
             Value::Generator(_) => "Object(Generator)".to_string(),
             Value::Resource(n) => format!("Resource id #{}", n),
@@ -13294,7 +13304,31 @@ impl Vm {
                 Err(ref _e) if self.exception_handler.is_some() && self.current_exception.is_some() => {
                     let handler = self.exception_handler.take().unwrap();
                     let exc = self.current_exception.take().unwrap();
+                    // PHP shows the user exception handler in stack traces as a frame
+                    // called from "[internal function]". Push a frame so any trace
+                    // captured during the handler reflects the call site.
+                    let handler_name = match &handler {
+                        Value::String(s) => s.to_string_lossy(),
+                        Value::Array(arr) => {
+                            let ab = arr.borrow();
+                            let vals: Vec<Value> = ab.values().cloned().collect();
+                            if vals.len() == 2 {
+                                let cn = match &vals[0] {
+                                    Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name),
+                                    Value::String(s) => s.to_string_lossy(),
+                                    _ => "?".to_string(),
+                                };
+                                let mn = vals[1].to_php_string().to_string_lossy();
+                                format!("{}::{}", cn, mn)
+                            } else { "[closure]".to_string() }
+                        }
+                        _ => "[closure]".to_string(),
+                    };
+                    let frame_args = vec![exc.clone()];
+                    // [internal function] is encoded by file="" and line=0.
+                    self.call_stack.push((handler_name, String::new(), 0, frame_args, false));
                     let handler_result = self.call_callback(&handler, &[exc.clone()]);
+                    self.call_stack.pop();
                     match handler_result {
                         Ok(_) => {
                             result = Ok(Value::Null);
@@ -13328,8 +13362,19 @@ impl Vm {
 
         let result = result?;
 
-        // Call __destruct on all tracked objects in reverse creation order
-        // Skip objects whose constructor threw or already destructed eagerly
+        // Call __destruct on all tracked objects in reverse creation order.
+        // (For uncaught-fatal paths, the SAPI calls `run_shutdown_destructors()` AFTER
+        // emitting the fatal message.)
+        self.run_shutdown_destructors();
+
+        Ok(result)
+    }
+
+    /// Run __destruct on all destructible objects in reverse creation order.
+    /// Called from `execute()` on clean exit, and from the SAPI layer after an
+    /// uncaught fatal error has been emitted so that destructor output (e.g. `echo`
+    /// inside `__destruct`) appears AFTER the "Fatal error: ..." message, matching PHP.
+    pub fn run_shutdown_destructors(&mut self) {
         let destructibles = std::mem::take(&mut self.destructible_objects);
         for obj_val in destructibles.iter().rev() {
             if let Value::Object(obj_rc) = obj_val {
@@ -13364,8 +13409,6 @@ impl Vm {
                 }
             }
         }
-
-        Ok(result)
     }
 
     /// Execute an op_array with pre-initialized CVs
@@ -17337,10 +17380,14 @@ impl Vm {
                                                         let class_part_owned: Vec<u8> = class_part_lower.to_vec();
                                                         let method_part_owned: Vec<u8> = method_part_lower.to_vec();
                                                         let class_display_owned: Vec<u8> = class_display.to_vec();
+                                                        // Prefer __call when calling from an instance method
+                                                        // on an ancestor (or via parent::/self::/static::); __callStatic
+                                                        // only when we're not inside an instance method.
+                                                        let inside_instance = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                                                            && matches!(cvs.first(), Some(Value::Object(_)));
+                                                        let prefer_call = inside_instance && has_call;
                                                         let result_val = 'magic_dispatch: {
-                                                            // We need to jump to the magic method dispatch code below
-                                                            // For now, we'll directly dispatch here
-                                                            if has_callstatic {
+                                                            if !prefer_call && has_callstatic {
                                                                 if let Some(cs_method) = self.classes.get(&class_part_owned).and_then(|c| c.get_method(b"__callstatic")) {
                                                                     let cs_op = cs_method.op_array.clone();
                                                                     let cs_declaring = cs_method.declaring_class.clone();
@@ -17389,6 +17436,30 @@ impl Vm {
                                                                     break 'magic_dispatch Some(r);
                                                                 }
                                                             }
+                                                            // Fallback to __callStatic if __call wasn't preferred or available
+                                                            if has_callstatic {
+                                                                if let Some(cs_method) = self.classes.get(&class_part_owned).and_then(|c| c.get_method(b"__callstatic")) {
+                                                                    let cs_op = cs_method.op_array.clone();
+                                                                    let cs_declaring = cs_method.declaring_class.clone();
+                                                                    let mut fn_cvs = vec![Value::Undef; cs_op.cv_names.len()];
+                                                                    if fn_cvs.len() > 0 {
+                                                                        fn_cvs[0] = Value::String(PhpString::from_vec(method_part_owned.clone()));
+                                                                    }
+                                                                    if fn_cvs.len() > 1 {
+                                                                        let mut args_arr = crate::array::PhpArray::new();
+                                                                        for arg in &call.args {
+                                                                            args_arr.push(arg.clone());
+                                                                        }
+                                                                        fn_cvs[1] = Value::Array(Rc::new(RefCell::new(args_arr)));
+                                                                    }
+                                                                    self.called_class_stack.push(class_display_owned.clone());
+                                                                    self.class_scope_stack.push(cs_declaring);
+                                                                    let r = self.execute_op_array(&cs_op, fn_cvs);
+                                                                    self.called_class_stack.pop();
+                                                                    self.class_scope_stack.pop();
+                                                                    break 'magic_dispatch Some(r);
+                                                                }
+                                                            }
                                                             None
                                                         };
                                                         if let Some(result) = result_val {
@@ -17402,16 +17473,8 @@ impl Vm {
                                                             continue;
                                                         }
                                                     }
-                                                    let err_id = self.next_object_id;
-                                                    self.next_object_id += 1;
-                                                    let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
-                                                    err_obj.set_property(
-                                                        b"message".to_vec(),
-                                                        Value::String(PhpString::from_string(err_msg.clone())),
-                                                    );
-                                                    err_obj.set_property(b"code".to_vec(), Value::Long(0));
-                                                    self.current_exception =
-                                                        Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                                    self.current_exception = Some(exc);
                                                     if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         continue;
@@ -19389,20 +19452,27 @@ impl Vm {
                                                         }
                                                         _ => {
                                                             // Objects/arrays cannot be converted to string
-                                                            let base_class = if class_lower == b"error"
+                                                            // ErrorException extends Exception, so check it first.
+                                                            let base_class = if class_lower == b"errorexception"
+                                                                || is_builtin_subclass(&class_lower, b"errorexception")
+                                                                || self.class_extends(&class_lower, b"errorexception") {
+                                                                "ErrorException"
+                                                            } else if class_lower == b"error"
                                                                 || is_builtin_subclass(&class_lower, b"error")
                                                                 || self.class_extends(&class_lower, b"error") {
                                                                 "Error"
-                                                            } else if class_lower == b"errorexception"
-                                                                || is_builtin_subclass(&class_lower, b"errorexception") {
-                                                                "ErrorException"
                                                             } else {
                                                                 "Exception"
                                                             };
                                                             let given_type = Vm::value_type_name(msg_val);
                                                             drop(obj_mut);
                                                             let msg = format!("{}::__construct(): Argument #1 ($message) must be of type string, {} given", base_class, given_type);
+                                                            // Push a frame for Exception->__construct so it appears in the trace
+                                                            let ctor_trace_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+                                                            let ctor_name = format!("{}->__construct", base_class);
+                                                            self.call_stack.push((ctor_name, self.current_file.clone(), op.line, ctor_trace_args, true));
                                                             let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                                            self.call_stack.pop();
                                                             self.current_exception = Some(exc);
                                                             if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                                 ip = catch_target as usize;
@@ -19480,11 +19550,27 @@ impl Vm {
                                         let calling_class_is_trait = self.classes.get(&class_lower)
                                             .map(|c| c.is_trait)
                                             .unwrap_or(false);
-                                        // Only forwarding calls (self:: and parent::) from instance context should use __call
-                                        // All other static calls (ClassName::, $obj::) should use __callStatic
+                                        // Use __call (not __callStatic) only when we are inside an
+                                        // instance method AND either it's a forwarding call (self::/parent::/static::)
+                                        // OR the named class is an ancestor of $this's runtime class.
+                                        // Outside an instance method (e.g. `$a::method()` from main), we always
+                                        // route through __callStatic.
+                                        let inside_instance_method = !self.class_scope_stack.is_empty()
+                                            && op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
                                         let in_instance_context = !calling_class_is_trait
+                                            && inside_instance_method
                                             && matches!(cvs.first(), Some(Value::Object(_)))
-                                            && is_forwarding_call;
+                                            && (is_forwarding_call || {
+                                                // Check if $this's runtime class extends / is the named class
+                                                if let Some(Value::Object(o)) = cvs.first() {
+                                                    let this_class_lower: Vec<u8> = o.borrow().class_name
+                                                        .iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                    this_class_lower == class_part_lower
+                                                        || self.class_extends(&this_class_lower, &class_part_lower)
+                                                } else {
+                                                    false
+                                                }
+                                            });
                                         if in_instance_context {
                                             if let Some((call_op, declaring_class)) = magic_call {
                                                 let mut fn_cvs =
@@ -23424,6 +23510,24 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // PHP refuses property names starting with NUL. When __unset exists, dispatch
+                    // first; the inner unset will trigger this check again under magic_depth > 0.
+                    if prop_name.as_bytes().first() == Some(&0u8) {
+                        let class_has_unset = if let Value::Object(obj) = &obj_val {
+                            let cl: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            self.classes.get(&cl).map(|c| c.methods.contains_key(&b"__unset".to_vec())).unwrap_or(false)
+                        } else { false };
+                        if !class_has_unset || self.magic_depth > 0 {
+                            let msg = "Cannot access property starting with \"\\0\"";
+                            let exc = self.create_exception(b"Error", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                        }
+                    }
                     if let Value::Object(obj) = &obj_val {
                         // Hooked properties cannot be unset
                         {
@@ -23597,8 +23701,14 @@ impl Vm {
                                 if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
                                 if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); }
                                 self.class_scope_stack.push(magic_declaring);
-                                self.called_class_stack.push(class_name_orig);
+                                self.called_class_stack.push(class_name_orig.clone());
+                                // Push a stack frame so the magic __unset call appears in exception traces.
+                                let class_disp = crate::value::display_class_name(&class_name_orig);
+                                let frame_name = format!("{}->__unset", class_disp);
+                                let frame_args = vec![Value::String(prop_name.clone())];
+                                self.call_stack.push((frame_name, self.current_file.clone(), op.line, frame_args, true));
                                 let _ = self.execute_op_array(&method, fn_cvs);
+                                self.call_stack.pop();
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
                                 self.magic_depth -= 1;
@@ -24617,9 +24727,9 @@ impl Vm {
                                         }
                                         // Skip __construct compatibility checks
                                         // Check compatibility for all method overrides except:
-                                        // - constructors
+                                        // - non-abstract constructors (PHP only checks abstract __construct signatures)
                                         // - private parent methods (not inherited for override checking)
-                                        let should_check = mn_lower != b"__construct"
+                                        let should_check = (mn_lower != b"__construct" || method.is_abstract)
                                             && method.visibility != Visibility::Private;
                                         if should_check {
                                             // Check method signature compatibility
@@ -25376,9 +25486,18 @@ impl Vm {
                                     );
                                 }
                             } else {
+                                // PHP 8 raises an Error (catchable) with the format:
+                                // Uncaught Error: Trait "name" not found
                                 let trait_display = String::from_utf8_lossy(trait_name).to_string();
+                                let err_msg = format!("Trait \"{}\" not found", trait_display);
+                                let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
                                 return Err(VmError {
-                                    message: format!("Could not find trait {}", trait_display),
+                                    message: format!("Uncaught Error: {}", err_msg),
                                     line: op.line,
                                 });
                             }
@@ -25519,6 +25638,9 @@ impl Vm {
                             }
                         }
 
+                        // Track which trait contributed each method name so we can detect
+                        // composition collisions between two traits with the same method.
+                        let mut method_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> = std::collections::HashMap::new();
                         for trait_name in &trait_names {
                             let trait_lower: Vec<u8> =
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -25554,6 +25676,35 @@ impl Vm {
                                     if own_method_names.contains(method_name) {
                                         continue;
                                     }
+                                    // If the trait method is abstract and the class already has a
+                                    // concrete inherited implementation (from parent class), keep the
+                                    // inherited one — the abstract trait declaration acts purely as a
+                                    // "this method must exist" requirement, which is satisfied.
+                                    if method.is_abstract {
+                                        if let Some(existing) = class.methods.get(method_name) {
+                                            if !existing.is_abstract {
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    // Composition collision: if another trait already contributed
+                                    // this method name (and no insteadof/alias resolved it), it's a
+                                    // fatal error.
+                                    if let Some(prev_trait) = method_from_trait.get(method_name) {
+                                        if prev_trait != &trait_def.name {
+                                            let prev_trait_display = String::from_utf8_lossy(prev_trait).to_string();
+                                            let cur_trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
+                                            let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                            let method_display = String::from_utf8_lossy(&method.name).to_string();
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Trait method {}::{} has not been applied as {}::{}, because of collision with {}::{}",
+                                                    cur_trait_display, method_display, class_display, method_display, prev_trait_display, method_display
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
                                     let mut m = method.clone();
                                     // Trait methods should have scope of the using class
                                     m.declaring_class = class_name_lower.clone();
@@ -25562,6 +25713,7 @@ impl Vm {
                                     let trait_name_original = trait_def.name.clone();
                                     patch_class_literals(&mut m, &trait_name_original, &class.name);
                                     class.methods.insert(method_name.clone(), m);
+                                    method_from_trait.insert(method_name.clone(), trait_def.name.clone());
                                 }
                                 // Copy trait properties
                                 let child_prop_names: Vec<Vec<u8>> =
@@ -26911,15 +27063,8 @@ impl Vm {
                                     class_name.to_string_lossy()
                                 )
                             };
-                            let err_id = self.next_object_id;
-                            self.next_object_id += 1;
-                            let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
-                            err_obj.set_property(
-                                b"message".to_vec(),
-                                Value::String(PhpString::from_string(err_msg.clone())),
-                            );
-                            self.current_exception =
-                                Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                            let exc = self.create_exception(b"Error", &err_msg, op.line);
+                            self.current_exception = Some(exc);
 
                             if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
@@ -27294,6 +27439,24 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // PHP refuses property names starting with NUL. When __get exists, dispatch
+                    // first; the inner access will trigger this check again under magic_depth > 0.
+                    if prop_name.as_bytes().first() == Some(&0u8) {
+                        let class_has_get = if let Value::Object(obj) = &obj_val_raw {
+                            let cl: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            self.classes.get(&cl).map(|c| c.methods.contains_key(&b"__get".to_vec())).unwrap_or(false)
+                        } else { false };
+                        if !class_has_get || self.magic_depth > 0 {
+                            let msg = "Cannot access property starting with \"\\0\"";
+                            let exc = self.create_exception(b"Error", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                        }
+                    }
 
                     // Lazy object initialization: skip for internal __lazy_* props
                     // and for properties explicitly marked as skipped via
@@ -27513,7 +27676,9 @@ impl Vm {
                                 .get(&class_lower)
                                 .map(|c| c.methods.contains_key(&b"__get".to_vec()))
                                 .unwrap_or(false);
-                            if has_get && self.magic_depth < 5 {
+                            // Don't recursively dispatch __get when access is denied from inside
+                            // __get itself (PHP raises the Error directly).
+                            if has_get && self.magic_depth == 0 {
                                 self.magic_depth += 1;
                                 let magic_method_def = self
                                     .classes
@@ -27523,6 +27688,10 @@ impl Vm {
                                     .unwrap();
                                 let method = magic_method_def.op_array.clone();
                                 let magic_declaring = magic_method_def.declaring_class.clone();
+                                // Use the declaring class for the trace frame
+                                let frame_class_name = self.classes.get(&magic_declaring)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_else(|| class_name_orig.clone());
                                 let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
                                 if !fn_cvs.is_empty() {
                                     fn_cvs[0] = obj_val.clone();
@@ -27532,25 +27701,39 @@ impl Vm {
                                 }
                                 self.class_scope_stack.push(magic_declaring.clone());
                                 self.called_class_stack.push(class_name_orig.clone());
+                                // Push a stack frame for __get
+                                let class_disp = crate::value::display_class_name(&frame_class_name);
+                                let frame_name = format!("{}->__get", class_disp);
+                                let frame_args = vec![Value::String(prop_name.clone())];
+                                self.call_stack.push((frame_name, self.current_file.clone(), op.line, frame_args, true));
                                 let result = self
                                     .execute_op_array(&method, fn_cvs)
                                     .unwrap_or(Value::Null);
+                                self.call_stack.pop();
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
                                 self.magic_depth -= 1;
+                                // Propagate any exception thrown inside __get
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                            let ob = obj.borrow();
+                                            let class = crate::value::display_class_name(&ob.class_name);
+                                            let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                            if msg.is_empty() { format!("Uncaught {}", class) } else { format!("Uncaught {}: {}", class, msg) }
+                                        } else { "Uncaught exception".to_string() };
+                                        return Err(VmError { message: exc_msg, line: op.line });
+                                    }
+                                }
                                 result
                             } else {
-                                // No __get - throw the error
-                                let err_id = self.next_object_id;
-                                self.next_object_id += 1;
-                                let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
-                                err_obj.set_property(
-                                    b"message".to_vec(),
-                                    Value::String(PhpString::from_string(err_msg.clone())),
-                                );
-                                err_obj.set_property(b"code".to_vec(), Value::Long(0));
-                                self.current_exception =
-                                    Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                // No __get - throw the error (with file/line populated)
+                                let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc);
                                 if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
@@ -27683,12 +27866,35 @@ impl Vm {
                                     } // $name
                                     self.class_scope_stack.push(magic_declaring);
                                     self.called_class_stack.push(class_name_orig.clone());
+                                    // Push stack frame for __get
+                                    let class_disp = crate::value::display_class_name(&class_name_orig);
+                                    let frame_name = format!("{}->__get", class_disp);
+                                    let frame_args = vec![Value::String(prop_name.clone())];
+                                    self.call_stack.push((frame_name, self.current_file.clone(), op.line, frame_args, true));
                                     let result = self
                                         .execute_op_array(&method, fn_cvs)
                                         .unwrap_or(Value::Null);
+                                    self.call_stack.pop();
                                     self.called_class_stack.pop();
                                     self.class_scope_stack.pop();
                                     self.magic_depth -= 1;
+                                    // If __get threw an exception, propagate via the same opcode handler's
+                                    // catch-target dispatch (don't silently return Null).
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
+                                            continue;
+                                        } else {
+                                            let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                                let ob = obj.borrow();
+                                                let class = crate::value::display_class_name(&ob.class_name);
+                                                let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                                if msg.is_empty() { format!("Uncaught {}", class) } else { format!("Uncaught {}: {}", class, msg) }
+                                            } else { "Uncaught exception".to_string() };
+                                            return Err(VmError { message: exc_msg, line: op.line });
+                                        }
+                                    }
                                     result
                                 } else {
                                     // Check if property was declared as typed in the class (unset typed property)
@@ -27765,6 +27971,28 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // PHP refuses property names starting with NUL when the class has no __set
+                    // (private/protected names internally use NUL prefixes). When __set exists,
+                    // dispatch goes through it first; the inner $this->$prop access will then
+                    // raise the Error from this same check.
+                    if prop_name.as_bytes().first() == Some(&0u8) {
+                        let class_has_set = if let Value::Object(obj) = &obj_val_raw {
+                            let cl: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            self.classes.get(&cl).map(|c| c.methods.contains_key(&b"__set".to_vec())).unwrap_or(false)
+                        } else { false };
+                        // Inside a magic method (e.g. __set body) we always raise; outside we
+                        // only raise when no __set will absorb the call.
+                        if !class_has_set || self.magic_depth > 0 {
+                            let msg = "Cannot access property starting with \"\\0\"";
+                            let exc = self.create_exception(b"Error", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                        }
+                    }
 
                     // Lazy init on write access (skip internal __lazy_* and
                     // properties marked via ReflectionProperty::skipLazyInitialization)
@@ -28141,17 +28369,9 @@ impl Vm {
                                 });
                             }
                         } else if let Some(err_msg) = readonly_error {
-                            // Readonly violation - throw Error
-                            let err_id = self.next_object_id;
-                            self.next_object_id += 1;
-                            let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
-                            err_obj.set_property(
-                                b"message".to_vec(),
-                                Value::String(PhpString::from_string(err_msg.clone())),
-                            );
-                            err_obj.set_property(b"code".to_vec(), Value::Long(0));
-                            self.current_exception =
-                                Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                            // Readonly violation - throw Error (with file/line populated)
+                            let exc = self.create_exception(b"Error", &err_msg, op.line);
+                            self.current_exception = Some(exc);
                             if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
                                 continue;
@@ -28176,8 +28396,10 @@ impl Vm {
                                 // 2. Not already inside a magic method (prevents infinite recursion)
                                 has_set && !prop_exists_on_instance && self.magic_depth == 0
                             } else {
-                                // Regular visibility: always try __set
-                                has_set && self.magic_depth < 5
+                                // Regular visibility: try __set only if not already inside one
+                                // (PHP doesn't recursively re-dispatch __set when access is
+                                // denied from within __set itself — it raises the Error directly).
+                                has_set && self.magic_depth == 0
                             };
                             if should_try_set {
                                 self.magic_depth += 1;
@@ -28189,6 +28411,12 @@ impl Vm {
                                     .unwrap();
                                 let method = magic_method_def.op_array.clone();
                                 let magic_declaring = magic_method_def.declaring_class.clone();
+                                // Use the declaring class (not the receiver's class) for the trace
+                                // frame, matching PHP behavior (`Operation->__set` when ExtOperation
+                                // inherits from Operation).
+                                let frame_class_name = self.classes.get(&magic_declaring)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_else(|| class_name_orig.clone());
                                 let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
                                 if !fn_cvs.is_empty() {
                                     fn_cvs[0] = obj_val.clone();
@@ -28197,11 +28425,17 @@ impl Vm {
                                     fn_cvs[1] = Value::String(prop_name.clone());
                                 }
                                 if fn_cvs.len() > 2 {
-                                    fn_cvs[2] = value;
+                                    fn_cvs[2] = value.clone();
                                 }
                                 self.class_scope_stack.push(magic_declaring);
                                 self.called_class_stack.push(class_name_orig.clone());
+                                // Push a stack frame for __set
+                                let class_disp = crate::value::display_class_name(&frame_class_name);
+                                let frame_name = format!("{}->__set", class_disp);
+                                let frame_args = vec![Value::String(prop_name.clone()), value];
+                                self.call_stack.push((frame_name, self.current_file.clone(), op.line, frame_args, true));
                                 let _ = self.execute_op_array(&method, fn_cvs);
+                                self.call_stack.pop();
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
                                 self.magic_depth -= 1;
@@ -28221,17 +28455,9 @@ impl Vm {
                                     }
                                 }
                             } else {
-                                // No __set - throw the error
-                                let err_id = self.next_object_id;
-                                self.next_object_id += 1;
-                                let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
-                                err_obj.set_property(
-                                    b"message".to_vec(),
-                                    Value::String(PhpString::from_string(err_msg.clone())),
-                                );
-                                err_obj.set_property(b"code".to_vec(), Value::Long(0));
-                                self.current_exception =
-                                    Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                // No __set - throw the error (with file/line populated)
+                                let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc);
                                 if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
                                     continue;
@@ -28252,6 +28478,7 @@ impl Vm {
                                 && !obj.borrow().has_property(prop_name.as_bytes())
                                 && self.magic_depth < 5
                             {
+                                self.magic_depth += 1;
                                 let magic_method_def = self
                                     .classes
                                     .get(&class_lower)
@@ -28268,13 +28495,36 @@ impl Vm {
                                     fn_cvs[1] = Value::String(prop_name.clone());
                                 }
                                 if fn_cvs.len() > 2 {
-                                    fn_cvs[2] = value;
+                                    fn_cvs[2] = value.clone();
                                 }
                                 self.class_scope_stack.push(magic_declaring);
                                 self.called_class_stack.push(class_name_orig.clone());
+                                // Push a stack frame so __set appears in exception traces
+                                let class_disp = crate::value::display_class_name(&class_name_orig);
+                                let frame_name = format!("{}->__set", class_disp);
+                                let frame_args = vec![Value::String(prop_name.clone()), value];
+                                self.call_stack.push((frame_name, self.current_file.clone(), op.line, frame_args, true));
                                 let _ = self.execute_op_array(&method, fn_cvs);
+                                self.call_stack.pop();
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
+                                self.magic_depth -= 1;
+                                // Propagate any exception thrown inside __set
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                                            let ob = obj.borrow();
+                                            let class = crate::value::display_class_name(&ob.class_name);
+                                            let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                            format!("Uncaught {}: {}", class, msg)
+                                        } else { "Uncaught exception".to_string() };
+                                        return Err(VmError { message: exc_msg, line: op.line });
+                                    }
+                                }
                             } else {
                                 if matches!(obj.borrow().get_property(b"__clone_window"), Value::True) {
                                     let modified_key = format!("__clone_modified_{}", String::from_utf8_lossy(prop_name.as_bytes()));
@@ -28901,16 +29151,8 @@ impl Vm {
                                 } else {
                                     // Method not accessible and no __call - throw error
                                     let err_msg = visibility_err.unwrap();
-                                    let err_id = self.next_object_id;
-                                    self.next_object_id += 1;
-                                    let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
-                                    err_obj.set_property(
-                                        b"message".to_vec(),
-                                        Value::String(PhpString::from_string(err_msg.clone())),
-                                    );
-                                    err_obj.set_property(b"code".to_vec(), Value::Long(0));
-                                    self.current_exception =
-                                        Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                    self.current_exception = Some(exc);
                                     if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
@@ -29522,8 +29764,39 @@ impl Vm {
                 let result = self.execute_op_array(&method, method_cvs);
                 self.class_scope_stack.pop();
                 self.called_class_stack.pop();
+                // If __toString threw, propagate the exception (already set in current_exception)
+                if self.current_exception.is_some() {
+                    return PhpString::empty();
+                }
                 if let Ok(result) = result {
-                    return result.to_php_string();
+                    // PHP enforces __toString return-type: must be string (or implicitly-coercible).
+                    // Returning nothing (Null/Undef) raises Error: "X::__toString(): Return value must be of type string, none returned"
+                    match &result {
+                        Value::String(s) => return s.clone(),
+                        Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+                            return result.to_php_string();
+                        }
+                        Value::Null | Value::Undef => {
+                            let obj_borrow = obj.borrow();
+                            let class_display = crate::value::display_class_name(&obj_borrow.class_name);
+                            drop(obj_borrow);
+                            let msg = format!("{}::__toString(): Return value must be of type string, none returned", class_display);
+                            let exc = self.create_exception(b"Error", &msg, 0);
+                            self.current_exception = Some(exc);
+                            return PhpString::empty();
+                        }
+                        _ => {
+                            // Object/array etc. — also a type error
+                            let obj_borrow = obj.borrow();
+                            let class_display = crate::value::display_class_name(&obj_borrow.class_name);
+                            drop(obj_borrow);
+                            let given_type = Vm::value_type_name(&result);
+                            let msg = format!("{}::__toString(): Return value must be of type string, {} returned", class_display, given_type);
+                            let exc = self.create_exception(b"Error", &msg, 0);
+                            self.current_exception = Some(exc);
+                            return PhpString::empty();
+                        }
+                    }
                 }
             }
             // Built-in __toString for Throwable classes (Exception, Error, etc.)
@@ -29707,7 +29980,28 @@ impl Vm {
                 });
             }
         }
-        Ok(self.value_to_string(val))
+        // Save current_exception state so we can detect if value_to_string raised one.
+        let pre_exc = self.current_exception.is_some();
+        let result = self.value_to_string(val);
+        // If value_to_string itself raised an exception (e.g. __toString threw or
+        // returned a non-string), surface it as a VmError so the caller can dispatch
+        // catches. Don't conflate with a pre-existing exception that the caller is
+        // already handling (e.g. echo inside a finally block during exception unwind).
+        if !pre_exc {
+            if let Some(exc) = self.current_exception.clone() {
+                let msg = match &exc {
+                    Value::Object(o) => {
+                        let ob = o.borrow();
+                        let cn = crate::value::display_class_name(&ob.class_name);
+                        let m = ob.get_property(b"message").to_php_string().to_string_lossy();
+                        if m.is_empty() { format!("Uncaught {}", cn) } else { format!("Uncaught {}: {}", cn, m) }
+                    }
+                    _ => "Uncaught exception in __toString".to_string(),
+                };
+                return Err(VmError { message: msg, line: self.current_line });
+            }
+        }
+        Ok(result)
     }
 
     fn read_operand(
@@ -31411,10 +31705,15 @@ fn php_decrement(val: &Value) -> Value {
     }
 }
 
-/// Format arguments for stack trace display
+/// Format arguments for stack trace display (default 15-char string limit)
 pub fn format_trace_args(args: &[Value]) -> String {
+    format_trace_args_with_limit(args, 15)
+}
+
+/// Format arguments for stack trace display with configurable string limit
+pub fn format_trace_args_with_limit(args: &[Value], max_len: usize) -> String {
     args.iter()
-        .map(|v| Vm::format_trace_arg(v))
+        .map(|v| Vm::format_trace_arg_with_limit(v, max_len))
         .collect::<Vec<_>>()
         .join(", ")
 }

@@ -604,14 +604,109 @@ fn restore_error_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
 }
 
 fn set_exception_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let handler_opt = args.first();
+    // Validate callback (PHP throws a TypeError for non-callable callbacks since 8.0)
+    if let Some(handler) = handler_opt {
+        if !matches!(handler, Value::Null) {
+            if let Some(err) = validate_exception_handler_callback(vm, handler) {
+                let exc = vm.throw_type_error(err.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: err, line: vm.current_line });
+            }
+        }
+    }
     let prev = vm.exception_handler.take();
     vm.exception_handler_stack.push(prev.clone());
-    if let Some(handler) = args.first() {
+    if let Some(handler) = handler_opt {
         if !matches!(handler, Value::Null) {
             vm.exception_handler = Some(handler.clone());
         }
     }
     Ok(prev.unwrap_or(Value::Null))
+}
+
+/// Validate a callback argument for set_exception_handler. Returns Some(error message)
+/// if the callback is invalid (PHP throws TypeError); None if it looks OK.
+fn validate_exception_handler_callback(vm: &Vm, callback: &Value) -> Option<String> {
+    let base = "set_exception_handler(): Argument #1 ($callback) must be a valid callback or null, ";
+    match callback {
+        Value::String(s) => {
+            let name = s.as_bytes();
+            if name.is_empty() {
+                return Some(format!("{}function \"\" not found or invalid function name", base));
+            }
+            // Class::method form
+            if let Some(pos) = name.windows(2).position(|w| w == b"::") {
+                let class_part = &name[..pos];
+                let method_part = &name[pos + 2..];
+                let class_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let method_lower: Vec<u8> = method_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(class) = vm.classes.get(&class_lower) {
+                    if class.get_method(&method_lower).is_some() {
+                        return None;
+                    }
+                    return Some(format!("{}class {} does not have a method \"{}\"",
+                        base, String::from_utf8_lossy(class_part), String::from_utf8_lossy(method_part)));
+                }
+                return Some(format!("{}class \"{}\" not found",
+                    base, String::from_utf8_lossy(class_part)));
+            }
+            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if name_lower.starts_with(b"__closure_") || name_lower.starts_with(b"__arrow_") || name_lower.starts_with(b"__bound_closure_") || name_lower.starts_with(b"__closure_fcc_") {
+                return None;
+            }
+            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
+                return None;
+            }
+            Some(format!("{}function \"{}\" not found or invalid function name", base, String::from_utf8_lossy(name)))
+        }
+        Value::Array(arr) => {
+            let arr_borrow = arr.borrow();
+            if arr_borrow.len() != 2 {
+                return Some(format!("{}array must have exactly two members", base));
+            }
+            let vals: Vec<Value> = arr_borrow.values().cloned().collect();
+            drop(arr_borrow);
+            // First member: object or class name
+            let class_lower = match &vals[0] {
+                Value::Object(o) => {
+                    let cn: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    cn
+                }
+                Value::String(s) => {
+                    let cn: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if cn.is_empty() {
+                        return Some(format!("{}class \"\" not found", base));
+                    }
+                    if !vm.classes.contains_key(&cn) {
+                        return Some(format!("{}class \"{}\" not found", base, s.to_string_lossy()));
+                    }
+                    cn
+                }
+                _ => return Some(format!("{}first array member is not a valid class name or object", base)),
+            };
+            // Second member: method name
+            match &vals[1] {
+                Value::String(s) => {
+                    let method_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some(cd) = vm.classes.get(&class_lower) {
+                        if cd.get_method(&method_lower).is_some() {
+                            return None;
+                        }
+                        // __call/__callStatic act as catch-alls — method is callable.
+                        if cd.get_method(b"__call").is_some() || cd.get_method(b"__callstatic").is_some() {
+                            return None;
+                        }
+                    }
+                    Some(format!("{}class {} does not have a method \"{}\"",
+                        base, String::from_utf8_lossy(&class_lower), s.to_string_lossy()))
+                }
+                _ => Some(format!("{}second array member is not a valid method", base)),
+            }
+        }
+        Value::Object(_) => None, // closures and __invoke objects are callable
+        _ => Some(format!("{}must be of type ?callable, {} given", base, Vm::value_type_name(callback))),
+    }
 }
 
 fn restore_exception_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -5009,9 +5104,11 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args[0].to_long();
     let format = args[1].to_php_string();
     let mut format_args = vec![Value::String(format)];
-    if let Value::Array(arr) = &args[2] {
-        for (_, v) in arr.borrow().iter() {
-            format_args.push(v.clone());
+    if args.len() > 2 {
+        if let Value::Array(arr) = &args[2] {
+            for (_, v) in arr.borrow().iter() {
+                format_args.push(v.clone());
+            }
         }
     }
     let formatted = crate::strings::do_sprintf(&format_args);

@@ -1120,6 +1120,14 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 vm.error_reporting = *n;
             }
         }
+        // Apply zend.exception_string_param_max_len to the VM (PHP rejects values outside [0,1_000_000])
+        if key == "zend.exception_string_param_max_len" {
+            if let Value::Long(n) = &val {
+                if *n >= 0 && *n <= 1_000_000 {
+                    vm.exception_string_param_max_len = *n as usize;
+                }
+            }
+        }
         vm.constants.insert(key.as_bytes().to_vec(), val);
     }
     for class in compiled_classes {
@@ -1142,13 +1150,22 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                         let obj_ref = obj.borrow();
                         let class = goro_core::value::display_class_name(&obj_ref.class_name);
                         let msg_str = obj_ref.get_property(b"message").to_php_string().to_string_lossy();
+                        // PHP uses the exception's `file`/`line` properties as-is once set.
+                        // If they were never populated (some engine-thrown Errors), fall back
+                        // to the actual throw site (vm.current_file, e.line) so we don't print ":0".
+                        let has_file = obj_ref.has_property(b"file");
+                        let has_line = obj_ref.has_property(b"line");
                         let exc_file = obj_ref.get_property(b"file").to_php_string().to_string_lossy();
                         let exc_line = obj_ref.get_property(b"line").to_long();
-                        let file_str = if exc_file.is_empty() || exc_file == "Unknown" { vm.current_file.clone() } else { exc_file };
-                        let line_num = if exc_line > 0 { exc_line as u32 } else { e.line };
+                        let file_str = if has_file { exc_file } else { vm.current_file.clone() };
+                        let line_num = if has_line && exc_line >= 0 {
+                            exc_line as u32
+                        } else {
+                            e.line
+                        };
                         // Get trace from exception object
                         let exc_trace = obj_ref.get_property(b"trace");
-                        let trace_str = format_exception_trace(&exc_trace, &stack_trace);
+                        let trace_str = format_exception_trace_with_limit(&exc_trace, &stack_trace, vm.exception_string_param_max_len);
                         chain.push((class, msg_str, file_str, line_num, trace_str));
                         // Walk previous chain
                         let mut prev = obj_ref.get_property(b"previous").clone();
@@ -1163,7 +1180,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                                 let pf_str = if pf.is_empty() || pf == "Unknown" { vm.current_file.clone() } else { pf };
                                 let pl_num = if pl > 0 { pl as u32 } else { 0 };
                                 let pt = prev_ref.get_property(b"trace");
-                                let pt_str = format_exception_trace(&pt, &stack_trace);
+                                let pt_str = format_exception_trace_with_limit(&pt, &stack_trace, vm.exception_string_param_max_len);
                                 chain.push((pc, pm, pf_str, pl_num, pt_str));
                                 next_prev = prev_ref.get_property(b"previous").clone();
                             } else {
@@ -1178,8 +1195,11 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                     // Actually PHP shows the innermost (last thrown) first, with "Uncaught",
                     // then shows each previous with "\n\nNext"
                     // The "thrown in" line comes at the very end with the last exception in chain
+                    // The "thrown in <file> on line <n>" line uses the exception's own
+                    // file/line. If file is empty, PHP renders "Unknown".
+                    let unknown_owned: String = "Unknown".to_string();
                     let first = &chain[0];
-                    let thrown_file = &first.2;
+                    let thrown_file: &String = if first.2.is_empty() { &unknown_owned } else { &first.2 };
                     let thrown_line = first.3;
 
                     let mut fatal = String::new();
@@ -1210,7 +1230,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                             }
                         }
                     }
-                    fatal.push_str(&format!("\n  thrown in {} on line {}", thrown_file, thrown_line));
+                    fatal.push_str(&format!("\n  thrown in {} on line {}\n", thrown_file, thrown_line));
 
                     output.extend_from_slice(fatal.as_bytes());
                 } else {
@@ -1226,12 +1246,21 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 output.extend_from_slice(fatal.as_bytes());
             }
 
+            // PHP runs destructors AFTER emitting the fatal-error message, so any output
+            // from `__destruct` follows the trace.
+            vm.run_shutdown_destructors();
+            output.extend_from_slice(&vm.take_output());
+
             Ok(output)
         }
     }
 }
 
 fn format_exception_trace(trace_val: &goro_core::value::Value, fallback_trace: &str) -> String {
+    format_exception_trace_with_limit(trace_val, fallback_trace, 15)
+}
+
+fn format_exception_trace_with_limit(trace_val: &goro_core::value::Value, fallback_trace: &str, max_len: usize) -> String {
     use goro_core::value::Value;
     use goro_core::array::ArrayKey;
     if let Value::Array(arr) = trace_val {
@@ -1261,7 +1290,7 @@ fn format_exception_trace(trace_val: &goro_core::value::Value, fallback_trace: &
                     if let Value::Array(args_arr) = args_val {
                         let args_arr = args_arr.borrow();
                         let formatted: Vec<String> = args_arr.iter().map(|(_k, v)| {
-                            goro_core::vm::Vm::format_trace_arg(v)
+                            goro_core::vm::Vm::format_trace_arg_with_limit(v, max_len)
                         }).collect();
                         formatted.join(", ")
                     } else {
