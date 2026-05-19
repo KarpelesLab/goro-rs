@@ -8271,17 +8271,18 @@ fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// output for special streams). Used after the write filter chain has
 /// been applied.
 fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
-    // Check special routing.
+    // The PHP constants STDIN/STDOUT/STDERR are pre-registered at resource
+    // ids 1/2/3 without a FILE_HANDLES entry. Route those directly.
+    if fid == 2 || fid == 3 {
+        vm.write_output(bytes);
+        return bytes.len();
+    }
+    // Check special routing for explicitly opened php://stdout etc.
     let special = FILE_HANDLES.with(|h| {
         h.borrow().get(&fid).map(|fh| fh.special).unwrap_or(SpecialStream::None)
     });
     match special {
-        SpecialStream::Stdout | SpecialStream::Output => {
-            vm.write_output(bytes);
-            bytes.len()
-        }
-        SpecialStream::Stderr => {
-            // For tests we send stderr to the regular output buffer too.
+        SpecialStream::Stdout | SpecialStream::Output | SpecialStream::Stderr => {
             vm.write_output(bytes);
             bytes.len()
         }
@@ -8387,8 +8388,8 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Apply write filter chain if any are attached.
     let filtered = crate::stream_filters::apply_write_chain(vm, fid, to_write);
-    // The handle must exist.
-    let exists = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
+    // STDOUT/STDERR are resource ids 1/2/3 without a FILE_HANDLES entry.
+    let exists = fid == 1 || fid == 2 || fid == 3 || FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
     if !exists { return Ok(Value::False); }
     write_to_stream(vm, fid, &filtered);
     // PHP returns the number of bytes from the user's input that were
@@ -12872,7 +12873,7 @@ fn stream_copy_to_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     }
     let len = buf.len();
     let filtered = crate::stream_filters::apply_write_chain(vm, dst_fid, &buf);
-    let exists = FILE_HANDLES.with(|h| h.borrow().contains_key(&dst_fid));
+    let exists = dst_fid == 1 || dst_fid == 2 || dst_fid == 3 || FILE_HANDLES.with(|h| h.borrow().contains_key(&dst_fid));
     if !exists { return Ok(Value::False); }
     write_to_stream(vm, dst_fid, &filtered);
     Ok(Value::Long(len as i64))
