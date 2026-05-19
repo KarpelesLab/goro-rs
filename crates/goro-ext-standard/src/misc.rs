@@ -656,6 +656,10 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         512 => {
             // E_USER_WARNING
             let call_line = vm.current_line;
+            // Honor error_reporting bitmask: only emit if E_USER_WARNING is set.
+            if vm.error_reporting & 512 == 0 {
+                return Ok(Value::True);
+            }
             if !vm.call_user_error_handler(512, &message, call_line) {
                 vm.emit_warning_at(&message, call_line);
             }
@@ -663,8 +667,18 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         1024 => {
             // E_USER_NOTICE
             let call_line = vm.current_line;
+            // Honor error_reporting bitmask: only emit if E_USER_NOTICE is set.
+            if vm.error_reporting & 1024 == 0 {
+                return Ok(Value::True);
+            }
             if !vm.call_user_error_handler(1024, &message, call_line) {
-                vm.emit_notice_raw(&message, call_line);
+                let notice = format!(
+                    "\nNotice: {} in {} on line {}\n",
+                    message,
+                    vm.current_file,
+                    call_line
+                );
+                vm.write_output(notice.as_bytes());
             }
         }
         16384 => {
