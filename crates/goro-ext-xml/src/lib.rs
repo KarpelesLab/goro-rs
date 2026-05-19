@@ -1211,6 +1211,60 @@ fn xml_parser_free(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(if removed { Value::True } else { Value::False })
 }
 
+/// Validate that the first argument is an XMLParser object.
+/// Throws TypeError if not. Returns the xml_id on success.
+fn require_xmlparser(vm: &mut Vm, fn_name: &str, val: &Value) -> Result<i64, VmError> {
+    let deref = match val {
+        Value::Reference(r) => r.borrow().clone(),
+        _ => val.clone(),
+    };
+    match &deref {
+        Value::Object(obj) => {
+            let p = obj.borrow().get_property(b"__xml_id");
+            if let Value::Long(n) = p {
+                Ok(n)
+            } else {
+                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                let msg = format!("{fn_name}(): Argument #1 ($parser) must be of type XMLParser, {class_name} given");
+                let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                Err(VmError { message: format!("Uncaught TypeError: {msg}"), line: vm.current_line })
+            }
+        }
+        other => {
+            let type_name = match other {
+                Value::Null | Value::Undef => "null",
+                Value::True | Value::False => "bool",
+                Value::Long(_) => "int",
+                Value::Double(_) => "float",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Resource(_) => "resource",
+                _ => "unknown",
+            };
+            let msg = format!("{fn_name}(): Argument #1 ($parser) must be of type XMLParser, {type_name} given");
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: format!("Uncaught TypeError: {msg}"), line: vm.current_line })
+        }
+    }
+}
+
+/// Validate that the handler is null, string, or callable (array/object).
+fn require_callable_handler(vm: &mut Vm, fn_name: &str, handler: &Value) -> Result<(), VmError> {
+    match handler {
+        Value::Null | Value::Undef => Ok(()),
+        Value::String(_) | Value::Array(_) | Value::Object(_) => Ok(()),
+        Value::Reference(r) => require_callable_handler(vm, fn_name, &r.borrow()),
+        _ => {
+            let msg = format!("{fn_name}(): Argument #2 ($handler) must be of type callable|string|null");
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: format!("Uncaught TypeError: {msg}"), line: vm.current_line })
+        }
+    }
+}
+
 /// Emit the PHP 8.4 deprecation when a non-callable string is passed as handler.
 /// Skips the deprecation when the string refers to an existing function.
 fn warn_non_callable_string(vm: &mut Vm, fn_name: &str, handler: &Value) {
@@ -1236,9 +1290,11 @@ fn warn_non_callable_string(vm: &mut Vm, fn_name: &str, handler: &Value) {
 }
 
 fn xml_set_element_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
+    let parser_id = require_xmlparser(vm, "xml_set_element_handler", args.first().unwrap_or(&Value::Null))?;
     let start = args.get(1).cloned().unwrap_or(Value::Null);
     let end = args.get(2).cloned().unwrap_or(Value::Null);
+    require_callable_handler(vm, "xml_set_element_handler", &start)?;
+    require_callable_handler(vm, "xml_set_element_handler", &end)?;
 
     warn_non_callable_string(vm, "xml_set_element_handler", &start);
     warn_non_callable_string(vm, "xml_set_element_handler", &end);
@@ -1266,8 +1322,9 @@ fn xml_set_element_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 }
 
 fn xml_set_character_data_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
+    let parser_id = require_xmlparser(vm, "xml_set_character_data_handler", args.first().unwrap_or(&Value::Null))?;
     let handler = args.get(1).cloned().unwrap_or(Value::Null);
+    require_callable_handler(vm, "xml_set_character_data_handler", &handler)?;
 
     warn_non_callable_string(vm, "xml_set_character_data_handler", &handler);
 
@@ -1287,8 +1344,9 @@ fn xml_set_character_data_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, 
 }
 
 fn xml_set_default_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
+    let parser_id = require_xmlparser(vm, "xml_set_default_handler", args.first().unwrap_or(&Value::Null))?;
     let handler = args.get(1).cloned().unwrap_or(Value::Null);
+    require_callable_handler(vm, "xml_set_default_handler", &handler)?;
 
     warn_non_callable_string(vm, "xml_set_default_handler", &handler);
 
@@ -1311,8 +1369,9 @@ fn xml_set_processing_instruction_handler(
     vm: &mut Vm,
     args: &[Value],
 ) -> Result<Value, VmError> {
-    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
+    let parser_id = require_xmlparser(vm, "xml_set_processing_instruction_handler", args.first().unwrap_or(&Value::Null))?;
     let handler = args.get(1).cloned().unwrap_or(Value::Null);
+    require_callable_handler(vm, "xml_set_processing_instruction_handler", &handler)?;
 
     warn_non_callable_string(vm, "xml_set_processing_instruction_handler", &handler);
 
