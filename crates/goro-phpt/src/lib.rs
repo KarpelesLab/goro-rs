@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
 
+pub mod mysqli_test;
+
 /// A parsed PHPT test file
 #[derive(Debug)]
 pub struct PhptTest {
@@ -323,15 +325,19 @@ pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
     //    Content-based: any mysqli test that calls bind_param or bind_result
     //    is going to talk to a real server in practice. The constant-existence
     //    and pure-error-path tests don't use bind_*().
-    if filename.contains("/ext/mysqli/tests/bind_fetch/")
-        || filename.contains("/ext/mysqli/tests/bind_insert/")
-    {
-        return Some("Live MySQL server required".into());
-    }
-    if filename.contains("/ext/mysqli/tests/")
-        && (file_section.contains("bind_param") || file_section.contains("bind_result"))
-    {
-        return Some("Live MySQL server required".into());
+    //
+    //    When our embedded fixture is up, DON'T skip — let them run.
+    if !mysqli_test::is_available() {
+        if filename.contains("/ext/mysqli/tests/bind_fetch/")
+            || filename.contains("/ext/mysqli/tests/bind_insert/")
+        {
+            return Some("Live MySQL server required".into());
+        }
+        if filename.contains("/ext/mysqli/tests/")
+            && (file_section.contains("bind_param") || file_section.contains("bind_result"))
+        {
+            return Some("Live MySQL server required".into());
+        }
     }
 
     // 5. External `php` binary spawn — currently disabled. Tests that
@@ -1568,6 +1574,25 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_phpt_files(dir, &mut files);
     files.sort();
+
+    // If any of the tests live under ext/mysqli/, try to spin up an embedded
+    // MySQL/MariaDB server. The fixture exports MYSQL_TEST_* env vars so the
+    // tests' connect.inc picks them up. If startup fails (no binary, init
+    // error, port in use), we silently fall back to the existing skip
+    // behavior — no regression.
+    let has_mysqli_tests = files.iter().any(|p| {
+        p.to_string_lossy().contains("/ext/mysqli/tests/")
+    });
+    if has_mysqli_tests {
+        let start = std::time::Instant::now();
+        let up = mysqli_test::ensure_started();
+        if up {
+            eprintln!("[goro-phpt] embedded MySQL fixture ready in {:.2}s",
+                start.elapsed().as_secs_f32());
+        } else {
+            eprintln!("[goro-phpt] no embedded MySQL fixture available; mysqli tests will be skipped");
+        }
+    }
 
     for path in &files {
         if let Ok(content) = std::fs::read_to_string(path) {
