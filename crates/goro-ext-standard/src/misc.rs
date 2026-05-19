@@ -12830,39 +12830,52 @@ fn stream_set_read_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
     Ok(Value::Long(0))
 }
 
-fn stream_copy_to_stream_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn stream_copy_to_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let src_fid = args.first().unwrap_or(&Value::Null).to_long();
     let dst_fid = args.get(1).unwrap_or(&Value::Null).to_long();
     let max_length = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
     let offset = args.get(3).map(|v| v.to_long()).unwrap_or(0);
-    let data = FILE_HANDLES.with(|h| {
-        let mut handles = h.borrow_mut();
-        if let Some(fh) = handles.get_mut(&src_fid) {
-            use std::io::{Read, Seek, SeekFrom};
-            if offset > 0 { let _ = fh.file.seek(SeekFrom::Start(offset as u64)); }
-            let mut buf = Vec::new();
-            if max_length >= 0 {
-                buf.resize(max_length as usize, 0);
-                match fh.file.read(&mut buf) { Ok(n) => { buf.truncate(n); Some(buf) } Err(_) => None }
-            } else {
-                match fh.file.read_to_end(&mut buf) { Ok(_) => Some(buf), Err(_) => None }
+    if offset > 0 {
+        FILE_HANDLES.with(|h| {
+            if let Some(fh) = h.borrow_mut().get_mut(&src_fid) {
+                let _ = fh.file.seek(SeekFrom::Start(offset as u64));
             }
-        } else { None }
-    });
-    match data {
-        Some(buf) => {
-            let len = buf.len();
-            let ok = FILE_HANDLES.with(|h| {
-                let mut handles = h.borrow_mut();
-                if let Some(fh) = handles.get_mut(&dst_fid) {
-                    use std::io::Write;
-                    fh.file.write_all(&buf).is_ok()
-                } else { false }
-            });
-            if ok { Ok(Value::Long(len as i64)) } else { Ok(Value::False) }
-        }
-        None => Ok(Value::False),
+        });
     }
+    // Pull bytes (post READ-filter) from source. Push them through dst
+    // (which routes through WRITE filters in fwrite_fn).
+    let has_src_read_filters = crate::stream_filters::chain_has_direction(src_fid, crate::stream_filters::STREAM_FILTER_READ);
+    let mut buf: Vec<u8> = Vec::new();
+    if has_src_read_filters {
+        let limit = if max_length < 0 { usize::MAX } else { max_length as usize };
+        while buf.len() < limit {
+            let want = (limit - buf.len()).min(8192);
+            let chunk = read_filtered(vm, src_fid, want);
+            if chunk.is_empty() { break; }
+            buf.extend_from_slice(&chunk);
+        }
+    } else {
+        let data = FILE_HANDLES.with(|h| {
+            let mut handles = h.borrow_mut();
+            if let Some(fh) = handles.get_mut(&src_fid) {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                if max_length >= 0 {
+                    buf.resize(max_length as usize, 0);
+                    match fh.file.read(&mut buf) { Ok(n) => { buf.truncate(n); Some(buf) } Err(_) => None }
+                } else {
+                    match fh.file.read_to_end(&mut buf) { Ok(_) => Some(buf), Err(_) => None }
+                }
+            } else { None }
+        });
+        match data { Some(b) => buf = b, None => return Ok(Value::False), }
+    }
+    let len = buf.len();
+    let filtered = crate::stream_filters::apply_write_chain(vm, dst_fid, &buf);
+    let exists = FILE_HANDLES.with(|h| h.borrow().contains_key(&dst_fid));
+    if !exists { return Ok(Value::False); }
+    write_to_stream(vm, dst_fid, &filtered);
+    Ok(Value::Long(len as i64))
 }
 
 fn stream_filter_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
