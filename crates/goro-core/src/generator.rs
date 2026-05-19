@@ -236,6 +236,17 @@ impl PhpGenerator {
 
         self.state = GeneratorState::Completed;
         self.current_value = Value::Null;
+        // Drop any temporaries / CVs we held while suspended. This lets
+        // partially-constructed objects (e.g. `new C(yield)` interrupted at
+        // yield) destruct on close. Run pending object destructors so the
+        // user-visible __destruct fires before close() returns.
+        for t in self.tmps.iter_mut() {
+            *t = Value::Undef;
+        }
+        for c in self.cvs.iter_mut() {
+            *c = Value::Undef;
+        }
+        vm.run_pending_destructors_pub();
     }
 
     /// Resume execution of the generator until the next yield or return.

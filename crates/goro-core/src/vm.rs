@@ -3029,6 +3029,10 @@ impl Vm {
     /// Run destructors for objects that are only held by the destructible_objects list.
     /// In PHP, __destruct is called eagerly when the last user reference is dropped.
     /// Since destructible_objects keeps an Rc, we check for strong_count == 1.
+    pub fn run_pending_destructors_pub(&mut self) {
+        self.run_pending_destructors();
+    }
+
     fn run_pending_destructors(&mut self) {
         loop {
             let len = self.destructible_objects.len();

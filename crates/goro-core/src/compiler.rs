@@ -8183,43 +8183,14 @@ impl Compiler {
                             | ExprKind::StaticPropertyAccess { .. }
                             | ExprKind::DynamicStaticPropertyAccess { .. }
                             | ExprKind::ArrayAccess { .. } => {}
-                            ExprKind::FunctionCall { name, .. } => {
-                                // If the called function name is known statically
-                                // and is NOT declared returns_by_ref, emit the
-                                // notice. Otherwise defer (no notice).
-                                let mut should_notice = false;
-                                if let ExprKind::ConstantAccess(parts) = &name.kind {
-                                    if parts.len() == 1 {
-                                        let canonical: Vec<u8> = parts[0]
-                                            .iter()
-                                            .map(|b| b.to_ascii_lowercase())
-                                            .collect();
-                                        if let Some(callee) = self
-                                            .op_array
-                                            .child_functions
-                                            .iter()
-                                            .find(|f| {
-                                                f.name
-                                                    .iter()
-                                                    .map(|b| b.to_ascii_lowercase())
-                                                    .collect::<Vec<_>>()
-                                                    == canonical
-                                            })
-                                        {
-                                            if !callee.returns_by_ref {
-                                                should_notice = true;
-                                            }
-                                        } else {
-                                            // Unknown name (builtin or not yet
-                                            // compiled): conservatively emit so we
-                                            // match the test for non-ref builtins.
-                                            should_notice = true;
-                                        }
-                                    }
-                                }
-                                if should_notice {
-                                    emit_notice = true;
-                                }
+                            ExprKind::FunctionCall { .. } => {
+                                // Conservative: emit Notice for any function-call
+                                // result yielded by reference. PHP also emits in
+                                // most cases; the rare exception is when the
+                                // callee is itself declared `function &name()`,
+                                // but we don't have a function table at compile
+                                // time here.
+                                emit_notice = true;
                             }
                             ExprKind::MethodCall { .. }
                             | ExprKind::StaticMethodCall { .. } => {
