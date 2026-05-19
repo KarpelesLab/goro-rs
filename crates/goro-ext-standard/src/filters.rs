@@ -13,7 +13,7 @@
 //! helpers exposed here (`apply_read_chain`, `apply_write_chain`,
 //! `flush_close`) to run the chain.
 
-use goro_core::array::{ArrayKey, PhpArray};
+use goro_core::array::ArrayKey;
 use goro_core::object::PhpObject;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
@@ -21,7 +21,6 @@ use goro_core::vm::Vm;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::rc::Rc;
 
 pub const STREAM_FILTER_READ: i64 = 1;
@@ -213,49 +212,49 @@ fn parse_bzip2_level(params: &Value) -> u32 {
 }
 
 fn lookup_array_int(v: &Value, key: &[u8], default: i64) -> i64 {
-    let arr = match v {
-        Value::Array(a) => a.clone(),
-        Value::Reference(r) => {
-            let inner = r.borrow();
-            if let Value::Array(a) = &*inner { a.clone() } else { return default; }
+    match v {
+        Value::Array(a) => {
+            let a = a.borrow();
+            a.get(&ArrayKey::String(PhpString::from_bytes(key))).map(|v| v.to_long()).unwrap_or(default)
         }
-        _ => return default,
-    };
-    let a = arr.borrow();
-    if let Some(val) = a.get(&ArrayKey::String(PhpString::from_bytes(key))) {
-        return val.to_long();
+        Value::Reference(r) => lookup_array_int(&r.borrow(), key, default),
+        Value::Object(obj) => {
+            let v = obj.borrow().get_property(key);
+            if matches!(v, Value::Null | Value::Undef) { default } else { v.to_long() }
+        }
+        _ => default,
     }
-    default
 }
 
 fn lookup_array_str(v: &Value, key: &[u8]) -> Option<Vec<u8>> {
-    let arr = match v {
-        Value::Array(a) => a.clone(),
-        Value::Reference(r) => {
-            let inner = r.borrow();
-            if let Value::Array(a) = &*inner { a.clone() } else { return None; }
+    match v {
+        Value::Array(a) => {
+            let a = a.borrow();
+            a.get(&ArrayKey::String(PhpString::from_bytes(key)))
+                .map(|v| v.to_php_string().as_bytes().to_vec())
         }
-        _ => return None,
-    };
-    let a = arr.borrow();
-    a.get(&ArrayKey::String(PhpString::from_bytes(key)))
-        .map(|v| v.to_php_string().as_bytes().to_vec())
+        Value::Reference(r) => lookup_array_str(&r.borrow(), key),
+        Value::Object(obj) => {
+            let v = obj.borrow().get_property(key);
+            if matches!(v, Value::Null | Value::Undef) { None } else { Some(v.to_php_string().as_bytes().to_vec()) }
+        }
+        _ => None,
+    }
 }
 
 fn lookup_array_bool(v: &Value, key: &[u8], default: bool) -> bool {
-    let arr = match v {
-        Value::Array(a) => a.clone(),
-        Value::Reference(r) => {
-            let inner = r.borrow();
-            if let Value::Array(a) = &*inner { a.clone() } else { return default; }
+    match v {
+        Value::Array(a) => {
+            let a = a.borrow();
+            a.get(&ArrayKey::String(PhpString::from_bytes(key))).map(|v| v.to_bool()).unwrap_or(default)
         }
-        _ => return default,
-    };
-    let a = arr.borrow();
-    if let Some(val) = a.get(&ArrayKey::String(PhpString::from_bytes(key))) {
-        return val.to_bool();
+        Value::Reference(r) => lookup_array_bool(&r.borrow(), key, default),
+        Value::Object(obj) => {
+            let v = obj.borrow().get_property(key);
+            if matches!(v, Value::Null | Value::Undef) { default } else { v.to_bool() }
+        }
+        _ => default,
     }
-    default
 }
 
 /// Resolve a filter name to a built-in implementation, if it matches one
@@ -826,7 +825,6 @@ fn qp_encode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: b
             // Re-emit them as =HH (in original order).
             for &c in trailing.iter().rev() {
                 out.extend_from_slice(format!("={:02X}", c).as_bytes());
-                col += 2;
             }
             out.extend_from_slice(line_break);
             col = 0;
