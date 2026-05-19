@@ -736,15 +736,35 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                         .find(|p| p.name == *name)
                         .map(|p| p.visibility)
                 });
-                let display_name = match vis {
-                    Some(goro_core::object::Visibility::Protected) => {
-                        format!("\"{}\":protected", name_str)
+                // Detect integer-like property names (e.g. set via {1} = ...) and
+                // render them as bare integers, matching PHP's var_dump output.
+                let is_int_key = !name.is_empty()
+                    && (name[0] == b'-' || name[0].is_ascii_digit())
+                    && name.iter().enumerate().all(|(i, &b)| (i == 0 && b == b'-') || b.is_ascii_digit())
+                    && name.iter().any(|&b| b.is_ascii_digit())
+                    && {
+                        // Avoid "01" matches: PHP only treats canonical integer strings
+                        // as int keys. Parse and reformat to verify canonical.
+                        let s = std::str::from_utf8(name).unwrap_or("");
+                        if let Ok(n) = s.parse::<i64>() {
+                            n.to_string() == s
+                        } else {
+                            false
+                        }
+                    };
+                let display_name = if is_int_key && vis.is_none() {
+                    name_str.to_string()
+                } else {
+                    match vis {
+                        Some(goro_core::object::Visibility::Protected) => {
+                            format!("\"{}\":protected", name_str)
+                        }
+                        Some(goro_core::object::Visibility::Private) => {
+                            let class_name = goro_core::value::display_class_name(&obj_class_name);
+                            format!("\"{}\":\"{}\":private", name_str, class_name)
+                        }
+                        _ => format!("\"{}\"", name_str),
                     }
-                    Some(goro_core::object::Visibility::Private) => {
-                        let class_name = goro_core::value::display_class_name(&obj_class_name);
-                        format!("\"{}\":\"{}\":private", name_str, class_name)
-                    }
-                    _ => format!("\"{}\"", name_str),
                 };
                 // Handle uninitialized typed properties
                 if matches!(value, Value::Undef) {

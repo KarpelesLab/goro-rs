@@ -339,6 +339,13 @@ pub struct Vm {
     pub object_to_double: Option<fn(&Value) -> Option<f64>>,
     /// Object type checker (e.g., is GMP?)
     pub object_is_operator_type: Option<fn(&Value) -> bool>,
+    /// Object serialize hook (returns hex/string representation for serialize()).
+    /// If Some, returns the hex (or extension-defined) string for the object.
+    /// Used by GMP for `__serialize` magic method support.
+    pub gmp_to_hex: Option<fn(&Value) -> Option<String>>,
+    /// Object unserialize hook (parses hex string back into the object).
+    /// Returns true on success.
+    pub gmp_from_hex: Option<fn(&Value, &str) -> bool>,
     /// Native constructor handler keyed by lowercase class name.
     /// Called for `new ClassName(args...)` where `args[0]` is `$this` (the
     /// freshly-allocated object). On success, return Ok(()). On error, the
@@ -1208,6 +1215,8 @@ impl Vm {
             object_to_long: None,
             object_to_double: None,
             object_is_operator_type: None,
+            gmp_to_hex: None,
+            gmp_from_hex: None,
             object_construct_handlers: std::collections::HashMap::new(),
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();
@@ -5121,6 +5130,57 @@ impl Vm {
                     _ => None,
                 }
             }
+            b"gmp" => {
+                match method_lower {
+                    b"__serialize" => {
+                        // Return an array:
+                        //   [0 => hex_string]                            if no user props
+                        //   [0 => hex_string, 1 => ["prop" => value...]] if any user props
+                        let hex = self.gmp_to_hex
+                            .and_then(|f| f(&Value::Object(obj.clone())))
+                            .unwrap_or_else(|| {
+                                // Fallback: read num property as decimal, then convert
+                                let ob = obj.borrow();
+                                let num = ob.get_property(b"num").to_php_string().to_string_lossy();
+                                // Attempt minimal decimal->hex via the long path
+                                if let Ok(n) = num.parse::<i64>() {
+                                    if n < 0 {
+                                        format!("-{:x}", -n)
+                                    } else {
+                                        format!("{:x}", n)
+                                    }
+                                } else {
+                                    "0".to_string()
+                                }
+                            });
+                        let ob = obj.borrow();
+                        let mut props_arr = PhpArray::new();
+                        for (name, val) in ob.properties.iter() {
+                            if name.starts_with(b"__") { continue; }
+                            if name.as_slice() == b"num" { continue; }
+                            if matches!(val, Value::Undef) { continue; }
+                            // Key may be a numeric string -> int key, otherwise string.
+                            let s = String::from_utf8_lossy(name);
+                            if let Ok(n) = s.parse::<i64>() {
+                                if n.to_string() == *s {
+                                    props_arr.set(ArrayKey::Int(n), val.clone());
+                                    continue;
+                                }
+                            }
+                            props_arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                        }
+                        drop(ob);
+                        let mut arr = PhpArray::new();
+                        arr.set(ArrayKey::Int(0), Value::String(PhpString::from_string(hex)));
+                        if props_arr.len() > 0 {
+                            arr.set(ArrayKey::Int(1), Value::Array(Rc::new(RefCell::new(props_arr))));
+                        }
+                        Some(Value::Array(Rc::new(RefCell::new(arr))))
+                    }
+                    b"__unserialize" => None, // handled in handle_spl_docall (needs args)
+                    _ => None,
+                }
+            }
             b"reflectionclass" | b"reflectionobject" | b"reflectionenum" => {
                 crate::reflection::reflection_class_method(self, method_lower, obj)
             }
@@ -8100,6 +8160,7 @@ impl Vm {
             | b"random\\engine\\pcgoneseq128xslrr64"
             | b"random\\engine\\secure"
             | b"random\\randomizer" => crate::random::is_random_args_method(class, method),
+            b"gmp" => matches!(method, b"__unserialize"),
             _ => false,
         }
     }
@@ -10866,6 +10927,94 @@ impl Vm {
                     let _ = obj;
                     crate::random::handle_random_docall(self, class, method, args)
                 }
+                b"gmp" => {
+                    match method {
+                        b"__unserialize" => {
+                            let data_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            let arr = match &data_arg {
+                                Value::Array(a) => a.clone(),
+                                _ => {
+                                    let msg = "Could not unserialize number";
+                                    let exc = self.create_exception(b"Exception", msg, self.current_line);
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                            };
+                            let arr_b = arr.borrow();
+                            // First slot: hex string
+                            let hex_val = arr_b.get(&ArrayKey::Int(0)).cloned();
+                            let hex = match hex_val {
+                                Some(Value::String(s)) => s.to_string_lossy(),
+                                _ => {
+                                    drop(arr_b);
+                                    let msg = "Could not unserialize number";
+                                    let exc = self.create_exception(b"Exception", msg, self.current_line);
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                            };
+                            // Second slot: properties array (optional)
+                            let props_val = arr_b.get(&ArrayKey::Int(1)).cloned();
+                            drop(arr_b);
+                            // Validate props_val type first (return error if non-array)
+                            let props_arr = match props_val {
+                                Some(Value::Array(pa)) => Some(pa),
+                                Some(_) => {
+                                    let msg = "Could not unserialize properties";
+                                    let exc = self.create_exception(b"Exception", msg, self.current_line);
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                None => None,
+                            };
+                            // Drop existing num property so user props insert before num
+                            {
+                                let mut ob = obj.borrow_mut();
+                                ob.remove_property(b"num");
+                            }
+                            // Apply user properties first (preserve order).
+                            // GMP is a final class without AllowDynamicProperties, so any
+                            // property other than `num` is a dynamic property: emit the
+                            // PHP 8.2+ deprecation message for each one created.
+                            if let Some(pa) = props_arr {
+                                let prop_names: Vec<(Vec<u8>, Value)> = {
+                                    let pa_b = pa.borrow();
+                                    pa_b.iter().map(|(k, v)| {
+                                        let name: Vec<u8> = match k {
+                                            ArrayKey::String(s) => s.as_bytes().to_vec(),
+                                            ArrayKey::Int(n) => n.to_string().into_bytes(),
+                                        };
+                                        (name, v.clone())
+                                    }).collect()
+                                };
+                                for (name, val) in prop_names {
+                                    if name == b"num" { continue; }
+                                    let prop_str = String::from_utf8_lossy(&name);
+                                    self.emit_deprecated(&format!(
+                                        "Creation of dynamic property GMP::${} is deprecated",
+                                        prop_str
+                                    ));
+                                    obj.borrow_mut().set_property(name, val);
+                                }
+                            }
+                            // Now apply the GMP value (sets num)
+                            let this_val = Value::Object(obj.clone());
+                            let ok = if let Some(setter) = self.gmp_from_hex {
+                                setter(&this_val, &hex)
+                            } else {
+                                false
+                            };
+                            if !ok {
+                                let msg = "Could not unserialize number";
+                                let exc = self.create_exception(b"Exception", msg, self.current_line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            Some(Value::Null)
+                        }
+                        _ => None,
+                    }
+                }
                 _ => None,
             }
         } else {
@@ -11584,6 +11733,11 @@ impl Vm {
                 | b"curlhandle" | b"curlmultihandle" | b"curlsharehandle"
                 | b"socket"
                 | b"xmlparser"
+                | b"streambucket"
+                | b"__php_incomplete_class"
+                | b"roundingmode"
+                | b"reflection" | b"reflector" | b"reflectionzendextension"
+                | b"propertyhooktype"
                 | b"random\\engine" | b"random\\cryptosafeengine"
                 | b"random\\randomizer" | b"random\\engine\\mt19937"
                 | b"random\\engine\\pcgoneseq128xslrr64" | b"random\\engine\\xoshiro256starstar"
@@ -20879,12 +21033,29 @@ impl Vm {
                             }
                         };
                         if done {
+                            // Release iterator state to allow weakly-held keys to be freed.
+                            weakmap_iter_keys.remove(&iter_idx);
+                            foreach_keys.remove(&iter_idx);
+                            foreach_positions.remove(&iter_idx);
+                            if let OperandType::Tmp(t) = op.op1 {
+                                if let Some(slot) = tmps.get_mut(t as usize) {
+                                    *slot = Value::Undef;
+                                }
+                            }
                             if let OperandType::JmpTarget(target) = op.op2 {
                                 ip = target as usize;
                             }
                         }
                     } else {
                         // Not an array or generator - jump to end
+                        weakmap_iter_keys.remove(&iter_idx);
+                        foreach_keys.remove(&iter_idx);
+                        foreach_positions.remove(&iter_idx);
+                        if let OperandType::Tmp(t) = op.op1 {
+                            if let Some(slot) = tmps.get_mut(t as usize) {
+                                *slot = Value::Undef;
+                            }
+                        }
                         if let OperandType::JmpTarget(target) = op.op2 {
                             ip = target as usize;
                         }
@@ -21055,6 +21226,40 @@ impl Vm {
                                         };
                                         return Err(VmError { message: msg, line: op.line });
                                     }
+                                    // WeakMap by-ref iteration: build refs into weak_map_entries.
+                                    let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if class_lower == b"weakmap" {
+                                        let wm_id = obj.borrow().object_id;
+                                        let mut arr = PhpArray::new();
+                                        let mut key_objs: Vec<Value> = Vec::new();
+                                        // Convert each entry value to a Reference (if not already)
+                                        // and rewrite the storage to share that Reference so
+                                        // writes through the foreach &$v modify the entry.
+                                        if let Some(entries) = self.weak_map_entries.get_mut(&wm_id) {
+                                            for (_oid, weak, v) in entries.iter_mut() {
+                                                if weak.upgrade().is_none() { continue; }
+                                                // Promote the stored value to a Reference so
+                                                // the foreach `&$v` shares storage with the
+                                                // WeakMap entry. If already a Reference, keep it.
+                                                let ref_val = match v.clone() {
+                                                    Value::Reference(r) => Value::Reference(r),
+                                                    other => {
+                                                        let r = Rc::new(RefCell::new(other));
+                                                        let ref_v = Value::Reference(r);
+                                                        *v = ref_v.clone();
+                                                        ref_v
+                                                    }
+                                                };
+                                                if let Some(strong) = weak.upgrade() {
+                                                    key_objs.push(Value::Object(strong));
+                                                    let i = arr.len() as i64;
+                                                    arr.set(ArrayKey::Int(i), ref_val);
+                                                }
+                                            }
+                                        }
+                                        weakmap_iter_keys.insert(iter_idx, key_objs);
+                                        Rc::new(RefCell::new(arr))
+                                    } else {
                                     let target = self.proxy_redirect(obj);
                                     // For objects, convert to array of references to properties
                                     let obj_borrow = target.borrow();
@@ -21081,6 +21286,7 @@ impl Vm {
                                         );
                                     }
                                     Rc::new(RefCell::new(arr))
+                                    }
                                 }
                                 _ => {
                                     // Not an array or object - emit warning
@@ -21096,9 +21302,14 @@ impl Vm {
                     };
 
                     // Also make the source CV point to the same array if it was a CV
-                    // (ensure modifications through &$v modify the original)
+                    // (ensure modifications through &$v modify the original).
+                    // Skip this for objects (e.g. WeakMap by-ref iteration): we want
+                    // the source CV to keep its original object so `$map` still
+                    // refers to the WeakMap after the loop.
+                    let src_is_object = matches!(&arr_val, Value::Object(_)) ||
+                        matches!(&arr_val, Value::Reference(r) if matches!(&*r.borrow(), Value::Object(_)));
                     match &op.op1 {
-                        OperandType::Cv(idx) => {
+                        OperandType::Cv(idx) if !src_is_object => {
                             cvs[*idx as usize] = Value::Array(arr_rc.clone());
                         }
                         _ => {}
@@ -22782,7 +22993,20 @@ impl Vm {
                                 };
                                 new_obj.set_property(name.clone(), cloned_value);
                             }
+                            // For WeakMap, copy the live entries from the source.
+                            let original_oid = obj_borrow.object_id;
+                            let is_weakmap = class_lower.as_slice() == b"weakmap";
                             let new_obj_val = Value::Object(Rc::new(RefCell::new(new_obj)));
+                            if is_weakmap {
+                                let entries_copy: Vec<(u64, std::rc::Weak<RefCell<PhpObject>>, Value)> =
+                                    if let Some(entries) = self.weak_map_entries.get(&original_oid) {
+                                        entries.iter()
+                                            .filter(|(_, w, _)| w.upgrade().is_some())
+                                            .map(|(k, w, v)| (*k, w.clone(), v.clone()))
+                                            .collect()
+                                    } else { Vec::new() };
+                                self.weak_map_entries.insert(clone_id, entries_copy);
+                            }
                             // Call __clone() if defined
                             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             let class_name_display = crate::value::display_class_name(&obj_borrow.class_name);

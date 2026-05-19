@@ -30,7 +30,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gmp_div_q", gmp_div_q);
     vm.register_function(b"gmp_div_r", gmp_div_r);
     vm.register_function(b"gmp_div_qr", gmp_div_qr);
-    vm.register_function(b"gmp_div", gmp_div_q); // alias
+    vm.register_function(b"gmp_div", gmp_div); // alias of gmp_div_q
     vm.register_function(b"gmp_divexact", gmp_divexact);
     vm.register_function(b"gmp_mod", gmp_mod);
     vm.register_function(b"gmp_neg", gmp_neg);
@@ -81,6 +81,8 @@ pub fn register(vm: &mut Vm) {
     vm.object_to_long = Some(gmp_to_long);
     vm.object_to_double = Some(gmp_to_double);
     vm.object_is_operator_type = Some(is_gmp_object);
+    vm.gmp_to_hex = Some(gmp_to_hex_str);
+    vm.gmp_from_hex = Some(gmp_set_from_hex_str);
     vm.object_construct_handlers
         .insert(b"gmp".to_vec(), gmp_construct_native);
 
@@ -173,6 +175,26 @@ fn dze(msg: &str) -> String {
 fn operand_to_bigint_for_op(val: &Value) -> Result<BigInt, String> {
     match val {
         Value::Long(n) => Ok(BigInt::from(*n)),
+        Value::Double(d) => {
+            // Whole-number finite floats are accepted (matching PHP 8.x semantics
+            // for GMP operator overloading). Fractional floats are rejected as a
+            // TypeError; the caller can handle the deprecation case via a
+            // higher-level hook if needed.
+            if d.fract() == 0.0 && d.is_finite() {
+                if *d >= i64::MIN as f64 && *d <= i64::MAX as f64 {
+                    Ok(BigInt::from(*d as i64))
+                } else {
+                    // Out-of-i64 finite whole float: route through string parse.
+                    let s = format!("{}", *d as i128);
+                    parse_bigint_str_strict(&s, 10)
+                        .map_err(|_| ve("Number is not an integer string"))
+                }
+            } else {
+                Err(format!(
+                    "Number must be of type GMP|string|int, float given"
+                ))
+            }
+        }
         Value::String(s) => {
             // For operator overloading, strings must be integer strings (autodetect base).
             parse_bigint_str_strict(&s.to_string_lossy(), 0)
@@ -421,6 +443,7 @@ fn value_type_name_for_gmp(val: &Value) -> &'static str {
         Value::Null | Value::Undef => "null",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+        Value::Resource(_) => "resource",
         Value::Reference(r) => value_type_name_for_gmp(&r.borrow()),
         _ => "unknown",
     }
@@ -602,14 +625,14 @@ fn parse_bigint_str(s: &str, base: u32) -> Result<BigInt, String> {
         BigInt::parse_bytes(digit_str.as_bytes(), actual_base)
             .ok_or_else(|| format!("Invalid number string: {}", s))?
     } else {
-        // Manual parsing for bases 37..=62
+        // Manual parsing for bases 37..=62 (uppercase 10-35, lowercase 36-61)
         let mut result = BigInt::zero();
         let base_bi = BigInt::from(actual_base);
         for &ch in digit_str.as_bytes() {
             let digit = match ch {
                 b'0'..=b'9' => (ch - b'0') as u32,
-                b'a'..=b'z' => (ch - b'a' + 10) as u32,
-                b'A'..=b'Z' => (ch - b'A' + 36) as u32,
+                b'A'..=b'Z' => (ch - b'A' + 10) as u32,
+                b'a'..=b'z' => (ch - b'a' + 36) as u32,
                 _ => return Err(format!("Invalid digit for base {}", actual_base)),
             };
             result = result * &base_bi + BigInt::from(digit);
@@ -639,10 +662,14 @@ fn bigint_to_str_radix(n: &BigInt, base: u32) -> String {
         while !val.is_zero() {
             let (q, r) = val.div_rem(&base_bi);
             let d = r.to_u32().unwrap();
+            // PHP's gmp_strval ordering for bases > 36:
+            //   0-9  -> '0'-'9'
+            //   10-35 -> 'A'-'Z' (uppercase first)
+            //   36-61 -> 'a'-'z' (lowercase second)
             let ch = match d {
                 0..=9 => (b'0' + d as u8) as char,
-                10..=35 => (b'a' + (d - 10) as u8) as char,
-                36..=61 => (b'A' + (d - 36) as u8) as char,
+                10..=35 => (b'A' + (d - 10) as u8) as char,
+                36..=61 => (b'a' + (d - 36) as u8) as char,
                 _ => unreachable!(),
             };
             digits.push(ch);
@@ -710,6 +737,10 @@ fn value_to_bigint_checked(val: &Value, func_name: &str, arg_num: u32, arg_name:
             "{}(): Argument #{} (${}) must be of type GMP|string|int, array given",
             func_name, arg_num, arg_name
         ))),
+        Value::Resource(_) => Err(GmpArgError::Type(format!(
+            "{}(): Argument #{} (${}) must be of type GMP|string|int, resource given",
+            func_name, arg_num, arg_name
+        ))),
         Value::Reference(r) => value_to_bigint_checked(&r.borrow(), func_name, arg_num, arg_name),
         _ => Err(GmpArgError::Type(format!(
             "{}(): Argument #{} (${}) must be of type GMP|string|int, unknown given",
@@ -759,6 +790,76 @@ fn bigint_to_gmp_value(vm: &mut Vm, n: BigInt) -> Value {
     obj.set_property(b"num".to_vec(), Value::String(PhpString::from_string(num_str)));
     GMP_VALUES.with(|m| m.borrow_mut().insert(obj_id, n));
     Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+/// Generate the hex string representation used by GMP serialize.
+/// PHP's __serialize emits a lowercase hex string, with leading '-' for negatives.
+pub fn gmp_to_hex_str(val: &Value) -> Option<String> {
+    let n = get_gmp_value(val)?;
+    Some(n.to_str_radix(16))
+}
+
+/// Parse a hex string and update the GMP object's stored BigInt and `num` property.
+/// Returns true on success, false if the hex string was unparseable.
+pub fn gmp_set_from_hex_str(val: &Value, hex: &str) -> bool {
+    let obj = match val {
+        Value::Object(o) => o,
+        Value::Reference(r) => {
+            let r_borrow = r.borrow();
+            if let Value::Object(o) = &*r_borrow {
+                let oid = o.borrow().object_id;
+                match parse_gmp_hex(hex) {
+                    Some(n) => {
+                        let num_str = n.to_str_radix(10);
+                        o.borrow_mut().set_property(
+                            b"num".to_vec(),
+                            Value::String(PhpString::from_string(num_str)),
+                        );
+                        GMP_VALUES.with(|m| m.borrow_mut().insert(oid, n));
+                        return true;
+                    }
+                    None => return false,
+                }
+            }
+            return false;
+        }
+        _ => return false,
+    };
+    let oid = obj.borrow().object_id;
+    match parse_gmp_hex(hex) {
+        Some(n) => {
+            let num_str = n.to_str_radix(10);
+            obj.borrow_mut()
+                .set_property(b"num".to_vec(), Value::String(PhpString::from_string(num_str)));
+            GMP_VALUES.with(|m| m.borrow_mut().insert(oid, n));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Parse a GMP hex string (lowercase or uppercase, optional leading minus).
+fn parse_gmp_hex(hex: &str) -> Option<BigInt> {
+    if hex.is_empty() {
+        return None;
+    }
+    let (sign, digits) = if let Some(rest) = hex.strip_prefix('-') {
+        (Sign::Minus, rest)
+    } else {
+        (Sign::Plus, hex)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    // Validate all are hex digits
+    if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let n = BigInt::parse_bytes(digits.as_bytes(), 16)?;
+    Some(match sign {
+        Sign::Minus => -n,
+        _ => n,
+    })
 }
 
 // ============================================================
@@ -1490,13 +1591,21 @@ fn throw_div_by_zero(vm: &mut Vm, func_name: &str, arg_num: u32, arg_name: &str,
 }
 
 fn gmp_div_q(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = get_gmp_arg(vm, args, 0, "gmp_div_q", "num1")?;
-    let b = get_gmp_arg(vm, args, 1, "gmp_div_q", "num2")?;
+    gmp_div_q_with_name(vm, args, "gmp_div_q")
+}
+
+fn gmp_div(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    gmp_div_q_with_name(vm, args, "gmp_div")
+}
+
+fn gmp_div_q_with_name(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, VmError> {
+    let a = get_gmp_arg(vm, args, 0, func_name, "num1")?;
+    let b = get_gmp_arg(vm, args, 1, func_name, "num2")?;
     let round = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    validate_rounding_mode(vm, round, "gmp_div_q")?;
+    validate_rounding_mode(vm, round, func_name)?;
 
     if b.is_zero() {
-        return Err(throw_div_by_zero(vm, "gmp_div_q", 2, "num2", "Division by zero"));
+        return Err(throw_div_by_zero(vm, func_name, 2, "num2", "Division by zero"));
     }
 
     let (q, r) = a.div_rem(&b);
@@ -2126,7 +2235,7 @@ fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Err(VmError { message: msg, line: vm.current_line });
         }
     };
-    let word_size = word_size as usize;
+    let word_size_usize = word_size as usize;
 
     if a.is_zero() {
         // GMP returns empty string for 0.
@@ -2135,8 +2244,27 @@ fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let (_, bytes) = a.abs().to_bytes_be();
 
-    // Pad bytes to multiple of word_size (zero pad on MSB end).
-    let padded_len = ((bytes.len() + word_size - 1) / word_size) * word_size;
+    // Guard against malicious/huge word_size that would overflow when padding.
+    // PHP's gmp_export rejects this with a ValueError.
+    if word_size_usize > 0 && word_size_usize > 1_000_000_000 {
+        let msg = format!("gmp_export(): Argument #2 ($word_size) is too large for argument #1 ($num)");
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let padded_len = match bytes.len().checked_add(word_size_usize.saturating_sub(1))
+        .and_then(|n| n.checked_div(word_size_usize.max(1)))
+        .and_then(|n| n.checked_mul(word_size_usize))
+    {
+        Some(n) if n <= 1_000_000_000 => n,
+        _ => {
+            let msg = format!("gmp_export(): Argument #2 ($word_size) is too large for argument #1 ($num)");
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
+    let word_size = word_size_usize;
     let mut padded = vec![0u8; padded_len];
     let offset = padded_len - bytes.len();
     padded[offset..].copy_from_slice(&bytes);
@@ -2258,8 +2386,12 @@ fn next_random() -> u64 {
 
 fn gmp_random_bits(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let bits = get_int_arg(vm, args, 0, "gmp_random_bits", "bits")?;
-    if bits < 1 {
-        let msg = format!("gmp_random_bits(): Argument #1 ($bits) must be between 1 and {}", i64::MAX);
+    // Cap bits at a sane upper limit so we don't try to allocate billions of
+    // bytes on PHP_INT_MAX. PHP's limit is ~INT_MAX / 8 - the practical cap
+    // here is also based on usize::MAX / 8 to keep the byte count finite.
+    let max_bits: i64 = (usize::MAX / 8) as i64;
+    if bits < 1 || bits > max_bits {
+        let msg = format!("gmp_random_bits(): Argument #1 ($bits) must be between 1 and {}", max_bits);
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });

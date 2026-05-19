@@ -3776,18 +3776,23 @@ pub fn reflection_extension_method(
 fn get_extension_classes(ext: &str) -> &'static [&'static str] {
     match ext {
         "reflection" => &[
-            "Reflection", "ReflectionException", "ReflectionFunctionAbstract",
-            "ReflectionFunction", "ReflectionGenerator", "ReflectionMethod",
-            "ReflectionClass", "ReflectionObject", "ReflectionProperty",
-            "ReflectionClassConstant", "ReflectionParameter", "ReflectionType",
+            "ReflectionException", "Reflection", "Reflector",
+            "ReflectionFunctionAbstract",
+            "ReflectionFunction", "ReflectionGenerator",
+            "ReflectionParameter", "ReflectionType",
             "ReflectionNamedType", "ReflectionUnionType", "ReflectionIntersectionType",
+            "ReflectionMethod",
+            "ReflectionClass", "ReflectionObject", "ReflectionProperty",
+            "ReflectionClassConstant",
             "ReflectionExtension", "ReflectionZendExtension",
             "ReflectionReference", "ReflectionAttribute", "ReflectionEnum",
             "ReflectionEnumUnitCase", "ReflectionEnumBackedCase",
             "ReflectionFiber", "ReflectionConstant",
+            "PropertyHookType",
         ],
         "standard" => &[
-            "AssertionError", "__PHP_Incomplete_Class",
+            "AssertionError", "Directory", "RoundingMode", "StreamBucket",
+            "__PHP_Incomplete_Class", "php_user_filter",
         ],
         "core" => &[
             "stdClass", "Exception", "Error", "TypeError", "ValueError",

@@ -521,6 +521,36 @@ fn sqrt(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let base = args.first().unwrap_or(&Value::Null);
     let exp = args.get(1).unwrap_or(&Value::Null);
+    // If either operand is a GMP object, route through the extension's operator
+    // overloading so pow(gmp, n) / pow(n, gmp) returns a GMP object (matching PHP).
+    let is_gmp_obj = vm.object_is_operator_type.map(|f| f(base) || f(exp)).unwrap_or(false);
+    if is_gmp_obj {
+        if let Some(op_fn) = vm.object_do_operation {
+            if let Some(result) = op_fn(vm, "**", base, exp) {
+                return match result {
+                    Ok(v) => Ok(v),
+                    Err(e) => {
+                        // Map specific error markers (V/D prefixes) used by GMP.
+                        if let Some(stripped) = e.strip_prefix("\x01V\x01") {
+                            let msg = stripped.to_string();
+                            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                            vm.current_exception = Some(exc);
+                            Err(VmError { message: msg, line: vm.current_line })
+                        } else if let Some(stripped) = e.strip_prefix("\x01D\x01") {
+                            let msg = stripped.to_string();
+                            let exc = vm.create_exception(b"DivisionByZeroError", &msg, vm.current_line);
+                            vm.current_exception = Some(exc);
+                            Err(VmError { message: msg, line: vm.current_line })
+                        } else {
+                            let exc = vm.create_exception(b"TypeError", &e, vm.current_line);
+                            vm.current_exception = Some(exc);
+                            Err(VmError { message: e, line: vm.current_line })
+                        }
+                    }
+                };
+            }
+        }
+    }
     // Emit deprecation warning for pow(0, negative)
     let base_f = base.to_double();
     let exp_f = exp.to_double();
