@@ -2021,6 +2021,52 @@ impl PhpGenerator {
             return Ok(false);
         }
 
+        // If we're delegating via yield-from to an inner generator, route the
+        // throw into the inner first. The inner may catch and continue (yielding
+        // a new value), in which case we just observe its new state. If the
+        // inner doesn't catch, the throw propagates up through our normal
+        // resume path. Matches PHP semantics for basic_yield_from_exception_handling.
+        if let Some(Value::Generator(inner_rc)) = self.yield_from_source.clone() {
+            let inner_state = inner_rc.try_borrow().map(|b| b.state.clone()).ok();
+            if matches!(inner_state, Some(GeneratorState::Suspended)) {
+                let inner_result = {
+                    let mut inner = inner_rc.borrow_mut();
+                    let prev_caller = vm.generator_caller.take();
+                    let r = inner.resume_with_exception(vm);
+                    vm.generator_caller = prev_caller;
+                    r
+                };
+                match inner_result {
+                    Ok(true) => {
+                        // Inner caught and yielded again. Snapshot value/key
+                        // into us and stay suspended.
+                        let (val, key) = {
+                            let inner = inner_rc.borrow();
+                            (inner.current_value.clone(), inner.current_key.clone())
+                        };
+                        self.current_value = val;
+                        self.current_key = key;
+                        // Need to clear `yield_from_observed` so the next
+                        // resume of OUR generator advances the inner first.
+                        self.yield_from_observed = true;
+                        return Ok(true);
+                    }
+                    Ok(false) => {
+                        // Inner completed; fall through to local resume so the
+                        // body continues past the yield-from.
+                        self.yield_from_source = None;
+                        self.yield_from_observed = false;
+                    }
+                    Err(_) => {
+                        // Inner threw uncaught; vm.current_exception is set.
+                        // Fall through to our resume to let our handler catch.
+                        self.yield_from_source = None;
+                        self.yield_from_observed = false;
+                    }
+                }
+            }
+        }
+
         vm.enter_generator_resume(0)?;
 
         // If we have a fiber_suspend_result, we're resuming from a nested call
