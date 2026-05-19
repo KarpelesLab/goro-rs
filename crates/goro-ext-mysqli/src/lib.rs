@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use goro_core::array::{ArrayKey, PhpArray};
-use goro_core::object::PhpObject;
+use goro_core::object::{ClassEntry, PhpObject, PropertyDef, Visibility};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
@@ -117,6 +117,59 @@ fn opt_str_to_value(val: &Option<String>) -> Value {
     }
 }
 
+/// Safely convert a mysql_async::Value to Option<String>.
+/// Handles NULL, integers, doubles, dates, bytes (potentially non-utf8) etc.
+/// Uses lossy utf8 conversion for non-string types and arbitrary bytes.
+fn mysql_value_to_opt_string(val: &mysql_async::Value) -> Option<String> {
+    use mysql_async::Value as MV;
+    match val {
+        MV::NULL => None,
+        MV::Bytes(b) => Some(String::from_utf8_lossy(b).into_owned()),
+        MV::Int(i) => Some(i.to_string()),
+        MV::UInt(u) => Some(u.to_string()),
+        MV::Float(f) => Some(f.to_string()),
+        MV::Double(d) => {
+            // PHP-style double formatting: don't print trailing zeros.
+            // Use a default that won't lose precision badly.
+            if d.fract() == 0.0 && d.abs() < 1e16 {
+                Some(format!("{}", *d as i64))
+            } else {
+                Some(format!("{}", d))
+            }
+        }
+        MV::Date(y, m, d, h, mi, s, us) => {
+            if *us != 0 {
+                Some(format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}", y, m, d, h, mi, s, us))
+            } else if *h != 0 || *mi != 0 || *s != 0 {
+                Some(format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, mi, s))
+            } else {
+                Some(format!("{:04}-{:02}-{:02}", y, m, d))
+            }
+        }
+        MV::Time(neg, days, h, m, s, us) => {
+            let total_h = (*days as u64) * 24 + *h as u64;
+            let sign = if *neg { "-" } else { "" };
+            if *us != 0 {
+                Some(format!("{}{:02}:{:02}:{:02}.{:06}", sign, total_h, m, s, us))
+            } else {
+                Some(format!("{}{:02}:{:02}:{:02}", sign, total_h, m, s))
+            }
+        }
+    }
+}
+
+/// Extract a row's columns as Vec of (name, Option<String>) values.
+/// Safe replacement for `row.get::<Option<String>, _>(i)` which panics on
+/// type mismatch.
+fn row_to_string_columns(row: &mysql_async::Row, col_names: &[String]) -> Vec<(String, Option<String>)> {
+    let mut rd = Vec::with_capacity(col_names.len());
+    for (i, name) in col_names.iter().enumerate() {
+        let v = row.as_ref(i).map(mysql_value_to_opt_string).unwrap_or(None);
+        rd.push((name.clone(), v));
+    }
+    rd
+}
+
 type RowData = Vec<Vec<(String, Option<String>)>>;
 type QueryResult = Result<(Option<(RowData, usize)>, u64, u64), mysql_async::Error>;
 
@@ -124,7 +177,9 @@ type QueryResult = Result<(Option<(RowData, usize)>, u64, u64), mysql_async::Err
 
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"mysqli");
+    register_classes(vm);
     vm.register_function(b"mysqli_connect", mysqli_connect);
+    vm.register_function(b"mysqli_real_connect", mysqli_real_connect);
     vm.register_function(b"mysqli_close", mysqli_close);
     vm.register_function(b"mysqli_query", mysqli_query);
     vm.register_function(b"mysqli_real_query", mysqli_real_query);
@@ -165,6 +220,61 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mysqli_init", mysqli_init_fn);
     vm.register_function(b"mysqli_get_client_info", mysqli_get_client_info_fn);
     vm.register_function(b"mysqli_get_server_version", mysqli_get_server_version_fn);
+    vm.register_function(b"mysqli_get_host_info", mysqli_get_host_info_fn);
+    vm.register_function(b"mysqli_get_proto_info", mysqli_get_proto_info_fn);
+    vm.register_function(b"mysqli_get_server_info", mysqli_get_server_info_fn);
+    vm.register_function(b"mysqli_get_client_version", mysqli_get_client_version_fn);
+    vm.register_function(b"mysqli_thread_id", mysqli_thread_id_fn);
+    vm.register_function(b"mysqli_thread_safe", mysqli_thread_safe_fn);
+    vm.register_function(b"mysqli_warning_count", mysqli_warning_count_fn);
+    vm.register_function(b"mysqli_sqlstate", mysqli_sqlstate_fn);
+    vm.register_function(b"mysqli_data_seek", mysqli_data_seek_fn);
+    vm.register_function(b"mysqli_change_user", mysqli_change_user_fn);
+    vm.register_function(b"mysqli_options", mysqli_options_fn);
+    vm.register_function(b"mysqli_get_charset", mysqli_get_charset_fn);
+    vm.register_function(b"mysqli_kill", mysqli_kill_fn);
+    vm.register_function(b"mysqli_stat", mysqli_stat_fn);
+    vm.register_function(b"mysqli_dump_debug_info", mysqli_dump_debug_info_fn);
+    vm.register_function(b"mysqli_debug", mysqli_debug_fn);
+    vm.register_function(b"mysqli_refresh", mysqli_refresh_fn);
+    vm.register_function(b"mysqli_savepoint", mysqli_savepoint_fn);
+    vm.register_function(b"mysqli_release_savepoint", mysqli_release_savepoint_fn);
+    vm.register_function(b"mysqli_fetch_field", mysqli_fetch_field_fn);
+    vm.register_function(b"mysqli_fetch_fields", mysqli_fetch_fields_fn);
+    vm.register_function(b"mysqli_fetch_field_direct", mysqli_fetch_field_direct_fn);
+    vm.register_function(b"mysqli_field_seek", mysqli_field_seek_fn);
+    vm.register_function(b"mysqli_field_tell", mysqli_field_tell_fn);
+    vm.register_function(b"mysqli_num_fields", mysqli_num_fields_fn);
+    vm.register_function(b"mysqli_fetch_lengths", mysqli_fetch_lengths_fn);
+    vm.register_function(b"mysqli_fetch_column", mysqli_fetch_column_fn);
+    vm.register_function(b"mysqli_stmt_init", mysqli_stmt_init_fn);
+    vm.register_function(b"mysqli_stmt_prepare", mysqli_stmt_prepare_fn);
+    vm.register_function(b"mysqli_stmt_affected_rows", mysqli_stmt_affected_rows_fn);
+    vm.register_function(b"mysqli_stmt_num_rows", mysqli_stmt_num_rows_fn);
+    vm.register_function(b"mysqli_stmt_field_count", mysqli_stmt_field_count_fn);
+    vm.register_function(b"mysqli_stmt_param_count", mysqli_stmt_param_count_fn);
+    vm.register_function(b"mysqli_stmt_insert_id", mysqli_stmt_insert_id_fn);
+    vm.register_function(b"mysqli_stmt_errno", mysqli_stmt_errno_fn);
+    vm.register_function(b"mysqli_stmt_error", mysqli_stmt_error_fn);
+    vm.register_function(b"mysqli_stmt_sqlstate", mysqli_stmt_sqlstate_fn);
+    vm.register_function(b"mysqli_stmt_free_result", mysqli_stmt_free_result_fn);
+    vm.register_function(b"mysqli_stmt_reset", mysqli_stmt_reset_fn);
+    vm.register_function(b"mysqli_stmt_store_result", mysqli_stmt_store_result_fn);
+    vm.register_function(b"mysqli_stmt_fetch", mysqli_stmt_fetch_fn);
+    vm.register_function(b"mysqli_stmt_bind_result", mysqli_stmt_bind_result_fn);
+    vm.register_function(b"mysqli_stmt_attr_set", mysqli_stmt_attr_set_fn);
+    vm.register_function(b"mysqli_stmt_attr_get", mysqli_stmt_attr_get_fn);
+    vm.register_function(b"mysqli_stmt_data_seek", mysqli_stmt_data_seek_fn);
+    vm.register_function(b"mysqli_stmt_send_long_data", mysqli_stmt_send_long_data_fn);
+    vm.register_function(b"mysqli_stmt_result_metadata", mysqli_stmt_result_metadata_fn);
+    vm.register_function(b"mysqli_stmt_get_warnings", mysqli_stmt_get_warnings_fn);
+    vm.register_function(b"mysqli_get_warnings", mysqli_get_warnings_fn);
+    vm.register_function(b"mysqli_execute_query", mysqli_execute_query_fn);
+    vm.register_function(b"mysqli_set_local_infile_handler", mysqli_set_local_infile_handler_fn);
+    vm.register_function(b"mysqli_set_local_infile_default", mysqli_set_local_infile_default_fn);
+    vm.register_function(b"mysqli_error_list", mysqli_error_list_fn);
+    vm.register_function(b"mysqli_stmt_more_results", mysqli_stmt_more_results_fn);
+    vm.register_function(b"mysqli_stmt_next_result", mysqli_stmt_next_result_fn);
 
     vm.constants.insert(b"MYSQLI_ASSOC".to_vec(), Value::Long(MYSQLI_ASSOC));
     vm.constants.insert(b"MYSQLI_NUM".to_vec(), Value::Long(MYSQLI_NUM));
@@ -280,12 +390,7 @@ fn exec_query(pool: &mysql_async::Pool, query_str: &str) -> QueryResult {
         let raw_rows: Vec<mysql_async::Row> = qr.collect().await?;
         let mut rows = Vec::with_capacity(raw_rows.len());
         for row in &raw_rows {
-            let mut rd = Vec::with_capacity(col_names.len());
-            for (i, name) in col_names.iter().enumerate() {
-                let val: Option<String> = row.get(i);
-                rd.push((name.clone(), val));
-            }
-            rows.push(rd);
+            rows.push(row_to_string_columns(row, &col_names));
         }
         let num_rows = rows.len();
         Ok((Some((rows, num_rows)), 0u64, 0u64))
@@ -624,12 +729,7 @@ fn mysqli_stmt_execute(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let raw_rows: Vec<mysql_async::Row> = qr.collect().await?;
         let mut rows = Vec::with_capacity(raw_rows.len());
         for row in &raw_rows {
-            let mut rd = Vec::with_capacity(col_names.len());
-            for (i, name) in col_names.iter().enumerate() {
-                let v: Option<String> = row.get(i);
-                rd.push((name.clone(), v));
-            }
-            rows.push(rd);
+            rows.push(row_to_string_columns(row, &col_names));
         }
         let num_rows = rows.len();
         conn.close(stmt).await?;
@@ -810,4 +910,796 @@ fn mysqli_get_client_info_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
 
 fn mysqli_get_server_version_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(80100)) // 8.1.0
+}
+
+// ── Class registration ────────────────────────────────────────────────
+
+fn register_classes(vm: &mut Vm) {
+    // mysqli_driver — used by connect.inc to set report_mode.
+    let mut driver = ClassEntry::new(b"mysqli_driver".to_vec());
+    driver.properties.push(PropertyDef {
+        name: b"client_info".to_vec(),
+        default: Value::String(PhpString::from_bytes(b"mysqlnd 8.5.4")),
+        is_static: false,
+        is_readonly: false,
+        visibility: Visibility::Public,
+        set_visibility: None,
+        declaring_class: b"mysqli_driver".to_vec(),
+        property_type: None,
+        has_get_hook: false,
+        has_set_hook: false,
+        is_virtual: false,
+        is_abstract: false,
+        is_final: false,
+        doc_comment: None,
+        attributes: Vec::new(),
+    });
+    driver.properties.push(PropertyDef {
+        name: b"client_version".to_vec(),
+        default: Value::Long(80500),
+        is_static: false,
+        is_readonly: false,
+        visibility: Visibility::Public,
+        set_visibility: None,
+        declaring_class: b"mysqli_driver".to_vec(),
+        property_type: None,
+        has_get_hook: false,
+        has_set_hook: false,
+        is_virtual: false,
+        is_abstract: false,
+        is_final: false,
+        doc_comment: None,
+        attributes: Vec::new(),
+    });
+    driver.properties.push(PropertyDef {
+        name: b"driver_version".to_vec(),
+        default: Value::Long(101012),
+        is_static: false,
+        is_readonly: false,
+        visibility: Visibility::Public,
+        set_visibility: None,
+        declaring_class: b"mysqli_driver".to_vec(),
+        property_type: None,
+        has_get_hook: false,
+        has_set_hook: false,
+        is_virtual: false,
+        is_abstract: false,
+        is_final: false,
+        doc_comment: None,
+        attributes: Vec::new(),
+    });
+    driver.properties.push(PropertyDef {
+        name: b"report_mode".to_vec(),
+        default: Value::Long(0),
+        is_static: false,
+        is_readonly: false,
+        visibility: Visibility::Public,
+        set_visibility: None,
+        declaring_class: b"mysqli_driver".to_vec(),
+        property_type: None,
+        has_get_hook: false,
+        has_set_hook: false,
+        is_virtual: false,
+        is_abstract: false,
+        is_final: false,
+        doc_comment: None,
+        attributes: Vec::new(),
+    });
+    vm.classes.insert(b"mysqli_driver".to_vec(), driver);
+
+    // mysqli class — stub with the commonly-accessed properties.
+    let mut mysqli = ClassEntry::new(b"mysqli".to_vec());
+    for (name, default) in [
+        ("affected_rows", Value::Long(0)),
+        ("client_info", Value::String(PhpString::from_bytes(b"mysqlnd 8.5.4"))),
+        ("client_version", Value::Long(80500)),
+        ("connect_errno", Value::Long(0)),
+        ("connect_error", Value::Null),
+        ("errno", Value::Long(0)),
+        ("error", Value::String(PhpString::from_bytes(b""))),
+        ("error_list", Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        ("field_count", Value::Long(0)),
+        ("host_info", Value::String(PhpString::from_bytes(b""))),
+        ("info", Value::Null),
+        ("insert_id", Value::Long(0)),
+        ("server_info", Value::String(PhpString::from_bytes(b""))),
+        ("server_version", Value::Long(0)),
+        ("sqlstate", Value::String(PhpString::from_bytes(b"00000"))),
+        ("protocol_version", Value::Long(10)),
+        ("thread_id", Value::Long(0)),
+        ("warning_count", Value::Long(0)),
+    ] {
+        mysqli.properties.push(PropertyDef {
+            name: name.as_bytes().to_vec(),
+            default,
+            is_static: false,
+            is_readonly: false,
+            visibility: Visibility::Public,
+            set_visibility: None,
+            declaring_class: b"mysqli".to_vec(),
+            property_type: None,
+            has_get_hook: false,
+            has_set_hook: false,
+            is_virtual: false,
+            is_abstract: false,
+            is_final: false,
+            doc_comment: None,
+            attributes: Vec::new(),
+        });
+    }
+    vm.classes.insert(b"mysqli".to_vec(), mysqli);
+
+    // mysqli_result — stub.
+    let mut mr = ClassEntry::new(b"mysqli_result".to_vec());
+    for (name, default) in [
+        ("current_field", Value::Long(0)),
+        ("field_count", Value::Long(0)),
+        ("lengths", Value::Null),
+        ("num_rows", Value::Long(0)),
+        ("type", Value::Long(0)),
+    ] {
+        mr.properties.push(PropertyDef {
+            name: name.as_bytes().to_vec(),
+            default,
+            is_static: false,
+            is_readonly: false,
+            visibility: Visibility::Public,
+            set_visibility: None,
+            declaring_class: b"mysqli_result".to_vec(),
+            property_type: None,
+            has_get_hook: false,
+            has_set_hook: false,
+            is_virtual: false,
+            is_abstract: false,
+            is_final: false,
+            doc_comment: None,
+            attributes: Vec::new(),
+        });
+    }
+    vm.classes.insert(b"mysqli_result".to_vec(), mr);
+
+    // mysqli_stmt — stub.
+    let mut ms = ClassEntry::new(b"mysqli_stmt".to_vec());
+    for (name, default) in [
+        ("affected_rows", Value::Long(0)),
+        ("errno", Value::Long(0)),
+        ("error", Value::String(PhpString::from_bytes(b""))),
+        ("error_list", Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        ("field_count", Value::Long(0)),
+        ("insert_id", Value::Long(0)),
+        ("num_rows", Value::Long(0)),
+        ("param_count", Value::Long(0)),
+        ("sqlstate", Value::String(PhpString::from_bytes(b"00000"))),
+        ("id", Value::Long(0)),
+    ] {
+        ms.properties.push(PropertyDef {
+            name: name.as_bytes().to_vec(),
+            default,
+            is_static: false,
+            is_readonly: false,
+            visibility: Visibility::Public,
+            set_visibility: None,
+            declaring_class: b"mysqli_stmt".to_vec(),
+            property_type: None,
+            has_get_hook: false,
+            has_set_hook: false,
+            is_virtual: false,
+            is_abstract: false,
+            is_final: false,
+            doc_comment: None,
+            attributes: Vec::new(),
+        });
+    }
+    vm.classes.insert(b"mysqli_stmt".to_vec(), ms);
+
+    // mysqli_warning — stub for properties accessed by tests.
+    let mut mw = ClassEntry::new(b"mysqli_warning".to_vec());
+    for (name, default) in [
+        ("message", Value::String(PhpString::from_bytes(b""))),
+        ("sqlstate", Value::String(PhpString::from_bytes(b"00000"))),
+        ("errno", Value::Long(0)),
+    ] {
+        mw.properties.push(PropertyDef {
+            name: name.as_bytes().to_vec(),
+            default,
+            is_static: false,
+            is_readonly: false,
+            visibility: Visibility::Public,
+            set_visibility: None,
+            declaring_class: b"mysqli_warning".to_vec(),
+            property_type: None,
+            has_get_hook: false,
+            has_set_hook: false,
+            is_virtual: false,
+            is_abstract: false,
+            is_final: false,
+            doc_comment: None,
+            attributes: Vec::new(),
+        });
+    }
+    vm.classes.insert(b"mysqli_warning".to_vec(), mw);
+
+    // mysqli_sql_exception extends RuntimeException — register as plain class.
+    let mut se = ClassEntry::new(b"mysqli_sql_exception".to_vec());
+    se.parent = Some(b"RuntimeException".to_vec());
+    vm.classes.insert(b"mysqli_sql_exception".to_vec(), se);
+}
+
+// ── mysqli_real_connect ───────────────────────────────────────────────
+
+fn mysqli_real_connect(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Signature: mysqli_real_connect(mysqli $mysqli, ?string $hostname = null,
+    //   ?string $username = null, ?string $password = null, ?string $database = null,
+    //   ?int $port = null, ?string $socket = null, int $flags = 0): bool
+    let target_obj = match args.first() {
+        Some(Value::Object(o)) => o.clone(),
+        _ => return Ok(Value::False),
+    };
+
+    let host = args.get(1)
+        .filter(|v| !matches!(v, Value::Null | Value::Undef))
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let username = args.get(2)
+        .filter(|v| !matches!(v, Value::Null | Value::Undef))
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| "root".to_string());
+    let password = args.get(3)
+        .filter(|v| !matches!(v, Value::Null | Value::Undef))
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    let database = args.get(4)
+        .filter(|v| !matches!(v, Value::Null | Value::Undef))
+        .map(|v| v.to_php_string().to_string_lossy())
+        .filter(|s| !s.is_empty());
+    let port = args.get(5)
+        .filter(|v| !matches!(v, Value::Null | Value::Undef))
+        .map(|v| v.to_long() as u16)
+        .unwrap_or(3306);
+    let _socket = args.get(6)
+        .filter(|v| !matches!(v, Value::Null | Value::Undef))
+        .map(|v| v.to_php_string().to_string_lossy());
+    let _flags = args.get(7).map(|v| v.to_long()).unwrap_or(0);
+
+    let actual_host = if host.starts_with("p:") { &host[2..] } else { &host };
+    let mut builder = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(actual_host)
+        .tcp_port(port)
+        .user(Some(&username))
+        .pass(Some(&password));
+    if let Some(ref db) = database {
+        builder = builder.db_name(Some(db));
+    }
+
+    let pool = mysql_async::Pool::new(builder);
+    let conn_result = block_on(async {
+        let conn = pool.get_conn().await?;
+        let sv = conn.server_version();
+        let info = format!("{}.{}.{}", sv.0, sv.1, sv.2);
+        drop(conn);
+        Ok::<String, mysql_async::Error>(info)
+    });
+
+    match conn_result {
+        Ok(server_info) => {
+            LAST_CONNECT_ERROR.with(|e| *e.borrow_mut() = String::new());
+            LAST_CONNECT_ERRNO.with(|e| *e.borrow_mut() = 0);
+            // Reuse the existing object id so $mysqli stays as-is.
+            let id = target_obj.borrow().object_id;
+            CONNECTIONS.with(|c| c.borrow_mut().insert(id, MysqliConnection {
+                pool, last_error: String::new(), last_errno: 0,
+                affected_rows: 0, insert_id: 0, server_info, autocommit: true,
+            }));
+            // Populate visible properties on the object.
+            {
+                let mut ob = target_obj.borrow_mut();
+                ob.set_property(b"connect_errno".to_vec(), Value::Long(0));
+                ob.set_property(b"connect_error".to_vec(), Value::Null);
+                ob.set_property(b"errno".to_vec(), Value::Long(0));
+                ob.set_property(b"error".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            }
+            Ok(Value::True)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let errno = mysql_error_code(&e);
+            LAST_CONNECT_ERROR.with(|err| *err.borrow_mut() = msg.clone());
+            LAST_CONNECT_ERRNO.with(|err| *err.borrow_mut() = errno);
+            let mut ob = target_obj.borrow_mut();
+            ob.set_property(b"connect_errno".to_vec(), Value::Long(errno));
+            ob.set_property(b"connect_error".to_vec(), Value::String(PhpString::from_string(msg)));
+            Ok(Value::False)
+        }
+    }
+}
+
+// ── Stub functions for compatibility ────────────────────────────────────
+
+fn mysqli_get_host_info_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let info = CONNECTIONS.with(|c| {
+        c.borrow().get(&id).map(|_| "localhost via TCP/IP".to_string())
+    }).unwrap_or_default();
+    Ok(Value::String(PhpString::from_string(info)))
+}
+
+fn mysqli_get_proto_info_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(10))
+}
+
+fn mysqli_get_server_info_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let info = CONNECTIONS.with(|c| {
+        c.borrow().get(&id).map(|conn| conn.server_info.clone())
+    }).unwrap_or_else(|| "8.0.43".to_string());
+    Ok(Value::String(PhpString::from_string(info)))
+}
+
+fn mysqli_get_client_version_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(80500))
+}
+
+fn mysqli_thread_id_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(1))
+}
+
+fn mysqli_thread_safe_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_warning_count_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
+}
+
+fn mysqli_sqlstate_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"00000")))
+}
+
+fn mysqli_data_seek_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
+    RESULTS.with(|r| {
+        if let Some(res) = r.borrow_mut().get_mut(&id) {
+            if offset <= res.num_rows {
+                res.current_row = offset;
+                return Ok(Value::True);
+            }
+        }
+        Ok(Value::False)
+    })
+}
+
+fn mysqli_change_user_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_options_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_get_charset_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let id = vm.next_object_id();
+    let mut obj = PhpObject::new(b"stdClass".to_vec(), id);
+    obj.set_property(b"charset".to_vec(), Value::String(PhpString::from_bytes(b"utf8mb4")));
+    obj.set_property(b"collation".to_vec(), Value::String(PhpString::from_bytes(b"utf8mb4_general_ci")));
+    obj.set_property(b"dir".to_vec(), Value::String(PhpString::from_bytes(b"")));
+    obj.set_property(b"min_length".to_vec(), Value::Long(1));
+    obj.set_property(b"max_length".to_vec(), Value::Long(4));
+    obj.set_property(b"number".to_vec(), Value::Long(45));
+    obj.set_property(b"state".to_vec(), Value::Long(1));
+    obj.set_property(b"comment".to_vec(), Value::String(PhpString::from_bytes(b"UTF-8 Unicode")));
+    Ok(Value::Object(Rc::new(RefCell::new(obj))))
+}
+
+fn mysqli_kill_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_stat_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"Uptime: 0 Threads: 1 Questions: 0")))
+}
+
+fn mysqli_dump_debug_info_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_debug_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_refresh_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_savepoint_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let name = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    if run_sql(id, &format!("SAVEPOINT `{}`", name.replace('`', "``"))) { Ok(Value::True) } else { Ok(Value::False) }
+}
+
+fn mysqli_release_savepoint_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let name = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    if run_sql(id, &format!("RELEASE SAVEPOINT `{}`", name.replace('`', "``"))) { Ok(Value::True) } else { Ok(Value::False) }
+}
+
+fn mysqli_fetch_field_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let (field_name, idx_now) = RESULTS.with(|r| {
+        let mut results = r.borrow_mut();
+        let result = match results.get_mut(&id) { Some(r) => r, None => return (None, 0usize) };
+        // Use field_seek index stored somewhere - simplistic approach using current_field
+        let row = result.rows.first();
+        let idx = result.current_row.min(result.num_rows); // not quite right but a fallback
+        let name = row.and_then(|r| r.get(idx).map(|(n, _)| n.clone()));
+        (name, idx)
+    });
+    match field_name {
+        Some(name) => {
+            let obj_id = vm.next_object_id();
+            let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
+            obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(name)));
+            obj.set_property(b"orgname".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            obj.set_property(b"table".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            obj.set_property(b"orgtable".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            obj.set_property(b"max_length".to_vec(), Value::Long(0));
+            obj.set_property(b"length".to_vec(), Value::Long(255));
+            obj.set_property(b"charsetnr".to_vec(), Value::Long(45));
+            obj.set_property(b"flags".to_vec(), Value::Long(0));
+            obj.set_property(b"type".to_vec(), Value::Long(253));
+            obj.set_property(b"decimals".to_vec(), Value::Long(0));
+            obj.set_property(b"db".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            obj.set_property(b"def".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            let _ = idx_now;
+            Ok(Value::Object(Rc::new(RefCell::new(obj))))
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn mysqli_fetch_fields_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let names = RESULTS.with(|r| {
+        r.borrow().get(&id).and_then(|res| res.rows.first()).map(|row| row.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()).unwrap_or_default()
+    });
+    let mut arr = PhpArray::new();
+    for (i, name) in names.iter().enumerate() {
+        let obj_id = vm.next_object_id();
+        let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
+        obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(name.clone())));
+        obj.set_property(b"orgname".to_vec(), Value::String(PhpString::from_bytes(b"")));
+        obj.set_property(b"table".to_vec(), Value::String(PhpString::from_bytes(b"")));
+        obj.set_property(b"orgtable".to_vec(), Value::String(PhpString::from_bytes(b"")));
+        obj.set_property(b"max_length".to_vec(), Value::Long(0));
+        obj.set_property(b"length".to_vec(), Value::Long(255));
+        obj.set_property(b"charsetnr".to_vec(), Value::Long(45));
+        obj.set_property(b"flags".to_vec(), Value::Long(0));
+        obj.set_property(b"type".to_vec(), Value::Long(253));
+        obj.set_property(b"decimals".to_vec(), Value::Long(0));
+        obj.set_property(b"db".to_vec(), Value::String(PhpString::from_bytes(b"")));
+        obj.set_property(b"def".to_vec(), Value::String(PhpString::from_bytes(b"")));
+        arr.set(ArrayKey::Int(i as i64), Value::Object(Rc::new(RefCell::new(obj))));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+fn mysqli_fetch_field_direct_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let idx = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let name = RESULTS.with(|r| {
+        r.borrow().get(&id).and_then(|res| res.rows.first()).and_then(|row| row.get(idx).map(|(n, _)| n.clone()))
+    });
+    match name {
+        Some(n) => {
+            let obj_id = vm.next_object_id();
+            let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
+            obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(n)));
+            obj.set_property(b"orgname".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            obj.set_property(b"table".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            obj.set_property(b"orgtable".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            obj.set_property(b"max_length".to_vec(), Value::Long(0));
+            obj.set_property(b"length".to_vec(), Value::Long(255));
+            obj.set_property(b"charsetnr".to_vec(), Value::Long(45));
+            obj.set_property(b"flags".to_vec(), Value::Long(0));
+            obj.set_property(b"type".to_vec(), Value::Long(253));
+            obj.set_property(b"decimals".to_vec(), Value::Long(0));
+            obj.set_property(b"db".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            obj.set_property(b"def".to_vec(), Value::String(PhpString::from_bytes(b"")));
+            Ok(Value::Object(Rc::new(RefCell::new(obj))))
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn mysqli_field_seek_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_field_tell_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
+}
+
+fn mysqli_num_fields_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    RESULTS.with(|r| {
+        Ok(Value::Long(r.borrow().get(&id).and_then(|res| res.rows.first()).map(|row| row.len() as i64).unwrap_or(0)))
+    })
+}
+
+fn mysqli_fetch_lengths_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    RESULTS.with(|r| {
+        let results = r.borrow();
+        let result = match results.get(&id) { Some(r) => r, None => return Ok(Value::False) };
+        // Use the last fetched row (current_row - 1) lengths
+        if result.current_row == 0 { return Ok(Value::False); }
+        let idx = result.current_row - 1;
+        if idx >= result.num_rows { return Ok(Value::False); }
+        let row = &result.rows[idx];
+        let mut arr = PhpArray::new();
+        for (i, (_, v)) in row.iter().enumerate() {
+            let len = v.as_ref().map(|s| s.len() as i64).unwrap_or(0);
+            arr.set(ArrayKey::Int(i as i64), Value::Long(len));
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+    })
+}
+
+fn mysqli_fetch_column_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let col = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
+    RESULTS.with(|r| {
+        let mut results = r.borrow_mut();
+        let result = match results.get_mut(&id) { Some(r) => r, None => return Ok(Value::False) };
+        if result.current_row >= result.num_rows { return Ok(Value::False); }
+        let row = &result.rows[result.current_row];
+        result.current_row += 1;
+        let val = row.get(col).map(|(_, v)| opt_str_to_value(v)).unwrap_or(Value::False);
+        Ok(val)
+    })
+}
+
+// ── mysqli_stmt functions ─────────────────────────────────────────────
+
+fn mysqli_stmt_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let conn_id = args.first().and_then(get_object_id).unwrap_or(0);
+    let stmt_id = vm.next_object_id();
+    let stmt_obj = PhpObject::new(b"mysqli_stmt".to_vec(), stmt_id);
+    STMTS.with(|s| s.borrow_mut().insert(stmt_id, MysqliStmt {
+        conn_id, query: String::new(), param_types: None, param_values: Vec::new(),
+        result_id: None, last_error: String::new(), last_errno: 0,
+        affected_rows: 0, insert_id: 0,
+    }));
+    Ok(Value::Object(Rc::new(RefCell::new(stmt_obj))))
+}
+
+fn mysqli_stmt_prepare_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    let query = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    STMTS.with(|s| {
+        if let Some(stmt) = s.borrow_mut().get_mut(&stmt_id) {
+            stmt.query = query;
+            Ok(Value::True)
+        } else {
+            Ok(Value::False)
+        }
+    })
+}
+
+fn mysqli_stmt_affected_rows_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    STMTS.with(|s| Ok(Value::Long(s.borrow().get(&stmt_id).map(|st| st.affected_rows).unwrap_or(-1))))
+}
+
+fn mysqli_stmt_num_rows_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    let temp_key = stmt_id | 0x8000_0000_0000_0000;
+    RESULTS.with(|r| {
+        let rs = r.borrow();
+        let n = rs.get(&temp_key).map(|res| res.num_rows as i64)
+            .or_else(|| {
+                STMTS.with(|s| s.borrow().get(&stmt_id).and_then(|st| st.result_id)
+                    .and_then(|rid| rs.get(&rid).map(|res| res.num_rows as i64)))
+            })
+            .unwrap_or(0);
+        Ok(Value::Long(n))
+    })
+}
+
+fn mysqli_stmt_field_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    let temp_key = stmt_id | 0x8000_0000_0000_0000;
+    RESULTS.with(|r| {
+        let rs = r.borrow();
+        let n = rs.get(&temp_key).and_then(|res| res.rows.first()).map(|row| row.len() as i64).unwrap_or(0);
+        Ok(Value::Long(n))
+    })
+}
+
+fn mysqli_stmt_param_count_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    STMTS.with(|s| {
+        let count = s.borrow().get(&stmt_id).map(|st| st.query.matches('?').count() as i64).unwrap_or(0);
+        Ok(Value::Long(count))
+    })
+}
+
+fn mysqli_stmt_insert_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    STMTS.with(|s| Ok(Value::Long(s.borrow().get(&stmt_id).map(|st| st.insert_id).unwrap_or(0))))
+}
+
+fn mysqli_stmt_errno_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    STMTS.with(|s| Ok(Value::Long(s.borrow().get(&stmt_id).map(|st| st.last_errno).unwrap_or(0))))
+}
+
+fn mysqli_stmt_error_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    STMTS.with(|s| Ok(Value::String(PhpString::from_string(
+        s.borrow().get(&stmt_id).map(|st| st.last_error.clone()).unwrap_or_default()
+    ))))
+}
+
+fn mysqli_stmt_sqlstate_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::String(PhpString::from_bytes(b"00000")))
+}
+
+fn mysqli_stmt_free_result_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    let temp_key = stmt_id | 0x8000_0000_0000_0000;
+    RESULTS.with(|r| { r.borrow_mut().remove(&temp_key); });
+    Ok(Value::Null)
+}
+
+fn mysqli_stmt_reset_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_stmt_store_result_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_stmt_fetch_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Stub: without bind_result we can't actually fetch into bound vars.
+    // Returning NULL (no more rows) is the safest behavior so loops terminate.
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    let temp_key = stmt_id | 0x8000_0000_0000_0000;
+    RESULTS.with(|r| {
+        let mut results = r.borrow_mut();
+        let result = match results.get_mut(&temp_key) { Some(r) => r, None => return Ok(Value::Null) };
+        if result.current_row >= result.num_rows { return Ok(Value::Null); }
+        result.current_row += 1;
+        Ok(Value::True)
+    })
+}
+
+fn mysqli_stmt_bind_result_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Not implemented: would require bound-variable references.
+    Ok(Value::True)
+}
+
+fn mysqli_stmt_attr_set_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_stmt_attr_get_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(0))
+}
+
+fn mysqli_stmt_data_seek_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
+}
+
+fn mysqli_stmt_send_long_data_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_stmt_result_metadata_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Return a mysqli_result-shaped object derived from the stmt's columns.
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    let temp_key = stmt_id | 0x8000_0000_0000_0000;
+    let columns: Option<Vec<(String, Option<String>)>> = RESULTS.with(|r| {
+        r.borrow().get(&temp_key).and_then(|res| res.rows.first().cloned())
+    });
+    match columns {
+        Some(cols) => {
+            let res_id = vm.next_object_id();
+            let res_obj = PhpObject::new(b"mysqli_result".to_vec(), res_id);
+            // Store a faux result with just one fake row representing the columns.
+            RESULTS.with(|r| r.borrow_mut().insert(res_id, MysqliResult {
+                rows: vec![cols], current_row: 0, num_rows: 0
+            }));
+            Ok(Value::Object(Rc::new(RefCell::new(res_obj))))
+        }
+        None => Ok(Value::False),
+    }
+}
+
+fn mysqli_stmt_get_warnings_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn mysqli_get_warnings_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn mysqli_execute_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // mysqli_execute_query(mysqli $mysqli, string $query, ?array $params = null): mysqli_result|bool
+    // Simple impl: substitute parameters and run query.
+    let id = args.first().and_then(get_object_id).unwrap_or(0);
+    let query = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    let params: Option<Vec<Value>> = args.get(2).and_then(|v| {
+        if let Value::Array(arr) = v {
+            Some(arr.borrow().iter().map(|(_, v)| v.clone()).collect())
+        } else {
+            None
+        }
+    });
+    let pool = CONNECTIONS.with(|c| c.borrow().get(&id).map(|conn| conn.pool.clone()));
+    let pool = match pool { Some(p) => p, None => return Ok(Value::False) };
+
+    let result: QueryResult = block_on(async {
+        let mut conn = pool.get_conn().await?;
+        let mp: Vec<mysql_async::Value> = if let Some(ps) = params {
+            ps.iter().map(|v| match v {
+                Value::Null => mysql_async::Value::NULL,
+                Value::Long(n) => mysql_async::Value::Int(*n),
+                Value::Double(f) => mysql_async::Value::Double(*f),
+                Value::True => mysql_async::Value::Int(1),
+                Value::False => mysql_async::Value::Int(0),
+                _ => mysql_async::Value::Bytes(v.to_php_string().to_string_lossy().into_bytes()),
+            }).collect()
+        } else { Vec::new() };
+        let stmt = conn.prep(&query).await?;
+        let mut qr = conn.exec_iter(&stmt, mp).await?;
+        let columns: Vec<mysql_async::Column> = qr.columns_ref().to_vec();
+        if columns.is_empty() {
+            let affected = qr.affected_rows();
+            let insert_id = qr.last_insert_id().unwrap_or(0);
+            drop(qr);
+            conn.close(stmt).await?;
+            return Ok((None, affected, insert_id));
+        }
+        let col_names: Vec<String> = columns.iter().map(|c| c.name_str().to_string()).collect();
+        let raw_rows: Vec<mysql_async::Row> = qr.collect().await?;
+        let mut rows = Vec::with_capacity(raw_rows.len());
+        for row in &raw_rows {
+            rows.push(row_to_string_columns(row, &col_names));
+        }
+        let num_rows = rows.len();
+        conn.close(stmt).await?;
+        Ok((Some((rows, num_rows)), 0u64, 0u64))
+    });
+
+    match result {
+        Ok((Some((rows, num_rows)), _, _)) => {
+            let res_id = vm.next_object_id();
+            let res_obj = PhpObject::new(b"mysqli_result".to_vec(), res_id);
+            RESULTS.with(|r| r.borrow_mut().insert(res_id, MysqliResult { rows, current_row: 0, num_rows }));
+            Ok(Value::Object(Rc::new(RefCell::new(res_obj))))
+        }
+        Ok(_) => Ok(Value::True),
+        Err(_) => Ok(Value::False),
+    }
+}
+
+fn mysqli_set_local_infile_handler_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+
+fn mysqli_set_local_infile_default_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Null)
+}
+
+fn mysqli_error_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+
+fn mysqli_stmt_more_results_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+
+fn mysqli_stmt_next_result_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
 }

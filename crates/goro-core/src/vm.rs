@@ -19512,6 +19512,68 @@ impl Vm {
                                 }
                             }
 
+                            // mysqli method dispatch: route $mysqli->select_db()
+                            // → mysqli_select_db($mysqli, ...), etc.
+                            if !handled {
+                                let name_bytes = call.name.as_bytes();
+                                if let Some(sep_pos) = name_bytes.windows(2).position(|w| w == b"::") {
+                                    let class_part = &name_bytes[..sep_pos];
+                                    let method_part = &name_bytes[sep_pos + 2..];
+                                    let class_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let method_lower: Vec<u8> = method_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    // Get $this from cvs[0]
+                                    let cv0 = cvs.first().cloned();
+                                    let this_val = if matches!(cv0, Some(Value::Object(_))) {
+                                        cv0.unwrap()
+                                    } else {
+                                        call.args.first().cloned().unwrap_or(Value::Null)
+                                    };
+                                    if let Value::Object(_) = &this_val {
+                                        let proc_fn_name: Option<Vec<u8>> = match (class_lower.as_slice(), method_lower.as_slice()) {
+                                            (b"mysqli", b"__construct") => None, // handled separately
+                                            (b"mysqli", b"connect") => Some(b"mysqli_real_connect".to_vec()),
+                                            (b"mysqli", b"real_connect") => Some(b"mysqli_real_connect".to_vec()),
+                                            (b"mysqli", _) => Some([b"mysqli_".as_slice(), method_lower.as_slice()].concat()),
+                                            (b"mysqli_stmt", _) => Some([b"mysqli_stmt_".as_slice(), method_lower.as_slice()].concat()),
+                                            (b"mysqli_result", b"fetch_assoc") => Some(b"mysqli_fetch_assoc".to_vec()),
+                                            (b"mysqli_result", b"fetch_array") => Some(b"mysqli_fetch_array".to_vec()),
+                                            (b"mysqli_result", b"fetch_row") => Some(b"mysqli_fetch_row".to_vec()),
+                                            (b"mysqli_result", b"fetch_all") => Some(b"mysqli_fetch_all".to_vec()),
+                                            (b"mysqli_result", b"fetch_object") => Some(b"mysqli_fetch_object".to_vec()),
+                                            (b"mysqli_result", b"free") | (b"mysqli_result", b"close") | (b"mysqli_result", b"free_result") => Some(b"mysqli_free_result".to_vec()),
+                                            (b"mysqli_result", b"num_rows") => Some(b"mysqli_num_rows".to_vec()),
+                                            (b"mysqli_result", b"data_seek") => Some(b"mysqli_data_seek".to_vec()),
+                                            (b"mysqli_result", b"field_count") => Some(b"mysqli_field_count".to_vec()),
+                                            _ => None,
+                                        };
+                                        if let Some(fname) = proc_fn_name {
+                                            if let Some(func) = self.functions.get(&fname).copied() {
+                                                // InitMethodCall prepends $this to call.args, so
+                                                // call.args[0] is already the object. The procedural
+                                                // mysqli_* functions expect $this as args[0], so we
+                                                // can just pass call.args directly.
+                                                let bridge_args: Vec<Value> = if call.args.first().map(|v| matches!(v, Value::Object(_))).unwrap_or(false) {
+                                                    call.args.iter().cloned().collect()
+                                                } else {
+                                                    let mut v = vec![this_val.clone()];
+                                                    v.extend(call.args.iter().cloned());
+                                                    v
+                                                };
+                                                match func(self, &bridge_args) {
+                                                    Ok(v) => {
+                                                        self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                                                        handled = true;
+                                                    }
+                                                    Err(_) => {
+                                                        // Fall through to undefined-method handling
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             if !handled {
                                 let func_display = call.name.to_string_lossy();
                                 let err_msg = if func_display.contains("::") {
