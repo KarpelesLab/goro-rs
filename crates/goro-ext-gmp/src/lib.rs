@@ -2227,7 +2227,7 @@ fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Err(VmError { message: msg, line: vm.current_line });
         }
     };
-    let word_size = word_size as usize;
+    let word_size_usize = word_size as usize;
 
     if a.is_zero() {
         // GMP returns empty string for 0.
@@ -2236,8 +2236,27 @@ fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let (_, bytes) = a.abs().to_bytes_be();
 
-    // Pad bytes to multiple of word_size (zero pad on MSB end).
-    let padded_len = ((bytes.len() + word_size - 1) / word_size) * word_size;
+    // Guard against malicious/huge word_size that would overflow when padding.
+    // PHP's gmp_export rejects this with a ValueError.
+    if word_size_usize > 0 && word_size_usize > 1_000_000_000 {
+        let msg = format!("gmp_export(): Argument #2 ($word_size) is too large for argument #1 ($num)");
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let padded_len = match bytes.len().checked_add(word_size_usize.saturating_sub(1))
+        .and_then(|n| n.checked_div(word_size_usize.max(1)))
+        .and_then(|n| n.checked_mul(word_size_usize))
+    {
+        Some(n) if n <= 1_000_000_000 => n,
+        _ => {
+            let msg = format!("gmp_export(): Argument #2 ($word_size) is too large for argument #1 ($num)");
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
+    let word_size = word_size_usize;
     let mut padded = vec![0u8; padded_len];
     let offset = padded_len - bytes.len();
     padded[offset..].copy_from_slice(&bytes);
@@ -2359,8 +2378,12 @@ fn next_random() -> u64 {
 
 fn gmp_random_bits(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let bits = get_int_arg(vm, args, 0, "gmp_random_bits", "bits")?;
-    if bits < 1 {
-        let msg = format!("gmp_random_bits(): Argument #1 ($bits) must be between 1 and {}", i64::MAX);
+    // Cap bits at a sane upper limit so we don't try to allocate billions of
+    // bytes on PHP_INT_MAX. PHP's limit is ~INT_MAX / 8 - the practical cap
+    // here is also based on usize::MAX / 8 to keep the byte count finite.
+    let max_bits: i64 = (usize::MAX / 8) as i64;
+    if bits < 1 || bits > max_bits {
+        let msg = format!("gmp_random_bits(): Argument #1 ($bits) must be between 1 and {}", max_bits);
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });
