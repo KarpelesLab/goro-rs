@@ -57,6 +57,11 @@ pub struct PhpGenerator {
     pub yield_from_source: Option<Value>,
     /// Yield from: position within array iteration
     pub yield_from_pos: usize,
+    /// Yield from (Generator only): set after we yielded a value from the inner
+    /// generator's current state. On re-entry to YieldFrom we must first advance
+    /// the inner before yielding again. Without this flag we either advance too
+    /// eagerly (sharing-an-inner case) or never (single-owner case).
+    pub yield_from_observed: bool,
     /// When fiber suspension happens during DoFCall, this stores the result operand
     /// that should receive the resume value when the fiber resumes
     pub fiber_suspend_result: Option<crate::opcode::OperandType>,
@@ -79,6 +84,11 @@ pub struct PhpGenerator {
     pub pending_return: Option<Value>,
     /// Pending jump target for deferred break/continue (finally blocks)
     pub pending_finally_jump: Option<u32>,
+    /// Pending exception value: if the generator yields while an exception is still
+    /// in flight (e.g. yield inside a `finally` block), we stash the exception here
+    /// and clear `vm.current_exception` so callers can iterate without seeing the
+    /// in-flight exception until the finally block completes.
+    pub pending_exception: Option<Value>,
     /// Whether this generator has been force-closed (destruction while suspended)
     pub force_closed: bool,
     /// Whether this generator completed with an explicit return (vs exception/abort)
@@ -108,6 +118,7 @@ impl PhpGenerator {
             return_value: Value::Null,
             yield_from_source: None,
             yield_from_pos: 0,
+            yield_from_observed: false,
             fiber_suspend_result: None,
             is_running: false,
             called_class: None,
@@ -117,6 +128,7 @@ impl PhpGenerator {
             call_line: 0,
             pending_return: None,
             pending_finally_jump: None,
+            pending_exception: None,
             force_closed: false,
             has_returned: false,
             advanced_past_first: false,
@@ -134,6 +146,17 @@ impl PhpGenerator {
         }
 
         self.force_closed = true;
+
+        // If we're yielding from an inner generator, close it first so its
+        // finally blocks run before ours (matches PHP semantics).
+        if let Some(Value::Generator(inner_rc)) = self.yield_from_source.clone() {
+            // Use try_borrow_mut to avoid borrow conflicts; if it's currently
+            // borrowed we just skip (it'll be cleaned up on its own drop).
+            if let Ok(mut inner) = inner_rc.try_borrow_mut() {
+                inner.close(vm);
+            }
+            self.yield_from_source = None;
+        }
 
         // Find finally blocks that need to be executed.
         // Scan TryBegin/TryEnd in the op_array to find finally targets
@@ -215,10 +238,68 @@ impl PhpGenerator {
                             let message = obj_b.get_property(b"message").to_php_string().to_string_lossy().to_string();
                             let line = obj_b.get_property(b"line").to_long();
                             let file = vm.current_file.clone();
+                            // Build a trace from the exception's own trace property so
+                            // that the generator's call site appears in the report.
+                            let trace_lines = if let Value::Array(arr) =
+                                obj_b.get_property(b"trace")
+                            {
+                                let arr = arr.borrow();
+                                let mut lines = Vec::new();
+                                for (i, (_k, frame_val)) in arr.iter().enumerate() {
+                                    if let Value::Array(frame) = frame_val {
+                                        let frame = frame.borrow();
+                                        let func = frame
+                                            .get(&crate::array::ArrayKey::String(
+                                                crate::string::PhpString::from_bytes(b"function"),
+                                            ))
+                                            .map(|v| v.to_php_string().to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        let class_p = frame
+                                            .get(&crate::array::ArrayKey::String(
+                                                crate::string::PhpString::from_bytes(b"class"),
+                                            ))
+                                            .map(|v| v.to_php_string().to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        let type_p = frame
+                                            .get(&crate::array::ArrayKey::String(
+                                                crate::string::PhpString::from_bytes(b"type"),
+                                            ))
+                                            .map(|v| v.to_php_string().to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        let file_p = frame
+                                            .get(&crate::array::ArrayKey::String(
+                                                crate::string::PhpString::from_bytes(b"file"),
+                                            ))
+                                            .map(|v| v.to_php_string().to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        let line_p = frame
+                                            .get(&crate::array::ArrayKey::String(
+                                                crate::string::PhpString::from_bytes(b"line"),
+                                            ))
+                                            .map(|v| v.to_long())
+                                            .unwrap_or(0);
+                                        let display = if class_p.is_empty() {
+                                            func.clone()
+                                        } else {
+                                            format!("{}{}{}", class_p, type_p, func)
+                                        };
+                                        let loc = if file_p.is_empty() {
+                                            "[internal function]".to_string()
+                                        } else {
+                                            format!("{}({})", file_p, line_p)
+                                        };
+                                        lines.push(format!("#{} {}: {}()", i, loc, display));
+                                    }
+                                }
+                                lines.push(format!("#{} {{main}}", lines.len()));
+                                lines.join("\n")
+                            } else {
+                                "#0 {main}".to_string()
+                            };
                             drop(obj_b);
                             let output = format!(
-                                "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n#0 {{main}}\n  thrown in {} on line {}\n",
-                                class, message, file, line, file, line
+                                "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n{}\n  thrown in {} on line {}\n",
+                                class, message, file, line, trace_lines, file, line
                             );
                             vm.write_output(output.as_bytes());
                         } else {
@@ -279,12 +360,30 @@ impl PhpGenerator {
         } else {
             raw_name
         };
-        let func_file = if self.call_file.is_empty() {
-            vm.current_file.clone()
+        // The generator's frame in stack traces should reflect the most recent caller.
+        // When VM resumes the generator with caller context set (e.g. foreach), we use
+        // the caller's file/line; otherwise (Generator method calls, yield-from priming)
+        // we show "[internal function]" (empty file, line 0).
+        let (func_file, func_line) = if let Some((file, line)) = vm.generator_caller.clone() {
+            (file, line)
         } else {
-            self.call_file.clone()
+            (String::new(), 0)
         };
-        vm.call_stack.push((func_name, func_file, self.call_line, self.args.clone(), self.class_scope.is_some()));
+        vm.call_stack.push((
+            func_name,
+            func_file,
+            func_line,
+            self.args.clone(),
+            self.class_scope.is_some(),
+        ));
+
+        // Restore a deferred exception (yield-in-finally) if we stashed one
+        // when this generator suspended. The body's ReturnDeferred will pick
+        // it up after the finally completes and re-raise through any outer
+        // handlers (or out of the generator).
+        if let Some(exc) = self.pending_exception.take() {
+            vm.current_exception = Some(exc);
+        }
 
         self.is_running = true;
         let result = self.resume_inner(vm);
@@ -359,6 +458,14 @@ impl PhpGenerator {
                     self.state = GeneratorState::Suspended;
                     self.ip = ip;
 
+                    // If we are yielding while an exception is in flight (e.g. yield
+                    // inside a `finally` block), stash the exception so the caller's
+                    // iteration sees a clean state. We'll restore it on resume so
+                    // ReturnDeferred can re-raise after the finally completes.
+                    if let Some(exc) = vm.current_exception.take() {
+                        self.pending_exception = Some(exc);
+                    }
+
                     // The send value will be written to the result operand when we resume
                     return Ok(true);
                 }
@@ -391,6 +498,41 @@ impl PhpGenerator {
                                 self.write_operand(&op.result, Value::Null);
                             }
                             Value::Generator(inner_gen) => {
+                                // If we've already yielded the inner's current value on
+                                // a previous resume, advance the inner first. Otherwise
+                                // just observe the inner's current state. This way two
+                                // generators yielding from the same shared inner see the
+                                // same sequence of values without consuming each other's.
+                                if self.yield_from_observed {
+                                    let mut inner = inner_gen.borrow_mut();
+                                    inner.write_send_value();
+                                    let resume_outcome = inner.resume(vm);
+                                    drop(inner);
+                                    if resume_outcome.is_err() || vm.current_exception.is_some() {
+                                        // Inner threw - clear delegation and propagate
+                                        self.yield_from_source = None;
+                                        self.yield_from_observed = false;
+                                        if let Some((catch_target, finally_target, _)) =
+                                            self.exception_handlers.pop()
+                                        {
+                                            if catch_target > 0 {
+                                                ip = catch_target as usize;
+                                                continue;
+                                            } else if finally_target > 0 {
+                                                ip = finally_target as usize;
+                                                continue;
+                                            }
+                                        }
+                                        self.state = GeneratorState::Completed;
+                                        self.ip = ip;
+                                        return Err(VmError {
+                                            message: "Uncaught exception in generator"
+                                                .to_string(),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
+                                self.yield_from_observed = false;
                                 // Read inner state without holding borrow
                                 let (is_suspended, val, key, ret) = {
                                     let inner = inner_gen.borrow();
@@ -406,10 +548,7 @@ impl PhpGenerator {
                                     self.current_key = key;
                                     self.state = GeneratorState::Suspended;
                                     self.ip = ip - 1; // Re-execute YieldFrom on resume
-                                    // Advance inner generator for next resume
-                                    let mut inner = inner_gen.borrow_mut();
-                                    inner.write_send_value();
-                                    let _ = inner.resume(vm);
+                                    self.yield_from_observed = true;
                                     return Ok(true);
                                 }
                                 // Inner completed
@@ -523,17 +662,23 @@ impl PhpGenerator {
                     self.state = GeneratorState::Completed;
                     self.has_returned = true;
                     self.current_value = Value::Null;
+                    self.current_key = Value::Null;
                     self.ip = ip;
                     return Ok(false);
                 }
 
                 OpCode::Return => {
-                    // In a generator, return acts as GeneratorReturn
+                    // In a generator, return acts as GeneratorReturn.
+                    // An explicit return inside a finally block discards any pending
+                    // exception that triggered the finally (matches PHP semantics).
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     self.return_value = val;
                     self.state = GeneratorState::Completed;
                     self.has_returned = true;
                     self.current_value = Value::Null;
+                    self.current_key = Value::Null;
+                    self.pending_exception = None;
+                    vm.current_exception = None;
                     self.ip = ip;
                     return Ok(false);
                 }
@@ -1225,8 +1370,23 @@ impl PhpGenerator {
                 OpCode::Throw => {
                     let exc_val = self.read_operand(&op.op1, &op_array.literals);
                     vm.current_exception = Some(exc_val);
-                    if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
-                        ip = catch_target as usize;
+                    if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
+                        // Prefer catch handler if present; otherwise jump to finally
+                        // so the finally block runs and re-raises the pending exception
+                        // after it completes.
+                        if catch_target > 0 {
+                            ip = catch_target as usize;
+                        } else if finally_target > 0 {
+                            ip = finally_target as usize;
+                        } else {
+                            self.state = GeneratorState::Completed;
+                            self.current_value = Value::Null;
+                            self.ip = ip;
+                            return Err(VmError {
+                                message: "Uncaught exception in generator".to_string(),
+                                line: op.line,
+                            });
+                        }
                     } else {
                         self.state = GeneratorState::Completed;
                         self.current_value = Value::Null;
@@ -1594,6 +1754,38 @@ impl PhpGenerator {
                             vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
                             vm.generator_send_val(obj_val.clone());
                         } else {
+                            // No user method exists. For stdClass specifically (which
+                            // has no instance methods other than the implicit __construct),
+                            // raise the canonical "Call to undefined method" Error here so
+                            // the trace shows the right call frame instead of falling
+                            // through to a generic "undefined function" diagnostic.
+                            if class_name_lower == b"stdclass" && method_lower != b"__construct" {
+                                let class_orig = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let msg = format!(
+                                    "Call to undefined method {}::{}()",
+                                    class_orig,
+                                    method_name.to_string_lossy()
+                                );
+                                let exc = vm.create_exception(b"Error", &msg, op.line);
+                                vm.current_exception = Some(exc);
+                                if let Some((catch_target, finally_target, _)) =
+                                    self.exception_handlers.pop()
+                                {
+                                    if catch_target > 0 {
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else if finally_target > 0 {
+                                        ip = finally_target as usize;
+                                        continue;
+                                    }
+                                }
+                                self.state = GeneratorState::Completed;
+                                self.ip = ip;
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
                             // Try calling built-in/SPL methods via the VM
                             // Set up as a generic method call that the VM's DoFCall handler will dispatch
                             let mut func_name = class_name_lower.clone();
@@ -1611,12 +1803,70 @@ impl PhpGenerator {
                         // If it succeeds, check the is_running flag for nested resume detection.
                         let already_running = inner_gen_rc.try_borrow().map(|b| b.is_running).unwrap_or(true);
                         if already_running && (method_lower == b"next" || method_lower == b"send" || method_lower == b"rewind") {
-                            // Set up a pending call that will throw the error in DoFCall
-                            let err_msg = b"Cannot resume an already running generator";
-                            vm.generator_init_fcall(Value::String(crate::string::PhpString::from_bytes(b"__throw_error")));
-                            vm.generator_send_val(Value::String(crate::string::PhpString::from_bytes(err_msg)));
-                            vm.generator_send_val(Value::Long(op.line as i64));
-                            continue; // let DoFCall handle the throw
+                            // Push a Generator->X frame so the exception's recorded
+                            // backtrace includes the inner call site (matches PHP's
+                            // output for "Cannot resume an already running generator"),
+                            // build the Error exception while the frame is on the
+                            // stack, then pop and propagate as a regular thrown error.
+                            let frame_method = match method_lower.as_slice() {
+                                b"next" => "Generator->next",
+                                b"send" => "Generator->send",
+                                b"rewind" => "Generator->rewind",
+                                _ => "Generator->?",
+                            };
+                            vm.call_stack.push((
+                                frame_method.to_string(),
+                                vm.current_file.clone(),
+                                op.line,
+                                Vec::new(),
+                                true,
+                            ));
+                            let err_msg = "Cannot resume an already running generator";
+                            let exc = vm.create_exception(b"Error", err_msg, op.line);
+                            vm.call_stack.pop();
+                            vm.current_exception = Some(exc);
+                            // Propagate as a thrown exception so any inner try/catch
+                            // can intercept it (the original test does exactly this).
+                            if let Some((catch_target, finally_target, _)) =
+                                self.exception_handlers.pop()
+                            {
+                                if catch_target > 0 {
+                                    ip = catch_target as usize;
+                                    continue;
+                                } else if finally_target > 0 {
+                                    ip = finally_target as usize;
+                                    continue;
+                                }
+                            }
+                            self.state = GeneratorState::Completed;
+                            self.ip = ip;
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", err_msg),
+                                line: op.line,
+                            });
+                        }
+                        // Push a frame for the duration of the inner method call so
+                        // backtraces and exception traces include the call site.
+                        let push_inner_frame = matches!(
+                            method_lower.as_slice(),
+                            b"current" | b"key" | b"next" | b"valid" | b"rewind"
+                        );
+                        let inner_frame_method = match method_lower.as_slice() {
+                            b"current" => "Generator->current",
+                            b"key" => "Generator->key",
+                            b"next" => "Generator->next",
+                            b"valid" => "Generator->valid",
+                            b"rewind" => "Generator->rewind",
+                            _ => "",
+                        };
+                        if push_inner_frame {
+                            vm.call_stack.push((
+                                inner_frame_method.to_string(),
+                                vm.current_file.clone(),
+                                op.line,
+                                Vec::new(),
+                                true,
+                            ));
                         }
                         let result = match method_lower.as_slice() {
                             b"valid" => {
@@ -1666,6 +1916,9 @@ impl PhpGenerator {
                             }
                             _ => Value::Null,
                         };
+                        if push_inner_frame {
+                            vm.call_stack.pop();
+                        }
                         vm.generator_init_fcall(Value::String(crate::string::PhpString::from_bytes(b"__builtin_return")));
                         vm.generator_send_val(result);
                     } else {
@@ -1831,16 +2084,17 @@ impl PhpGenerator {
         } else {
             raw_name
         };
-        let func_file = if self.call_file.is_empty() {
-            vm.current_file.clone()
-        } else {
-            self.call_file.clone()
-        };
-        // For resume_with_exception, use call_line=0 to show [internal function]
+        // For resume_with_exception, use call_line=0 and empty file to show [internal function]
         // (matches PHP: when an exception is thrown INTO the generator, the
         // top frame shows the generator function was called from [internal function]
         // which is Generator->throw itself).
-        vm.call_stack.push((func_name, func_file, 0, self.args.clone(), self.class_scope.is_some()));
+        vm.call_stack.push((
+            func_name,
+            String::new(),
+            0,
+            self.args.clone(),
+            self.class_scope.is_some(),
+        ));
 
         // Try to find an exception handler in the generator
         let had_handler = if let Some((catch_target, finally_target, _)) = self.exception_handlers.last().copied() {

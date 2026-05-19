@@ -746,6 +746,13 @@ impl Compiler {
     pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         self.build_anon_class_name_map(&program.statements);
+        // Reject yield/yield-from at script top level (must appear inside a function).
+        if let Some(line) = find_top_level_yield(&program.statements) {
+            return Err(CompileError {
+                message: "The \"yield\" expression can only be used inside a function".into(),
+                line,
+            });
+        }
         // First pass: process namespace/use declarations and compile function/class declarations
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
         self.compile_hoisting_pass(&program.statements)?;
@@ -1686,7 +1693,7 @@ impl Compiler {
             }
 
             StmtKind::FunctionDecl {
-                name, params, body, return_type, attributes: func_attributes, end_line: func_end_line, doc_comment: func_doc_comment, ..
+                name, params, body, return_type, attributes: func_attributes, end_line: func_end_line, doc_comment: func_doc_comment, returns_by_ref: func_returns_by_ref, ..
             } => {
                 // Check for promoted properties in free functions
                 for param in params {
@@ -1712,6 +1719,7 @@ impl Compiler {
                 func_compiler.use_const_map = self.use_const_map.clone();
                 func_compiler.op_array.name = qualified_name.clone();
                 func_compiler.op_array.is_generator = is_generator;
+                func_compiler.op_array.returns_by_ref = *func_returns_by_ref;
                 func_compiler.op_array.decl_line = stmt.span.line;
                 func_compiler.op_array.end_line = if *func_end_line > 0 { *func_end_line } else { stmt.span.line };
                 func_compiler.op_array.doc_comment = func_doc_comment.clone();
@@ -10275,6 +10283,31 @@ fn expr_is_in_nullsafe_chain(expr: &Expr) -> bool {
         ExprKind::DynamicStaticMethodCall { class, .. } => expr_is_in_nullsafe_chain(class),
         _ => false,
     }
+}
+
+/// Search top-level statements for `yield` or `yield from`. If found, return
+/// the source line where it appears. Function/class bodies are not descended
+/// into because yield inside those is allowed.
+fn find_top_level_yield(stmts: &[Statement]) -> Option<u32> {
+    for stmt in stmts {
+        match &stmt.kind {
+            // Don't recurse into function/class/closure bodies - yield is legal there.
+            StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => continue,
+            StmtKind::NamespaceDecl { body, .. } => {
+                if let Some(body) = body {
+                    if let Some(l) = find_top_level_yield(body) {
+                        return Some(l);
+                    }
+                }
+            }
+            _ => {
+                if stmt_contains_yield(stmt) {
+                    return Some(stmt.span.line);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Check if a list of statements contains any yield expressions.

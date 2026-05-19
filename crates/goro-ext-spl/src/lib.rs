@@ -218,6 +218,22 @@ fn spl_object_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 // --- Iterator functions ---
 
 fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Push a call-stack frame so any exception thrown while iterating the
+    // generator/iterator captures `iterator_to_array(...)` in its backtrace.
+    let trace_arg = args.first().cloned().unwrap_or(Value::Null);
+    vm.call_stack.push((
+        "iterator_to_array".to_string(),
+        vm.current_file.clone(),
+        vm.current_line,
+        vec![trace_arg],
+        false,
+    ));
+    let r = iterator_to_array_impl(vm, args);
+    vm.call_stack.pop();
+    r
+}
+
+fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     match args.first() {
         Some(Value::Array(arr)) => {
@@ -253,7 +269,7 @@ fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             if is_aggregate {
                 let iter_val = vm.call_object_method(val, b"getIterator", &[]).unwrap_or(Value::Null);
-                return iterator_to_array_fn(vm, &[iter_val, if use_keys { Value::True } else { Value::False }]);
+                return iterator_to_array_impl(vm, &[iter_val, if use_keys { Value::True } else { Value::False }]);
             }
             let mut result = PhpArray::new();
             // Call rewind, then iterate with valid/current/key/next

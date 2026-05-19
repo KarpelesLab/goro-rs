@@ -6535,6 +6535,25 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let original = args.first().cloned().unwrap_or(Value::Null);
+    // Generators are never serializable.
+    if matches!(original.deref(), Value::Generator(_)) {
+        // Push frame for the trace
+        _vm.call_stack.push((
+            "serialize".to_string(),
+            _vm.current_file.clone(),
+            _vm.current_line,
+            vec![original.clone()],
+            false,
+        ));
+        let msg = "Serialization of 'Generator' is not allowed";
+        let exc = _vm.create_exception(b"Exception", msg, _vm.current_line);
+        _vm.call_stack.pop();
+        _vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: format!("Uncaught Exception: {}", msg),
+            line: _vm.current_line,
+        });
+    }
     // For lazy objects, trigger init and redirect to real before serializing.
     let val_owned: Value = if let Value::Object(obj) = original.deref() {
         let is_lazy = matches!(
@@ -6898,6 +6917,37 @@ fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.to_php_string().as_bytes().to_vec(),
         None => return Ok(Value::False),
     };
+    // Block deserialization of certain non-serializable classes regardless of payload.
+    for (prefix, class_disp) in [
+        (&b"O:9:\"Generator\""[..], "Generator"),
+        (&b"C:9:\"Generator\""[..], "Generator"),
+        (&b"O:7:\"Closure\""[..], "Closure"),
+        (&b"C:7:\"Closure\""[..], "Closure"),
+        (&b"O:5:\"Fiber\""[..], "Fiber"),
+        (&b"C:5:\"Fiber\""[..], "Fiber"),
+        (&b"O:13:\"WeakReference\""[..], "WeakReference"),
+        (&b"C:13:\"WeakReference\""[..], "WeakReference"),
+        (&b"O:7:\"WeakMap\""[..], "WeakMap"),
+        (&b"C:7:\"WeakMap\""[..], "WeakMap"),
+    ] {
+        if data.starts_with(prefix) {
+            vm.call_stack.push((
+                "unserialize".to_string(),
+                vm.current_file.clone(),
+                vm.current_line,
+                vec![Value::String(PhpString::from_bytes(&data))],
+                false,
+            ));
+            let msg = format!("Unserialization of '{}' is not allowed", class_disp);
+            let exc = vm.create_exception(b"Exception", &msg, vm.current_line);
+            vm.call_stack.pop();
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught Exception: {}", msg),
+                line: vm.current_line,
+            });
+        }
+    }
     match unserialize_value(&data, &mut 0, vm) {
         Some(val) => Ok(val),
         None => {
