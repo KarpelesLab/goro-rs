@@ -746,6 +746,13 @@ impl Compiler {
     pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         self.build_anon_class_name_map(&program.statements);
+        // Reject yield/yield-from at script top level (must appear inside a function).
+        if let Some(line) = find_top_level_yield(&program.statements) {
+            return Err(CompileError {
+                message: "The \"yield\" expression can only be used inside a function".into(),
+                line,
+            });
+        }
         // First pass: process namespace/use declarations and compile function/class declarations
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
         self.compile_hoisting_pass(&program.statements)?;
@@ -1686,7 +1693,7 @@ impl Compiler {
             }
 
             StmtKind::FunctionDecl {
-                name, params, body, return_type, attributes: func_attributes, end_line: func_end_line, doc_comment: func_doc_comment, ..
+                name, params, body, return_type, attributes: func_attributes, end_line: func_end_line, doc_comment: func_doc_comment, returns_by_ref: func_returns_by_ref, ..
             } => {
                 // Check for promoted properties in free functions
                 for param in params {
@@ -1712,6 +1719,7 @@ impl Compiler {
                 func_compiler.use_const_map = self.use_const_map.clone();
                 func_compiler.op_array.name = qualified_name.clone();
                 func_compiler.op_array.is_generator = is_generator;
+                func_compiler.op_array.returns_by_ref = *func_returns_by_ref;
                 func_compiler.op_array.decl_line = stmt.span.line;
                 func_compiler.op_array.end_line = if *func_end_line > 0 { *func_end_line } else { stmt.span.line };
                 func_compiler.op_array.doc_comment = func_doc_comment.clone();
@@ -8158,6 +8166,56 @@ impl Compiler {
             }
 
             ExprKind::Yield(value, key) => {
+                // For by-ref generators (function &gen()), yielding a non-reference
+                // expression (constant, operator result, by-value function call)
+                // emits a runtime Notice. We detect at compile time:
+                //   - literals and operator results: notice
+                //   - variables / array access / property access: no notice
+                //   - function calls: notice unless the static name resolves to a
+                //     function declared as returns_by_ref
+                if self.op_array.returns_by_ref {
+                    if let Some(val_expr) = value {
+                        let mut emit_notice = false;
+                        match &val_expr.kind {
+                            ExprKind::Variable(_)
+                            | ExprKind::DynamicVariable(_)
+                            | ExprKind::PropertyAccess { .. }
+                            | ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicStaticPropertyAccess { .. }
+                            | ExprKind::ArrayAccess { .. } => {}
+                            ExprKind::FunctionCall { .. } => {
+                                // Conservative: emit Notice for any function-call
+                                // result yielded by reference. PHP also emits in
+                                // most cases; the rare exception is when the
+                                // callee is itself declared `function &name()`,
+                                // but we don't have a function table at compile
+                                // time here.
+                                emit_notice = true;
+                            }
+                            ExprKind::MethodCall { .. }
+                            | ExprKind::StaticMethodCall { .. } => {
+                                // Methods can return by-reference; defer at compile
+                                // time. The runtime detects and emits.
+                            }
+                            _ => {
+                                emit_notice = true;
+                            }
+                        }
+                        if emit_notice {
+                            let msg_str = "Only variable references should be yielded by reference";
+                            let msg_idx = self
+                                .op_array
+                                .add_literal(Value::String(crate::string::PhpString::from_bytes(msg_str.as_bytes())));
+                            self.op_array.emit(Op {
+                                opcode: OpCode::EmitNotice,
+                                op1: OperandType::Const(msg_idx),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                        }
+                    }
+                }
                 // Compile the yielded value (if any)
                 let val_operand = if let Some(val_expr) = value {
                     self.compile_expr(val_expr)?
@@ -10277,6 +10335,31 @@ fn expr_is_in_nullsafe_chain(expr: &Expr) -> bool {
     }
 }
 
+/// Search top-level statements for `yield` or `yield from`. If found, return
+/// the source line where it appears. Function/class bodies are not descended
+/// into because yield inside those is allowed.
+fn find_top_level_yield(stmts: &[Statement]) -> Option<u32> {
+    for stmt in stmts {
+        match &stmt.kind {
+            // Don't recurse into function/class/closure bodies - yield is legal there.
+            StmtKind::FunctionDecl { .. } | StmtKind::ClassDecl { .. } => continue,
+            StmtKind::NamespaceDecl { body, .. } => {
+                if let Some(body) = body {
+                    if let Some(l) = find_top_level_yield(body) {
+                        return Some(l);
+                    }
+                }
+            }
+            _ => {
+                if stmt_contains_yield(stmt) {
+                    return Some(stmt.span.line);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Check if a list of statements contains any yield expressions.
 /// This determines whether a function should be compiled as a generator.
 fn stmts_contain_yield(stmts: &[Statement]) -> bool {
@@ -10498,6 +10581,28 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         ExprKind::CloneWith { object, with_args } => expr_contains_yield(object) || with_args.iter().any(|(_, e)| expr_contains_yield(e)),
         ExprKind::PropertyAccess { object, .. } => expr_contains_yield(object),
         ExprKind::Include { path, .. } => expr_contains_yield(path),
+        ExprKind::New { class, args } => {
+            expr_contains_yield(class) || args.iter().any(|a| expr_contains_yield(&a.value))
+        }
+        ExprKind::StaticMethodCall { class, args, .. } => {
+            expr_contains_yield(class) || args.iter().any(|a| expr_contains_yield(&a.value))
+        }
+        ExprKind::Match { subject, arms } => {
+            expr_contains_yield(subject)
+                || arms.iter().any(|arm| {
+                    arm.conditions
+                        .as_ref()
+                        .map(|cs| cs.iter().any(expr_contains_yield))
+                        .unwrap_or(false)
+                        || expr_contains_yield(&arm.body)
+                })
+        }
+        ExprKind::AssignRef { target, value } => {
+            expr_contains_yield(target) || expr_contains_yield(value)
+        }
+        ExprKind::Instanceof { expr, class } => {
+            expr_contains_yield(expr) || expr_contains_yield(class)
+        }
         _ => false,
     }
 }

@@ -304,6 +304,10 @@ pub struct Vm {
     pub fiber_depth: u32,
     /// Whether we're currently force-closing a fiber (running its finally blocks)
     pub fiber_force_closing: bool,
+    /// Optional caller context (file, line) used when entering a generator resume
+    /// from user code (e.g., foreach iteration). When None, the generator's frame
+    /// in stack traces is recorded as "[internal function]".
+    pub generator_caller: Option<(String, u32)>,
     /// The currently executing Fiber object (for Fiber::getCurrent())
     pub current_fiber: Option<Value>,
     /// Stack of fiber objects for nested fibers
@@ -416,6 +420,7 @@ impl Vm {
             fiber_coroutines: HashMap::new(),
             fiber_depth: 0,
             fiber_force_closing: false,
+            generator_caller: None,
             current_fiber: None,
             fiber_stack: Vec::new(),
             exit_requested: false,
@@ -2180,7 +2185,13 @@ impl Vm {
         // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
         for (idx, (func_name, file, line, args, is_method)) in self.call_stack.iter().rev().enumerate() {
             let mut frame = PhpArray::new();
-            if !file.is_empty() {
+            // Frames whose file is set to the placeholder "[internal function]" or
+            // whose line is 0 represent an internal-engine call (Fiber callback,
+            // generator body, generator method dispatch). Don't store file/line so
+            // formatters render them as `[internal function]:` instead of
+            // `[internal function](0):`.
+            let is_internal = file.is_empty() || file == "[internal function]" || *line == 0;
+            if !is_internal {
                 frame.set(
                     ArrayKey::String(PhpString::from_bytes(b"file")),
                     Value::String(PhpString::from_string(file.clone())),
@@ -2542,6 +2553,15 @@ impl Vm {
                         // class_name may have original case, so compare case-insensitively
                         let class_name_lower: Vec<u8> =
                             class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                        // Generator values are stored as Value::Generator, not Value::Object.
+                        // Accept them for Generator, Iterator, Traversable, IteratorAggregate types.
+                        if matches!(value, Value::Generator(_)) {
+                            return matches!(
+                                class_name_lower.as_slice(),
+                                b"generator" | b"iterator" | b"traversable" | b"iteratoraggregate"
+                            );
+                        }
 
                         // Special case: Closure type - in goro-rs closures are strings/arrays, not objects
                         if class_name_lower == b"closure" {
@@ -3009,6 +3029,10 @@ impl Vm {
     /// Run destructors for objects that are only held by the destructible_objects list.
     /// In PHP, __destruct is called eagerly when the last user reference is dropped.
     /// Since destructible_objects keeps an Rc, we check for strong_count == 1.
+    pub fn run_pending_destructors_pub(&mut self) {
+        self.run_pending_destructors();
+    }
+
     fn run_pending_destructors(&mut self) {
         loop {
             let len = self.destructible_objects.len();
@@ -13079,10 +13103,38 @@ impl Vm {
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
         let result = self.execute_op_array(op_array, cvs);
 
+        // The Return path in global scope force-closes outstanding generator CVs
+        // so their finally blocks can run on shutdown. If any such finally raised
+        // an Error (e.g., "Cannot yield from finally in a force-closed
+        // generator"), convert it into a Fatal-error result so the engine surfaces
+        // it after main returned cleanly.
+        let mut result = result;
+        if result.is_ok() && self.current_exception.is_some() {
+            let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
+                let ob = obj.borrow();
+                let class = crate::value::display_class_name(&ob.class_name);
+                let msg = ob
+                    .get_property(b"message")
+                    .to_php_string()
+                    .to_string_lossy()
+                    .to_string();
+                if msg.is_empty() {
+                    format!("Uncaught {}", class)
+                } else {
+                    format!("Uncaught {}: {}", class, msg)
+                }
+            } else {
+                "Uncaught exception".to_string()
+            };
+            result = Err(VmError {
+                message: exc_msg,
+                line: self.current_line,
+            });
+        }
+
         // If there's an uncaught exception and a user exception handler is set, call it
         // Support chaining: if the handler throws and a new handler was registered inside it,
         // that new handler should catch the new exception.
-        let mut result = result;
         loop {
             match result {
                 Err(ref _e) if self.exception_handler.is_some() && self.current_exception.is_some() => {
@@ -16511,6 +16563,16 @@ impl Vm {
                         // Generator send() method: args[0] = generator, args[1] = sent value
                         if let Some(Value::Generator(gen_rc)) = call.args.first() {
                             let sent_value = call.args.get(1).cloned().unwrap_or(Value::Null);
+                            // Push a "Generator->send" frame so backtraces taken inside
+                            // the generator body include the send() call site.
+                            let send_frame_args = vec![sent_value.clone()];
+                            self.call_stack.push((
+                                "Generator->send".to_string(),
+                                self.current_file.clone(),
+                                op.line,
+                                send_frame_args,
+                                true,
+                            ));
                             let mut gen_borrow = gen_rc.borrow_mut();
                             gen_borrow.advanced_past_first = true;
                             let was_created = gen_borrow.state == crate::generator::GeneratorState::Created;
@@ -16522,6 +16584,7 @@ impl Vm {
                                 let _ = gen_borrow.resume(self);
                                 if self.current_exception.is_some() {
                                     drop(gen_borrow);
+                                    self.call_stack.pop();
                                     if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         continue;
@@ -16545,6 +16608,7 @@ impl Vm {
                             }
                             let result = gen_borrow.current_value.clone();
                             drop(gen_borrow);
+                            self.call_stack.pop();
                             if self.current_exception.is_some() {
                                 if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
@@ -19496,13 +19560,26 @@ impl Vm {
                             self.globals.insert(name.clone(), cv_val.clone());
                         }
                     }
-                    // In global scope, save all CVs as globals
+                    // In global scope, save all CVs as globals AND force-close any
+                    // suspended generators so their finally blocks run on script exit
+                    // (matches PHP's "shutdown" semantics).
                     if self.is_global_scope {
                         for (i, cv) in cvs.iter().enumerate() {
                             if !matches!(cv, Value::Undef)
                                 && let Some(name) = op_array.cv_names.get(i)
                             {
                                 self.globals.insert(name.clone(), cv.clone());
+                            }
+                        }
+                        // Close any generator CVs (top-level script ending). Any
+                        // exception they produce is surfaced as a Fatal error below.
+                        for cv in cvs.iter() {
+                            if let Value::Generator(gen_rc) = cv {
+                                if let Ok(mut g) = gen_rc.try_borrow_mut() {
+                                    let prev_caller = self.generator_caller.take();
+                                    g.close(self);
+                                    self.generator_caller = prev_caller;
+                                }
                             }
                         }
                     }
@@ -20270,7 +20347,10 @@ impl Vm {
                             }
                             let mut gen_borrow = gen_rc.borrow_mut();
                             if gen_borrow.state == crate::generator::GeneratorState::Created {
+                                let prev_caller = self.generator_caller.take();
+                                self.generator_caller = Some((self.current_file.clone(), op.line));
                                 let resume_result = gen_borrow.resume(self);
+                                self.generator_caller = prev_caller;
                                 drop(gen_borrow);
                                 if resume_result.is_err() || self.current_exception.is_some() {
                                     // Exception thrown during generator priming - propagate it
@@ -20545,7 +20625,11 @@ impl Vm {
                             let mut gen_borrow = gen_rc.borrow_mut();
                             gen_borrow.advanced_past_first = true;
                             gen_borrow.write_send_value();
-                            match gen_borrow.resume(self) {
+                            let prev_caller = self.generator_caller.take();
+                            self.generator_caller = Some((self.current_file.clone(), op.line));
+                            let resume_outcome = gen_borrow.resume(self);
+                            self.generator_caller = prev_caller;
+                            match resume_outcome {
                                 Ok(_) => {}
                                 Err(e) => {
                                     drop(gen_borrow);
@@ -20817,6 +20901,23 @@ impl Vm {
 
                     // Handle Generator values - delegate to ForeachInit behavior
                     if let Value::Generator(gen_rc) = &arr_val {
+                        // Iterating a non-ref generator by-reference is an error.
+                        // The generator function must have been declared `function &gen()`.
+                        let is_ref_gen = gen_rc.borrow().op_array.returns_by_ref;
+                        if !is_ref_gen {
+                            let msg = "You can only iterate a generator by-reference if it declared that it yields by-reference";
+                            let exc = self.create_exception(b"Exception", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Exception: {}", msg),
+                                line: op.line,
+                            });
+                        }
                         {
                             let mut gen_borrow = gen_rc.borrow_mut();
                             if gen_borrow.state == crate::generator::GeneratorState::Created {
@@ -22878,8 +22979,54 @@ impl Vm {
                             if let Value::Generator(gen_rc) = slot {
                                 let gen_clone = gen_rc.clone();
                                 *slot = Value::Undef;
-                                let mut gen_borrow = gen_clone.borrow_mut();
-                                gen_borrow.close(self);
+                                {
+                                    let mut gen_borrow = gen_clone.borrow_mut();
+                                    let prev_caller = self.generator_caller.take();
+                                    self.generator_caller =
+                                        Some((self.current_file.clone(), op.line));
+                                    gen_borrow.close(self);
+                                    self.generator_caller = prev_caller;
+                                }
+                                // close() may leave an Error in current_exception
+                                // (e.g. "Cannot yield from finally in a force-closed
+                                // generator"). Propagate it through outer handlers.
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, finally_target, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        if catch_target > 0 {
+                                            ip = catch_target as usize;
+                                            continue;
+                                        } else if finally_target > 0 {
+                                            ip = finally_target as usize;
+                                            continue;
+                                        }
+                                    }
+                                    let exc_msg = if let Some(Value::Object(obj)) =
+                                        &self.current_exception
+                                    {
+                                        let ob = obj.borrow();
+                                        let class =
+                                            crate::value::display_class_name(&ob.class_name);
+                                        let msg = ob
+                                            .get_property(b"message")
+                                            .to_php_string()
+                                            .to_string_lossy()
+                                            .to_string();
+                                        if msg.is_empty() {
+                                            format!("Uncaught {}", class)
+                                        } else {
+                                            format!("Uncaught {}: {}", class, msg)
+                                        }
+                                    } else {
+                                        "Uncaught exception".to_string()
+                                    };
+                                    return Err(VmError {
+                                        message: exc_msg,
+                                        line: op.line,
+                                    });
+                                }
                             } else if let Value::Object(obj_rc) = slot {
                                 // Check if this is a Fiber object that needs cleanup
                                 let is_fiber = {
@@ -23679,33 +23826,49 @@ impl Vm {
                                         let gb = gen_clone.borrow();
                                         (gb.current_key.clone(), gb.current_value.clone())
                                     };
-                                    let arr_key = match &key_val {
-                                        Value::Long(n) => ArrayKey::Int(*n),
+                                    // Compute the key, but defer the "must be int|string"
+                                    // error until AFTER advancing the generator: an exception
+                                    // from a `finally` block (which runs on advance) takes
+                                    // priority over the key-type diagnostic (matches PHP).
+                                    let (arr_key_opt, key_err) = match &key_val {
+                                        Value::Long(n) => (Some(ArrayKey::Int(*n)), None),
                                         Value::String(s) => {
-                                            // Numeric string keys become int keys
                                             let s_str = s.to_string_lossy();
-                                            if let Ok(n) = s_str.parse::<i64>() {
+                                            let k = if let Ok(n) = s_str.parse::<i64>() {
                                                 ArrayKey::Int(n)
                                             } else {
                                                 ArrayKey::String(s.clone())
-                                            }
+                                            };
+                                            (Some(k), None)
                                         }
-                                        _ => {
-                                            spread_err = Some("Keys must be of type int|string during array unpacking".to_string());
-                                            break;
-                                        }
+                                        _ => (
+                                            None,
+                                            Some(
+                                                "Keys must be of type int|string during array unpacking"
+                                                    .to_string(),
+                                            ),
+                                        ),
                                     };
-                                    pairs.push((arr_key, yielded_val));
+                                    if let Some(k) = arr_key_opt {
+                                        pairs.push((k, yielded_val));
+                                    }
                                     let mut gb = gen_clone.borrow_mut();
                                     gb.write_send_value();
                                     match gb.resume(self) {
                                         Ok(_) => {}
                                         Err(_) => {
-                                            // Generator threw - current_exception is set
+                                            // Generator threw on advance - the exception
+                                            // takes priority over a deferred key-type error.
                                             drop(gb);
                                             spread_err = Some(String::new()); // marker
                                             break;
                                         }
+                                    }
+                                    // After advance: if the generator didn't throw and we
+                                    // had a deferred key error, raise it now.
+                                    if let Some(msg) = key_err {
+                                        spread_err = Some(msg);
+                                        break;
                                     }
                                 }
                             }
@@ -28543,17 +28706,129 @@ impl Vm {
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
 
+                        // If the generator is currently delegating via `yield from` to
+                        // an inner generator that is still suspended, observe the
+                        // deepest still-suspended delegate. PHP snapshots the value
+                        // into the outer generator(s) on each observation so that when
+                        // the delegate later completes, the outer still reports the
+                        // last seen value (matches bug70904, bug70965, etc.).
+                        let delegate_gen: Option<Rc<RefCell<crate::generator::PhpGenerator>>> = {
+                            let mut cur = gen_rc.clone();
+                            let mut depth = 0;
+                            loop {
+                                if depth > 64 { break Some(cur); }
+                                // Use try_borrow to avoid panicking if the
+                                // current generator is being mutated elsewhere
+                                // (e.g. during inner.resume() or yield-from
+                                // re-entry). In that case, just stop walking.
+                                let next_inner = match cur.try_borrow() {
+                                    Ok(b) => match &b.yield_from_source {
+                                        Some(Value::Generator(inner)) => {
+                                            let is_suspended = matches!(
+                                                inner.try_borrow().map(|ib| ib.state.clone()),
+                                                Ok(crate::generator::GeneratorState::Suspended)
+                                            );
+                                            if is_suspended {
+                                                Some(inner.clone())
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    },
+                                    Err(_) => None,
+                                };
+                                match next_inner {
+                                    Some(n) => { cur = n; depth += 1; }
+                                    None => break Some(cur),
+                                }
+                            }
+                        };
+                        // If we resolved past `gen_rc`, snapshot the delegate's
+                        // value/key into every outer generator in the chain so
+                        // subsequent observations (after the delegate completes)
+                        // still see the last value.
+                        if let Some(ref dg) = delegate_gen {
+                            if !Rc::ptr_eq(dg, gen_rc) {
+                                let (dval, dkey) = match dg.try_borrow() {
+                                    Ok(b) => (b.current_value.clone(), b.current_key.clone()),
+                                    Err(_) => (Value::Null, Value::Null),
+                                };
+                                let mut cur = gen_rc.clone();
+                                for _ in 0..64 {
+                                    if Rc::ptr_eq(&cur, dg) { break; }
+                                    let next_inner = match cur.try_borrow_mut() {
+                                        Ok(mut b) => {
+                                            b.current_value = dval.clone();
+                                            b.current_key = dkey.clone();
+                                            match &b.yield_from_source {
+                                                Some(Value::Generator(inner)) => Some(inner.clone()),
+                                                _ => None,
+                                            }
+                                        }
+                                        Err(_) => None,
+                                    };
+                                    match next_inner {
+                                        Some(n) => cur = n,
+                                        None => break,
+                                    }
+                                }
+                            }
+                        }
+
+                        // Push a Generator->X frame around the resume calls so any
+                        // exception raised inside the body produces a backtrace with
+                        // the call site visible. Only methods whose arms don't take
+                        // their own early-return path are wrapped here.
+                        let push_frame = matches!(
+                            method_lower.as_slice(),
+                            b"current" | b"key" | b"next" | b"valid"
+                        );
+                        let display_method: &str = match method_lower.as_slice() {
+                            b"current" => "Generator->current",
+                            b"key" => "Generator->key",
+                            b"next" => "Generator->next",
+                            b"valid" => "Generator->valid",
+                            _ => "",
+                        };
+                        if push_frame {
+                            self.call_stack.push((
+                                display_method.to_string(),
+                                self.current_file.clone(),
+                                op.line,
+                                Vec::new(),
+                                true,
+                            ));
+                        }
+
                         let result = match method_lower.as_slice() {
                             b"current" => {
-                                let gen_borrow = gen_rc.borrow();
-                                if gen_borrow.state == crate::generator::GeneratorState::Created {
-                                    drop(gen_borrow);
+                                let state = match gen_rc.try_borrow() {
+                                    Ok(b) => b.state.clone(),
+                                    // Already borrowed => generator is running.
+                                    Err(_) => crate::generator::GeneratorState::Suspended,
+                                };
+                                if state == crate::generator::GeneratorState::Created {
                                     // Need to advance to first yield
                                     let mut gen_borrow = gen_rc.borrow_mut();
                                     let _ = gen_borrow.resume(self);
                                     gen_borrow.current_value.clone()
+                                } else if let Some(ref dg) = delegate_gen {
+                                    if !Rc::ptr_eq(dg, gen_rc) {
+                                        dg.try_borrow()
+                                            .map(|b| b.current_value.clone())
+                                            .unwrap_or(Value::Null)
+                                    } else {
+                                        gen_rc
+                                            .try_borrow()
+                                            .map(|b| b.current_value.clone())
+                                            .unwrap_or(Value::Null)
+                                    }
                                 } else {
-                                    gen_borrow.current_value.clone()
+                                    gen_rc
+                                        .try_borrow()
+                                        .map(|b| b.current_value.clone())
+                                        .unwrap_or(Value::Null)
                                 }
                             }
                             b"key" => {
@@ -28563,6 +28838,12 @@ impl Vm {
                                     let mut gen_borrow = gen_rc.borrow_mut();
                                     let _ = gen_borrow.resume(self);
                                     gen_borrow.current_key.clone()
+                                } else if let Some(ref dg) = delegate_gen {
+                                    if !Rc::ptr_eq(dg, gen_rc) {
+                                        dg.borrow().current_key.clone()
+                                    } else {
+                                        gen_borrow.current_key.clone()
+                                    }
                                 } else {
                                     gen_borrow.current_key.clone()
                                 }
@@ -28601,6 +28882,17 @@ impl Vm {
                                 }
                             }
                             b"rewind" => {
+                                // Push a Generator->rewind frame for the duration of
+                                // the resume() so backtraces inside the generator can
+                                // see the rewind() call site. We pop it on the success
+                                // path here, and at each early-return below.
+                                self.call_stack.push((
+                                    "Generator->rewind".to_string(),
+                                    self.current_file.clone(),
+                                    op.line,
+                                    Vec::new(),
+                                    true,
+                                ));
                                 let gen_borrow = gen_rc.borrow();
                                 if gen_borrow.state == crate::generator::GeneratorState::Created {
                                     drop(gen_borrow);
@@ -28609,6 +28901,7 @@ impl Vm {
                                     let resume_result = gen_borrow.resume(self);
                                     drop(gen_borrow);
                                     if resume_result.is_err() || self.current_exception.is_some() {
+                                        self.call_stack.pop();
                                         // Exception during priming - propagate
                                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
@@ -28621,17 +28914,10 @@ impl Vm {
                                         return Err(VmError { message: "Uncaught exception in generator".to_string(), line: op.line });
                                     }
                                 } else if gen_borrow.advanced_past_first {
-                                    // Cannot rewind a generator that has been advanced past the first yield
+                                    // Cannot rewind a generator that has been advanced past the first yield.
+                                    // The Generator->rewind frame pushed above is already on the stack so
+                                    // create_exception captures it; pop after capturing.
                                     drop(gen_borrow);
-                                    // Push a trace frame for Generator->rewind() so the
-                                    // exception backtrace shows the call site.
-                                    self.call_stack.push((
-                                        "Generator->rewind".to_string(),
-                                        self.current_file.clone(),
-                                        op.line,
-                                        Vec::new(),
-                                        true,
-                                    ));
                                     let msg = "Cannot rewind a generator that was already run";
                                     let exc = self.create_exception(b"Exception", msg, op.line);
                                     self.call_stack.pop();
@@ -28642,7 +28928,9 @@ impl Vm {
                                     }
                                     return Err(VmError { message: format!("Uncaught Exception: {}", msg), line: op.line });
                                 }
-                                // If at first yield or completed, rewind is a no-op
+                                // If at first yield or completed, rewind is a no-op.
+                                // Pop the rewind trace frame before returning.
+                                self.call_stack.pop();
                                 Value::Null
                             }
                             b"send" => {
@@ -28709,6 +28997,11 @@ impl Vm {
                             }
                             _ => Value::Null,
                         };
+
+                        // Pop the Generator->X stack frame (if we pushed one above).
+                        if push_frame {
+                            self.call_stack.pop();
+                        }
 
                         // For send() and throw(), we need to pass through to DoFCall so args can be collected
                         if method_lower == b"send" {
@@ -29499,7 +29792,10 @@ impl Vm {
                         func_cvs[i] = arg.clone();
                     }
                 }
-                let generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
+                let mut generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
+                generator.args = call.args.clone();
+                generator.call_file = self.current_file.clone();
+                generator.call_line = line;
                 let gen_rc = Rc::new(RefCell::new(generator));
                 Ok(Value::Generator(gen_rc))
             } else {
@@ -29527,7 +29823,27 @@ impl Vm {
                         }
                     }
                 }
+                // Push a call_stack frame so backtrace_from_inside_the_call can see
+                // this function. (The main DoFCall opcode path already pushes a
+                // frame for non-generator calls; generator_do_fcall historically
+                // didn't, so backtraces inside a generator-called function lost
+                // the intermediate frame.)
+                let raw_name = String::from_utf8_lossy(&user_fn.name).to_string();
+                let display = if !user_fn.display_name.is_empty() {
+                    String::from_utf8_lossy(&user_fn.display_name).to_string()
+                } else {
+                    raw_name
+                };
+                let trace_args = call.args.clone();
+                self.call_stack.push((
+                    display,
+                    self.current_file.clone(),
+                    line,
+                    trace_args,
+                    user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this"),
+                ));
                 let result = self.execute_op_array(&user_fn, func_cvs);
+                self.call_stack.pop();
                 self.is_global_scope = was_global;
                 result
             }

@@ -13,7 +13,7 @@ pub enum StmtKind {
     For { init: Vec<Expr>, condition: Vec<Expr>, update: Vec<Expr>, body: Vec<Statement> },
     Foreach { expr: Expr, key: Option<Expr>, value: Expr, by_ref: bool, body: Vec<Statement> },
     Switch { expr: Expr, cases: Vec<SwitchCase> }, Break(Option<Expr>), Continue(Option<Expr>),
-    FunctionDecl { name: Vec<u8>, params: Vec<Param>, return_type: Option<TypeHint>, body: Vec<Statement>, is_static: bool, attributes: Vec<Attribute>, end_line: u32, doc_comment: Option<Vec<u8>> },
+    FunctionDecl { name: Vec<u8>, params: Vec<Param>, return_type: Option<TypeHint>, body: Vec<Statement>, is_static: bool, attributes: Vec<Attribute>, end_line: u32, doc_comment: Option<Vec<u8>>, returns_by_ref: bool },
     ClassDecl { name: Vec<u8>, modifiers: ClassModifiers, extends: Option<Vec<u8>>, implements: Vec<Vec<u8>>, body: Vec<ClassMember>, enum_backing_type: Option<Vec<u8>>, attributes: Vec<Attribute>, end_line: u32, doc_comment: Option<Vec<u8>> },
     TryCatch { try_body: Vec<Statement>, catches: Vec<CatchClause>, finally_body: Option<Vec<Statement>> },
     Throw(Expr), Global(Vec<Vec<u8>>), StaticVar(Vec<(Vec<u8>, Option<Expr>)>), Unset(Vec<Expr>),

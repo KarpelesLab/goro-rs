@@ -1236,7 +1236,7 @@ impl Parser {
         let span = self.span();
         self.advance(); // function
         // Optional & for return-by-reference
-        self.eat(&TokenKind::Ampersand);
+        let returns_by_ref = self.eat(&TokenKind::Ampersand);
         let name = match self.peek().clone() {
             TokenKind::Identifier(name) => {
                 self.advance();
@@ -1277,6 +1277,7 @@ impl Parser {
                 attributes,
                 end_line,
                 doc_comment: None,
+                returns_by_ref,
             },
             span,
         })
@@ -5269,10 +5270,45 @@ impl Parser {
             }
             TokenKind::Yield => {
                 self.advance();
-                if matches!(
+                // Tokens after which yield is bare (no value follows). Includes
+                // statement/expr terminators and ALL binary operators that bind
+                // tighter than yield (yield is one of the loosest expressions in
+                // PHP). A binary operator token here means we're computing
+                // `<binop>(yield, rhs)` and yield is the LHS.
+                let bare = matches!(
                     self.peek(),
-                    TokenKind::Semicolon | TokenKind::CloseParen | TokenKind::CloseBracket
-                ) {
+                    TokenKind::Semicolon
+                        | TokenKind::CloseParen
+                        | TokenKind::CloseBracket
+                        | TokenKind::CloseBrace
+                        | TokenKind::Comma
+                        | TokenKind::Colon
+                        | TokenKind::QuestionMark
+                        | TokenKind::DoubleArrow
+                        | TokenKind::Star
+                        | TokenKind::Slash
+                        | TokenKind::Percent
+                        | TokenKind::Pow
+                        | TokenKind::Dot
+                        | TokenKind::Equal
+                        | TokenKind::Identical
+                        | TokenKind::NotEqual
+                        | TokenKind::NotIdentical
+                        | TokenKind::Less
+                        | TokenKind::Greater
+                        | TokenKind::LessEqual
+                        | TokenKind::GreaterEqual
+                        | TokenKind::Spaceship
+                        | TokenKind::BooleanAnd
+                        | TokenKind::BooleanOr
+                        | TokenKind::Ampersand
+                        | TokenKind::Pipe
+                        | TokenKind::Caret
+                        | TokenKind::ShiftLeft
+                        | TokenKind::ShiftRight
+                        | TokenKind::NullCoalesce
+                );
+                if bare {
                     Ok(Expr {
                         span,
                         kind: ExprKind::Yield(None, None),

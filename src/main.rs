@@ -256,7 +256,7 @@ fn format_trace_from_value(trace_val: &goro_core::value::Value, fallback: &str) 
                 } else {
                     String::new()
                 };
-                let loc = if file.is_empty() {
+                let loc = if file.is_empty() || file == "[internal function]" || line == 0 {
                     "[internal function]".to_string()
                 } else {
                     format!("{}({})", file, line)

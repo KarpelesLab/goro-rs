@@ -656,6 +656,10 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         512 => {
             // E_USER_WARNING
             let call_line = vm.current_line;
+            // Honor error_reporting bitmask: only emit if E_USER_WARNING is set.
+            if vm.error_reporting & 512 == 0 {
+                return Ok(Value::True);
+            }
             if !vm.call_user_error_handler(512, &message, call_line) {
                 vm.emit_warning_at(&message, call_line);
             }
@@ -663,8 +667,18 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         1024 => {
             // E_USER_NOTICE
             let call_line = vm.current_line;
+            // Honor error_reporting bitmask: only emit if E_USER_NOTICE is set.
+            if vm.error_reporting & 1024 == 0 {
+                return Ok(Value::True);
+            }
             if !vm.call_user_error_handler(1024, &message, call_line) {
-                vm.emit_notice_raw(&message, call_line);
+                let notice = format!(
+                    "\nNotice: {} in {} on line {}\n",
+                    message,
+                    vm.current_file,
+                    call_line
+                );
+                vm.write_output(notice.as_bytes());
             }
         }
         16384 => {
@@ -6535,6 +6549,25 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let original = args.first().cloned().unwrap_or(Value::Null);
+    // Generators are never serializable.
+    if matches!(original.deref(), Value::Generator(_)) {
+        // Push frame for the trace
+        _vm.call_stack.push((
+            "serialize".to_string(),
+            _vm.current_file.clone(),
+            _vm.current_line,
+            vec![original.clone()],
+            false,
+        ));
+        let msg = "Serialization of 'Generator' is not allowed";
+        let exc = _vm.create_exception(b"Exception", msg, _vm.current_line);
+        _vm.call_stack.pop();
+        _vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: format!("Uncaught Exception: {}", msg),
+            line: _vm.current_line,
+        });
+    }
     // For lazy objects, trigger init and redirect to real before serializing.
     let val_owned: Value = if let Value::Object(obj) = original.deref() {
         let is_lazy = matches!(
@@ -6898,6 +6931,37 @@ fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.to_php_string().as_bytes().to_vec(),
         None => return Ok(Value::False),
     };
+    // Block deserialization of certain non-serializable classes regardless of payload.
+    for (prefix, class_disp) in [
+        (&b"O:9:\"Generator\""[..], "Generator"),
+        (&b"C:9:\"Generator\""[..], "Generator"),
+        (&b"O:7:\"Closure\""[..], "Closure"),
+        (&b"C:7:\"Closure\""[..], "Closure"),
+        (&b"O:5:\"Fiber\""[..], "Fiber"),
+        (&b"C:5:\"Fiber\""[..], "Fiber"),
+        (&b"O:13:\"WeakReference\""[..], "WeakReference"),
+        (&b"C:13:\"WeakReference\""[..], "WeakReference"),
+        (&b"O:7:\"WeakMap\""[..], "WeakMap"),
+        (&b"C:7:\"WeakMap\""[..], "WeakMap"),
+    ] {
+        if data.starts_with(prefix) {
+            vm.call_stack.push((
+                "unserialize".to_string(),
+                vm.current_file.clone(),
+                vm.current_line,
+                vec![Value::String(PhpString::from_bytes(&data))],
+                false,
+            ));
+            let msg = format!("Unserialization of '{}' is not allowed", class_disp);
+            let exc = vm.create_exception(b"Exception", &msg, vm.current_line);
+            vm.call_stack.pop();
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught Exception: {}", msg),
+                line: vm.current_line,
+            });
+        }
+    }
     match unserialize_value(&data, &mut 0, vm) {
         Some(val) => Ok(val),
         None => {
@@ -9830,11 +9894,6 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         if i >= max_frames {
             break;
         }
-        let file_display = if file == "Unknown.php" || file.is_empty() {
-            &vm.current_file
-        } else {
-            file
-        };
         let args_str = if ignore_args {
             String::new()
         } else {
@@ -9846,7 +9905,19 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         } else {
             func_name.clone()
         };
-        lines.push(format!("#{} {}({}): {}({})", i, file_display, line, display_name, args_str));
+        // Frames with empty file/line=0 represent an internal-engine call
+        // (e.g. a generator body resumed by VM machinery, or a Fiber callback).
+        let loc = if *line == 0 || file.is_empty() {
+            "[internal function]".to_string()
+        } else {
+            let file_display = if file == "Unknown.php" {
+                vm.current_file.as_str()
+            } else {
+                file.as_str()
+            };
+            format!("{}({})", file_display, line)
+        };
+        lines.push(format!("#{} {}: {}({})", i, loc, display_name, args_str));
     }
 
     let mut output = lines.join("\n");
