@@ -1,9 +1,14 @@
+pub mod filters;
 pub mod math;
 pub mod misc;
 pub mod output;
 pub mod regex;
 pub mod strings;
 pub mod type_funcs;
+
+// Alias for code referencing `stream_filters` (the gitignore unfortunately
+// matches anything starting with "stream").
+pub use filters as stream_filters;
 
 use goro_core::vm::Vm;
 

@@ -889,7 +889,13 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(path, source).is_ok()
+        // The phpt parser strips the trailing newline of the FILE
+        // section. Real php-src test runners write the source with a
+        // final newline, so tests that read __FILE__ see the same byte
+        // sequence as the original .phpt block.
+        let mut full = source.to_vec();
+        if !full.last().is_some_and(|&b| b == b'\n') { full.push(b'\n'); }
+        std::fs::write(path, &full).is_ok()
     } else {
         false
     };

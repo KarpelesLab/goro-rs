@@ -11,4 +11,5 @@ goro-vfs = { path = "../goro-vfs" }
 libc = "0.2"
 bcrypt = "0.19"
 flate2 = "1"
+bzip2 = "0.6"
 tempfile = "3"
