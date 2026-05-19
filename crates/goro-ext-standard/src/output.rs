@@ -21,6 +21,7 @@ fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__pkey_id")
         || name.starts_with(b"__cert_id")
         || name.starts_with(b"__csr_id")
+        || name.starts_with(b"__xml_")
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

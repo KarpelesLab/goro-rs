@@ -6557,7 +6557,7 @@ fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Check for non-serializable classes
     if let Value::Object(obj) = val {
         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        if matches!(class_lower.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber") {
+        if matches!(class_lower.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber" | b"xmlparser") {
             let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
             let msg = format!("Serialization of '{}' is not allowed", class_name);
             let exc = _vm.create_exception(b"Exception", &msg, _vm.current_line);
@@ -7084,7 +7084,7 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
 
             // Check for non-unserializable classes
             let class_lower_check: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if matches!(class_lower_check.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber") {
+            if matches!(class_lower_check.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber" | b"xmlparser") {
                 let class_display = String::from_utf8_lossy(&class_name).to_string();
                 let msg = format!("Unserialization of '{}' is not allowed", class_display);
                 let exc = vm.create_exception(b"Exception", &msg, vm.current_line);
@@ -7351,7 +7351,7 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
             }
             // Check for non-unserializable classes
             let c_class_lower: Vec<u8> = c_class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if matches!(c_class_lower.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber") {
+            if matches!(c_class_lower.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber" | b"xmlparser") {
                 let class_display = String::from_utf8_lossy(&c_class_name).to_string();
                 let msg = format!("Unserialization of '{}' is not allowed", class_display);
                 let exc = vm.create_exception(b"Exception", &msg, vm.current_line);

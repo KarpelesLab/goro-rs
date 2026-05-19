@@ -17,200 +17,134 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"ctype_xdigit", ctype_xdigit);
 }
 
-/// Helper for ctype functions: get bytes to check (handles int as ASCII code)
-/// Emits deprecation warning for non-string types
-fn ctype_get_bytes(vm: &mut Vm, args: &[Value], func_name: &str) -> Vec<u8> {
-    let val = args.first().unwrap_or(&Value::Null);
+/// Returns the PHP type name used in error messages
+fn php_type_name(val: &Value) -> String {
     match val {
-        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Null | Value::Undef => "null".to_string(),
+        Value::True | Value::False => "bool".to_string(),
+        Value::Long(_) => "int".to_string(),
+        Value::Double(_) => "float".to_string(),
+        Value::String(_) => "string".to_string(),
+        Value::Array(_) => "array".to_string(),
+        Value::Resource(_) => "resource".to_string(),
+        Value::Object(obj) => String::from_utf8_lossy(&obj.borrow().class_name).to_string(),
+        Value::Generator(_) => "Generator".to_string(),
+        Value::Reference(r) => php_type_name(&r.borrow()),
+    }
+}
+
+/// Run a ctype check on a value matching PHP semantics.
+/// `iswhat` is a byte predicate (taking the byte and returning bool).
+/// `allow_digits` is returned for ints > 255.
+/// `allow_minus` is returned for ints < -128.
+fn ctype_check<F: Fn(u8) -> bool>(
+    vm: &mut Vm,
+    args: &[Value],
+    func_name: &str,
+    iswhat: F,
+    allow_digits: bool,
+    allow_minus: bool,
+) -> Value {
+    let val = match args.first() {
+        Some(v) => v.clone(),
+        None => return Value::False,
+    };
+    // Dereference if needed
+    let val = match &val {
+        Value::Reference(r) => r.borrow().clone(),
+        _ => val,
+    };
+
+    match &val {
+        Value::String(s) => {
+            let bytes = s.as_bytes();
+            if bytes.is_empty() {
+                Value::False
+            } else if bytes.iter().all(|&b| iswhat(b)) {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
         Value::Long(n) => {
+            // Emit deprecation
             vm.emit_deprecated_at(
-                &format!("{func_name}(): Argument of type int will be interpreted as string in the future"),
+                &format!(
+                    "{func_name}(): Argument of type int will be interpreted as string in the future"
+                ),
                 vm.current_line,
             );
-            if *n >= -128 && *n <= 255 {
-                let c = if *n < 0 { (*n + 256) as u8 } else { *n as u8 };
-                vec![c]
+            let n = *n;
+            if (0..=255).contains(&n) {
+                if iswhat(n as u8) { Value::True } else { Value::False }
+            } else if (-128..0).contains(&n) {
+                let b = (n + 256) as u8;
+                if iswhat(b) { Value::True } else { Value::False }
+            } else if n > 255 {
+                if allow_digits { Value::True } else { Value::False }
             } else {
-                // Large integers: convert to string representation
-                val.to_php_string().as_bytes().to_vec()
+                // n < -128
+                if allow_minus { Value::True } else { Value::False }
             }
         }
-        Value::Double(f) => {
+        _ => {
+            // Emit deprecation for non-string, non-int types
+            let type_name = php_type_name(&val);
             vm.emit_deprecated_at(
-                &format!("{func_name}(): Argument of type float will be interpreted as string in the future"),
+                &format!(
+                    "{func_name}(): Argument of type {type_name} will be interpreted as string in the future"
+                ),
                 vm.current_line,
             );
-            // PHP treats float as (int)$float for ctype functions
-            let n = *f as i64;
-            if n >= -128 && n <= 255 {
-                let c = if n < 0 { (n + 256) as u8 } else { n as u8 };
-                vec![c]
-            } else {
-                // Values outside -128..255 return false (empty vec triggers false)
-                vec![]
-            }
+            Value::False
         }
-        Value::Null | Value::Undef => {
-            vm.emit_deprecated_at(
-                &format!("{func_name}(): Argument of type null will be interpreted as string in the future"),
-                vm.current_line,
-            );
-            val.to_php_string().as_bytes().to_vec()
-        }
-        Value::True => {
-            vm.emit_deprecated_at(
-                &format!("{func_name}(): Argument of type bool will be interpreted as string in the future"),
-                vm.current_line,
-            );
-            // PHP treats bool as int (1/0) then as ASCII code
-            vec![1u8]
-        }
-        Value::False => {
-            vm.emit_deprecated_at(
-                &format!("{func_name}(): Argument of type bool will be interpreted as string in the future"),
-                vm.current_line,
-            );
-            // false = 0 (NUL byte)
-            vec![0u8]
-        }
-        Value::Array(_) => {
-            vm.emit_deprecated_at(
-                &format!("{func_name}(): Argument of type array will be interpreted as string in the future"),
-                vm.current_line,
-            );
-            // PHP returns false for array arguments
-            vec![]
-        }
-        Value::Object(obj) => {
-            let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-            vm.emit_deprecated_at(
-                &format!("{func_name}(): Argument of type {class_name} will be interpreted as string in the future"),
-                vm.current_line,
-            );
-            // PHP returns false for object arguments
-            vec![]
-        }
-        _ => val.to_php_string().as_bytes().to_vec(),
     }
 }
 
 fn ctype_alpha(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_alpha");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_alphabetic()) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(vm, args, "ctype_alpha", |b| b.is_ascii_alphabetic(), false, false))
 }
 fn ctype_digit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_digit");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_digit()) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(vm, args, "ctype_digit", |b| b.is_ascii_digit(), true, false))
 }
 fn ctype_alnum(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_alnum");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(vm, args, "ctype_alnum", |b| b.is_ascii_alphanumeric(), true, false))
 }
 fn ctype_upper(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_upper");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_uppercase()) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(vm, args, "ctype_upper", |b| b.is_ascii_uppercase(), false, false))
 }
 fn ctype_lower(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_lower");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_lowercase()) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(vm, args, "ctype_lower", |b| b.is_ascii_lowercase(), false, false))
 }
 fn ctype_space(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_space");
-    Ok(
-        if !bytes.is_empty()
-            && bytes
-                .iter()
-                .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C))
-        {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_space",
+        |b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C),
+        false,
+        false,
+    ))
 }
-
 fn ctype_cntrl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_cntrl");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_control()) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(vm, args, "ctype_cntrl", |b| b.is_ascii_control(), false, false))
 }
-
 fn ctype_graph(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_graph");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_graphic()) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(vm, args, "ctype_graph", |b| b.is_ascii_graphic(), true, true))
 }
-
 fn ctype_print(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_print");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| *b >= 0x20 && *b <= 0x7e) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_print",
+        |b| (0x20..=0x7e).contains(&b),
+        true,
+        true,
+    ))
 }
-
 fn ctype_punct(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_punct");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_punctuation()) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(vm, args, "ctype_punct", |b| b.is_ascii_punctuation(), false, false))
 }
-
 fn ctype_xdigit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let bytes = ctype_get_bytes(vm, args, "ctype_xdigit");
-    Ok(
-        if !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_hexdigit()) {
-            Value::True
-        } else {
-            Value::False
-        },
-    )
+    Ok(ctype_check(vm, args, "ctype_xdigit", |b| b.is_ascii_hexdigit(), true, false))
 }

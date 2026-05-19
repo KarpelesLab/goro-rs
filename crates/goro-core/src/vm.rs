@@ -272,6 +272,9 @@ pub struct Vm {
     next_bound_closure_id: u64,
     /// JSON last error code (0 = no error)
     pub json_last_error: i64,
+    /// Object pointers currently being serialized by json_encode via jsonSerialize.
+    /// Used to detect recursion across nested json_encode() calls (Bug #61978).
+    pub json_encoding_objects: std::collections::HashSet<usize>,
     /// Last PCRE error code
     pub preg_last_error: i64,
     /// Named args being forwarded to a builtin function call (for call_user_func etc.)
@@ -399,6 +402,7 @@ impl Vm {
             exception_handler_stack: Vec::new(),
             next_bound_closure_id: 0,
             json_last_error: 0,
+            json_encoding_objects: std::collections::HashSet::new(),
             preg_last_error: 0,
             pending_named_args: Vec::new(),
             current_file: "Unknown.php".to_string(),
@@ -3342,7 +3346,8 @@ impl Vm {
                 || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
                 || name.starts_with(b"__pkey_id")
                 || name.starts_with(b"__cert_id")
-                || name.starts_with(b"__csr_id") {
+                || name.starts_with(b"__csr_id")
+                || name.starts_with(b"__xml_") {
                 continue;
             }
             // Skip uninitialized props (Undef).
@@ -21794,7 +21799,7 @@ impl Vm {
                             let obj_borrow = obj.borrow();
                             // Check if this is an uncloneable object
                             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if class_lower == b"generator" || class_lower == b"closure" || obj_borrow.has_property(b"__enum_case") {
+                            if class_lower == b"generator" || class_lower == b"closure" || class_lower == b"xmlparser" || class_lower == b"fiber" || obj_borrow.has_property(b"__enum_case") {
                                 let class_name = crate::value::display_class_name(&obj_borrow.class_name);
                                 drop(obj_borrow);
                                 let msg = format!("Trying to clone an uncloneable object of class {}", class_name);
@@ -23367,6 +23372,7 @@ impl Vm {
                                 if parent.is_final {
                                     let parent_display = String::from_utf8_lossy(parent_name).to_string();
                                     let child_display = String::from_utf8_lossy(&name_val.to_php_string().as_bytes()).to_string();
+                                    let parent_display = String::from_utf8_lossy(&parent.name).to_string();
                                     return Err(VmError {
                                         message: format!("Class {} cannot extend final class {}", child_display, parent_display),
                                         line: op.line,

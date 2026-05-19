@@ -4328,23 +4328,53 @@ impl Parser {
                                 kind: ExprKind::Variable(name),
                                 span: var_span,
                             };
-                            // Parse chained property/array access
+                            // Parse chained property/method/array access
                             loop {
                                 if matches!(self.peek(), TokenKind::Arrow) {
                                     self.advance(); // consume ->
                                     if let TokenKind::Identifier(prop_name) = self.peek().clone() {
                                         self.advance();
-                                        expr = Expr {
-                                            kind: ExprKind::PropertyAccess {
-                                                object: Box::new(expr),
-                                                property: Box::new(Expr {
-                                                    kind: ExprKind::Identifier(prop_name),
-                                                    span: var_span,
-                                                }),
-                                                nullsafe: false,
-                                            },
-                                            span: var_span,
-                                        };
+                                        // Method call: identifier followed by `(`
+                                        if matches!(self.peek(), TokenKind::OpenParen) {
+                                            self.advance(); // consume (
+                                            let mut args: Vec<crate::ast::Argument> = Vec::new();
+                                            while !matches!(self.peek(), TokenKind::CloseParen | TokenKind::Eof) {
+                                                let arg_expr = self.parse_expression()?;
+                                                args.push(crate::ast::Argument { name: None, value: arg_expr, unpack: false });
+                                                if matches!(self.peek(), TokenKind::Comma) {
+                                                    self.advance();
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            if matches!(self.peek(), TokenKind::CloseParen) {
+                                                self.advance();
+                                            }
+                                            expr = Expr {
+                                                kind: ExprKind::MethodCall {
+                                                    object: Box::new(expr),
+                                                    method: Box::new(Expr {
+                                                        kind: ExprKind::Identifier(prop_name),
+                                                        span: var_span,
+                                                    }),
+                                                    args,
+                                                    nullsafe: false,
+                                                },
+                                                span: var_span,
+                                            };
+                                        } else {
+                                            expr = Expr {
+                                                kind: ExprKind::PropertyAccess {
+                                                    object: Box::new(expr),
+                                                    property: Box::new(Expr {
+                                                        kind: ExprKind::Identifier(prop_name),
+                                                        span: var_span,
+                                                    }),
+                                                    nullsafe: false,
+                                                },
+                                                span: var_span,
+                                            };
+                                        }
                                     } else {
                                         break;
                                     }
