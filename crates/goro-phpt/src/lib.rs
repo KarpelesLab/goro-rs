@@ -1264,7 +1264,7 @@ fn format_exception_trace(trace_val: &goro_core::value::Value, fallback_trace: &
                 } else {
                     String::new()
                 };
-                let loc = if file.is_empty() || line == 0 {
+                let loc = if file.is_empty() || file == "[internal function]" || line == 0 {
                     "[internal function]".to_string()
                 } else {
                     format!("{}({})", file, line)

@@ -2185,7 +2185,13 @@ impl Vm {
         // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
         for (idx, (func_name, file, line, args, is_method)) in self.call_stack.iter().rev().enumerate() {
             let mut frame = PhpArray::new();
-            if !file.is_empty() {
+            // Frames whose file is set to the placeholder "[internal function]" or
+            // whose line is 0 represent an internal-engine call (Fiber callback,
+            // generator body, generator method dispatch). Don't store file/line so
+            // formatters render them as `[internal function]:` instead of
+            // `[internal function](0):`.
+            let is_internal = file.is_empty() || file == "[internal function]" || *line == 0;
+            if !is_internal {
                 frame.set(
                     ArrayKey::String(PhpString::from_bytes(b"file")),
                     Value::String(PhpString::from_string(file.clone())),
