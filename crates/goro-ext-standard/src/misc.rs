@@ -1,5 +1,5 @@
 use goro_core::array::{ArrayKey, PhpArray};
-use goro_core::object::{PhpObject, Visibility};
+use goro_core::object::{ClassEntry, PhpObject, PropertyDef, Visibility};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
@@ -68,6 +68,33 @@ fn normalize_ns_const_name(name: &[u8]) -> Vec<u8> {
 }
 
 pub fn register(vm: &mut Vm) {
+    // Built-in php_user_filter base class. User filters extend this class
+    // and override filter(); the property `filtername`, `params`, and
+    // `stream` are set by the runtime before onCreate() is invoked.
+    {
+        let mut pufc = ClassEntry::new(b"php_user_filter".to_vec());
+        let props: &[&[u8]] = &[b"filtername", b"params", b"stream"];
+        for p in props {
+            pufc.properties.push(PropertyDef {
+                name: p.to_vec(),
+                default: Value::Null,
+                is_static: false,
+                is_readonly: false,
+                visibility: Visibility::Public,
+                set_visibility: None,
+                declaring_class: b"php_user_filter".to_vec(),
+                property_type: None,
+                has_get_hook: false,
+                has_set_hook: false,
+                is_virtual: false,
+                is_abstract: false,
+                is_final: false,
+                attributes: Vec::new(),
+                doc_comment: None,
+            });
+        }
+        vm.classes.insert(b"php_user_filter".to_vec(), pufc);
+    }
     // Error handling
     vm.register_function(b"error_reporting", error_reporting);
     vm.register_function(b"set_error_handler", set_error_handler);
@@ -443,6 +470,22 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"stream_filter_prepend", stream_filter_prepend_fn);
     vm.register_function(b"stream_filter_register", stream_filter_register_fn);
     vm.register_function(b"stream_filter_remove", stream_filter_remove_fn);
+    // Bucket brigade helpers used by user filters.
+    vm.register_function(b"stream_bucket_make_writeable", crate::stream_filters::stream_bucket_make_writeable);
+    vm.register_function(b"stream_bucket_append", crate::stream_filters::stream_bucket_append);
+    vm.register_function(b"stream_bucket_prepend", crate::stream_filters::stream_bucket_prepend);
+    vm.register_function(b"stream_bucket_new", crate::stream_filters::stream_bucket_new);
+    // Filter direction constants.
+    vm.constants.insert(b"STREAM_FILTER_READ".to_vec(), Value::Long(crate::stream_filters::STREAM_FILTER_READ));
+    vm.constants.insert(b"STREAM_FILTER_WRITE".to_vec(), Value::Long(crate::stream_filters::STREAM_FILTER_WRITE));
+    vm.constants.insert(b"STREAM_FILTER_ALL".to_vec(), Value::Long(crate::stream_filters::STREAM_FILTER_ALL));
+    // User filter return code constants.
+    vm.constants.insert(b"PSFS_PASS_ON".to_vec(), Value::Long(crate::stream_filters::PSFS_PASS_ON));
+    vm.constants.insert(b"PSFS_FEED_ME".to_vec(), Value::Long(crate::stream_filters::PSFS_FEED_ME));
+    vm.constants.insert(b"PSFS_ERR_FATAL".to_vec(), Value::Long(crate::stream_filters::PSFS_ERR_FATAL));
+    vm.constants.insert(b"PSFS_FLAG_NORMAL".to_vec(), Value::Long(0));
+    vm.constants.insert(b"PSFS_FLAG_FLUSH_INC".to_vec(), Value::Long(1));
+    vm.constants.insert(b"PSFS_FLAG_FLUSH_CLOSE".to_vec(), Value::Long(2));
     vm.register_function(b"stream_context_create", stream_context_create_fn);
     vm.register_function(b"stream_context_set_option", stream_context_set_option_fn);
     vm.register_function(b"stream_context_set_options", stream_context_set_option_fn);
@@ -5763,6 +5806,20 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let path_str = path.to_string_lossy();
+    // php://filter routes through fopen so the filter chain is applied.
+    if path_str.starts_with("php://filter/") {
+        let inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r"))];
+        let fp = fopen_fn(vm, &inner_args)?;
+        let fid = match fp { Value::Resource(n) => n, _ => return Ok(Value::False), };
+        let get_args = if length.is_some() {
+            vec![Value::Resource(fid), Value::Long(length.unwrap()), Value::Long(offset)]
+        } else {
+            vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
+        };
+        let res = stream_get_contents_fn(vm, &get_args)?;
+        let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+        return Ok(res);
+    }
     if !path_str.starts_with("php://") && !path_str.starts_with("http://") && !path_str.starts_with("data://") && !path_str.starts_with("compress.zlib://") && !path_str.starts_with("compress.bzip2://") {
         if !vm.check_open_basedir("file_get_contents", &path_str) {
             return Ok(Value::False);
@@ -7904,14 +7961,38 @@ fn dir_handle_resource_id(val: &Value) -> Option<i64> {
     }
 }
 
+/// For streams that are not backed by a real OS file (php://stdout,
+/// php://stderr, php://output), writes are routed through `vm.write_output`
+/// instead of writing to `file`. The tempfile we store in `file` is just a
+/// placeholder so the rest of the code can keep using a single struct.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SpecialStream {
+    None,
+    Stdout,
+    Stderr,
+    Output,
+    Memory,
+    Temp,
+}
+
 struct FileHandle {
     file: std::fs::File,
     #[allow(dead_code)]
     mode: String,
     eof: bool,
+    /// For special streams (php://stdout etc.), routes writes through vm.
+    special: SpecialStream,
+    /// Buffer of bytes pending consumption by the read filter chain.
+    filter_read_pending: Vec<u8>,
+    /// Buffer of post-filter bytes ready to be returned by fread/fgets.
+    filter_read_ready: Vec<u8>,
 }
 
 fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
+    alloc_file_handle_special(file, mode, SpecialStream::None)
+}
+
+fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialStream) -> i64 {
     NEXT_FILE_ID.with(|id| {
         let fid = id.get();
         id.set(fid + 1);
@@ -7920,10 +8001,78 @@ fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
                 file,
                 mode: mode.to_string(),
                 eof: false,
+                special,
+                filter_read_pending: Vec::new(),
+                filter_read_ready: Vec::new(),
             });
         });
         fid
     })
+}
+
+/// Decode a base64 payload from a data:// URI. Lenient (whitespace and
+/// stray characters are ignored).
+fn data_uri_base64_decode(input: &[u8]) -> Vec<u8> {
+    let mut filtered = Vec::with_capacity(input.len());
+    for &b in input {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'=' => filtered.push(b),
+            _ => {}
+        }
+    }
+    while filtered.len() % 4 != 0 { filtered.push(b'='); }
+    let mut out = Vec::with_capacity(filtered.len() * 3 / 4);
+    let mut i = 0;
+    while i + 4 <= filtered.len() {
+        let mut n: u32 = 0;
+        let mut pad = 0u32;
+        for j in 0..4 {
+            let c = filtered[i + j];
+            let v: u32 = match c {
+                b'A'..=b'Z' => (c - b'A') as u32,
+                b'a'..=b'z' => (c - b'a' + 26) as u32,
+                b'0'..=b'9' => (c - b'0' + 52) as u32,
+                b'+' => 62,
+                b'/' => 63,
+                b'=' => { pad += 1; 0 }
+                _ => 0,
+            };
+            n = (n << 6) | v;
+        }
+        out.push(((n >> 16) & 0xff) as u8);
+        if pad < 2 { out.push(((n >> 8) & 0xff) as u8); }
+        if pad < 1 { out.push((n & 0xff) as u8); }
+        i += 4;
+    }
+    out
+}
+
+fn data_uri_urldecode(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let b = input[i];
+        if b == b'%' && i + 2 < input.len() {
+            let h1 = hex_digit_misc(input[i + 1]);
+            let h2 = hex_digit_misc(input[i + 2]);
+            match (h1, h2) {
+                (Some(a), Some(b)) => { out.push((a << 4) | b); i += 3; continue; }
+                _ => {}
+            }
+        }
+        if b == b'+' { out.push(b' '); } else { out.push(b); }
+        i += 1;
+    }
+    out
+}
+
+fn hex_digit_misc(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -7982,6 +8131,100 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // Handle php://filter/<chain>/resource=<inner_url> by recursively
+    // opening the inner stream then attaching the requested chain.
+    if let Some(rest) = filename.strip_prefix("php://filter/") {
+        // Split off the "/resource=" or "?resource=" portion.
+        let (chain_str, inner_url) = if let Some(idx) = rest.find("/resource=") {
+            (&rest[..idx], &rest[idx + "/resource=".len()..])
+        } else if let Some(idx) = rest.find("resource=") {
+            (&rest[..idx.saturating_sub(1)], &rest[idx + "resource=".len()..])
+        } else {
+            (rest, "")
+        };
+        // Recurse on the inner URL.
+        let inner_args = vec![Value::String(PhpString::from_string(inner_url.to_string())), Value::String(PhpString::from_string(mode.clone()))];
+        let inner = fopen_fn(vm, &inner_args)?;
+        let inner_fid = match inner {
+            Value::Resource(n) => n,
+            _ => return Ok(Value::False),
+        };
+        // Parse and attach each filter spec separated by '|'.
+        for spec in chain_str.split('|') {
+            if spec.is_empty() { continue; }
+            // spec may be "read=<filter>", "write=<filter>", or just <filter>.
+            let (dir, name) = if let Some(rest) = spec.strip_prefix("read=") {
+                (crate::stream_filters::STREAM_FILTER_READ, rest)
+            } else if let Some(rest) = spec.strip_prefix("write=") {
+                (crate::stream_filters::STREAM_FILTER_WRITE, rest)
+            } else {
+                (crate::stream_filters::STREAM_FILTER_ALL, spec)
+            };
+            let _ = crate::stream_filters::attach_filter(
+                inner_fid,
+                name.as_bytes(),
+                dir,
+                &Value::Null,
+                false,
+                None,
+            );
+        }
+        return Ok(Value::Resource(inner_fid));
+    }
+
+    // Handle data: URLs: data:[mediatype][;base64],<data> (both data: and
+    // data:// forms — only the latter is canonical for PHP wrappers but
+    // RFC2397 uses the former).
+    let data_rest = filename.strip_prefix("data://").or_else(|| filename.strip_prefix("data:"));
+    if let Some(rest) = data_rest {
+        // Optional mediatype and ;base64 prefix.
+        let (header, payload) = rest.split_once(',').unwrap_or(("", rest));
+        let is_base64 = header.split(';').any(|p| p == "base64");
+        let bytes: Vec<u8> = if is_base64 {
+            data_uri_base64_decode(payload.as_bytes())
+        } else {
+            data_uri_urldecode(payload.as_bytes())
+        };
+        let mut tmp = match tempfile::tempfile() {
+            Ok(f) => f,
+            Err(_) => return Ok(Value::False),
+        };
+        use std::io::{Seek, SeekFrom, Write};
+        if tmp.write_all(&bytes).is_err() {
+            return Ok(Value::False);
+        }
+        let _ = tmp.seek(SeekFrom::Start(0));
+        let fid = alloc_file_handle(tmp, &mode);
+        goro_core::value::register_resource(fid, b"stream");
+        return Ok(Value::Resource(fid));
+    }
+
+    // Handle php:// wrapper paths. php://stdout, php://stderr, php://output
+    // are write-only sinks routed through the VM output. php://memory and
+    // php://temp are seekable in-memory streams backed by a tempfile.
+    if let Some(rest) = filename.strip_prefix("php://") {
+        let lower: String = rest.to_ascii_lowercase();
+        let special = match lower.as_str() {
+            "stdout" => Some(SpecialStream::Stdout),
+            "stderr" => Some(SpecialStream::Stderr),
+            "output" => Some(SpecialStream::Output),
+            "memory" => Some(SpecialStream::Memory),
+            "input" => Some(SpecialStream::Memory), // tests don't rely on stdin
+            s if s.starts_with("temp") => Some(SpecialStream::Temp),
+            _ => None,
+        };
+        if let Some(sp) = special {
+            match tempfile::tempfile() {
+                Ok(f) => {
+                    let fid = alloc_file_handle_special(f, &mode, sp);
+                    goro_core::value::register_resource(fid, b"stream");
+                    return Ok(Value::Resource(fid));
+                }
+                Err(_) => return Ok(Value::False),
+            }
+        }
+    }
+
     let file = match mode_clean.as_str() {
         "r" => std::fs::File::open(&filename),
         "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&filename),
@@ -8006,8 +8249,15 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn fclose_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
+    // Flush write-filter chain.
+    let flush_bytes = crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_WRITE);
+    if !flush_bytes.is_empty() {
+        write_to_stream(vm, fid, &flush_bytes);
+    }
+    // Tear down filters attached to this stream.
+    crate::stream_filters::remove_stream_filters(fid);
     FILE_HANDLES.with(|handles| {
         handles.borrow_mut().remove(&fid);
     });
@@ -8017,11 +8267,48 @@ fn fclose_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-fn fread_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// Write `bytes` to the physical backing of the stream (file or vm
+/// output for special streams). Used after the write filter chain has
+/// been applied.
+fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
+    // Check special routing.
+    let special = FILE_HANDLES.with(|h| {
+        h.borrow().get(&fid).map(|fh| fh.special).unwrap_or(SpecialStream::None)
+    });
+    match special {
+        SpecialStream::Stdout | SpecialStream::Output => {
+            vm.write_output(bytes);
+            bytes.len()
+        }
+        SpecialStream::Stderr => {
+            // For tests we send stderr to the regular output buffer too.
+            vm.write_output(bytes);
+            bytes.len()
+        }
+        SpecialStream::None | SpecialStream::Memory | SpecialStream::Temp => {
+            FILE_HANDLES.with(|h| {
+                let mut h = h.borrow_mut();
+                if let Some(fh) = h.get_mut(&fid) {
+                    match fh.file.write(bytes) {
+                        Ok(n) => n,
+                        Err(_) => 0,
+                    }
+                } else { 0 }
+            })
+        }
+    }
+}
+
+fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let length = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
     if length == 0 {
         return Ok(Value::String(PhpString::from_bytes(b"")));
+    }
+    // If read filters are attached, route through filter chain.
+    let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
+    if has_read_filters {
+        return Ok(Value::String(PhpString::from_vec(read_filtered(vm, fid, length))));
     }
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
@@ -8044,29 +8331,91 @@ fn fread_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn fwrite_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// Helper: read up to `length` post-filter bytes from a stream with one
+/// or more READ filters attached. Reads from the underlying file in chunks,
+/// runs the filter chain, accumulates the result, and returns up to
+/// `length` bytes. Excess filtered output stays buffered on the handle.
+fn read_filtered(vm: &mut Vm, fid: i64, length: usize) -> Vec<u8> {
+    let mut produced: Vec<u8> = FILE_HANDLES.with(|h| {
+        h.borrow_mut().get_mut(&fid).map(|fh| std::mem::take(&mut fh.filter_read_ready)).unwrap_or_default()
+    });
+    while produced.len() < length {
+        // Read a chunk of raw bytes from the file.
+        let mut raw = vec![0u8; 8192];
+        let (n, eof_flag) = FILE_HANDLES.with(|h| {
+            let mut h = h.borrow_mut();
+            let Some(fh) = h.get_mut(&fid) else { return (0usize, true); };
+            match fh.file.read(&mut raw) {
+                Ok(0) => { fh.eof = true; (0, true) }
+                Ok(n) => (n, false),
+                Err(_) => (0, true),
+            }
+        });
+        raw.truncate(n);
+        if n == 0 {
+            // Flush the chain to extract trailing bytes.
+            let trailing = crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_READ);
+            produced.extend_from_slice(&trailing);
+            break;
+        }
+        let filtered = crate::stream_filters::apply_read_chain(vm, fid, &raw);
+        produced.extend_from_slice(&filtered);
+        let _ = eof_flag;
+    }
+    // Split produced into return-now and stash-for-later.
+    let take = produced.len().min(length);
+    let leftover = produced[take..].to_vec();
+    let ret = produced[..take].to_vec();
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            fh.filter_read_ready = leftover;
+            if fh.eof && fh.filter_read_ready.is_empty() && ret.is_empty() {
+                // already EOF
+            }
+        }
+    });
+    ret
+}
+
+fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let bytes = data.as_bytes();
     let length = args.get(2).map(|v| v.to_long() as usize).unwrap_or(bytes.len());
     let to_write = &bytes[..length.min(bytes.len())];
+    let original_len = to_write.len();
 
-    FILE_HANDLES.with(|handles| {
-        let mut handles = handles.borrow_mut();
-        if let Some(fh) = handles.get_mut(&fid) {
-            match fh.file.write(to_write) {
-                Ok(n) => Ok(Value::Long(n as i64)),
-                Err(_) => Ok(Value::False),
-            }
-        } else {
-            Ok(Value::False)
-        }
-    })
+    // Apply write filter chain if any are attached.
+    let filtered = crate::stream_filters::apply_write_chain(vm, fid, to_write);
+    // The handle must exist.
+    let exists = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
+    if !exists { return Ok(Value::False); }
+    write_to_stream(vm, fid, &filtered);
+    // PHP returns the number of bytes from the user's input that were
+    // accepted, regardless of how many post-filter bytes were emitted.
+    Ok(Value::Long(original_len as i64))
 }
 
-fn fgets_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let max_length = args.get(1).map(|v| v.to_long() as usize);
+
+    let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
+    if has_read_filters {
+        let limit = max_length.unwrap_or(1024);
+        let mut out: Vec<u8> = Vec::new();
+        let mut hit_newline = false;
+        while out.len() < limit {
+            let chunk = read_filtered(vm, fid, 1);
+            if chunk.is_empty() { break; }
+            out.extend_from_slice(&chunk);
+            if *chunk.last().unwrap() == b'\n' { hit_newline = true; break; }
+        }
+        let is_eof_now = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.eof && fh.filter_read_ready.is_empty()).unwrap_or(true));
+        if out.is_empty() && is_eof_now { return Ok(Value::False); }
+        let _ = hit_newline;
+        return Ok(Value::String(PhpString::from_vec(out)));
+    }
 
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
@@ -11196,22 +11545,40 @@ fn fputcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
-    FILE_HANDLES.with(|handles| {
+    let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
+    if has_read_filters {
+        let mut total = 0i64;
+        loop {
+            let chunk = read_filtered(vm, fid, 8192);
+            if chunk.is_empty() { break; }
+            total += chunk.len() as i64;
+            vm.write_output(&chunk);
+        }
+        return Ok(Value::Long(total));
+    }
+    let buf = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             let mut buf = Vec::new();
             match fh.file.read_to_end(&mut buf) {
-                Ok(n) => {
+                Ok(_n) => {
                     fh.eof = true;
-                    vm.write_output(&buf);
-                    Ok(Value::Long(n as i64))
+                    Some(buf)
                 }
-                Err(_) => Ok(Value::False),
+                Err(_) => None,
             }
         } else {
-            Ok(Value::False)
+            None
         }
-    })
+    });
+    match buf {
+        Some(b) => {
+            let n = b.len() as i64;
+            vm.write_output(&b);
+            Ok(Value::Long(n))
+        }
+        None => Ok(Value::False),
+    }
 }
 
 fn linkinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -11765,10 +12132,30 @@ fn fstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn stream_get_contents_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let max_length = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+
+    let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
+    if has_read_filters {
+        if offset >= 0 {
+            FILE_HANDLES.with(|h| {
+                if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                    let _ = fh.file.seek(SeekFrom::Start(offset as u64));
+                }
+            });
+        }
+        let limit = if max_length < 0 { usize::MAX } else { max_length as usize };
+        let mut out: Vec<u8> = Vec::new();
+        while out.len() < limit {
+            let want = (limit - out.len()).min(8192);
+            let chunk = read_filtered(vm, fid, want);
+            if chunk.is_empty() { break; }
+            out.extend_from_slice(&chunk);
+        }
+        return Ok(Value::String(PhpString::from_vec(out)));
+    }
 
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
@@ -12478,10 +12865,110 @@ fn stream_copy_to_stream_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     }
 }
 
-fn stream_filter_append_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn stream_filter_prepend_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn stream_filter_register_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn stream_filter_remove_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn stream_filter_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    let class = args.get(1).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    if name.is_empty() {
+        let msg = "stream_filter_register(): Argument #1 ($filter_name) must be a non-empty string".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    if class.is_empty() {
+        let msg = "stream_filter_register(): Argument #2 ($class) must be a non-empty string".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    Ok(if crate::stream_filters::register_user_filter(&name, &class) { Value::True } else { Value::False })
+}
+
+fn stream_filter_append_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    attach_filter_impl(vm, args, false)
+}
+
+fn stream_filter_prepend_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    attach_filter_impl(vm, args, true)
+}
+
+fn attach_filter_impl(vm: &mut Vm, args: &[Value], prepend: bool) -> Result<Value, VmError> {
+    let stream_val = args.first().cloned().unwrap_or(Value::Null);
+    let stream_id = match &stream_val {
+        Value::Resource(n) => *n,
+        Value::Long(n) => *n,
+        Value::Reference(r) => match &*r.borrow() {
+            Value::Resource(n) => *n,
+            Value::Long(n) => *n,
+            _ => return Ok(Value::False),
+        },
+        _ => return Ok(Value::False),
+    };
+    let name = args.get(1).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    if name.is_empty() { return Ok(Value::False); }
+    let direction = args.get(2).map(|v| v.to_long()).unwrap_or(crate::stream_filters::STREAM_FILTER_ALL);
+    let params = args.get(3).cloned().unwrap_or(Value::Null);
+
+    // First check whether it's a registered user filter; if so, instantiate
+    // an object of the registered class.
+    let user_obj = if let Some(class_name) = crate::stream_filters::user_filter_class(&name) {
+        Some(instantiate_user_filter(vm, &class_name, &name, &params))
+    } else {
+        None
+    };
+
+    let user_obj_opt = match user_obj {
+        Some(Some(o)) => Some(o),
+        Some(None) => return Ok(Value::False),
+        None => None,
+    };
+
+    match crate::stream_filters::attach_filter(stream_id, &name, direction, &params, prepend, user_obj_opt) {
+        Some(fid) => Ok(Value::Resource(fid)),
+        None => Ok(Value::False),
+    }
+}
+
+/// Instantiate the user-defined class registered for a stream filter.
+/// Sets `filtername`, `params`, and `stream` properties as PHP does, then
+/// calls `onCreate()` if defined.
+fn instantiate_user_filter(vm: &mut Vm, class_name: &[u8], filter_name: &[u8], params: &Value) -> Option<Rc<RefCell<PhpObject>>> {
+    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    // Class must exist.
+    if !vm.classes.contains_key(&class_lower) { return None; }
+    let obj_id = vm.next_object_id();
+    let mut obj = PhpObject::new(class_name.to_vec(), obj_id);
+    vm.apply_class_property_defaults(&mut obj, &class_lower);
+    obj.set_property(b"filtername".to_vec(), Value::String(PhpString::from_bytes(filter_name)));
+    obj.set_property(b"params".to_vec(), params.clone());
+    let rc = Rc::new(RefCell::new(obj));
+    // Call onCreate() if defined.
+    let obj_val = Value::Object(rc.clone());
+    let _ = vm.call_object_method(&obj_val, b"onCreate", &[]);
+    Some(rc)
+}
+
+fn stream_filter_remove_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid_opt: Option<i64> = match args.first() {
+        Some(Value::Resource(n)) => Some(*n),
+        Some(Value::Long(n)) => Some(*n),
+        Some(Value::Reference(r)) => match &*r.borrow() {
+            Value::Resource(n) => Some(*n),
+            Value::Long(n) => Some(*n),
+            _ => None,
+        },
+        _ => None,
+    };
+    let fid = match fid_opt {
+        Some(n) if crate::stream_filters::is_filter_resource(n) => n,
+        _ => {
+            let msg = "stream_filter_remove(): supplied resource is not a valid stream filter resource".to_string();
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
+    if crate::stream_filters::remove_filter(fid) { Ok(Value::True) } else { Ok(Value::False) }
+}
 fn stream_context_create_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
 fn stream_context_set_option_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn stream_context_get_options_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
@@ -12539,8 +13026,8 @@ fn stream_get_wrappers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
 
 fn stream_get_filters_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
-    for name in &[b"string.rot13" as &[u8], b"string.toupper", b"string.tolower", b"convert.iconv.*"] {
-        arr.push(Value::String(PhpString::from_bytes(name)));
+    for name in crate::stream_filters::list_filter_names() {
+        arr.push(Value::String(PhpString::from_vec(name)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }

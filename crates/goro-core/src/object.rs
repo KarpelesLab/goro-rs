@@ -193,7 +193,10 @@ impl Drop for PhpObject {
     fn drop(&mut self) {
         // Don't recycle the sentinel zero id.
         if self.object_id != 0 {
-            FREED_OBJECT_IDS.with(|ids| ids.borrow_mut().push(self.object_id));
+            // Use try_with so we don't panic during thread-local
+            // destruction (when other TLS holding PhpObject Rcs may be
+            // torn down after FREED_OBJECT_IDS).
+            let _ = FREED_OBJECT_IDS.try_with(|ids| ids.borrow_mut().push(self.object_id));
         }
     }
 }
