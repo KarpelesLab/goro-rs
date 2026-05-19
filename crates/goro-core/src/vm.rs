@@ -28707,17 +28707,26 @@ impl Vm {
                             let mut depth = 0;
                             loop {
                                 if depth > 64 { break Some(cur); }
-                                let next_inner = {
-                                    let b = cur.borrow();
-                                    match &b.yield_from_source {
-                                        Some(Value::Generator(inner))
-                                            if inner.borrow().state
-                                                == crate::generator::GeneratorState::Suspended =>
-                                        {
-                                            Some(inner.clone())
+                                // Use try_borrow to avoid panicking if the
+                                // current generator is being mutated elsewhere
+                                // (e.g. during inner.resume() or yield-from
+                                // re-entry). In that case, just stop walking.
+                                let next_inner = match cur.try_borrow() {
+                                    Ok(b) => match &b.yield_from_source {
+                                        Some(Value::Generator(inner)) => {
+                                            let is_suspended = matches!(
+                                                inner.try_borrow().map(|ib| ib.state.clone()),
+                                                Ok(crate::generator::GeneratorState::Suspended)
+                                            );
+                                            if is_suspended {
+                                                Some(inner.clone())
+                                            } else {
+                                                None
+                                            }
                                         }
                                         _ => None,
-                                    }
+                                    },
+                                    Err(_) => None,
                                 };
                                 match next_inner {
                                     Some(n) => { cur = n; depth += 1; }
@@ -28731,21 +28740,23 @@ impl Vm {
                         // still see the last value.
                         if let Some(ref dg) = delegate_gen {
                             if !Rc::ptr_eq(dg, gen_rc) {
-                                let (dval, dkey) = {
-                                    let b = dg.borrow();
-                                    (b.current_value.clone(), b.current_key.clone())
+                                let (dval, dkey) = match dg.try_borrow() {
+                                    Ok(b) => (b.current_value.clone(), b.current_key.clone()),
+                                    Err(_) => (Value::Null, Value::Null),
                                 };
                                 let mut cur = gen_rc.clone();
-                                loop {
+                                for _ in 0..64 {
                                     if Rc::ptr_eq(&cur, dg) { break; }
-                                    let next_inner = {
-                                        let mut b = cur.borrow_mut();
-                                        b.current_value = dval.clone();
-                                        b.current_key = dkey.clone();
-                                        match &b.yield_from_source {
-                                            Some(Value::Generator(inner)) => Some(inner.clone()),
-                                            _ => None,
+                                    let next_inner = match cur.try_borrow_mut() {
+                                        Ok(mut b) => {
+                                            b.current_value = dval.clone();
+                                            b.current_key = dkey.clone();
+                                            match &b.yield_from_source {
+                                                Some(Value::Generator(inner)) => Some(inner.clone()),
+                                                _ => None,
+                                            }
                                         }
+                                        Err(_) => None,
                                     };
                                     match next_inner {
                                         Some(n) => cur = n,
@@ -28782,21 +28793,32 @@ impl Vm {
 
                         let result = match method_lower.as_slice() {
                             b"current" => {
-                                let gen_borrow = gen_rc.borrow();
-                                if gen_borrow.state == crate::generator::GeneratorState::Created {
-                                    drop(gen_borrow);
+                                let state = match gen_rc.try_borrow() {
+                                    Ok(b) => b.state.clone(),
+                                    // Already borrowed => generator is running.
+                                    Err(_) => crate::generator::GeneratorState::Suspended,
+                                };
+                                if state == crate::generator::GeneratorState::Created {
                                     // Need to advance to first yield
                                     let mut gen_borrow = gen_rc.borrow_mut();
                                     let _ = gen_borrow.resume(self);
                                     gen_borrow.current_value.clone()
                                 } else if let Some(ref dg) = delegate_gen {
                                     if !Rc::ptr_eq(dg, gen_rc) {
-                                        dg.borrow().current_value.clone()
+                                        dg.try_borrow()
+                                            .map(|b| b.current_value.clone())
+                                            .unwrap_or(Value::Null)
                                     } else {
-                                        gen_borrow.current_value.clone()
+                                        gen_rc
+                                            .try_borrow()
+                                            .map(|b| b.current_value.clone())
+                                            .unwrap_or(Value::Null)
                                     }
                                 } else {
-                                    gen_borrow.current_value.clone()
+                                    gen_rc
+                                        .try_borrow()
+                                        .map(|b| b.current_value.clone())
+                                        .unwrap_or(Value::Null)
                                 }
                             }
                             b"key" => {
