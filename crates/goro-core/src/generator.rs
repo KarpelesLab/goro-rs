@@ -637,6 +637,12 @@ impl PhpGenerator {
                 // Re-implement all the VM opcodes that a generator might use
                 OpCode::Nop => {}
 
+                OpCode::EmitNotice => {
+                    let msg_val = self.read_operand(&op.op1, &op_array.literals);
+                    let msg = msg_val.to_php_string().to_string_lossy();
+                    vm.emit_notice_at(&msg, op.line);
+                }
+
                 OpCode::Echo => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     let s = vm.value_to_string(&val);

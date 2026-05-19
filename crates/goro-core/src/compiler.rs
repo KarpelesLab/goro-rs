@@ -8166,6 +8166,85 @@ impl Compiler {
             }
 
             ExprKind::Yield(value, key) => {
+                // For by-ref generators (function &gen()), yielding a non-reference
+                // expression (constant, operator result, by-value function call)
+                // emits a runtime Notice. We detect at compile time:
+                //   - literals and operator results: notice
+                //   - variables / array access / property access: no notice
+                //   - function calls: notice unless the static name resolves to a
+                //     function declared as returns_by_ref
+                if self.op_array.returns_by_ref {
+                    if let Some(val_expr) = value {
+                        let mut emit_notice = false;
+                        match &val_expr.kind {
+                            ExprKind::Variable(_)
+                            | ExprKind::DynamicVariable(_)
+                            | ExprKind::PropertyAccess { .. }
+                            | ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicStaticPropertyAccess { .. }
+                            | ExprKind::ArrayAccess { .. } => {}
+                            ExprKind::FunctionCall { name, .. } => {
+                                // If the called function name is known statically
+                                // and is NOT declared returns_by_ref, emit the
+                                // notice. Otherwise defer (no notice).
+                                let mut should_notice = false;
+                                if let ExprKind::ConstantAccess(parts) = &name.kind {
+                                    if parts.len() == 1 {
+                                        let canonical: Vec<u8> = parts[0]
+                                            .iter()
+                                            .map(|b| b.to_ascii_lowercase())
+                                            .collect();
+                                        if let Some(callee) = self
+                                            .op_array
+                                            .child_functions
+                                            .iter()
+                                            .find(|f| {
+                                                f.name
+                                                    .iter()
+                                                    .map(|b| b.to_ascii_lowercase())
+                                                    .collect::<Vec<_>>()
+                                                    == canonical
+                                            })
+                                        {
+                                            if !callee.returns_by_ref {
+                                                should_notice = true;
+                                            }
+                                        } else {
+                                            // Unknown name (builtin or not yet
+                                            // compiled): conservatively emit so we
+                                            // match the test for non-ref builtins.
+                                            should_notice = true;
+                                        }
+                                    }
+                                }
+                                if should_notice {
+                                    emit_notice = true;
+                                }
+                            }
+                            ExprKind::MethodCall { .. }
+                            | ExprKind::StaticMethodCall { .. } => {
+                                // Methods can return by-reference; defer at compile
+                                // time. The runtime detects and emits.
+                            }
+                            _ => {
+                                emit_notice = true;
+                            }
+                        }
+                        if emit_notice {
+                            let msg_str = "Only variable references should be yielded by reference";
+                            let msg_idx = self
+                                .op_array
+                                .add_literal(Value::String(crate::string::PhpString::from_bytes(msg_str.as_bytes())));
+                            self.op_array.emit(Op {
+                                opcode: OpCode::EmitNotice,
+                                op1: OperandType::Const(msg_idx),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                        }
+                    }
+                }
                 // Compile the yielded value (if any)
                 let val_operand = if let Some(val_expr) = value {
                     self.compile_expr(val_expr)?
