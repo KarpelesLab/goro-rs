@@ -95,6 +95,9 @@ pub struct FilterInstance {
     /// For base64 / qp encoders: current column position so line wrapping
     /// continues correctly across fwrite calls.
     pub col: usize,
+    /// True once the filter has been driven with `closing=true` exactly
+    /// once. Used by flush_chain to avoid re-flushing.
+    pub closed: bool,
 }
 
 pub struct DeflateCtx {
@@ -325,6 +328,7 @@ pub fn attach_filter(
         bz_decompress: None,
         dechunk_state: DechunkState::Header,
         col: 0,
+        closed: false,
     };
     let rc = Rc::new(RefCell::new(inst));
     FILTERS.with(|m| { m.borrow_mut().insert(fid, rc.clone()); });
@@ -430,24 +434,22 @@ pub fn apply_read_chain(vm: &mut Vm, stream_id: i64, data: &[u8]) -> Vec<u8> {
 /// of the chain to flush.
 pub fn flush_chain(vm: &mut Vm, stream_id: i64, direction: i64) -> Vec<u8> {
     let chain = STREAM_CHAINS.with(|m| m.borrow().get(&stream_id).cloned()).unwrap_or_default();
-    // First filter sees empty input + closing; subsequent filters see the
-    // accumulated output as input + closing.
     let mut buf = Vec::new();
-    let mut any = false;
     for f in &chain {
         let dir = f.borrow().direction;
-        if dir & direction == 0 {
-            continue;
-        }
-        any = true;
-        // Push prior output through, then emit closing.
+        if dir & direction == 0 { continue; }
+        // Push prior output through, then emit closing exactly once per
+        // filter (subsequent calls would re-invoke user `onClose`-like
+        // logic, leading to infinite loops in read mode).
         if !buf.is_empty() {
             buf = run_filter(vm, f, &buf, false);
         }
+        let already_closed = f.borrow().closed;
+        if already_closed { continue; }
         let mut close_out = run_filter(vm, f, &[], true);
+        f.borrow_mut().closed = true;
         buf.append(&mut close_out);
     }
-    let _ = any;
     buf
 }
 
