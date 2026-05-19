@@ -655,7 +655,7 @@ impl<'a> Lexer<'a> {
                         TokenKind::Variable(var_name),
                         Span::new(self.pos as u32, self.pos as u32, self.line),
                     ));
-                    // Parse chained property/array access until }
+                    // Parse chained property/method/array access until }
                     loop {
                         if self.peek() == Some(b'-') && self.peek_at(1) == Some(b'>') {
                             self.advance(); // consume -
@@ -670,6 +670,99 @@ impl<'a> Lexer<'a> {
                                     TokenKind::Identifier(prop_name),
                                     Span::new(self.pos as u32, self.pos as u32, self.line),
                                 ));
+                            }
+                        } else if self.peek() == Some(b'(') {
+                            // Method call: emit `(`, scan inside up to matching `)`.
+                            self.advance(); // consume (
+                            self.pending.push(Token::new(
+                                TokenKind::OpenParen,
+                                Span::new(self.pos as u32, self.pos as u32, self.line),
+                            ));
+                            // Skip arguments inside (...) — re-lex as normal PHP
+                            // until matching paren. We use a simple paren counter
+                            // and let the main lexer handle quotes/strings by
+                            // tokenizing them.
+                            let mut depth: i32 = 1;
+                            while depth > 0 {
+                                match self.peek() {
+                                    Some(b'(') => {
+                                        self.advance();
+                                        depth += 1;
+                                        self.pending.push(Token::new(
+                                            TokenKind::OpenParen,
+                                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        ));
+                                    }
+                                    Some(b')') => {
+                                        self.advance();
+                                        depth -= 1;
+                                        self.pending.push(Token::new(
+                                            TokenKind::CloseParen,
+                                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        ));
+                                    }
+                                    Some(b',') => {
+                                        self.advance();
+                                        self.pending.push(Token::new(
+                                            TokenKind::Comma,
+                                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        ));
+                                    }
+                                    Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => {
+                                        self.advance();
+                                    }
+                                    Some(b'$') => {
+                                        self.advance();
+                                        let var_name = self.scan_identifier();
+                                        self.pending.push(Token::new(
+                                            TokenKind::Variable(var_name),
+                                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        ));
+                                    }
+                                    Some(b'\'') => {
+                                        self.advance();
+                                        let mut s = Vec::new();
+                                        while let Some(c) = self.peek() {
+                                            if c == b'\'' { self.advance(); break; }
+                                            if c == b'\\' {
+                                                self.advance();
+                                                if let Some(esc) = self.peek() {
+                                                    self.advance();
+                                                    match esc {
+                                                        b'\\' => s.push(b'\\'),
+                                                        b'\'' => s.push(b'\''),
+                                                        c => { s.push(b'\\'); s.push(c); }
+                                                    }
+                                                }
+                                            } else {
+                                                s.push(c);
+                                                self.advance();
+                                            }
+                                        }
+                                        self.pending.push(Token::new(
+                                            TokenKind::ConstantString(s),
+                                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        ));
+                                    }
+                                    Some(b'0'..=b'9') => {
+                                        let n = self.scan_number();
+                                        self.pending.push(Token::new(
+                                            n,
+                                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        ));
+                                    }
+                                    Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
+                                        let id = self.scan_identifier();
+                                        self.pending.push(Token::new(
+                                            TokenKind::Identifier(id),
+                                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                                        ));
+                                    }
+                                    Some(_) => {
+                                        self.advance();
+                                    }
+                                    None => break,
+                                }
                             }
                         } else if self.peek() == Some(b'[') {
                             self.advance(); // consume [

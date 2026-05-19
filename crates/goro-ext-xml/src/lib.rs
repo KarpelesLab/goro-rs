@@ -30,6 +30,8 @@ struct XmlParser {
     error_code: i64,
     parser_object: Option<Value>,
     separator: Option<String>,
+    skip_tagstart: i64,
+    skip_white: bool,
 }
 
 impl XmlParser {
@@ -48,9 +50,25 @@ impl XmlParser {
             error_code: 0,
             parser_object: None,
             separator: None,
+            skip_tagstart: 0,
+            skip_white: false,
         }
     }
 
+}
+
+/// Apply XML_OPTION_SKIP_TAGSTART: drop N leading bytes from tag name.
+/// If N >= name length, the result is empty string.
+fn apply_skip_tagstart(name: &str, skip: i64) -> String {
+    if skip <= 0 {
+        return name.to_string();
+    }
+    let skip = skip as usize;
+    if skip >= name.len() {
+        String::new()
+    } else {
+        name[skip..].to_string()
+    }
 }
 
 // ── XML error constants ─────────────────────────────────────────────────────
@@ -649,7 +667,45 @@ fn call_callback(
                                 Some(Value::Object(obj.clone())),
                             );
                         }
+                        // Fall back to __call magic method
+                        if let Some(call_method) = class.methods.get(b"__call".as_ref()) {
+                            let op = call_method.op_array.clone();
+                            let mut args_arr = PhpArray::new();
+                            for a in &args {
+                                args_arr.push(a.clone());
+                            }
+                            let call_args = vec![
+                                Value::String(method_name.clone()),
+                                Value::Array(Rc::new(RefCell::new(args_arr))),
+                            ];
+                            return vm.execute_fn_with_named_args(
+                                &op,
+                                call_args,
+                                vec![],
+                                Some(Value::Object(obj.clone())),
+                            );
+                        }
                     }
+                }
+            }
+            Ok(Value::Null)
+        }
+        Value::Object(obj) => {
+            // Closure or invokable object: look for __invoke method
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if class_lower == b"closure" {
+                if let Some(result) = vm.call_object_method(callback, b"__invoke", &args) {
+                    return Ok(result);
+                }
+            } else if let Some(class) = vm.classes.get(&class_lower).cloned() {
+                if let Some(method) = class.methods.get(b"__invoke".as_ref()) {
+                    let op = method.op_array.clone();
+                    return vm.execute_fn_with_named_args(
+                        &op,
+                        args,
+                        vec![],
+                        Some(callback.clone()),
+                    );
                 }
             }
             Ok(Value::Null)
@@ -831,11 +887,41 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"libxml_disable_entity_loader", libxml_disable_entity_loader_fn);
     vm.register_function(b"libxml_set_external_entity_loader", libxml_set_external_entity_loader_fn);
     vm.register_extension(b"libxml");
+
+    // Register XMLParser as a final, opaque, non-serializable class.
+    let mut xmlparser_ce = goro_core::object::ClassEntry::new(b"XMLParser".to_vec());
+    xmlparser_ce.is_final = true;
+    vm.classes.insert(b"xmlparser".to_vec(), xmlparser_ce);
 }
 
 // ── Built-in function implementations ───────────────────────────────────────
 
-fn xml_parser_create(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// Build an opaque XMLParser PhpObject wrapping the given internal parser id.
+fn make_xmlparser_object(vm: &mut Vm, xml_id: i64) -> Value {
+    let obj_id = vm.next_object_id();
+    let mut obj = PhpObject::new(b"XMLParser".to_vec(), obj_id);
+    obj.set_property(b"__xml_id".to_vec(), Value::Long(xml_id));
+    Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+/// Extract internal parser id from a value that should be an XMLParser object.
+fn extract_xml_id(val: &Value) -> Option<i64> {
+    match val {
+        Value::Object(obj) => {
+            let p = obj.borrow().get_property(b"__xml_id");
+            match p {
+                Value::Long(n) => Some(n),
+                _ => None,
+            }
+        }
+        // Backwards compat: accept raw int (legacy resource id)
+        Value::Long(n) => Some(*n),
+        Value::Reference(r) => extract_xml_id(&r.borrow()),
+        _ => None,
+    }
+}
+
+fn xml_parser_create(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let _encoding = args
         .first()
         .map(|v| v.to_php_string().to_string_lossy())
@@ -850,10 +936,10 @@ fn xml_parser_create(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let parser = XmlParser::new();
     XML_PARSERS.with(|p| p.borrow_mut().insert(id, parser));
 
-    Ok(Value::Long(id))
+    Ok(make_xmlparser_object(vm, id))
 }
 
-fn xml_parser_create_ns(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn xml_parser_create_ns(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let _encoding = args
         .first()
         .map(|v| v.to_php_string().to_string_lossy())
@@ -874,11 +960,11 @@ fn xml_parser_create_ns(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     parser.separator = Some(separator);
     XML_PARSERS.with(|p| p.borrow_mut().insert(id, parser));
 
-    Ok(Value::Long(id))
+    Ok(make_xmlparser_object(vm, id))
 }
 
 fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let data = args
         .get(1)
         .unwrap_or(&Value::Null)
@@ -886,7 +972,7 @@ fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .to_string_lossy();
 
     // Extract parser state for parsing
-    let (start_byte, start_line, start_col, separator, case_folding) = XML_PARSERS.with(|p| {
+    let (start_byte, start_line, start_col, separator, case_folding, skip_tagstart) = XML_PARSERS.with(|p| {
         let parsers = p.borrow();
         if let Some(parser) = parsers.get(&parser_id) {
             Ok((
@@ -895,6 +981,7 @@ fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 parser.current_column,
                 parser.separator.clone(),
                 parser.case_folding,
+                parser.skip_tagstart,
             ))
         } else {
             Err(VmError {
@@ -944,6 +1031,7 @@ fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             } else {
                                 name
                             };
+                            let folded_name = apply_skip_tagstart(&folded_name, skip_tagstart);
                             let mut attr_array = PhpArray::new();
                             for (k, v) in attributes {
                                 let folded_key = if case_folding {
@@ -997,6 +1085,7 @@ fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             } else {
                                 name
                             };
+                            let folded_name = apply_skip_tagstart(&folded_name, skip_tagstart);
                             dispatch_callback(
                                 vm,
                                 cb,
@@ -1117,15 +1206,98 @@ fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn xml_parser_free(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     _vm.emit_deprecated("Function xml_parser_free() is deprecated since 8.5, as it has no effect since PHP 8.0");
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let removed = XML_PARSERS.with(|p| p.borrow_mut().remove(&parser_id).is_some());
     Ok(if removed { Value::True } else { Value::False })
 }
 
-fn xml_set_element_handler(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+/// Validate that the first argument is an XMLParser object.
+/// Throws TypeError if not. Returns the xml_id on success.
+fn require_xmlparser(vm: &mut Vm, fn_name: &str, val: &Value) -> Result<i64, VmError> {
+    let deref = match val {
+        Value::Reference(r) => r.borrow().clone(),
+        _ => val.clone(),
+    };
+    match &deref {
+        Value::Object(obj) => {
+            let p = obj.borrow().get_property(b"__xml_id");
+            if let Value::Long(n) = p {
+                Ok(n)
+            } else {
+                let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                let msg = format!("{fn_name}(): Argument #1 ($parser) must be of type XMLParser, {class_name} given");
+                let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                Err(VmError { message: format!("Uncaught TypeError: {msg}"), line: vm.current_line })
+            }
+        }
+        other => {
+            let type_name = match other {
+                Value::Null | Value::Undef => "null",
+                Value::True | Value::False => "bool",
+                Value::Long(_) => "int",
+                Value::Double(_) => "float",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Resource(_) => "resource",
+                _ => "unknown",
+            };
+            let msg = format!("{fn_name}(): Argument #1 ($parser) must be of type XMLParser, {type_name} given");
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: format!("Uncaught TypeError: {msg}"), line: vm.current_line })
+        }
+    }
+}
+
+/// Validate that the handler is null, string, or callable (array/object).
+fn require_callable_handler(vm: &mut Vm, fn_name: &str, handler: &Value) -> Result<(), VmError> {
+    match handler {
+        Value::Null | Value::Undef => Ok(()),
+        Value::String(_) | Value::Array(_) | Value::Object(_) => Ok(()),
+        Value::Reference(r) => require_callable_handler(vm, fn_name, &r.borrow()),
+        _ => {
+            let msg = format!("{fn_name}(): Argument #2 ($handler) must be of type callable|string|null");
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            Err(VmError { message: format!("Uncaught TypeError: {msg}"), line: vm.current_line })
+        }
+    }
+}
+
+/// Emit the PHP 8.4 deprecation when a non-callable string is passed as handler.
+/// Skips the deprecation when the string refers to an existing function.
+fn warn_non_callable_string(vm: &mut Vm, fn_name: &str, handler: &Value) {
+    if let Value::String(s) = handler {
+        let s_bytes = s.as_bytes();
+        if s_bytes.is_empty() {
+            vm.emit_deprecated_at(
+                &format!("{fn_name}(): Passing non-callable strings is deprecated since 8.4"),
+                vm.current_line,
+            );
+            return;
+        }
+        let s_lower: Vec<u8> = s_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let is_callable = vm.user_functions.contains_key(&s_lower)
+            || vm.functions.contains_key(&s_lower);
+        if !is_callable {
+            vm.emit_deprecated_at(
+                &format!("{fn_name}(): Passing non-callable strings is deprecated since 8.4"),
+                vm.current_line,
+            );
+        }
+    }
+}
+
+fn xml_set_element_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let parser_id = require_xmlparser(vm, "xml_set_element_handler", args.first().unwrap_or(&Value::Null))?;
     let start = args.get(1).cloned().unwrap_or(Value::Null);
     let end = args.get(2).cloned().unwrap_or(Value::Null);
+    require_callable_handler(vm, "xml_set_element_handler", &start)?;
+    require_callable_handler(vm, "xml_set_element_handler", &end)?;
+
+    warn_non_callable_string(vm, "xml_set_element_handler", &start);
+    warn_non_callable_string(vm, "xml_set_element_handler", &end);
 
     XML_PARSERS.with(|p| {
         let mut parsers = p.borrow_mut();
@@ -1149,9 +1321,12 @@ fn xml_set_element_handler(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     Ok(Value::True)
 }
 
-fn xml_set_character_data_handler(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+fn xml_set_character_data_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let parser_id = require_xmlparser(vm, "xml_set_character_data_handler", args.first().unwrap_or(&Value::Null))?;
     let handler = args.get(1).cloned().unwrap_or(Value::Null);
+    require_callable_handler(vm, "xml_set_character_data_handler", &handler)?;
+
+    warn_non_callable_string(vm, "xml_set_character_data_handler", &handler);
 
     XML_PARSERS.with(|p| {
         let mut parsers = p.borrow_mut();
@@ -1168,9 +1343,12 @@ fn xml_set_character_data_handler(_vm: &mut Vm, args: &[Value]) -> Result<Value,
     Ok(Value::True)
 }
 
-fn xml_set_default_handler(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+fn xml_set_default_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let parser_id = require_xmlparser(vm, "xml_set_default_handler", args.first().unwrap_or(&Value::Null))?;
     let handler = args.get(1).cloned().unwrap_or(Value::Null);
+    require_callable_handler(vm, "xml_set_default_handler", &handler)?;
+
+    warn_non_callable_string(vm, "xml_set_default_handler", &handler);
 
     XML_PARSERS.with(|p| {
         let mut parsers = p.borrow_mut();
@@ -1188,11 +1366,14 @@ fn xml_set_default_handler(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
 }
 
 fn xml_set_processing_instruction_handler(
-    _vm: &mut Vm,
+    vm: &mut Vm,
     args: &[Value],
 ) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+    let parser_id = require_xmlparser(vm, "xml_set_processing_instruction_handler", args.first().unwrap_or(&Value::Null))?;
     let handler = args.get(1).cloned().unwrap_or(Value::Null);
+    require_callable_handler(vm, "xml_set_processing_instruction_handler", &handler)?;
+
+    warn_non_callable_string(vm, "xml_set_processing_instruction_handler", &handler);
 
     XML_PARSERS.with(|p| {
         let mut parsers = p.borrow_mut();
@@ -1208,10 +1389,22 @@ fn xml_set_processing_instruction_handler(
     Ok(Value::True)
 }
 
-fn xml_parser_set_option(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+fn xml_parser_set_option(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let option = args.get(1).unwrap_or(&Value::Null).to_long();
     let value = args.get(2).cloned().unwrap_or(Value::Null);
+    // Validate XML_OPTION_SKIP_TAGSTART range up-front so we can emit a warning
+    // (PHP behaviour) without rolling back the parser state.
+    if option == XML_OPTION_SKIP_TAGSTART {
+        let v = value.to_long();
+        if !(0..=0x7FFF_FFFF).contains(&v) {
+            vm.emit_warning_at(
+                "xml_parser_set_option(): Argument #3 ($value) must be between 0 and 2147483647 for option XML_OPTION_SKIP_TAGSTART",
+                vm.current_line,
+            );
+            return Ok(Value::False);
+        }
+    }
 
     XML_PARSERS.with(|p| {
         let mut parsers = p.borrow_mut();
@@ -1225,8 +1418,13 @@ fn xml_parser_set_option(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                     parser.target_encoding = value.to_php_string().to_string_lossy();
                     Ok(Value::True)
                 }
-                XML_OPTION_SKIP_TAGSTART | XML_OPTION_SKIP_WHITE => {
-                    // Accepted but not actively used
+                XML_OPTION_SKIP_TAGSTART => {
+                    // Range already validated at top of function.
+                    parser.skip_tagstart = value.to_long();
+                    Ok(Value::True)
+                }
+                XML_OPTION_SKIP_WHITE => {
+                    parser.skip_white = value.is_truthy();
                     Ok(Value::True)
                 }
                 _ => Ok(Value::False),
@@ -1238,7 +1436,7 @@ fn xml_parser_set_option(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
 }
 
 fn xml_parser_get_option(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let option = args.get(1).unwrap_or(&Value::Null).to_long();
 
     XML_PARSERS.with(|p| {
@@ -1251,8 +1449,8 @@ fn xml_parser_get_option(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                 XML_OPTION_TARGET_ENCODING => Ok(Value::String(PhpString::from_string(
                     parser.target_encoding.clone(),
                 ))),
-                XML_OPTION_SKIP_TAGSTART => Ok(Value::Long(0)),
-                XML_OPTION_SKIP_WHITE => Ok(Value::Long(0)),
+                XML_OPTION_SKIP_TAGSTART => Ok(Value::Long(parser.skip_tagstart)),
+                XML_OPTION_SKIP_WHITE => Ok(Value::Long(if parser.skip_white { 1 } else { 0 })),
                 _ => Ok(Value::False),
             }
         } else {
@@ -1261,8 +1459,12 @@ fn xml_parser_get_option(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     })
 }
 
-fn xml_set_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+fn xml_set_object(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_deprecated_at(
+        "Function xml_set_object() is deprecated since 8.4, provide a proper method callable to xml_set_*_handler() functions",
+        vm.current_line,
+    );
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let object = args.get(1).cloned().unwrap_or(Value::Null);
 
     XML_PARSERS.with(|p| {
@@ -1280,7 +1482,7 @@ fn xml_set_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn xml_get_error_code(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let code = XML_PARSERS.with(|p| {
         let parsers = p.borrow();
         parsers.get(&parser_id).map(|pp| pp.error_code).unwrap_or(0)
@@ -1319,7 +1521,7 @@ fn xml_error_string(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn xml_get_current_line_number(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let line = XML_PARSERS.with(|p| {
         let parsers = p.borrow();
         parsers
@@ -1331,7 +1533,7 @@ fn xml_get_current_line_number(_vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 }
 
 fn xml_get_current_column_number(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let col = XML_PARSERS.with(|p| {
         let parsers = p.borrow();
         parsers
@@ -1343,7 +1545,7 @@ fn xml_get_current_column_number(_vm: &mut Vm, args: &[Value]) -> Result<Value, 
 }
 
 fn xml_get_current_byte_index(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let idx = XML_PARSERS.with(|p| {
         let parsers = p.borrow();
         parsers
@@ -1355,7 +1557,7 @@ fn xml_get_current_byte_index(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
 }
 
 fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = args.first().unwrap_or(&Value::Null).to_long();
+    let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let data = args
         .get(1)
         .unwrap_or(&Value::Null)
@@ -1363,10 +1565,10 @@ fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         .to_string_lossy();
 
     // Extract parser state
-    let (separator, case_folding) = XML_PARSERS.with(|p| {
+    let (separator, case_folding, skip_tagstart) = XML_PARSERS.with(|p| {
         let parsers = p.borrow();
         if let Some(parser) = parsers.get(&parser_id) {
-            Ok((parser.separator.clone(), parser.case_folding))
+            Ok((parser.separator.clone(), parser.case_folding, parser.skip_tagstart))
         } else {
             Err(VmError {
                 message: "xml_parse_into_struct(): supplied argument is not a valid XML Parser resource".to_string(),
@@ -1394,6 +1596,7 @@ fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                         } else {
                             name.clone()
                         };
+                        let folded = apply_skip_tagstart(&folded, skip_tagstart);
                         let mut entry = PhpArray::new();
                         entry.set(
                             ArrayKey::String(PhpString::from_bytes(b"tag")),
@@ -1449,6 +1652,7 @@ fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                         } else {
                             name.clone()
                         };
+                        let folded = apply_skip_tagstart(&folded, skip_tagstart);
 
                         // Check if the previous entry for this tag was an "open" with no value/children
                         // If so, change it to "complete" instead of adding a separate "close"

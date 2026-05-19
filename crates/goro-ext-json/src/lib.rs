@@ -62,6 +62,23 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         original.clone()
     };
+    // Cross-call recursion guard for JsonSerializable: when called from within
+    // jsonSerialize() for the same object, return false (matches PHP).
+    if let Value::Object(obj) = &val_owned {
+        let ptr = Rc::as_ptr(obj) as usize;
+        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let has_json_serialize = if let Some(class) = vm.classes.get(&class_lower) {
+            class.interfaces.iter().any(|i| i.eq_ignore_ascii_case(b"JsonSerializable"))
+                || class.get_method(b"jsonserialize").is_some()
+        } else {
+            false
+        };
+        if has_json_serialize && vm.json_encoding_objects.contains(&ptr) {
+            // Recursion detected
+            vm.json_last_error = 6;
+            return Ok(Value::False);
+        }
+    }
     let val = &val_owned;
     let flags = match args.get(1) {
         Some(v) => v.to_long(),
@@ -103,9 +120,36 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !effective_throw {
         vm.json_last_error = 0;
     }
+    // Capture original obj pointer if input is a JsonSerializable object so we
+    // can detect cyclic references during encoding (Bug #61978).
+    let orig_obj_ptr: Option<usize> = if let Value::Object(obj) = val {
+        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let has_json_serialize = if let Some(class) = vm.classes.get(&class_lower) {
+            class.interfaces.iter().any(|i| i.eq_ignore_ascii_case(b"JsonSerializable"))
+                || class.get_method(b"jsonserialize").is_some()
+        } else {
+            false
+        };
+        if has_json_serialize { Some(Rc::as_ptr(obj) as usize) } else { None }
+    } else { None };
     // Pre-process value: call jsonSerialize() on JsonSerializable objects
-    let val = resolve_json_serializable(vm, val);
-    let mut seen = std::collections::HashSet::new();
+    let val_owned2 = resolve_json_serializable(vm, val);
+    if vm.current_exception.is_some() {
+        // jsonSerialize threw — propagate.
+        return Err(VmError { message: "Uncaught exception in jsonSerialize".to_string(), line: 0 });
+    }
+    let val = &val_owned2;
+    // If jsonSerialize did NOT return the same object (e.g. returned an array
+    // containing the original obj), pre-populate the encoder's seen set with
+    // the original obj_ptr so cyclic references are detected. When it returns
+    // $this, fall through to normal encoding without pre-pop.
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    if let Some(orig_ptr) = orig_obj_ptr {
+        let resolved_same = matches!(val, Value::Object(o) if Rc::as_ptr(o) as usize == orig_ptr);
+        if !resolved_same {
+            seen.insert(orig_ptr);
+        }
+    }
     let mut recursion_detected = false;
     let s = json_encode_value_flags_tracked(&val, 0, flags, max_depth, &mut seen, &mut recursion_detected);
     if s.contains("\x00ENUM_ERROR") {
@@ -159,20 +203,42 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         return Ok(Value::False);
     }
+    if s.contains("\x00RESOURCE_ERROR") {
+        // Resource type cannot be JSON encoded
+        if !effective_throw {
+            vm.json_last_error = 8; // JSON_ERROR_UNSUPPORTED_TYPE
+        }
+        if partial_output {
+            return Ok(Value::String(PhpString::from_bytes(b"null")));
+        }
+        if effective_throw {
+            let exc = create_json_exception(vm, b"JsonException", "Type is not supported", 8);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: "Uncaught JsonException: Type is not supported".to_string(), line: 0 });
+        }
+        return Ok(Value::False);
+    }
     Ok(Value::String(PhpString::from_string(s)))
 }
 
 /// Recursively resolve JsonSerializable objects by calling their jsonSerialize() method
 fn resolve_json_serializable(vm: &mut Vm, val: &Value) -> Value {
-    resolve_json_serializable_depth(vm, val, 0)
+    let mut seen = std::collections::HashSet::new();
+    resolve_json_serializable_depth(vm, val, 0, &mut seen)
 }
 
-fn resolve_json_serializable_depth(vm: &mut Vm, val: &Value, depth: usize) -> Value {
+fn resolve_json_serializable_depth(
+    vm: &mut Vm,
+    val: &Value,
+    depth: usize,
+    seen: &mut std::collections::HashSet<usize>,
+) -> Value {
     if depth > 64 {
         return val.clone(); // Prevent infinite recursion
     }
     match val {
         Value::Object(obj) => {
+            let obj_ptr = Rc::as_ptr(obj) as usize;
             let obj_ref = obj.borrow();
             // Skip enum cases
             if obj_ref.has_property(b"__enum_case") {
@@ -194,51 +260,125 @@ fn resolve_json_serializable_depth(vm: &mut Vm, val: &Value, depth: usize) -> Va
                 b"splfixedarray" | b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
             );
             if has_json_serialize || is_builtin_json {
-                // Try call_object_method which handles both user and built-in SPL dispatch
-                if let Some(result) = vm.call_object_method(val, b"jsonSerialize", &[]) {
-                    return resolve_json_serializable_depth(vm, &result, depth + 1);
-                }
-            }
-            if has_json_serialize {
-                // Fallback: try user-defined method directly
-                let method = {
-                    let class = vm.classes.get(&class_lower);
-                    class.and_then(|c| c.get_method(b"jsonserialize").cloned())
-                };
-                if let Some(method) = method {
-                    let op = method.op_array.clone();
-                    let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
-                    if !fn_cvs.is_empty() {
-                        fn_cvs[0] = val.clone(); // $this
+                // Recursion guard: if we're already resolving this object via
+                // jsonSerialize higher up the stack, fall through to plain
+                // object encoding (this matches PHP's behaviour when
+                // jsonSerialize returns $this — it doesn't keep invoking the
+                // method, just encodes public properties).
+                if seen.insert(obj_ptr) {
+                    // Mark this object as being encoded so that recursive
+                    // json_encode($this) calls from within jsonSerialize fail.
+                    let inserted_global = vm.json_encoding_objects.insert(obj_ptr);
+                    // Try call_object_method which handles both user and built-in SPL dispatch
+                    let call_result = vm.call_object_method(val, b"jsonSerialize", &[]);
+                    if vm.current_exception.is_some() {
+                        seen.remove(&obj_ptr);
+                        if inserted_global {
+                            vm.json_encoding_objects.remove(&obj_ptr);
+                        }
+                        return val.clone();
                     }
-                    if let Ok(result) = vm.execute_fn(&op, fn_cvs) {
-                        return resolve_json_serializable_depth(vm, &result, depth + 1);
+                    if let Some(result) = call_result {
+                        let r = resolve_json_serializable_depth(vm, &result, depth + 1, seen);
+                        seen.remove(&obj_ptr);
+                        if inserted_global {
+                            vm.json_encoding_objects.remove(&obj_ptr);
+                        }
+                        return r;
+                    }
+                    if has_json_serialize {
+                        // Fallback: try user-defined method directly
+                        let method = {
+                            let class = vm.classes.get(&class_lower);
+                            class.and_then(|c| c.get_method(b"jsonserialize").cloned())
+                        };
+                        if let Some(method) = method {
+                            let op = method.op_array.clone();
+                            let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
+                            if !fn_cvs.is_empty() {
+                                fn_cvs[0] = val.clone(); // $this
+                            }
+                            if let Ok(result) = vm.execute_fn(&op, fn_cvs) {
+                                let r = resolve_json_serializable_depth(vm, &result, depth + 1, seen);
+                                seen.remove(&obj_ptr);
+                                if inserted_global {
+                                    vm.json_encoding_objects.remove(&obj_ptr);
+                                }
+                                return r;
+                            }
+                        }
+                    }
+                    seen.remove(&obj_ptr);
+                    if inserted_global {
+                        vm.json_encoding_objects.remove(&obj_ptr);
                     }
                 }
+                // Already in `seen`: fall through to plain encoding below
             }
-            val.clone()
+            // No JsonSerializable: collect private/protected property names so they can be filtered.
+            // We build a HashSet and store it on the cloned object via an internal __json_nonpublic prop.
+            // Cleaner: filter the cloned object in place by removing private/protected properties.
+            let nonpublic_names: std::collections::HashSet<Vec<u8>> = {
+                if let Some(class) = vm.classes.get(&class_lower) {
+                    class.properties.iter()
+                        .filter(|p| !p.is_static && p.visibility != goro_core::object::Visibility::Public)
+                        .map(|p| p.name.clone())
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                }
+            };
+            if nonpublic_names.is_empty() {
+                // No filtering needed. Keep original Rc identity so that
+                // recursion detection works downstream. Nested objects with
+                // jsonSerialize will be processed when we recurse into them
+                // during encoding.
+                return val.clone();
+            }
+            // Build a filtered clone
+            let obj_ref = obj.borrow();
+            let new_obj_id = vm.next_object_id();
+            let mut new_obj = goro_core::object::PhpObject::new(obj_ref.class_name.clone(), new_obj_id);
+            let props: Vec<_> = obj_ref.properties.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            drop(obj_ref);
+            for (name, value) in props {
+                if nonpublic_names.contains(&name) {
+                    continue;
+                }
+                let resolved = resolve_json_serializable_depth(vm, &value, depth + 1, seen);
+                new_obj.set_property(name, resolved);
+            }
+            Value::Object(Rc::new(RefCell::new(new_obj)))
         }
         Value::Array(arr) => {
-            // Check if any values in the array are JsonSerializable objects
+            // Check if any values in the array contain objects/refs that may
+            // need to be resolved.
             let arr_ref = arr.borrow();
-            let has_objects = arr_ref.iter().any(|(_, v)| matches!(v, Value::Object(_)));
-            if !has_objects {
+            let has_nested = arr_ref.iter().any(|(_, v)| {
+                matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_))
+            });
+            if !has_nested {
                 return val.clone();
             }
             let items: Vec<_> = arr_ref.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             drop(arr_ref);
             let mut new_arr = PhpArray::new();
             for (key, value) in items {
-                let resolved = resolve_json_serializable_depth(vm, &value, depth + 1);
+                let resolved = resolve_json_serializable_depth(vm, &value, depth + 1, seen);
+                if vm.current_exception.is_some() {
+                    // Stop processing - exception will propagate to top of json_encode.
+                    return val.clone();
+                }
                 new_arr.set(key, resolved);
             }
             Value::Array(Rc::new(RefCell::new(new_arr)))
         }
-        Value::Reference(r) => resolve_json_serializable_depth(vm, &r.borrow(), depth),
+        Value::Reference(r) => resolve_json_serializable_depth(vm, &r.borrow(), depth, seen),
         _ => val.clone(),
     }
 }
 
+#[allow(dead_code)]
 fn json_encode_value_flags(val: &Value, depth: usize, flags: i64) -> String {
     let mut seen = std::collections::HashSet::new();
     let mut recursion_detected = false;
@@ -275,26 +415,62 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, max_de
         Value::True => "true".to_string(),
         Value::False => "false".to_string(),
         Value::Long(n) => n.to_string(),
-        Value::Resource(_) => "0".to_string(),
+        Value::Resource(_) => "\x00RESOURCE_ERROR".to_string(),
         Value::Double(f) => {
             if f.is_infinite() || f.is_nan() {
-                "null".to_string()
+                // PHP json_encode emits "0" for inf/nan in nested contexts;
+                // the top-level check intercepts these for return-false handling.
+                "0".to_string()
             } else {
                 // PHP uses serialize_precision for json_encode
                 let sp = goro_core::value::get_php_serialize_precision();
                 let s = if sp < 0 {
-                    // Shortest roundtrip
-                    let mut best = format!("{}", f);
-                    for prec in 0..20 {
-                        let candidate = format!("{:.prec$}", f, prec = prec);
-                        if let Ok(parsed) = candidate.parse::<f64>() {
-                            if parsed == *f {
-                                best = candidate;
-                                break;
+                    // Shortest roundtrip: use scientific notation for very
+                    // small/large values, decimal otherwise (matches
+                    // format_php_float_shortest behaviour).
+                    let abs = f.abs();
+                    if abs != 0.0 && (abs >= 1e15 || abs < 1e-4) {
+                        // Scientific notation: lowercase 'e', no '+' for
+                        // positive exponents (PHP convention for json).
+                        let mut best = format!("{:e}", f);
+                        for prec in 0..20 {
+                            let candidate = format!("{:.prec$e}", f, prec = prec);
+                            if let Ok(parsed) = candidate.parse::<f64>() {
+                                if parsed == *f {
+                                    best = candidate;
+                                    break;
+                                }
                             }
                         }
+                        // Convert "1.23456789e-13" → "1.23456789e-13" (already correct)
+                        // But Rust may emit "1e-13" without dot; PHP keeps no extra dots.
+                        // Also format the exponent with explicit + sign for positives
+                        // (PHP uses "1.23e+34" for 1.23e34, not "1.23e34").
+                        if let Some(pos) = best.find('e') {
+                            let mantissa = &best[..pos];
+                            let exp_str: i32 = best[pos+1..].parse().unwrap_or(0);
+                            let exp_fmt = if exp_str >= 0 {
+                                format!("e+{}", exp_str)
+                            } else {
+                                format!("e{}", exp_str)
+                            };
+                            format!("{}{}", mantissa, exp_fmt)
+                        } else {
+                            best
+                        }
+                    } else {
+                        let mut best = format!("{}", f);
+                        for prec in 0..20 {
+                            let candidate = format!("{:.prec$}", f, prec = prec);
+                            if let Ok(parsed) = candidate.parse::<f64>() {
+                                if parsed == *f {
+                                    best = candidate;
+                                    break;
+                                }
+                            }
+                        }
+                        best
                     }
-                    best
                 } else {
                     goro_core::value::format_php_float_with_precision_pub(*f, sp as usize)
                 };
@@ -360,7 +536,7 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, max_de
                         seen.remove(&arr_ptr);
                         return "\x00DEPTH_ERROR".to_string();
                     }
-                    if partial_output && encoded.contains("\x00UTF8_ERROR") {
+                    if partial_output && (encoded.contains("\x00UTF8_ERROR") || encoded.contains("\x00RESOURCE_ERROR")) {
                         "null".to_string()
                     } else {
                         encoded
@@ -394,7 +570,7 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, max_de
                         if encoded_val == "\x00DEPTH_ERROR" {
                             return "\x00DEPTH_ERROR".to_string();
                         }
-                        let encoded_val = if partial_output && encoded_val.contains("\x00UTF8_ERROR") {
+                        let encoded_val = if partial_output && (encoded_val.contains("\x00UTF8_ERROR") || encoded_val.contains("\x00RESOURCE_ERROR")) {
                             "null".to_string()
                         } else {
                             encoded_val
@@ -549,22 +725,31 @@ fn json_encode_string(bytes: &[u8], flags: i64) -> String {
                     i += len;
                     continue;
                 } else {
-                    // Invalid UTF-8
+                    // Invalid UTF-8: skip the expected sequence length so one
+                    // bad start byte + continuation bytes is treated as a single
+                    // invalid sequence (per PHP behaviour).
+                    let max_len = utf8_seq_len(bytes[i]);
+                    let mut skip = 1usize;
+                    while skip < max_len && i + skip < bytes.len() {
+                        let nb = bytes[i + skip];
+                        if nb & 0xC0 == 0x80 {
+                            skip += 1;
+                        } else {
+                            break;
+                        }
+                    }
                     if flags & JSON_INVALID_UTF8_IGNORE != 0 {
-                        // Skip this byte
-                        i += 1;
+                        i += skip;
                         continue;
                     } else if flags & JSON_INVALID_UTF8_SUBSTITUTE != 0 {
-                        // Replace with U+FFFD
                         if flags & JSON_UNESCAPED_UNICODE != 0 {
                             result.push('\u{FFFD}');
                         } else {
                             result.push_str("\\ufffd");
                         }
-                        i += 1;
+                        i += skip;
                         continue;
                     } else {
-                        // Return special error marker
                         return format!("\x00UTF8_ERROR");
                     }
                 }
@@ -574,6 +759,16 @@ fn json_encode_string(bytes: &[u8], flags: i64) -> String {
     }
     result.push('"');
     result
+}
+
+/// How many bytes a UTF-8 start byte would consume (1..=4), assuming a valid sequence.
+/// Returns 1 for invalid start bytes or continuation bytes.
+fn utf8_seq_len(b0: u8) -> usize {
+    if b0 < 0x80 { 1 }
+    else if b0 & 0xE0 == 0xC0 { 2 }
+    else if b0 & 0xF0 == 0xE0 { 3 }
+    else if b0 & 0xF8 == 0xF0 { 4 }
+    else { 1 }
 }
 
 fn decode_utf8_char(bytes: &[u8]) -> (Option<u32>, usize) {
@@ -652,13 +847,27 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let bigint_as_string = (flags & 2) != 0; // JSON_BIGINT_AS_STRING = 2
     let throw_on_error = (flags & JSON_THROW_ON_ERROR) != 0;
+    let invalid_utf8_ignore = (flags & JSON_INVALID_UTF8_IGNORE) != 0;
+    let invalid_utf8_substitute = (flags & JSON_INVALID_UTF8_SUBSTITUTE) != 0;
 
     // JSON_OBJECT_AS_ARRAY flag
     if (flags & JSON_OBJECT_AS_ARRAY) != 0 {
         associative = true;
     }
 
-    // Pre-validate UTF-8 of the input
+    // Pre-process bytes for JSON_INVALID_UTF8_* flags: scrub invalid UTF-8 in
+    // string literals (between quotes) per PHP semantics.
+    let processed_owned: Vec<u8>;
+    let json_bytes: &[u8] = if invalid_utf8_ignore || invalid_utf8_substitute {
+        processed_owned = scrub_invalid_utf8_in_strings(json_bytes, invalid_utf8_substitute);
+        &processed_owned
+    } else {
+        json_bytes
+    };
+
+    // Pre-validate UTF-8 of the input (skip if JSON_INVALID_UTF8_* flags are set)
+    let _skip_utf8_check = invalid_utf8_ignore || invalid_utf8_substitute;
+    if !_skip_utf8_check {
     if let Some(utf8_err) = check_json_utf8(json_bytes) {
         match utf8_err {
             JsonUtf8Error::InvalidUtf8 => {
@@ -680,6 +889,7 @@ fn json_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Ok(Value::Null);
             }
         }
+    }
     }
 
     let mut parser = JsonParser {
@@ -757,7 +967,7 @@ fn json_error_msg(code: i64) -> &'static str {
     match code {
         0 => "No error",
         1 => "Maximum stack depth exceeded",
-        2 => "Invalid or malformed JSON",
+        2 => "State mismatch (invalid or malformed JSON)",
         3 => "Control character error, possibly incorrectly encoded",
         4 => "Syntax error",
         5 => "Malformed UTF-8 characters, possibly incorrectly encoded",
@@ -774,6 +984,70 @@ fn json_error_msg(code: i64) -> &'static str {
 enum JsonUtf8Error {
     InvalidUtf8,
     ControlChar,
+}
+
+/// Scrub invalid UTF-8 byte sequences in JSON string literals.
+/// If `substitute` is true, replace each invalid byte with U+FFFD (0xEF 0xBF 0xBD).
+/// Otherwise (ignore mode), drop the invalid bytes.
+/// Bytes outside string literals are left untouched.
+fn scrub_invalid_utf8_in_strings(input: &[u8], substitute: bool) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < input.len() {
+        let b = input[i];
+        if !in_string {
+            if b == b'"' {
+                in_string = true;
+            }
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        // In string
+        if b == b'\\' {
+            // Escape sequence, copy two bytes (backslash + next byte) as-is
+            out.push(b);
+            i += 1;
+            if i < input.len() {
+                out.push(input[i]);
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'"' {
+            in_string = false;
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        if b < 0x80 {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        // High bit set — try to decode UTF-8
+        let (cp, len) = decode_utf8_char(&input[i..]);
+        match cp {
+            Some(cp_val) if !(0xD800..=0xDFFF).contains(&cp_val) => {
+                // Valid UTF-8, copy all bytes
+                for j in 0..len {
+                    if i + j < input.len() {
+                        out.push(input[i + j]);
+                    }
+                }
+                i += len;
+            }
+            _ => {
+                // Invalid byte
+                if substitute {
+                    out.extend_from_slice(&[0xEF, 0xBF, 0xBD]);
+                }
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Check raw JSON bytes for invalid UTF-8 or bare control characters (outside string escapes).
@@ -1109,7 +1383,16 @@ impl<'a, 'b> JsonParser<'a, 'b> {
                     self.depth -= 1;
                     return Some(Value::Array(Rc::new(RefCell::new(arr))));
                 }
-                _ => return None,
+                Some(_) => {
+                    // State mismatch — expected ',' or ']' but found something else
+                    self.error_code = 2;
+                    return None;
+                }
+                None => {
+                    // EOF mid-array — syntax error
+                    self.error_code = 4;
+                    return None;
+                }
             }
         }
     }
@@ -1162,7 +1445,14 @@ impl<'a, 'b> JsonParser<'a, 'b> {
                         self.depth -= 1;
                         return Some(Value::Array(Rc::new(RefCell::new(arr))));
                     }
-                    _ => return None,
+                    Some(_) => {
+                        self.error_code = 2;
+                        return None;
+                    }
+                    None => {
+                        self.error_code = 4;
+                        return None;
+                    }
                 }
             }
         } else {
@@ -1204,7 +1494,14 @@ impl<'a, 'b> JsonParser<'a, 'b> {
                         self.depth -= 1;
                         return Some(Value::Object(Rc::new(RefCell::new(obj))));
                     }
-                    _ => return None,
+                    Some(_) => {
+                        self.error_code = 2;
+                        return None;
+                    }
+                    None => {
+                        self.error_code = 4;
+                        return None;
+                    }
                 }
             }
         }
