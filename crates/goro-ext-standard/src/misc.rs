@@ -8419,6 +8419,23 @@ fn getallheaders_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn apache_response_headers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
+    // PHP's apache_response_headers (in cli-server) prepends a default
+    // X-Powered-By and appends a default Content-type when those aren't
+    // explicitly set; mirror that.
+    let mut has_xpb = false;
+    let mut has_ct = false;
+    SENT_HEADERS.with(|h| {
+        for (k, _v) in h.borrow().iter() {
+            if k.eq_ignore_ascii_case(b"X-Powered-By") { has_xpb = true; }
+            if k.eq_ignore_ascii_case(b"Content-Type") || k.eq_ignore_ascii_case(b"Content-type") { has_ct = true; }
+        }
+    });
+    if !has_xpb {
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"X-Powered-By")),
+            Value::String(PhpString::from_bytes(b"PHP/8.5.4")),
+        );
+    }
     SENT_HEADERS.with(|h| {
         for (k, v) in h.borrow().iter() {
             arr.set(
@@ -8427,6 +8444,12 @@ fn apache_response_headers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
             );
         }
     });
+    if !has_ct {
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"Content-type")),
+            Value::String(PhpString::from_bytes(b"text/html; charset=UTF-8")),
+        );
+    }
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 fn http_response_code_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
