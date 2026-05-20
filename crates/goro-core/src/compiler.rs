@@ -101,8 +101,8 @@ pub struct Compiler {
     use_const_map: HashMap<Vec<u8>, Vec<u8>>,
     /// Label offsets for goto: maps label name -> instruction offset
     label_offsets: HashMap<Vec<u8>, u32>,
-    /// Pending gotos for forward references: maps label name -> list of jmp instruction offsets
-    pending_gotos: HashMap<Vec<u8>, Vec<u32>>,
+    /// Pending gotos for forward references: maps label name -> list of (jmp instruction offset, source line)
+    pending_gotos: HashMap<Vec<u8>, Vec<(u32, u32)>>,
     /// Source file path (for __FILE__, __DIR__)
     pub source_file: Vec<u8>,
     /// Whether the current function has a "never" return type
@@ -260,6 +260,22 @@ impl Compiler {
             is_in_function_body: false,
             is_in_class_method: false,
         }
+    }
+
+    /// Reject any unresolved gotos in this compiler scope. Called at the end of
+    /// each function/method/closure/script body so that an unmatched goto becomes
+    /// a clean compile-time fatal error instead of a placeholder Jmp to ip=0 that
+    /// would otherwise spin forever at runtime.
+    fn check_pending_gotos(&self) -> CompileResult<()> {
+        if let Some((name, locs)) = self.pending_gotos.iter().next() {
+            let label = String::from_utf8_lossy(name).into_owned();
+            let line = locs.first().map(|(_, l)| *l).unwrap_or(0);
+            return Err(CompileError {
+                message: format!("'goto' to undefined label '{}'", label),
+                line,
+            });
+        }
+        Ok(())
     }
 
     /// Compute the canonical PHP closure display name `{closure:<context>:<line>}`
@@ -835,6 +851,9 @@ impl Compiler {
                 }
             }
         }
+        // Reject any unresolved gotos at top level (PHP: "'goto' to undefined label").
+        // Without this, the placeholder Jmp jumps to ip=0 and causes an infinite loop.
+        self.check_pending_gotos()?;
         // Emit implicit return null at end of script
         let null_idx = self.op_array.add_literal(Value::Null);
         self.op_array.emit(Op {
@@ -1923,6 +1942,9 @@ impl Compiler {
                 for s in body {
                     func_compiler.compile_stmt(s)?;
                 }
+
+                // Reject any unresolved gotos in this function body
+                func_compiler.check_pending_gotos()?;
 
                 // Implicit return null
                 let null_idx = func_compiler.op_array.add_literal(Value::Null);
@@ -3135,6 +3157,7 @@ impl Compiler {
                                         for s in closure_body {
                                             closure_compiler.compile_stmt(s)?;
                                         }
+                                        closure_compiler.check_pending_gotos()?;
                                         let null_idx = closure_compiler.op_array.add_literal(Value::Null);
                                         closure_compiler.op_array.emit(crate::opcode::Op {
                                             opcode: OpCode::Return,
@@ -3402,6 +3425,7 @@ impl Compiler {
                                 for s in hook_body {
                                     hook_compiler.compile_stmt(s)?;
                                 }
+                                hook_compiler.check_pending_gotos()?;
 
                                 // Implicit return null
                                 let null_idx = hook_compiler.op_array.add_literal(Value::Null);
@@ -3459,6 +3483,7 @@ impl Compiler {
                                 for s in hook_body {
                                     hook_compiler.compile_stmt(s)?;
                                 }
+                                hook_compiler.check_pending_gotos()?;
 
                                 // Implicit return null
                                 let null_idx = hook_compiler.op_array.add_literal(Value::Null);
@@ -3903,6 +3928,7 @@ impl Compiler {
                                                 for s in hook_body.iter() {
                                                     hook_compiler.compile_stmt(s)?;
                                                 }
+                                                hook_compiler.check_pending_gotos()?;
                                                 let null_idx = hook_compiler.op_array.add_literal(Value::Null);
                                                 hook_compiler.op_array.emit(Op {
                                                     opcode: OpCode::Return,
@@ -3949,6 +3975,7 @@ impl Compiler {
                                                 for s in hook_body.iter() {
                                                     hook_compiler.compile_stmt(s)?;
                                                 }
+                                                hook_compiler.check_pending_gotos()?;
                                                 let null_idx = hook_compiler.op_array.add_literal(Value::Null);
                                                 hook_compiler.op_array.emit(Op {
                                                     opcode: OpCode::Return,
@@ -4246,6 +4273,7 @@ impl Compiler {
                                 for s in body_stmts {
                                     method_compiler.compile_stmt(s)?;
                                 }
+                                method_compiler.check_pending_gotos()?;
 
                                 // Implicit return null
                                 let null_idx = method_compiler.op_array.add_literal(Value::Null);
@@ -4720,6 +4748,7 @@ impl Compiler {
                                         for s in closure_body {
                                             closure_compiler.compile_stmt(s)?;
                                         }
+                                        closure_compiler.check_pending_gotos()?;
                                         // Add implicit return null
                                         let null_idx = closure_compiler.op_array.add_literal(Value::Null);
                                         closure_compiler.op_array.emit(crate::opcode::Op {
@@ -5148,7 +5177,7 @@ impl Compiler {
                 self.label_offsets.insert(name.clone(), offset);
                 // Patch any pending gotos that reference this label
                 if let Some(gotos) = self.pending_gotos.remove(name) {
-                    for goto_offset in gotos {
+                    for (goto_offset, _line) in gotos {
                         self.op_array.patch_jump(goto_offset, offset);
                     }
                 }
@@ -5176,7 +5205,7 @@ impl Compiler {
                     self.pending_gotos
                         .entry(name.clone())
                         .or_insert_with(Vec::new)
-                        .push(jmp);
+                        .push((jmp, stmt.span.line));
                 }
                 Ok(())
             }
@@ -7937,6 +7966,7 @@ impl Compiler {
                 for s in body {
                     closure_compiler.compile_stmt(s)?;
                 }
+                closure_compiler.check_pending_gotos()?;
 
                 let null_idx = closure_compiler.op_array.add_literal(Value::Null);
                 closure_compiler.op_array.emit(Op {
