@@ -744,6 +744,21 @@ fn execute_php_request(
         let key = format!("HTTP_{}", upper);
         set_kv(&mut server, key.as_bytes(), v.as_bytes());
     }
+    // Parse Authorization: Basic <base64> into PHP_AUTH_USER / PHP_AUTH_PW
+    if let Some(auth) = headers.get("authorization") {
+        if let Some(b64) = auth.strip_prefix("Basic ").or_else(|| auth.strip_prefix("basic ")) {
+            if let Some(decoded) = base64_decode(b64.trim()) {
+                if let Ok(s) = std::str::from_utf8(&decoded) {
+                    if let Some(colon) = s.find(':') {
+                        set_kv(&mut server, b"PHP_AUTH_USER", s[..colon].as_bytes());
+                        set_kv(&mut server, b"PHP_AUTH_PW", s[colon + 1..].as_bytes());
+                    }
+                }
+            }
+        } else if let Some(rest) = auth.strip_prefix("Digest ").or_else(|| auth.strip_prefix("digest ")) {
+            set_kv(&mut server, b"PHP_AUTH_DIGEST", rest.as_bytes());
+        }
+    }
     vm.set_global(b"_SERVER".to_vec(), Value::Array(std::rc::Rc::new(std::cell::RefCell::new(server))));
 
     // Build $_GET
@@ -1024,6 +1039,45 @@ fn parse_multipart(body: &[u8], boundary: &str, post: &mut PhpArray, files: &mut
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    let s_bytes = s.as_bytes();
+    if s_bytes.is_empty() {
+        return Some(Vec::new());
+    }
+    fn ch(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            b'=' => Some(64),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(s_bytes.len() * 3 / 4);
+    let mut i = 0;
+    while i + 4 <= s_bytes.len() {
+        let a = ch(s_bytes[i])?;
+        let b = ch(s_bytes[i + 1])?;
+        let c = ch(s_bytes[i + 2])?;
+        let d = ch(s_bytes[i + 3])?;
+        if a == 64 || b == 64 {
+            return None;
+        }
+        out.push((a << 2) | (b >> 4));
+        if c != 64 {
+            out.push((b << 4) | (c >> 2));
+            if d != 64 {
+                out.push((c << 6) | d);
+            }
+        }
+        i += 4;
+    }
+    Some(out)
 }
 
 fn epoch_secs() -> u64 {
