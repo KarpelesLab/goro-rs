@@ -40,7 +40,14 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 // ── Connection storage ────────────────────────────────────────────────
 
 struct MysqliConnection {
-    pool: mysql_async::Pool,
+    /// Original opts — used by the pool / get_conn() and to re-establish a
+    /// connection if `conn` has been disconnected.
+    opts: mysql_async::Opts,
+    /// Sticky session connection. Lazily set on first use; kept across calls
+    /// so SET commands (sql_mode, transactions, user vars) persist between
+    /// queries. Behind RefCell so we can mutate during block_on without
+    /// holding the CONNECTIONS HashMap borrow.
+    conn: Rc<RefCell<Option<mysql_async::Conn>>>,
     last_error: String,
     last_errno: i64,
     affected_rows: i64,
@@ -59,10 +66,38 @@ thread_local! {
 
 // ── Result storage ────────────────────────────────────────────────────
 
+/// Per-column metadata captured from mysql_async for type-aware bind_result
+/// conversion. We store one entry per column in column order.
+#[derive(Clone, Debug)]
+struct ColumnMeta {
+    #[allow(dead_code)]
+    name: String,
+    /// MySQL column type code (1=TINY, 2=SHORT, 3=LONG, 4=FLOAT, 5=DOUBLE,
+    /// 7=TIMESTAMP, 8=LONGLONG, 9=INT24, 10=DATE, 11=TIME, 12=DATETIME,
+    /// 13=YEAR, 246=DECIMAL/NEWDECIMAL, 252=BLOB family, 253=VAR_STRING,
+    /// 254=STRING).
+    mysql_type: u8,
+    /// True if the column is unsigned (UNSIGNED_FLAG bit).
+    #[allow(dead_code)]
+    unsigned: bool,
+    /// Decimal precision (fractional digits for DATETIME / TIMESTAMP / TIME,
+    /// number of decimal places for DECIMAL / FLOAT / DOUBLE). Drives how
+    /// many trailing fractional digits we render for DATETIME column types.
+    decimals: u8,
+}
+
 struct MysqliResult {
     rows: Vec<Vec<(String, Option<String>)>>,
     current_row: usize,
     num_rows: usize,
+    /// Optional per-column metadata. Present when produced by exec_iter
+    /// (prepared statement path), absent for synthetic results.
+    columns: Vec<ColumnMeta>,
+    /// Raw row values (one entry per row, each a Vec of mysql_async::Value
+    /// matching `columns`). Populated for prepared-statement results so
+    /// bind_result / fetch can return typed PHP values. Empty for legacy
+    /// string-only paths.
+    raw_rows: Vec<Vec<mysql_async::Value>>,
 }
 
 thread_local! {
@@ -74,9 +109,20 @@ thread_local! {
 struct MysqliStmt {
     conn_id: u64,
     query: String,
-    #[allow(dead_code)]
+    /// Type string from bind_param (e.g. "iisb"). Used at execute() time to
+    /// coerce each live value to the target mysql_async::Value variant.
     param_types: Option<String>,
-    param_values: Vec<Value>,
+    /// Smart-pointer view of each bound parameter — the actual PHP variable
+    /// that should be re-read at execute() time. For "i"/"d"/"s" types this
+    /// is read each execute. For "b" (blob) we also append data buffered
+    /// via send_long_data.
+    param_refs: Vec<Rc<RefCell<Value>>>,
+    /// Per-parameter blob accumulator used by send_long_data. Indexed by
+    /// param position (0-based). Only populated for "b" type params.
+    param_blob_buffers: Vec<Vec<u8>>,
+    /// References bound for result columns by bind_result. fetch() writes
+    /// each row's columns into these (in order) via *r.borrow_mut() = val.
+    bound_result_refs: Vec<Rc<RefCell<Value>>>,
     result_id: Option<u64>,
     #[allow(dead_code)]
     last_error: String,
@@ -93,6 +139,32 @@ thread_local! {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
+
+/// Retrieve the sticky session info (opts + sticky conn handle) for a
+/// connection id. The returned `Rc<RefCell<Option<Conn>>>` is shared with
+/// the stored `MysqliConnection`, so taking/restoring the connection in
+/// an async block keeps it persistent across mysqli calls.
+fn get_session(conn_id: u64) -> Option<(mysql_async::Opts, Rc<RefCell<Option<mysql_async::Conn>>>)> {
+    CONNECTIONS.with(|c| {
+        c.borrow().get(&conn_id).map(|conn| (conn.opts.clone(), conn.conn.clone()))
+    })
+}
+
+/// Acquire (or re-establish) the sticky mysql_async::Conn behind a
+/// session handle. Must be invoked inside `block_on(async { ... })`.
+async fn take_conn(opts: &mysql_async::Opts, holder: &Rc<RefCell<Option<mysql_async::Conn>>>)
+    -> Result<mysql_async::Conn, mysql_async::Error>
+{
+    if let Some(c) = holder.borrow_mut().take() {
+        return Ok(c);
+    }
+    mysql_async::Conn::new(opts.clone()).await
+}
+
+/// Restore the connection to the holder so the next mysqli call reuses it.
+fn restore_conn(holder: &Rc<RefCell<Option<mysql_async::Conn>>>, conn: mysql_async::Conn) {
+    *holder.borrow_mut() = Some(conn);
+}
 
 fn get_object_id(val: &Value) -> Option<u64> {
     if let Value::Object(obj) = val {
@@ -171,7 +243,142 @@ fn row_to_string_columns(row: &mysql_async::Row, col_names: &[String]) -> Vec<(S
 }
 
 type RowData = Vec<Vec<(String, Option<String>)>>;
-type QueryResult = Result<(Option<(RowData, usize)>, u64, u64), mysql_async::Error>;
+type RawRows = Vec<Vec<mysql_async::Value>>;
+/// (Some(QueryRows), affected, insert_id) or None for non-result queries.
+/// QueryRows = (rows-as-strings, num_rows, columns, raw_rows)
+type QueryRows = (RowData, usize, Vec<ColumnMeta>, RawRows);
+type QueryResult = Result<(Option<QueryRows>, u64, u64), mysql_async::Error>;
+
+/// Build per-column metadata from mysql_async columns.
+fn build_column_meta(columns: &[mysql_async::Column]) -> Vec<ColumnMeta> {
+    use mysql_async::consts::ColumnFlags;
+    columns.iter().map(|c| ColumnMeta {
+        name: c.name_str().to_string(),
+        mysql_type: c.column_type() as u8,
+        unsigned: c.flags().contains(ColumnFlags::UNSIGNED_FLAG),
+        decimals: c.decimals(),
+    }).collect()
+}
+
+/// Convert a 4-byte MySQL FLOAT into a PHP double using the same "%.6G"-style
+/// rounding that mysqlnd / libmysql apply. Raw `f32 as f64` would propagate
+/// IEEE-754 noise (e.g. 5.1f32 expands to 5.099999904632568f64). PHP instead
+/// truncates the value to 6 significant decimal digits — enough to uniquely
+/// represent any f32 to display precision — so `float(5.1)` parses back to
+/// 5.1f64. This matches PHP test expectations exactly.
+fn f32_to_php_double(f: f32) -> f64 {
+    if !f.is_finite() {
+        return f as f64;
+    }
+    if f == 0.0 {
+        return 0.0;
+    }
+    // C printf "%.6G" prints 6 significant digits, switching to %e form when
+    // the exponent is < -4 or >= precision. Mirror that here.
+    let abs = f.abs() as f64;
+    let exp = abs.log10().floor() as i32;
+    let use_scientific = exp < -4 || exp >= 6;
+    let s = if use_scientific {
+        // %.5e is 6 significant digits with one before the dot.
+        format!("{:.5e}", f as f64)
+    } else {
+        // Plain decimal with 6 significant digits.
+        let digits_after_point = (5 - exp).max(0) as usize;
+        format!("{:.*}", digits_after_point, f as f64)
+    };
+    s.parse::<f64>().unwrap_or(f as f64)
+}
+
+/// Format the fractional-second portion of a datetime / time value following
+/// the column's `decimals` field. PHP renders the trailing dot only when the
+/// column actually declares a fractional precision (e.g. DATETIME(4) →
+/// ".NNNN"). When `decimals` is 0 we omit the suffix entirely.
+fn format_fractional(us: u32, decimals: u8) -> String {
+    if decimals == 0 { return String::new(); }
+    let decimals = decimals.min(6) as usize;
+    // us has 6 digits resolution. Right-truncate to `decimals` digits.
+    let scale = 10u32.pow((6 - decimals) as u32);
+    let truncated = us / scale;
+    format!(".{:0width$}", truncated, width = decimals)
+}
+
+/// Convert a raw column value to a PHP `Value`, respecting the column's type.
+/// Used by mysqli_stmt_fetch / bind_result to produce native int/float when the
+/// column is numeric, NULL for NULL, and string otherwise (with PHP-style
+/// datetime / time formatting).
+fn mysql_value_to_php(val: &mysql_async::Value, meta: &ColumnMeta) -> Value {
+    use mysql_async::Value as MV;
+    // MySQL field type codes for numeric columns.
+    const TINY: u8 = 1; const SHORT: u8 = 2; const LONG: u8 = 3; const FLOAT: u8 = 4;
+    const DOUBLE: u8 = 5; const TIMESTAMP: u8 = 7; const LONGLONG: u8 = 8; const INT24: u8 = 9;
+    const DATETIME: u8 = 12; const YEAR: u8 = 13;
+    // YEAR is a special integer column type in MySQL but PHP returns it as
+    // a string in textual form (e.g. "2010") to match libmysql / mysqlnd.
+    let is_int_type = matches!(meta.mysql_type, TINY | SHORT | LONG | LONGLONG | INT24);
+    let is_float_type = matches!(meta.mysql_type, FLOAT | DOUBLE);
+    let is_year_type = meta.mysql_type == YEAR;
+    let is_dt_with_time = matches!(meta.mysql_type, DATETIME | TIMESTAMP);
+    match val {
+        MV::NULL => Value::Null,
+        // YEAR: render as 4-character string.
+        _ if is_year_type => {
+            let n = match val {
+                MV::Int(i) => *i,
+                MV::UInt(u) => *u as i64,
+                MV::Bytes(b) => std::str::from_utf8(b).ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            Value::String(PhpString::from_string(format!("{:04}", n)))
+        }
+        MV::Int(i) if is_int_type => Value::Long(*i),
+        MV::UInt(u) if is_int_type => Value::Long(*u as i64),
+        MV::Int(i) => Value::Long(*i),
+        MV::UInt(u) => Value::Long(*u as i64),
+        MV::Float(f) if is_float_type => Value::Double(f32_to_php_double(*f)),
+        MV::Double(d) if is_float_type => Value::Double(*d),
+        MV::Float(f) => Value::Double(f32_to_php_double(*f)),
+        MV::Double(d) => Value::Double(*d),
+        MV::Bytes(b) => {
+            // Numeric columns may arrive as text (textual protocol). Coerce
+            // back to int / float.
+            if is_int_type {
+                if let Ok(s) = std::str::from_utf8(b) {
+                    if let Ok(n) = s.parse::<i64>() { return Value::Long(n); }
+                }
+            }
+            if is_float_type {
+                if let Ok(s) = std::str::from_utf8(b) {
+                    if let Ok(f) = s.parse::<f64>() { return Value::Double(f); }
+                }
+            }
+            // DECIMAL / strings: keep as string. (PHP returns DECIMAL as a
+            // string to preserve precision.)
+            Value::String(PhpString::from_bytes(b))
+        }
+        MV::Date(y, m, d, h, mi, s, us) => {
+            let frac = format_fractional(*us, meta.decimals);
+            let formatted = if is_dt_with_time {
+                // DATETIME and TIMESTAMP always show HH:MM:SS, regardless of
+                // whether the time portion is zero.
+                format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}{}", y, m, d, h, mi, s, frac)
+            } else if *h != 0 || *mi != 0 || *s != 0 || *us != 0 {
+                format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}{}", y, m, d, h, mi, s, frac)
+            } else {
+                format!("{:04}-{:02}-{:02}", y, m, d)
+            };
+            Value::String(PhpString::from_string(formatted))
+        }
+        MV::Time(neg, days, h, m, s, us) => {
+            let total_h = (*days as u64) * 24 + *h as u64;
+            let sign = if *neg { "-" } else { "" };
+            let frac = format_fractional(*us, meta.decimals);
+            let formatted = format!("{}{:02}:{:02}:{:02}{}", sign, total_h, m, s, frac);
+            Value::String(PhpString::from_string(formatted))
+        }
+    }
+}
 
 // ── Registration ──────────────────────────────────────────────────────
 
@@ -327,24 +534,25 @@ fn mysqli_connect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         builder = builder.db_name(Some(db));
     }
 
-    let pool = mysql_async::Pool::new(builder);
+    let opts: mysql_async::Opts = builder.into();
 
     let conn_result = block_on(async {
-        let conn = pool.get_conn().await?;
+        let conn = mysql_async::Conn::new(opts.clone()).await?;
         let sv = conn.server_version();
         let info = format!("{}.{}.{}", sv.0, sv.1, sv.2);
-        drop(conn);
-        Ok::<String, mysql_async::Error>(info)
+        Ok::<(mysql_async::Conn, String), mysql_async::Error>((conn, info))
     });
 
     match conn_result {
-        Ok(server_info) => {
+        Ok((conn, server_info)) => {
             LAST_CONNECT_ERROR.with(|e| *e.borrow_mut() = String::new());
             LAST_CONNECT_ERRNO.with(|e| *e.borrow_mut() = 0);
             let id = vm.next_object_id();
             let obj = PhpObject::new(b"mysqli".to_vec(), id);
             CONNECTIONS.with(|c| c.borrow_mut().insert(id, MysqliConnection {
-                pool, last_error: String::new(), last_errno: 0,
+                opts,
+                conn: Rc::new(RefCell::new(Some(conn))),
+                last_error: String::new(), last_errno: 0,
                 affected_rows: 0, insert_id: 0, server_info, autocommit: true,
             }));
             Ok(Value::Object(Rc::new(RefCell::new(obj))))
@@ -365,7 +573,9 @@ fn mysqli_close(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let id = args.first().and_then(get_object_id).unwrap_or(0);
     let removed = CONNECTIONS.with(|c| c.borrow_mut().remove(&id));
     if let Some(conn) = removed {
-        block_on(async { conn.pool.disconnect().await.ok(); });
+        if let Some(c) = conn.conn.borrow_mut().take() {
+            block_on(async { c.disconnect().await.ok(); });
+        }
         Ok(Value::True)
     } else {
         Ok(Value::False)
@@ -374,38 +584,52 @@ fn mysqli_close(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // ── exec_query helper ─────────────────────────────────────────────────
 
-fn exec_query(pool: &mysql_async::Pool, query_str: &str) -> QueryResult {
-    let pool = pool.clone();
-    block_on(async {
-        let mut conn = pool.get_conn().await?;
-        let mut qr = conn.query_iter(query_str).await?;
-        let columns: Vec<mysql_async::Column> = qr.columns_ref().to_vec();
-        if columns.is_empty() {
-            let affected = qr.affected_rows();
-            let insert_id = qr.last_insert_id().unwrap_or(0);
-            drop(qr);
-            return Ok((None, affected, insert_id));
-        }
-        let col_names: Vec<String> = columns.iter().map(|c| c.name_str().to_string()).collect();
-        let raw_rows: Vec<mysql_async::Row> = qr.collect().await?;
-        let mut rows = Vec::with_capacity(raw_rows.len());
-        for row in &raw_rows {
-            rows.push(row_to_string_columns(row, &col_names));
-        }
-        let num_rows = rows.len();
-        Ok((Some((rows, num_rows)), 0u64, 0u64))
+fn exec_query(opts: &mysql_async::Opts, holder: &Rc<RefCell<Option<mysql_async::Conn>>>, query_str: &str) -> QueryResult {
+    let opts = opts.clone();
+    let holder = holder.clone();
+    block_on(async move {
+        let mut conn = take_conn(&opts, &holder).await?;
+        let result = async {
+            let mut qr = conn.query_iter(query_str).await?;
+            let columns_raw: Vec<mysql_async::Column> = qr.columns_ref().to_vec();
+            if columns_raw.is_empty() {
+                let affected = qr.affected_rows();
+                let insert_id = qr.last_insert_id().unwrap_or(0);
+                drop(qr);
+                return Ok((None, affected, insert_id));
+            }
+            let col_meta = build_column_meta(&columns_raw);
+            let col_names: Vec<String> = columns_raw.iter().map(|c| c.name_str().to_string()).collect();
+            let raw_rows_async: Vec<mysql_async::Row> = qr.collect().await?;
+            let mut rows = Vec::with_capacity(raw_rows_async.len());
+            let mut raw_rows: Vec<Vec<mysql_async::Value>> = Vec::with_capacity(raw_rows_async.len());
+            for row in &raw_rows_async {
+                rows.push(row_to_string_columns(row, &col_names));
+                let mut rr: Vec<mysql_async::Value> = Vec::with_capacity(col_meta.len());
+                for i in 0..col_meta.len() {
+                    rr.push(row.as_ref(i).cloned().unwrap_or(mysql_async::Value::NULL));
+                }
+                raw_rows.push(rr);
+            }
+            let num_rows = rows.len();
+            Ok::<_, mysql_async::Error>((Some((rows, num_rows, col_meta, raw_rows)), 0u64, 0u64))
+        }.await;
+        restore_conn(&holder, conn);
+        result
     })
 }
 
 // ── run_sql helper ────────────────────────────────────────────────────
 
 fn run_sql(id: u64, sql: &str) -> bool {
-    let pool = CONNECTIONS.with(|c| c.borrow().get(&id).map(|conn| conn.pool.clone()));
-    let pool = match pool { Some(p) => p, None => return false };
-    let result: Result<(), mysql_async::Error> = block_on(async {
-        let mut conn = pool.get_conn().await?;
-        conn.query_drop(sql).await?;
-        Ok(())
+    let session = get_session(id);
+    let (opts, holder) = match session { Some(s) => s, None => return false };
+    let sql = sql.to_string();
+    let result: Result<(), mysql_async::Error> = block_on(async move {
+        let mut conn = take_conn(&opts, &holder).await?;
+        let res = conn.query_drop(&sql).await;
+        restore_conn(&holder, conn);
+        res
     });
     match result {
         Ok(()) => {
@@ -436,14 +660,14 @@ fn run_sql(id: u64, sql: &str) -> bool {
 fn mysqli_query(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let id = args.first().and_then(get_object_id).unwrap_or(0);
     let query_str = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-    let pool = CONNECTIONS.with(|c| c.borrow().get(&id).map(|conn| conn.pool.clone()));
-    let pool = match pool { Some(p) => p, None => return Ok(Value::False) };
+    let session = get_session(id);
+    let (opts, holder) = match session { Some(s) => s, None => return Ok(Value::False) };
 
-    match exec_query(&pool, &query_str) {
-        Ok((Some((rows, num_rows)), _, _)) => {
+    match exec_query(&opts, &holder, &query_str) {
+        Ok((Some((rows, num_rows, columns, raw_rows)), _, _)) => {
             let res_id = vm.next_object_id();
             let res_obj = PhpObject::new(b"mysqli_result".to_vec(), res_id);
-            RESULTS.with(|r| r.borrow_mut().insert(res_id, MysqliResult { rows, current_row: 0, num_rows }));
+            RESULTS.with(|r| r.borrow_mut().insert(res_id, MysqliResult { rows, current_row: 0, num_rows, columns, raw_rows }));
             CONNECTIONS.with(|c| { if let Some(conn) = c.borrow_mut().get_mut(&id) { conn.last_error.clear(); conn.last_errno = 0; } });
             Ok(Value::Object(Rc::new(RefCell::new(res_obj))))
         }
@@ -472,15 +696,19 @@ fn mysqli_query(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn mysqli_real_query(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let id = args.first().and_then(get_object_id).unwrap_or(0);
     let query_str = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-    let pool = CONNECTIONS.with(|c| c.borrow().get(&id).map(|conn| conn.pool.clone()));
-    let pool = match pool { Some(p) => p, None => return Ok(Value::False) };
+    let session = get_session(id);
+    let (opts, holder) = match session { Some(s) => s, None => return Ok(Value::False) };
 
-    let result: Result<(u64, u64), mysql_async::Error> = block_on(async {
-        let mut conn = pool.get_conn().await?;
-        conn.query_drop(&query_str).await?;
-        let affected = conn.affected_rows();
-        let insert_id = conn.last_insert_id().unwrap_or(0);
-        Ok((affected, insert_id))
+    let result: Result<(u64, u64), mysql_async::Error> = block_on(async move {
+        let mut conn = take_conn(&opts, &holder).await?;
+        let res = async {
+            conn.query_drop(&query_str).await?;
+            let affected = conn.affected_rows();
+            let insert_id = conn.last_insert_id().unwrap_or(0);
+            Ok::<_, mysql_async::Error>((affected, insert_id))
+        }.await;
+        restore_conn(&holder, conn);
+        res
     });
 
     match result {
@@ -667,22 +895,43 @@ fn mysqli_prepare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let stmt_id = vm.next_object_id();
     let stmt_obj = PhpObject::new(b"mysqli_stmt".to_vec(), stmt_id);
     STMTS.with(|s| s.borrow_mut().insert(stmt_id, MysqliStmt {
-        conn_id, query, param_types: None, param_values: Vec::new(),
+        conn_id, query, param_types: None,
+        param_refs: Vec::new(),
+        param_blob_buffers: Vec::new(),
+        bound_result_refs: Vec::new(),
         result_id: None, last_error: String::new(), last_errno: 0,
         affected_rows: 0, insert_id: 0,
     }));
     Ok(Value::Object(Rc::new(RefCell::new(stmt_obj))))
 }
 
+/// Extract a Rc<RefCell<Value>> reference handle from a parameter. If the
+/// arg is already a Value::Reference, share it. Otherwise create a fresh
+/// reference cell seeded with the current value (the original variable
+/// is no longer linked, but the call still functions for the by-value
+/// fall-through case).
+fn extract_or_new_ref(val: &Value) -> Rc<RefCell<Value>> {
+    if let Value::Reference(r) = val {
+        r.clone()
+    } else {
+        Rc::new(RefCell::new(val.clone()))
+    }
+}
+
 fn mysqli_stmt_bind_param(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
     let types = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-    let params: Vec<Value> = args.iter().skip(2).cloned().collect();
+    // Each subsequent arg should be a Value::Reference; capture the cell so we
+    // can read live values back at execute() time. send_long_data later may
+    // populate per-param blob buffers.
+    let refs: Vec<Rc<RefCell<Value>>> = args.iter().skip(2).map(extract_or_new_ref).collect();
+    let n = refs.len();
     STMTS.with(|s| {
         let mut stmts = s.borrow_mut();
         if let Some(stmt) = stmts.get_mut(&stmt_id) {
             stmt.param_types = Some(types);
-            stmt.param_values = params;
+            stmt.param_refs = refs;
+            stmt.param_blob_buffers = vec![Vec::new(); n];
             Ok(Value::True)
         } else {
             Ok(Value::False)
@@ -690,50 +939,125 @@ fn mysqli_stmt_bind_param(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     })
 }
 
-fn mysqli_stmt_execute(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
-    let stmt_info = STMTS.with(|s| {
-        s.borrow().get(&stmt_id).map(|st| (st.conn_id, st.query.clone(), st.param_values.clone()))
-    });
-    let (conn_id, query, param_values) = match stmt_info { Some(i) => i, None => return Ok(Value::False) };
-    let pool = CONNECTIONS.with(|c| c.borrow().get(&conn_id).map(|conn| conn.pool.clone()));
-    let pool = match pool { Some(p) => p, None => return Ok(Value::False) };
-
-    let result: QueryResult = block_on(async {
-        let mut conn = pool.get_conn().await?;
-        let mut mysql_params: Vec<mysql_async::Value> = Vec::new();
-        for val in &param_values {
-            match val {
-                Value::Null => mysql_params.push(mysql_async::Value::NULL),
-                Value::Long(n) => mysql_params.push(mysql_async::Value::Int(*n)),
-                Value::Double(f) => mysql_params.push(mysql_async::Value::Double(*f)),
-                Value::True => mysql_params.push(mysql_async::Value::Int(1)),
-                Value::False => mysql_params.push(mysql_async::Value::Int(0)),
-                _ => {
-                    let s = val.to_php_string().to_string_lossy();
-                    mysql_params.push(mysql_async::Value::Bytes(s.into_bytes()));
-                }
+/// Coerce a PHP value to a mysql_async::Value following the given type char.
+/// Type chars: 'i' = integer, 'd' = double, 's' = string, 'b' = blob.
+fn php_to_mysql_param(val: &Value, type_ch: u8, blob_buf: &[u8]) -> mysql_async::Value {
+    // Deref reference once for inspection.
+    let inner: Value = if let Value::Reference(r) = val { r.borrow().clone() } else { val.clone() };
+    match type_ch {
+        b'i' => match &inner {
+            Value::Null => mysql_async::Value::NULL,
+            Value::True => mysql_async::Value::Int(1),
+            Value::False => mysql_async::Value::Int(0),
+            Value::Long(n) => mysql_async::Value::Int(*n),
+            Value::Double(f) => mysql_async::Value::Int(*f as i64),
+            other => {
+                let s = other.to_php_string().to_string_lossy();
+                s.parse::<i64>().map(mysql_async::Value::Int)
+                    .unwrap_or(mysql_async::Value::Int(0))
+            }
+        },
+        b'd' => match &inner {
+            Value::Null => mysql_async::Value::NULL,
+            Value::Long(n) => mysql_async::Value::Double(*n as f64),
+            Value::Double(f) => mysql_async::Value::Double(*f),
+            Value::True => mysql_async::Value::Double(1.0),
+            Value::False => mysql_async::Value::Double(0.0),
+            other => {
+                let s = other.to_php_string().to_string_lossy();
+                s.parse::<f64>().map(mysql_async::Value::Double)
+                    .unwrap_or(mysql_async::Value::Double(0.0))
+            }
+        },
+        b'b' => {
+            // If send_long_data buffered bytes for this param, use that;
+            // otherwise treat like 's' (and let the bound variable's value
+            // fill in when send_long_data is not used).
+            if !blob_buf.is_empty() {
+                return mysql_async::Value::Bytes(blob_buf.to_vec());
+            }
+            match &inner {
+                Value::Null => mysql_async::Value::NULL,
+                Value::String(s) => mysql_async::Value::Bytes(s.as_bytes().to_vec()),
+                other => mysql_async::Value::Bytes(other.to_php_string().as_bytes().to_vec()),
             }
         }
-        let stmt = conn.prep(&query).await?;
-        let mut qr = conn.exec_iter(&stmt, mysql_params).await?;
-        let columns: Vec<mysql_async::Column> = qr.columns_ref().to_vec();
-        if columns.is_empty() {
-            let affected = qr.affected_rows();
-            let insert_id = qr.last_insert_id().unwrap_or(0);
-            drop(qr);
+        _ => match &inner {
+            // 's' (string) — also the fallback.
+            Value::Null => mysql_async::Value::NULL,
+            Value::String(s) => mysql_async::Value::Bytes(s.as_bytes().to_vec()),
+            Value::Long(n) => mysql_async::Value::Bytes(n.to_string().into_bytes()),
+            Value::Double(f) => mysql_async::Value::Bytes(f.to_string().into_bytes()),
+            Value::True => mysql_async::Value::Bytes(b"1".to_vec()),
+            Value::False => mysql_async::Value::Bytes(Vec::new()),
+            other => mysql_async::Value::Bytes(other.to_php_string().as_bytes().to_vec()),
+        }
+    }
+}
+
+fn mysqli_stmt_execute(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    // Capture (conn_id, query, types, refs, blob_buffers) without holding the
+    // STMTS borrow across the blocking I/O call.
+    let stmt_info = STMTS.with(|s| {
+        s.borrow().get(&stmt_id).map(|st| (
+            st.conn_id,
+            st.query.clone(),
+            st.param_types.clone().unwrap_or_default(),
+            st.param_refs.clone(),
+            st.param_blob_buffers.clone(),
+        ))
+    });
+    let (conn_id, query, types_str, param_refs, blob_buffers) = match stmt_info {
+        Some(i) => i, None => return Ok(Value::False)
+    };
+    let session = get_session(conn_id);
+    let (opts, holder) = match session { Some(s) => s, None => return Ok(Value::False) };
+
+    // Build mysql params from the live values now (not from cached values
+    // captured at bind_param time).
+    let mut mysql_params: Vec<mysql_async::Value> = Vec::with_capacity(param_refs.len());
+    let types_bytes = types_str.as_bytes();
+    for (i, r) in param_refs.iter().enumerate() {
+        let t = types_bytes.get(i).copied().unwrap_or(b's');
+        let live = Value::Reference(r.clone());
+        let empty_vec = Vec::new();
+        let buf: &[u8] = blob_buffers.get(i).map(|b| b.as_slice()).unwrap_or(empty_vec.as_slice());
+        mysql_params.push(php_to_mysql_param(&live, t, buf));
+    }
+
+    let result: QueryResult = block_on(async move {
+        let mut conn = take_conn(&opts, &holder).await?;
+        let res = async {
+            let stmt = conn.prep(&query).await?;
+            let mut qr = conn.exec_iter(&stmt, mysql_params).await?;
+            let columns_raw: Vec<mysql_async::Column> = qr.columns_ref().to_vec();
+            if columns_raw.is_empty() {
+                let affected = qr.affected_rows();
+                let insert_id = qr.last_insert_id().unwrap_or(0);
+                drop(qr);
+                conn.close(stmt).await?;
+                return Ok((None, affected, insert_id));
+            }
+            let col_meta = build_column_meta(&columns_raw);
+            let col_names: Vec<String> = columns_raw.iter().map(|c| c.name_str().to_string()).collect();
+            let raw_rows_async: Vec<mysql_async::Row> = qr.collect().await?;
+            let mut rows = Vec::with_capacity(raw_rows_async.len());
+            let mut raw_rows: Vec<Vec<mysql_async::Value>> = Vec::with_capacity(raw_rows_async.len());
+            for row in &raw_rows_async {
+                rows.push(row_to_string_columns(row, &col_names));
+                let mut rr: Vec<mysql_async::Value> = Vec::with_capacity(col_meta.len());
+                for i in 0..col_meta.len() {
+                    rr.push(row.as_ref(i).cloned().unwrap_or(mysql_async::Value::NULL));
+                }
+                raw_rows.push(rr);
+            }
+            let num_rows = rows.len();
             conn.close(stmt).await?;
-            return Ok((None, affected, insert_id));
-        }
-        let col_names: Vec<String> = columns.iter().map(|c| c.name_str().to_string()).collect();
-        let raw_rows: Vec<mysql_async::Row> = qr.collect().await?;
-        let mut rows = Vec::with_capacity(raw_rows.len());
-        for row in &raw_rows {
-            rows.push(row_to_string_columns(row, &col_names));
-        }
-        let num_rows = rows.len();
-        conn.close(stmt).await?;
-        Ok((Some((rows, num_rows)), 0u64, 0u64))
+            Ok::<_, mysql_async::Error>((Some((rows, num_rows, col_meta, raw_rows)), 0u64, 0u64))
+        }.await;
+        restore_conn(&holder, conn);
+        res
     });
 
     match result {
@@ -744,10 +1068,19 @@ fn mysqli_stmt_execute(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     stmt.insert_id = insert_id as i64;
                     stmt.last_error.clear();
                     stmt.last_errno = 0;
-                    if let Some((rows, num_rows)) = rows_opt {
+                    if let Some((rows, num_rows, columns, raw_rows)) = rows_opt {
                         let temp_key = stmt_id | 0x8000_0000_0000_0000;
-                        RESULTS.with(|r| r.borrow_mut().insert(temp_key, MysqliResult { rows, current_row: 0, num_rows }));
+                        RESULTS.with(|r| r.borrow_mut().insert(temp_key, MysqliResult {
+                            rows, current_row: 0, num_rows, columns, raw_rows,
+                        }));
                     }
+                }
+            });
+            // Clear blob buffers after execute (matches PHP libmysql behaviour:
+            // long_data is consumed by a single execute and must be re-sent).
+            STMTS.with(|s| {
+                if let Some(stmt) = s.borrow_mut().get_mut(&stmt_id) {
+                    for buf in stmt.param_blob_buffers.iter_mut() { buf.clear(); }
                 }
             });
             CONNECTIONS.with(|c| {
@@ -808,12 +1141,13 @@ fn mysqli_select_db(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn mysqli_ping(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let id = args.first().and_then(get_object_id).unwrap_or(0);
-    let pool = CONNECTIONS.with(|c| c.borrow().get(&id).map(|conn| conn.pool.clone()));
-    let pool = match pool { Some(p) => p, None => return Ok(Value::False) };
-    let result: Result<(), mysql_async::Error> = block_on(async {
-        let mut conn = pool.get_conn().await?;
-        conn.ping().await?;
-        Ok(())
+    let session = get_session(id);
+    let (opts, holder) = match session { Some(s) => s, None => return Ok(Value::False) };
+    let result: Result<(), mysql_async::Error> = block_on(async move {
+        let mut conn = take_conn(&opts, &holder).await?;
+        let res = conn.ping().await;
+        restore_conn(&holder, conn);
+        res
     });
     if result.is_ok() { Ok(Value::True) } else { Ok(Value::False) }
 }
@@ -1171,23 +1505,24 @@ fn mysqli_real_connect(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         builder = builder.db_name(Some(db));
     }
 
-    let pool = mysql_async::Pool::new(builder);
+    let opts: mysql_async::Opts = builder.into();
     let conn_result = block_on(async {
-        let conn = pool.get_conn().await?;
+        let conn = mysql_async::Conn::new(opts.clone()).await?;
         let sv = conn.server_version();
         let info = format!("{}.{}.{}", sv.0, sv.1, sv.2);
-        drop(conn);
-        Ok::<String, mysql_async::Error>(info)
+        Ok::<(mysql_async::Conn, String), mysql_async::Error>((conn, info))
     });
 
     match conn_result {
-        Ok(server_info) => {
+        Ok((conn, server_info)) => {
             LAST_CONNECT_ERROR.with(|e| *e.borrow_mut() = String::new());
             LAST_CONNECT_ERRNO.with(|e| *e.borrow_mut() = 0);
             // Reuse the existing object id so $mysqli stays as-is.
             let id = target_obj.borrow().object_id;
             CONNECTIONS.with(|c| c.borrow_mut().insert(id, MysqliConnection {
-                pool, last_error: String::new(), last_errno: 0,
+                opts,
+                conn: Rc::new(RefCell::new(Some(conn))),
+                last_error: String::new(), last_errno: 0,
                 affected_rows: 0, insert_id: 0, server_info, autocommit: true,
             }));
             // Populate visible properties on the object.
@@ -1466,7 +1801,10 @@ fn mysqli_stmt_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let stmt_id = vm.next_object_id();
     let stmt_obj = PhpObject::new(b"mysqli_stmt".to_vec(), stmt_id);
     STMTS.with(|s| s.borrow_mut().insert(stmt_id, MysqliStmt {
-        conn_id, query: String::new(), param_types: None, param_values: Vec::new(),
+        conn_id, query: String::new(), param_types: None,
+        param_refs: Vec::new(),
+        param_blob_buffers: Vec::new(),
+        bound_result_refs: Vec::new(),
         result_id: None, last_error: String::new(), last_errno: 0,
         affected_rows: 0, insert_id: 0,
     }));
@@ -1561,22 +1899,52 @@ fn mysqli_stmt_store_result_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, V
 }
 
 fn mysqli_stmt_fetch_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Stub: without bind_result we can't actually fetch into bound vars.
-    // Returning NULL (no more rows) is the safest behavior so loops terminate.
+    // Returns: TRUE for a fetched row, NULL when no more rows, FALSE on error.
+    // If bind_result was called, populate the bound references with typed
+    // PHP values matching the column metadata.
     let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
     let temp_key = stmt_id | 0x8000_0000_0000_0000;
-    RESULTS.with(|r| {
+    // Take a snapshot of (raw row, columns) and the bound refs, then write
+    // outside the STMTS / RESULTS borrows to avoid re-entrancy issues.
+    let bound_refs: Vec<Rc<RefCell<Value>>> = STMTS.with(|s| {
+        s.borrow().get(&stmt_id).map(|st| st.bound_result_refs.clone()).unwrap_or_default()
+    });
+    let snapshot: Option<(Vec<mysql_async::Value>, Vec<ColumnMeta>)> = RESULTS.with(|r| {
         let mut results = r.borrow_mut();
-        let result = match results.get_mut(&temp_key) { Some(r) => r, None => return Ok(Value::Null) };
-        if result.current_row >= result.num_rows { return Ok(Value::Null); }
+        let result = match results.get_mut(&temp_key) { Some(r) => r, None => return None };
+        if result.current_row >= result.num_rows { return None; }
+        let idx = result.current_row;
         result.current_row += 1;
-        Ok(Value::True)
-    })
+        let raw = result.raw_rows.get(idx).cloned().unwrap_or_default();
+        Some((raw, result.columns.clone()))
+    });
+    let (raw_row, cols) = match snapshot { Some(s) => s, None => return Ok(Value::Null) };
+    if !bound_refs.is_empty() && !cols.is_empty() {
+        for (i, r) in bound_refs.iter().enumerate() {
+            let v = if let (Some(rv), Some(meta)) = (raw_row.get(i), cols.get(i)) {
+                mysql_value_to_php(rv, meta)
+            } else {
+                Value::Null
+            };
+            *r.borrow_mut() = v;
+        }
+    }
+    Ok(Value::True)
 }
 
-fn mysqli_stmt_bind_result_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Not implemented: would require bound-variable references.
-    Ok(Value::True)
+fn mysqli_stmt_bind_result_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    // Each subsequent arg should be a Value::Reference into the caller's
+    // variable. Capture and store; fetch() writes typed values into these.
+    let refs: Vec<Rc<RefCell<Value>>> = args.iter().skip(1).map(extract_or_new_ref).collect();
+    STMTS.with(|s| {
+        if let Some(stmt) = s.borrow_mut().get_mut(&stmt_id) {
+            stmt.bound_result_refs = refs;
+            Ok(Value::True)
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
 
 fn mysqli_stmt_attr_set_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -1591,8 +1959,25 @@ fn mysqli_stmt_data_seek_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
     Ok(Value::Null)
 }
 
-fn mysqli_stmt_send_long_data_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+fn mysqli_stmt_send_long_data_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // mysqli_stmt_send_long_data(mysqli_stmt $stmt, int $param_num, string $data)
+    let stmt_id = args.first().and_then(get_object_id).unwrap_or(0);
+    let param_num = args.get(1).map(|v| v.to_long() as usize).unwrap_or(0);
+    let data = args.get(2).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    STMTS.with(|s| {
+        let mut stmts = s.borrow_mut();
+        if let Some(stmt) = stmts.get_mut(&stmt_id) {
+            // Ensure the blob buffer has enough slots — bind_param resizes
+            // to the number of params, but defensively grow here too.
+            if param_num >= stmt.param_blob_buffers.len() {
+                stmt.param_blob_buffers.resize(param_num + 1, Vec::new());
+            }
+            stmt.param_blob_buffers[param_num].extend_from_slice(&data);
+            Ok(Value::True)
+        } else {
+            Ok(Value::False)
+        }
+    })
 }
 
 fn mysqli_stmt_result_metadata_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1608,7 +1993,8 @@ fn mysqli_stmt_result_metadata_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
             let res_obj = PhpObject::new(b"mysqli_result".to_vec(), res_id);
             // Store a faux result with just one fake row representing the columns.
             RESULTS.with(|r| r.borrow_mut().insert(res_id, MysqliResult {
-                rows: vec![cols], current_row: 0, num_rows: 0
+                rows: vec![cols], current_row: 0, num_rows: 0,
+                columns: Vec::new(), raw_rows: Vec::new(),
             }));
             Ok(Value::Object(Rc::new(RefCell::new(res_obj))))
         }
@@ -1636,47 +2022,60 @@ fn mysqli_execute_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             None
         }
     });
-    let pool = CONNECTIONS.with(|c| c.borrow().get(&id).map(|conn| conn.pool.clone()));
-    let pool = match pool { Some(p) => p, None => return Ok(Value::False) };
+    let session = get_session(id);
+    let (opts, holder) = match session { Some(s) => s, None => return Ok(Value::False) };
 
-    let result: QueryResult = block_on(async {
-        let mut conn = pool.get_conn().await?;
-        let mp: Vec<mysql_async::Value> = if let Some(ps) = params {
-            ps.iter().map(|v| match v {
-                Value::Null => mysql_async::Value::NULL,
-                Value::Long(n) => mysql_async::Value::Int(*n),
-                Value::Double(f) => mysql_async::Value::Double(*f),
-                Value::True => mysql_async::Value::Int(1),
-                Value::False => mysql_async::Value::Int(0),
-                _ => mysql_async::Value::Bytes(v.to_php_string().to_string_lossy().into_bytes()),
-            }).collect()
-        } else { Vec::new() };
-        let stmt = conn.prep(&query).await?;
-        let mut qr = conn.exec_iter(&stmt, mp).await?;
-        let columns: Vec<mysql_async::Column> = qr.columns_ref().to_vec();
-        if columns.is_empty() {
-            let affected = qr.affected_rows();
-            let insert_id = qr.last_insert_id().unwrap_or(0);
-            drop(qr);
+    let result: QueryResult = block_on(async move {
+        let mut conn = take_conn(&opts, &holder).await?;
+        let res = async {
+            let mp: Vec<mysql_async::Value> = if let Some(ps) = params {
+                ps.iter().map(|v| match v {
+                    Value::Null => mysql_async::Value::NULL,
+                    Value::Long(n) => mysql_async::Value::Int(*n),
+                    Value::Double(f) => mysql_async::Value::Double(*f),
+                    Value::True => mysql_async::Value::Int(1),
+                    Value::False => mysql_async::Value::Int(0),
+                    _ => mysql_async::Value::Bytes(v.to_php_string().to_string_lossy().into_bytes()),
+                }).collect()
+            } else { Vec::new() };
+            let stmt = conn.prep(&query).await?;
+            let mut qr = conn.exec_iter(&stmt, mp).await?;
+            let columns_raw: Vec<mysql_async::Column> = qr.columns_ref().to_vec();
+            if columns_raw.is_empty() {
+                let affected = qr.affected_rows();
+                let insert_id = qr.last_insert_id().unwrap_or(0);
+                drop(qr);
+                conn.close(stmt).await?;
+                return Ok((None, affected, insert_id));
+            }
+            let col_meta = build_column_meta(&columns_raw);
+            let col_names: Vec<String> = columns_raw.iter().map(|c| c.name_str().to_string()).collect();
+            let raw_rows_async: Vec<mysql_async::Row> = qr.collect().await?;
+            let mut rows = Vec::with_capacity(raw_rows_async.len());
+            let mut raw_rows: Vec<Vec<mysql_async::Value>> = Vec::with_capacity(raw_rows_async.len());
+            for row in &raw_rows_async {
+                rows.push(row_to_string_columns(row, &col_names));
+                let mut rr: Vec<mysql_async::Value> = Vec::with_capacity(col_meta.len());
+                for i in 0..col_meta.len() {
+                    rr.push(row.as_ref(i).cloned().unwrap_or(mysql_async::Value::NULL));
+                }
+                raw_rows.push(rr);
+            }
+            let num_rows = rows.len();
             conn.close(stmt).await?;
-            return Ok((None, affected, insert_id));
-        }
-        let col_names: Vec<String> = columns.iter().map(|c| c.name_str().to_string()).collect();
-        let raw_rows: Vec<mysql_async::Row> = qr.collect().await?;
-        let mut rows = Vec::with_capacity(raw_rows.len());
-        for row in &raw_rows {
-            rows.push(row_to_string_columns(row, &col_names));
-        }
-        let num_rows = rows.len();
-        conn.close(stmt).await?;
-        Ok((Some((rows, num_rows)), 0u64, 0u64))
+            Ok::<_, mysql_async::Error>((Some((rows, num_rows, col_meta, raw_rows)), 0u64, 0u64))
+        }.await;
+        restore_conn(&holder, conn);
+        res
     });
 
     match result {
-        Ok((Some((rows, num_rows)), _, _)) => {
+        Ok((Some((rows, num_rows, columns, raw_rows)), _, _)) => {
             let res_id = vm.next_object_id();
             let res_obj = PhpObject::new(b"mysqli_result".to_vec(), res_id);
-            RESULTS.with(|r| r.borrow_mut().insert(res_id, MysqliResult { rows, current_row: 0, num_rows }));
+            RESULTS.with(|r| r.borrow_mut().insert(res_id, MysqliResult {
+                rows, current_row: 0, num_rows, columns, raw_rows,
+            }));
             Ok(Value::Object(Rc::new(RefCell::new(res_obj))))
         }
         Ok(_) => Ok(Value::True),
