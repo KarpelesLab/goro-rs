@@ -7907,9 +7907,37 @@ fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
     })
 }
 
-fn fopen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let mode = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
+
+    // Handle http:// and https:// URLs via the built-in HTTP client. Fetch
+    // the body upfront and back the resulting handle with a temp file so
+    // subsequent fread/feof/fgets calls work as normal file ops.
+    if filename.starts_with("http://") || filename.starts_with("https://") {
+        let val = http_fetch_ctx(&filename, vm, "GET", &[], &[]);
+        let body = match val {
+            Value::String(s) => s.as_bytes().to_vec(),
+            _ => return Ok(Value::False),
+        };
+        // Write to a temp file
+        let tmp_path = std::env::temp_dir().join(format!(
+            "goro_http_{}_{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        ));
+        if std::fs::write(&tmp_path, &body).is_err() {
+            return Ok(Value::False);
+        }
+        if let Ok(f) = std::fs::File::open(&tmp_path) {
+            // Best-effort cleanup; we leak the temp file otherwise.
+            let _ = std::fs::remove_file(&tmp_path);
+            let fid = alloc_file_handle(f, &mode);
+            goro_core::value::register_resource(fid, b"stream");
+            return Ok(Value::Long(fid));
+        }
+        return Ok(Value::False);
+    }
 
     // Normalize mode: strip 'b' (binary) and 't' (text) flags - they're all the same on Linux
     let mode_clean: String = mode.chars().filter(|&c| c != 'b' && c != 't').collect();
