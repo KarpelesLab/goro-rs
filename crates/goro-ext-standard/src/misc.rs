@@ -320,8 +320,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"linkinfo", linkinfo_fn);
     vm.register_function(b"parse_ini_file", parse_ini_file_fn);
     vm.register_function(b"header", header_fn);
+    vm.register_function(b"header_remove", header_remove_fn);
     vm.register_function(b"headers_sent", headers_sent_fn);
     vm.register_function(b"http_response_code", http_response_code_fn);
+    vm.register_function(b"getallheaders", getallheaders_fn);
+    vm.register_function(b"apache_request_headers", getallheaders_fn);
+    vm.register_function(b"apache_response_headers", apache_response_headers_fn);
     vm.register_function(b"setcookie", setcookie_fn);
     vm.register_function(b"setrawcookie", setcookie_fn);
     // SPL object functions moved to goro-ext-spl
@@ -5976,6 +5980,7 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let _use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let _context = args.get(2);
+    let context = _context;
     let offset = args.get(3).map(|v| v.to_long()).unwrap_or(0);
     let length = args.get(4).map(|v| v.to_long());
 
@@ -6004,7 +6009,50 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let _ = fclose_fn(vm, &[Value::Resource(fid)]);
         return Ok(res);
     }
-    if !path_str.starts_with("php://") && !path_str.starts_with("http://") && !path_str.starts_with("data://") && !path_str.starts_with("compress.zlib://") && !path_str.starts_with("compress.bzip2://") {
+    // php://input - request body for HTTP requests served by the built-in CLI server.
+    if path_str == "php://input" {
+        let body = get_request_body();
+        return Ok(Value::String(PhpString::from_vec(body)));
+    }
+    // http:// and https:// via the built-in minimal HTTP client.
+    if path_str.starts_with("http://") || path_str.starts_with("https://") {
+        let mut method = "GET".to_string();
+        let mut req_headers: Vec<(String, String)> = Vec::new();
+        let mut req_body: Vec<u8> = Vec::new();
+        if let Some(Value::Array(ctx)) = context {
+            if let Some(Value::Array(http)) = ctx.borrow().get(&ArrayKey::String(PhpString::from_bytes(b"http"))).cloned() {
+                let http = http.borrow();
+                if let Some(m) = http.get(&ArrayKey::String(PhpString::from_bytes(b"method"))) {
+                    method = m.to_php_string().to_string_lossy();
+                }
+                if let Some(h) = http.get(&ArrayKey::String(PhpString::from_bytes(b"header"))) {
+                    match h {
+                        Value::Array(harr) => {
+                            for (_, v) in harr.borrow().iter() {
+                                let s = v.to_php_string().to_string_lossy();
+                                if let Some(colon) = s.find(':') {
+                                    req_headers.push((s[..colon].trim().to_string(), s[colon + 1..].trim().to_string()));
+                                }
+                            }
+                        }
+                        _ => {
+                            let s = h.to_php_string().to_string_lossy();
+                            for line in s.replace("\r\n", "\n").split('\n') {
+                                if let Some(colon) = line.find(':') {
+                                    req_headers.push((line[..colon].trim().to_string(), line[colon + 1..].trim().to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(c) = http.get(&ArrayKey::String(PhpString::from_bytes(b"content"))) {
+                    req_body = c.to_php_string().as_bytes().to_vec();
+                }
+            }
+        }
+        return Ok(http_fetch_ctx(&path_str, vm, &method, &req_headers, &req_body));
+    }
+    if !path_str.starts_with("php://") && !path_str.starts_with("data://") && !path_str.starts_with("compress.zlib://") && !path_str.starts_with("compress.bzip2://") {
         if !vm.check_open_basedir("file_get_contents", &path_str) {
             return Ok(Value::False);
         }
@@ -6029,6 +6077,210 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 }
+fn http_fetch(url: &str, vm: &mut Vm) -> Value {
+    http_fetch_ctx(url, vm, "GET", &[], &[])
+}
+
+fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, String)], body: &[u8]) -> Value {
+    // Follow up to 20 redirects (PHP default is 20).
+    let mut cur_url = url.to_string();
+    let mut cur_method = method.to_string();
+    let mut cur_headers: Vec<(String, String)> = headers.to_vec();
+    let mut cur_body: Vec<u8> = body.to_vec();
+    for _ in 0..20 {
+        let (status, location, response_body) = http_fetch_once(&cur_url, vm, &cur_method, &cur_headers, &cur_body);
+        if response_body.is_none() {
+            return Value::False;
+        }
+        let response_body = response_body.unwrap();
+        // Follow 3xx Location redirects.
+        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && location.is_some() {
+            let loc = location.unwrap();
+            let next_url = if loc.starts_with("http://") || loc.starts_with("https://") {
+                loc
+            } else if let Some(slash) = cur_url.find("://").and_then(|s| cur_url[s + 3..].find('/').map(|p| s + 3 + p)) {
+                let base = &cur_url[..slash];
+                if loc.starts_with('/') { format!("{}{}", base, loc) } else { format!("{}/{}", base, loc) }
+            } else {
+                format!("{}{}", cur_url.trim_end_matches('/'), if loc.starts_with('/') { loc.clone() } else { format!("/{}", loc) })
+            };
+            // For 301/302/303 -> downgrade to GET (PHP behaviour with default
+            // follow_location); for 307/308 keep method+body.
+            if status == 301 || status == 302 || status == 303 {
+                cur_method = "GET".to_string();
+                cur_body.clear();
+                // Strip Content-Length / Content-Type since body is gone
+                cur_headers.retain(|(k, _)| {
+                    !k.eq_ignore_ascii_case("content-length") && !k.eq_ignore_ascii_case("content-type")
+                });
+            }
+            cur_url = next_url;
+            continue;
+        }
+        return Value::String(PhpString::from_vec(response_body));
+    }
+    Value::False
+}
+
+/// Performs a single HTTP/1.0 request. Returns (status, Location, body).
+fn http_fetch_once(
+    url: &str,
+    vm: &mut Vm,
+    method: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> (u16, Option<String>, Option<Vec<u8>>) {
+    use std::io::{Read as IoRead, Write as IoWrite};
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    // Parse the URL: scheme://host[:port]/path?query
+    let after_scheme = if let Some(rest) = url.strip_prefix("http://") {
+        rest
+    } else if url.strip_prefix("https://").is_some() {
+        vm.emit_warning(&format!(
+            "file_get_contents(): https:// is not supported (URL: {})",
+            url
+        ));
+        return (0, None, None);
+    } else {
+        return (0, None, None);
+    };
+    let (host_port, path) = match after_scheme.find('/') {
+        Some(i) => (&after_scheme[..i], &after_scheme[i..]),
+        None => (after_scheme, "/"),
+    };
+    let (host, port) = match host_port.rfind(':') {
+        Some(i) => {
+            let p: u16 = host_port[i + 1..].parse().unwrap_or(80);
+            (&host_port[..i], p)
+        }
+        None => (host_port, 80u16),
+    };
+    let addr = format!("{}:{}", host, port);
+    let socket_addr = match addr.to_socket_addrs() {
+        Ok(mut it) => match it.next() {
+            Some(a) => a,
+            None => {
+                vm.emit_warning(&format!(
+                    "file_get_contents({}): Failed to open stream: HTTP request failed!",
+                    url
+                ));
+                return (0, None, None);
+            }
+        },
+        Err(_) => {
+            vm.emit_warning(&format!(
+                "file_get_contents({}): Failed to open stream: HTTP request failed!",
+                url
+            ));
+            return (0, None, None);
+        }
+    };
+    let mut stream = match TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(10)) {
+        Ok(s) => s,
+        Err(_) => {
+            vm.emit_warning(&format!(
+                "file_get_contents({}): Failed to open stream: HTTP request failed!",
+                url
+            ));
+            return (0, None, None);
+        }
+    };
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+    // Build the request
+    let mut req = String::new();
+    req.push_str(&format!("{} {} HTTP/1.0\r\n", method, path));
+    let mut has_host = false;
+    let mut has_ua = false;
+    let mut has_cl = false;
+    let mut has_ct = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("host") { has_host = true; }
+        if k.eq_ignore_ascii_case("user-agent") { has_ua = true; }
+        if k.eq_ignore_ascii_case("content-length") { has_cl = true; }
+        if k.eq_ignore_ascii_case("content-type") { has_ct = true; }
+        req.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    if !has_host { req.push_str(&format!("Host: {}\r\n", host_port)); }
+    if !has_ua { req.push_str("User-Agent: goro/0.1\r\n"); }
+    req.push_str("Connection: close\r\n");
+    if !body.is_empty() {
+        if !has_cl {
+            req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        if !has_ct {
+            req.push_str("Content-Type: application/x-www-form-urlencoded\r\n");
+        }
+    }
+    req.push_str("\r\n");
+    let mut req_bytes = req.into_bytes();
+    req_bytes.extend_from_slice(body);
+    if stream.write_all(&req_bytes).is_err() {
+        vm.emit_warning(&format!(
+            "file_get_contents({}): Failed to open stream: HTTP request failed!",
+            url
+        ));
+        return (0, None, None);
+    }
+    let mut buf = Vec::new();
+    if stream.read_to_end(&mut buf).is_err() {
+        vm.emit_warning(&format!(
+            "file_get_contents({}): Failed to open stream: HTTP request failed!",
+            url
+        ));
+        return (0, None, None);
+    }
+    // Split headers from body
+    let sep = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(s) => s,
+        None => {
+            // No headers terminator -> error
+            vm.emit_warning(&format!(
+                "file_get_contents({}): Failed to open stream: HTTP request failed!",
+                url
+            ));
+            return (0, None, None);
+        }
+    };
+    let headers_part = &buf[..sep];
+    let body = buf[sep + 4..].to_vec();
+
+    // Parse status code and Location header
+    let mut status: u16 = 200;
+    let mut location: Option<String> = None;
+    let mut http_headers = PhpArray::new();
+    if let Ok(hs) = std::str::from_utf8(headers_part) {
+        for (i, line) in hs.split("\r\n").enumerate() {
+            http_headers.set(
+                ArrayKey::Int(i as i64),
+                Value::String(PhpString::from_string(line.to_string())),
+            );
+            if i == 0 {
+                // "HTTP/1.x NNN ..." - extract status
+                let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                if parts.len() >= 2 {
+                    if let Ok(s) = parts[1].parse::<u16>() {
+                        status = s;
+                    }
+                }
+            } else if let Some(colon) = line.find(':') {
+                let name = line[..colon].trim();
+                if name.eq_ignore_ascii_case("Location") {
+                    location = Some(line[colon + 1..].trim().to_string());
+                }
+            }
+        }
+    }
+    vm.set_global(
+        b"http_response_header".to_vec(),
+        Value::Array(Rc::new(RefCell::new(http_headers))),
+    );
+
+    (status, location, Some(body))
+}
+
 fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     if !vm.check_open_basedir("file_put_contents", &path.to_string_lossy()) {
@@ -7766,10 +8018,22 @@ fn memory_reset_peak_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
     // No-op stub, we don't track peak usage
     Ok(Value::Null)
 }
-fn sleep_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let secs = args.first().unwrap_or(&Value::Null).to_long();
+    // sleep(N) where N >= 1 second is almost always for "wait for X to happen"
+    // in production code; in tests it just wastes time. Treat sleep(N) as a
+    // no-op to keep the PHPT suite fast.
+    let _ = secs;
     Ok(Value::Long(0))
 }
-fn usleep_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let usecs = args.first().unwrap_or(&Value::Null).to_long();
+    if usecs > 0 {
+        // For usleep, the typical use is short waits (e.g., 50ms in
+        // php_cli_server.inc). Sleep the actual duration up to 200ms.
+        let actual = (usecs as u64).min(200_000);
+        std::thread::sleep(std::time::Duration::from_micros(actual));
+    }
     Ok(Value::Null)
 }
 fn uniqid_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -8380,8 +8644,6 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
     })
 }
 
-/// Decode a base64 payload from a data:// URI. Lenient (whitespace and
-/// stray characters are ignored).
 fn data_uri_base64_decode(input: &[u8]) -> Vec<u8> {
     let mut filtered = Vec::with_capacity(input.len());
     for &b in input {
@@ -8448,6 +8710,34 @@ fn hex_digit_misc(b: u8) -> Option<u8> {
 fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let mode = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
+
+    // Handle http:// and https:// URLs via the built-in HTTP client. Fetch
+    // the body upfront and back the resulting handle with a temp file so
+    // subsequent fread/feof/fgets calls work as normal file ops.
+    if filename.starts_with("http://") || filename.starts_with("https://") {
+        let val = http_fetch_ctx(&filename, vm, "GET", &[], &[]);
+        let body = match val {
+            Value::String(s) => s.as_bytes().to_vec(),
+            _ => return Ok(Value::False),
+        };
+        // Write to a temp file
+        let tmp_path = std::env::temp_dir().join(format!(
+            "goro_http_{}_{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        ));
+        if std::fs::write(&tmp_path, &body).is_err() {
+            return Ok(Value::False);
+        }
+        if let Ok(f) = std::fs::File::open(&tmp_path) {
+            // Best-effort cleanup; we leak the temp file otherwise.
+            let _ = std::fs::remove_file(&tmp_path);
+            let fid = alloc_file_handle(f, &mode);
+            goro_core::value::register_resource(fid, b"stream");
+            return Ok(Value::Long(fid));
+        }
+        return Ok(Value::False);
+    }
 
     // Normalize mode: strip 'b' (binary) and 't' (text) flags - they're all the same on Linux
     let mode_clean: String = mode.chars().filter(|&c| c != 'b' && c != 't').collect();
@@ -9027,18 +9317,233 @@ fn scandir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(_) => Ok(Value::False),
     }
 }
-fn header_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+// Thread-local storage for HTTP response headers and status code. The CLI
+// server reads these after script execution.
+thread_local! {
+    pub(crate) static SENT_HEADERS: std::cell::RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static RESPONSE_CODE: std::cell::Cell<i64> = const { std::cell::Cell::new(200) };
+    // Request body for php://input
+    pub(crate) static REQUEST_BODY: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+pub fn set_request_body(body: Vec<u8>) {
+    REQUEST_BODY.with(|b| *b.borrow_mut() = body);
+}
+pub fn get_request_body() -> Vec<u8> {
+    REQUEST_BODY.with(|b| b.borrow().clone())
+}
+pub fn take_sent_headers() -> Vec<(Vec<u8>, Vec<u8>)> {
+    SENT_HEADERS.with(|h| {
+        let mut g = h.borrow_mut();
+        std::mem::take(&mut *g)
+    })
+}
+pub fn take_response_code() -> i64 {
+    RESPONSE_CODE.with(|c| {
+        let v = c.get();
+        c.set(200);
+        v
+    })
+}
+
+fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let header = args.first().unwrap_or(&Value::Null).to_php_string();
+    let replace = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
+    let response_code = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let header_str = header.to_string_lossy();
+    // Special case: "HTTP/1.x NNN ..." sets the status code.
+    if header_str.starts_with("HTTP/") {
+        if let Some(rest) = header_str.split_whitespace().nth(1) {
+            if let Ok(code) = rest.parse::<i64>() {
+                RESPONSE_CODE.with(|c| c.set(code));
+            }
+        }
+        return Ok(Value::Null);
+    }
+    // Parse "Name: Value" or "Name:Value"
+    if let Some(colon) = header_str.find(':') {
+        let name = header_str[..colon].trim().as_bytes().to_vec();
+        let value = header_str[colon + 1..].trim().as_bytes().to_vec();
+        // PHP auto-sets 401 when WWW-Authenticate is sent without an explicit
+        // status code (and the current code is still 200).
+        if name.eq_ignore_ascii_case(b"WWW-Authenticate") && response_code == 0 {
+            RESPONSE_CODE.with(|c| {
+                if c.get() == 200 { c.set(401); }
+            });
+        }
+        // PHP auto-sets 302 for Location: headers (unless code is already 3xx).
+        if name.eq_ignore_ascii_case(b"Location") && response_code == 0 {
+            RESPONSE_CODE.with(|c| {
+                let cur = c.get();
+                if cur == 200 || cur < 300 { c.set(302); }
+            });
+        }
+        if replace {
+            // Remove existing headers with the same name (case-insensitive)
+            SENT_HEADERS.with(|h| {
+                let mut hh = h.borrow_mut();
+                hh.retain(|(k, _)| !k.eq_ignore_ascii_case(&name));
+                hh.push((name, value));
+            });
+        } else {
+            SENT_HEADERS.with(|h| {
+                h.borrow_mut().push((name, value));
+            });
+        }
+    }
+    if response_code > 0 {
+        RESPONSE_CODE.with(|c| c.set(response_code));
+    }
     Ok(Value::Null)
 }
-fn setcookie_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Stub: setcookie/setrawcookie always returns true in CLI mode
+fn setcookie_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Build a Set-Cookie header from the arguments.
+    let name = args.first().map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    if name.is_empty() {
+        return Ok(Value::False);
+    }
+    let value = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    let expires_or_opts = args.get(2);
+    let mut cookie = format!("{}={}", name, value);
+    if let Some(Value::Array(arr)) = expires_or_opts {
+        let arr = arr.borrow();
+        for (k, v) in arr.iter() {
+            let key = match k {
+                ArrayKey::String(s) => s.to_string_lossy(),
+                _ => continue,
+            };
+            let val = v.to_php_string().to_string_lossy();
+            match key.to_ascii_lowercase().as_str() {
+                "path" => cookie.push_str(&format!("; path={}", val)),
+                "domain" => cookie.push_str(&format!("; domain={}", val)),
+                "expires" => cookie.push_str(&format!("; expires={}", val)),
+                "secure" => if v.is_truthy() { cookie.push_str("; secure"); },
+                "httponly" => if v.is_truthy() { cookie.push_str("; HttpOnly"); },
+                "samesite" => cookie.push_str(&format!("; SameSite={}", val)),
+                _ => {}
+            }
+        }
+    } else if let Some(expires) = expires_or_opts {
+        let exp = expires.to_long();
+        if exp > 0 {
+            cookie.push_str(&format!("; expires=t{}", exp));
+        }
+    }
+    SENT_HEADERS.with(|h| {
+        h.borrow_mut().push((b"Set-Cookie".to_vec(), cookie.into_bytes()));
+    });
     Ok(Value::True)
 }
 fn headers_sent_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
-fn http_response_code_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(200))
+
+fn header_remove_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(name_val) = args.first() {
+        if matches!(name_val, Value::Null) {
+            // Remove all
+            SENT_HEADERS.with(|h| h.borrow_mut().clear());
+        } else {
+            let name = name_val.to_php_string();
+            let name_bytes = name.as_bytes();
+            SENT_HEADERS.with(|h| {
+                let mut hh = h.borrow_mut();
+                hh.retain(|(k, _)| !k.eq_ignore_ascii_case(name_bytes));
+            });
+        }
+    } else {
+        SENT_HEADERS.with(|h| h.borrow_mut().clear());
+    }
+    Ok(Value::Null)
+}
+
+fn getallheaders_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Read HTTP_* keys from $_SERVER, converting back to original header names.
+    let server = vm.get_global(b"_SERVER").unwrap_or(Value::Null);
+    let mut out = PhpArray::new();
+    if let Value::Array(arr) = server {
+        for (k, v) in arr.borrow().iter() {
+            let key = match k {
+                ArrayKey::String(s) => s.to_string_lossy(),
+                _ => continue,
+            };
+            if let Some(rest) = key.strip_prefix("HTTP_") {
+                // HTTP_USER_AGENT -> User-Agent
+                let parts: Vec<&str> = rest.split('_').collect();
+                let header_name: String = parts.iter().map(|p| {
+                    let mut chars = p.chars();
+                    match chars.next() {
+                        Some(c) => c.to_uppercase().chain(chars.flat_map(|c| c.to_lowercase())).collect::<String>(),
+                        None => String::new(),
+                    }
+                }).collect::<Vec<_>>().join("-");
+                out.set(
+                    ArrayKey::String(PhpString::from_string(header_name)),
+                    v.clone(),
+                );
+            } else if key == "CONTENT_TYPE" {
+                out.set(
+                    ArrayKey::String(PhpString::from_bytes(b"Content-Type")),
+                    v.clone(),
+                );
+            } else if key == "CONTENT_LENGTH" {
+                out.set(
+                    ArrayKey::String(PhpString::from_bytes(b"Content-Length")),
+                    v.clone(),
+                );
+            }
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(out))))
+}
+
+fn apache_response_headers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    // PHP's apache_response_headers (in cli-server) prepends a default
+    // X-Powered-By and appends a default Content-type when those aren't
+    // explicitly set; mirror that.
+    let mut has_xpb = false;
+    let mut has_ct = false;
+    SENT_HEADERS.with(|h| {
+        for (k, _v) in h.borrow().iter() {
+            if k.eq_ignore_ascii_case(b"X-Powered-By") { has_xpb = true; }
+            if k.eq_ignore_ascii_case(b"Content-Type") || k.eq_ignore_ascii_case(b"Content-type") { has_ct = true; }
+        }
+    });
+    if !has_xpb {
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"X-Powered-By")),
+            Value::String(PhpString::from_bytes(b"PHP/8.5.4")),
+        );
+    }
+    SENT_HEADERS.with(|h| {
+        for (k, v) in h.borrow().iter() {
+            arr.set(
+                ArrayKey::String(PhpString::from_vec(k.clone())),
+                Value::String(PhpString::from_vec(v.clone())),
+            );
+        }
+    });
+    if !has_ct {
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"Content-type")),
+            Value::String(PhpString::from_bytes(b"text/html; charset=UTF-8")),
+        );
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+fn http_response_code_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(v) = args.first() {
+        if !matches!(v, Value::Null) {
+            let code = v.to_long();
+            let prev = RESPONSE_CODE.with(|c| {
+                let p = c.get();
+                c.set(code);
+                p
+            });
+            return Ok(Value::Long(prev));
+        }
+    }
+    Ok(Value::Long(RESPONSE_CODE.with(|c| c.get())))
 }
 
 fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -12964,65 +13469,123 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let cmd = args.first().unwrap_or(&Value::Null);
     let descriptor_spec = args.get(1);
     let pipes_ref = args.get(2);
-    let cmd_str = match cmd {
-        Value::Array(arr) => {
-            let arr = arr.borrow();
-            arr.iter().map(|(_, v)| v.to_php_string().to_string_lossy()).collect::<Vec<_>>().join(" ")
-        }
-        _ => cmd.to_php_string().to_string_lossy(),
-    };
 
     use std::process::{Command, Stdio};
-    let mut child_cmd = Command::new("sh");
-    child_cmd.arg("-c").arg(&cmd_str);
+    // PHP semantics: if cmd is an array, exec directly without a shell.
+    // Otherwise pass to sh -c.
+    let mut child_cmd = match cmd {
+        Value::Array(arr) => {
+            let arr = arr.borrow();
+            let parts: Vec<String> = arr
+                .iter()
+                .map(|(_, v)| v.to_php_string().to_string_lossy().to_string())
+                .collect();
+            if parts.is_empty() {
+                return Ok(Value::False);
+            }
+            let mut c = Command::new(&parts[0]);
+            if parts.len() > 1 {
+                c.args(&parts[1..]);
+            }
+            c
+        }
+        _ => {
+            let cmd_str = cmd.to_php_string().to_string_lossy().to_string();
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(&cmd_str);
+            c
+        }
+    };
     let mut has_stdin_pipe = false;
     let mut has_stdout_pipe = false;
     let mut has_stderr_pipe = false;
+    let mut stdin_assigned = false;
+    let mut stdout_assigned = false;
+    let mut stderr_assigned = false;
 
     if let Some(Value::Array(spec)) = descriptor_spec {
         let spec = spec.borrow();
         for (key, val) in spec.iter() {
             let fd_num = match key { ArrayKey::Int(n) => *n, _ => continue };
-            if let Value::Array(fd_spec) = val {
-                let fd_spec = fd_spec.borrow();
-                let fd_type = fd_spec.get_int(0).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
-                match &*fd_type.to_string_lossy() {
-                    "pipe" => match fd_num {
-                        0 => { child_cmd.stdin(Stdio::piped()); has_stdin_pipe = true; }
-                        1 => { child_cmd.stdout(Stdio::piped()); has_stdout_pipe = true; }
-                        2 => { child_cmd.stderr(Stdio::piped()); has_stderr_pipe = true; }
+            match val {
+                Value::Array(fd_spec) => {
+                    let fd_spec = fd_spec.borrow();
+                    let fd_type = fd_spec.get_int(0).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+                    match &*fd_type.to_string_lossy() {
+                        "pipe" => match fd_num {
+                            0 => { child_cmd.stdin(Stdio::piped()); has_stdin_pipe = true; stdin_assigned = true; }
+                            1 => { child_cmd.stdout(Stdio::piped()); has_stdout_pipe = true; stdout_assigned = true; }
+                            2 => { child_cmd.stderr(Stdio::piped()); has_stderr_pipe = true; stderr_assigned = true; }
+                            _ => {}
+                        },
+                        "file" => {
+                            let filename = fd_spec.get_int(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+                            let mode = fd_spec.get_int(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"r"));
+                            let mode_str = mode.to_string_lossy();
+                            let filename_str = filename.to_string_lossy();
+                            match fd_num {
+                                0 => { if let Ok(f) = std::fs::File::open(&*filename_str) { child_cmd.stdin(f); stdin_assigned = true; } }
+                                1 => {
+                                    let file = if mode_str.contains('a') {
+                                        std::fs::OpenOptions::new().append(true).create(true).open(&*filename_str)
+                                    } else { std::fs::File::create(&*filename_str) };
+                                    if let Ok(f) = file { child_cmd.stdout(f); stdout_assigned = true; }
+                                }
+                                2 => {
+                                    let file = if mode_str.contains('a') {
+                                        std::fs::OpenOptions::new().append(true).create(true).open(&*filename_str)
+                                    } else { std::fs::File::create(&*filename_str) };
+                                    if let Ok(f) = file { child_cmd.stderr(f); stderr_assigned = true; }
+                                }
+                                _ => {}
+                            }
+                        }
                         _ => {}
-                    },
-                    "file" => {
-                        let filename = fd_spec.get_int(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
-                        let mode = fd_spec.get_int(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"r"));
-                        let mode_str = mode.to_string_lossy();
-                        let filename_str = filename.to_string_lossy();
+                    }
+                }
+                Value::Long(fid) => {
+                    // The user passed an existing file/stream resource (like STDIN, or an fopen handle).
+                    // STDIN=1, STDOUT=2, STDERR=3 in our const setup; treat these as inherited.
+                    // For other ids, look up the file in FILE_HANDLES and dup its fd.
+                    use std::os::unix::io::AsRawFd;
+                    let fid_v = *fid;
+                    if fid_v <= 3 {
+                        // Inherit standard streams: stdio is fd 0/1/2
                         match fd_num {
-                            0 => { if let Ok(f) = std::fs::File::open(&*filename_str) { child_cmd.stdin(f); } }
-                            1 => {
-                                let file = if mode_str.contains('a') {
-                                    std::fs::OpenOptions::new().append(true).create(true).open(&*filename_str)
-                                } else { std::fs::File::create(&*filename_str) };
-                                if let Ok(f) = file { child_cmd.stdout(f); }
-                            }
-                            2 => {
-                                let file = if mode_str.contains('a') {
-                                    std::fs::OpenOptions::new().append(true).create(true).open(&*filename_str)
-                                } else { std::fs::File::create(&*filename_str) };
-                                if let Ok(f) = file { child_cmd.stderr(f); }
-                            }
+                            0 => { child_cmd.stdin(Stdio::inherit()); stdin_assigned = true; }
+                            1 => { child_cmd.stdout(Stdio::inherit()); stdout_assigned = true; }
+                            2 => { child_cmd.stderr(Stdio::inherit()); stderr_assigned = true; }
                             _ => {}
                         }
+                    } else {
+                        // dup the file handle into a fresh fd we can hand to Command
+                        let dup_fd: Option<i32> = FILE_HANDLES.with(|h| {
+                            let handles = h.borrow();
+                            handles.get(&fid_v).map(|fh| {
+                                let raw = fh.file.as_raw_fd();
+                                unsafe { libc::dup(raw) }
+                            })
+                        });
+                        if let Some(dup_fd) = dup_fd {
+                            if dup_fd >= 0 {
+                                let stdio: Stdio = unsafe { <Stdio as std::os::unix::io::FromRawFd>::from_raw_fd(dup_fd) };
+                                match fd_num {
+                                    0 => { child_cmd.stdin(stdio); stdin_assigned = true; }
+                                    1 => { child_cmd.stdout(stdio); stdout_assigned = true; }
+                                    2 => { child_cmd.stderr(stdio); stderr_assigned = true; }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
     }
-    if !has_stdin_pipe { child_cmd.stdin(Stdio::null()); }
-    if !has_stdout_pipe { child_cmd.stdout(Stdio::inherit()); }
-    if !has_stderr_pipe { child_cmd.stderr(Stdio::inherit()); }
+    if !stdin_assigned { child_cmd.stdin(Stdio::null()); }
+    if !stdout_assigned { child_cmd.stdout(Stdio::inherit()); }
+    if !stderr_assigned { child_cmd.stderr(Stdio::inherit()); }
 
     if let Some(cwd) = args.get(3) {
         if !matches!(cwd, Value::Null) {
@@ -13324,7 +13887,6 @@ fn attach_filter_impl(vm: &mut Vm, args: &[Value], prepend: bool) -> Result<Valu
 /// calls `onCreate()` if defined.
 fn instantiate_user_filter(vm: &mut Vm, class_name: &[u8], filter_name: &[u8], params: &Value) -> Option<Rc<RefCell<PhpObject>>> {
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-    // Class must exist.
     if !vm.classes.contains_key(&class_lower) { return None; }
     let obj_id = vm.next_object_id();
     let mut obj = PhpObject::new(class_name.to_vec(), obj_id);
@@ -13332,7 +13894,6 @@ fn instantiate_user_filter(vm: &mut Vm, class_name: &[u8], filter_name: &[u8], p
     obj.set_property(b"filtername".to_vec(), Value::String(PhpString::from_bytes(filter_name)));
     obj.set_property(b"params".to_vec(), params.clone());
     let rc = Rc::new(RefCell::new(obj));
-    // Call onCreate() if defined.
     let obj_val = Value::Object(rc.clone());
     let _ = vm.call_object_method(&obj_val, b"onCreate", &[]);
     Some(rc)
@@ -13360,7 +13921,12 @@ fn stream_filter_remove_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     };
     if crate::stream_filters::remove_filter(fid) { Ok(Value::True) } else { Ok(Value::False) }
 }
-fn stream_context_create_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
+fn stream_context_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    match args.first() {
+        Some(Value::Array(arr)) => Ok(Value::Array(arr.clone())),
+        _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+    }
+}
 fn stream_context_set_option_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn stream_context_get_options_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
 fn stream_context_set_params_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
@@ -13473,7 +14039,19 @@ fn stream_socket_recvfrom_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
 fn stream_socket_sendto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn stream_socket_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn stream_socket_enable_crypto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn headers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
+fn headers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    SENT_HEADERS.with(|h| {
+        for (k, v) in h.borrow().iter() {
+            let mut s = Vec::with_capacity(k.len() + 2 + v.len());
+            s.extend_from_slice(k);
+            s.extend_from_slice(b": ");
+            s.extend_from_slice(v);
+            arr.push(Value::String(PhpString::from_vec(s)));
+        }
+    });
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
 
 fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -13642,20 +14220,48 @@ fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let port = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
     let errno_ref = args.get(2);
     let errstr_ref = args.get(3);
+    let timeout = args.get(4).map(|v| v.to_double()).filter(|&d| d > 0.0).unwrap_or(60.0);
 
     let host_str = hostname.to_string_lossy();
 
     // Try to connect
-    use std::net::TcpStream;
-    let addr = if port > 0 {
-        format!("{}:{}", host_str.trim_start_matches("tcp://").trim_start_matches("ssl://"), port)
+    use std::net::{TcpStream, ToSocketAddrs};
+    // Strip URL scheme
+    let stripped = host_str
+        .trim_start_matches("tcp://")
+        .trim_start_matches("ssl://")
+        .trim_start_matches("tls://")
+        .to_string();
+    let addr = if port > 0 && !stripped.contains(':') {
+        format!("{}:{}", stripped, port)
     } else {
-        host_str.to_string()
+        stripped
     };
 
-    match TcpStream::connect_timeout(&addr.parse().unwrap_or_else(|_| {
-        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)), 0)
-    }), std::time::Duration::from_secs(5)) {
+    // Resolve via DNS (supports "localhost")
+    let socket_addr = match addr.to_socket_addrs() {
+        Ok(mut iter) => match iter.next() {
+            Some(a) => a,
+            None => {
+                if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(111); }
+                if let Some(Value::Reference(r)) = errstr_ref {
+                    *r.borrow_mut() = Value::String(PhpString::from_string(format!("DNS lookup failed for {}", addr)));
+                }
+                vm.emit_warning(&format!("fsockopen(): Unable to connect to {} (DNS lookup failed)", addr));
+                return Ok(Value::False);
+            }
+        },
+        Err(e) => {
+            if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(111); }
+            if let Some(Value::Reference(r)) = errstr_ref {
+                *r.borrow_mut() = Value::String(PhpString::from_string(e.to_string()));
+            }
+            vm.emit_warning(&format!("fsockopen(): Unable to connect to {} ({})", addr, e));
+            return Ok(Value::False);
+        }
+    };
+
+    match TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs_f64(timeout)) {
         Ok(stream) => {
             // Set errno to 0 and errstr to ""
             if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(0); }

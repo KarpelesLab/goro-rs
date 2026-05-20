@@ -1,6 +1,8 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
+
+mod cli_server;
 
 fn main() {
     // HARD memory limit: 2GB virtual address space.
@@ -21,6 +23,12 @@ fn main() {
     if args.len() < 2 {
         print_usage(&args[0]);
         process::exit(1);
+    }
+
+    // Built-in server mode: scan all args for -S (since php -S can appear
+    // after -t doc_root -n etc.). Activated when -S is present.
+    if args.iter().any(|a| a == "-S") {
+        run_builtin_server(&args[1..]);
     }
 
     match args[1].as_str() {
@@ -277,10 +285,68 @@ fn format_trace_from_value(trace_val: &goro_core::value::Value, fallback: &str) 
 fn print_usage(program: &str) {
     eprintln!("Usage: {} [options] [-f] <file> [--] [args...]", program);
     eprintln!("       {} -r <code>", program);
+    eprintln!("       {} -S addr:port [-t docroot] [router]", program);
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -r <code>     Run PHP code from the command line");
-    eprintln!("  -v, --version Display version information");
-    eprintln!("  -h, --help    Display this help message");
-    eprintln!("  --test <dir>  Run PHPT tests in directory");
+    eprintln!("  -r <code>          Run PHP code from the command line");
+    eprintln!("  -S <addr:port>     Run with the built-in web server");
+    eprintln!("  -t <docroot>       Document root for built-in web server");
+    eprintln!("  -n                 No php.ini file used");
+    eprintln!("  -v, --version      Display version information");
+    eprintln!("  -h, --help         Display this help message");
+    eprintln!("  --test <dir>       Run PHPT tests in directory");
+}
+
+fn run_builtin_server(args: &[String]) -> ! {
+    let mut addr: Option<String> = None;
+    let mut doc_root: Option<PathBuf> = None;
+    let mut router: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        match a.as_str() {
+            "-S" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: -S requires an address argument");
+                    process::exit(1);
+                }
+                addr = Some(args[i].clone());
+            }
+            "-t" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: -t requires a docroot argument");
+                    process::exit(1);
+                }
+                doc_root = Some(PathBuf::from(&args[i]));
+            }
+            "-n" => { /* ignore: no INI */ }
+            "-d" => {
+                // skip the next arg (ini directive)
+                i += 1;
+            }
+            _ => {
+                // Treat as router script (last positional argument)
+                router = Some(PathBuf::from(a));
+            }
+        }
+        i += 1;
+    }
+    let addr = match addr {
+        Some(a) => a,
+        None => {
+            eprintln!("Error: -S requires an address argument");
+            process::exit(1);
+        }
+    };
+    let doc_root = doc_root.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    });
+    let opts = cli_server::CliServerOptions {
+        addr,
+        doc_root,
+        router,
+    };
+    cli_server::run(opts)
 }

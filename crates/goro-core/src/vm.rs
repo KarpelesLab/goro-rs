@@ -528,10 +528,24 @@ impl Vm {
                     b"PHP_EXTENSION_DIR".to_vec(),
                     Value::String(PhpString::from_bytes(b"")),
                 );
-                c.insert(
-                    b"PHP_BINARY".to_vec(),
-                    Value::String(PhpString::from_bytes(b"goro")),
-                );
+                {
+                    // Prefer TEST_PHP_EXECUTABLE / PHP_BINARY env var if set
+                    // (the test harness sets this to the goro binary), then
+                    // fall back to current_exe(), then to "goro".
+                    let bin = std::env::var("TEST_PHP_EXECUTABLE")
+                        .ok()
+                        .or_else(|| std::env::var("PHP_BINARY").ok())
+                        .or_else(|| {
+                            std::env::current_exe()
+                                .ok()
+                                .map(|p| p.to_string_lossy().to_string())
+                        })
+                        .unwrap_or_else(|| "goro".to_string());
+                    c.insert(
+                        b"PHP_BINARY".to_vec(),
+                        Value::String(PhpString::from_string(bin)),
+                    );
+                }
                 c.insert(
                     b"PHP_SHLIB_SUFFIX".to_vec(),
                     Value::String(PhpString::from_bytes(b"so")),
@@ -20254,7 +20268,22 @@ impl Vm {
                     return Ok(Value::Null);
                 }
                 OpCode::ArrayGet => {
-                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let mut arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // If the source is an uninitialized superglobal CV, fall back to the global.
+                    if matches!(arr_val, Value::Null | Value::Undef) {
+                        if let OperandType::Cv(idx) = &op.op1 {
+                            if let Some(name) = op_array.cv_names.get(*idx as usize) {
+                                if matches!(name.as_slice(),
+                                    b"_SESSION" | b"_SERVER" | b"_GET" | b"_POST" |
+                                    b"_COOKIE" | b"_FILES" | b"_REQUEST" | b"_ENV" | b"GLOBALS"
+                                ) {
+                                    if let Some(global_val) = self.globals.get(name.as_slice()) {
+                                        arr_val = global_val.clone().deref();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
@@ -23995,7 +24024,23 @@ impl Vm {
 
                 OpCode::IssetCheck => {
                     // isset() check: True if value is not Null and not Undef
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let mut val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // Superglobal lazy-load: isset($_SERVER) should be true
+                    // when the global is populated even if no CV exists.
+                    if matches!(val, Value::Null | Value::Undef) {
+                        if let OperandType::Cv(idx) = &op.op1 {
+                            if let Some(name) = op_array.cv_names.get(*idx as usize) {
+                                if matches!(name.as_slice(),
+                                    b"_SESSION" | b"_SERVER" | b"_GET" | b"_POST" |
+                                    b"_COOKIE" | b"_FILES" | b"_REQUEST" | b"_ENV" | b"GLOBALS"
+                                ) {
+                                    if let Some(global_val) = self.globals.get(name.as_slice()) {
+                                        val = global_val.clone().deref();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let result = match val {
                         Value::Null | Value::Undef => Value::False,
                         _ => Value::True,
@@ -24006,7 +24051,22 @@ impl Vm {
                 OpCode::ArrayIsset => {
                     // isset($arr[$key]) - for arrays, check if key exists and value is not null
                     // For objects implementing ArrayAccess, call offsetExists()
-                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let mut arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // Superglobal fallback (lazy load) when CV is uninitialised.
+                    if matches!(arr_val, Value::Null | Value::Undef) {
+                        if let OperandType::Cv(idx) = &op.op1 {
+                            if let Some(name) = op_array.cv_names.get(*idx as usize) {
+                                if matches!(name.as_slice(),
+                                    b"_SESSION" | b"_SERVER" | b"_GET" | b"_POST" |
+                                    b"_COOKIE" | b"_FILES" | b"_REQUEST" | b"_ENV" | b"GLOBALS"
+                                ) {
+                                    if let Some(global_val) = self.globals.get(name.as_slice()) {
+                                        arr_val = global_val.clone().deref();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val);
