@@ -261,6 +261,7 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"restore_exception_handler");
     params!(b"header", b"header", b"replace", b"response_code");
     params!(b"http_response_code", b"response_code");
+    params!(b"request_parse_body", b"options");
     params!(b"php_uname", b"mode");
     params!(b"php_sapi_name");
     params!(b"phpversion", b"extension");

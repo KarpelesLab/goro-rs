@@ -484,6 +484,42 @@ impl<'a> Lexer<'a> {
                         Some(b'\\') => result.push(b'\\'),
                         Some(b'$') => result.push(b'$'),
                         Some(b'"') => result.push(b'"'),
+                        Some(b'u') if self.peek() == Some(b'{') => {
+                            // \u{HEX} — Unicode codepoint encoded as UTF-8
+                            self.advance(); // consume '{'
+                            let mut hex_str = String::new();
+                            while let Some(ch) = self.peek() {
+                                if ch == b'}' { break; }
+                                if !ch.is_ascii_hexdigit() {
+                                    // Invalid; bail and treat the whole thing literally
+                                    hex_str.clear();
+                                    break;
+                                }
+                                hex_str.push(ch as char);
+                                self.advance();
+                            }
+                            if self.peek() == Some(b'}') && !hex_str.is_empty() {
+                                self.advance(); // consume '}'
+                                if let Ok(cp) = u32::from_str_radix(&hex_str, 16) {
+                                    if let Some(c) = char::from_u32(cp) {
+                                        let mut buf = [0u8; 4];
+                                        let s = c.encode_utf8(&mut buf);
+                                        result.extend_from_slice(s.as_bytes());
+                                    } else {
+                                        // Invalid codepoint — fall back to literal text
+                                        result.push(b'\\');
+                                        result.push(b'u');
+                                        result.push(b'{');
+                                        result.extend_from_slice(hex_str.as_bytes());
+                                        result.push(b'}');
+                                    }
+                                }
+                            } else {
+                                // Malformed — emit literal
+                                result.push(b'\\');
+                                result.push(b'u');
+                            }
+                        }
                         Some(b'x' | b'X') => {
                             let mut hex = Vec::new();
                             for _ in 0..2 {
@@ -1687,6 +1723,34 @@ impl<'a> Lexer<'a> {
                         }
                         b'$' => {
                             result.push(b'$');
+                            i += 1;
+                        }
+                        b'u' if i + 1 < len && content[i + 1] == b'{' => {
+                            // \u{HEX} unicode escape
+                            let mut j = i + 2;
+                            let mut hex_str = String::new();
+                            while j < len && content[j] != b'}' {
+                                if !content[j].is_ascii_hexdigit() {
+                                    hex_str.clear();
+                                    break;
+                                }
+                                hex_str.push(content[j] as char);
+                                j += 1;
+                            }
+                            if j < len && content[j] == b'}' && !hex_str.is_empty() {
+                                if let Ok(cp) = u32::from_str_radix(&hex_str, 16) {
+                                    if let Some(c) = char::from_u32(cp) {
+                                        let mut buf = [0u8; 4];
+                                        let s = c.encode_utf8(&mut buf);
+                                        result.extend_from_slice(s.as_bytes());
+                                        i = j + 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                            // Malformed — emit literal
+                            result.push(b'\\');
+                            result.push(b'u');
                             i += 1;
                         }
                         b'x' | b'X' => {

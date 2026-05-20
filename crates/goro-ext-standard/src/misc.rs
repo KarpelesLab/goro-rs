@@ -95,6 +95,12 @@ pub fn register(vm: &mut Vm) {
         }
         vm.classes.insert(b"php_user_filter".to_vec(), pufc);
     }
+    // RequestParseBodyException extends \Exception
+    {
+        let mut cls = ClassEntry::new(b"RequestParseBodyException".to_vec());
+        cls.parent = Some(b"Exception".to_vec());
+        vm.classes.insert(b"requestparsebodyexception".to_vec(), cls);
+    }
     // Error handling
     vm.register_function(b"error_reporting", error_reporting);
     vm.register_function(b"set_error_handler", set_error_handler);
@@ -5705,8 +5711,21 @@ fn parse_url_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn http_build_query_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null);
+    // Top-level enum: throw TypeError.
+    if let Value::Object(obj) = data {
+        let cls_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        if let Some(ce) = vm.classes.get(&cls_lower) {
+            if ce.is_enum {
+                let name = obj.borrow().class_name.clone();
+                let msg = format!("http_build_query(): Argument #1 ($data) must not be an enum, {} given", String::from_utf8_lossy(&name));
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+            }
+        }
+    }
     let _numeric_prefix = args.get(1).and_then(|v| {
         if matches!(v, Value::Null | Value::Undef) { None }
         else { Some(v.to_php_string().to_string_lossy()) }
@@ -5745,17 +5764,24 @@ fn http_build_query_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     fn build_query_recursive(
+        vm: &mut Vm,
         parts: &mut Vec<String>,
         prefix: &str,
         val: &Value,
         separator: &str,
         enc_type: i64,
         numeric_prefix: &Option<String>,
+        depth: usize,
     ) {
+        // PHP's http_build_query bails out on deeply nested or recursive structures.
+        if depth > 128 {
+            return;
+        }
         match val {
             Value::Array(arr) => {
-                for (key, v) in arr.borrow().iter() {
-                    let k = match key {
+                let pairs: Vec<(goro_core::array::ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (key, v) in pairs {
+                    let k = match &key {
                         goro_core::array::ArrayKey::Int(n) => {
                             if prefix.is_empty() {
                                 if let Some(np) = numeric_prefix {
@@ -5774,12 +5800,77 @@ fn http_build_query_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     } else {
                         format!("{}%5B{}%5D", prefix, url_encode(&k, enc_type))
                     };
-                    build_query_recursive(parts, &new_prefix, v, separator, enc_type, numeric_prefix);
+                    build_query_recursive(vm, parts, &new_prefix, &v, separator, enc_type, numeric_prefix, depth + 1);
+                }
+            }
+            Value::Object(obj) => {
+                // Handle enums specially:
+                //   - backed enum case → use its backing value
+                //   - unbacked enum   → ValueError
+                let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let (is_enum, has_backing, class_name) = vm.classes.get(&class_lower)
+                    .map(|ce| (ce.is_enum, ce.enum_backing_type.is_some(), ce.name.clone()))
+                    .unwrap_or((false, false, Vec::new()));
+                if is_enum {
+                    if has_backing {
+                        let val = obj.borrow().get_property(b"value");
+                        let v = url_encode(&val.to_php_string().to_string_lossy(), enc_type);
+                        parts.push(format!("{}={}", prefix, v));
+                    } else {
+                        let msg = format!("Unbacked enum {} cannot be converted to a string", String::from_utf8_lossy(&class_name));
+                        let exc = vm.create_exception(b"ValueError", &msg, 0);
+                        vm.current_exception = Some(exc);
+                    }
+                    return;
+                }
+                // Treat objects like arrays: iterate accessible properties.
+                let obj_b = obj.borrow();
+                let scope_class: Option<Vec<u8>> = vm.current_class_scope()
+                    .map(|name| name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                let mut visibility_map: std::collections::HashMap<Vec<u8>, (goro_core::object::Visibility, Vec<u8>)> = std::collections::HashMap::new();
+                let mut walk_class = Some(class_lower.clone());
+                while let Some(c) = walk_class {
+                    if let Some(ce) = vm.classes.get(&c) {
+                        for p in &ce.properties {
+                            visibility_map.entry(p.name.clone())
+                                .or_insert((p.visibility, p.declaring_class.clone()));
+                        }
+                        walk_class = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                    } else {
+                        walk_class = None;
+                    }
+                }
+                let props: Vec<(Vec<u8>, Value)> = obj_b.properties.iter().cloned().collect();
+                drop(obj_b);
+                for (prop_name, prop_val) in props {
+                    let visible = if let Some((vis, decl)) = visibility_map.get(&prop_name) {
+                        match vis {
+                            goro_core::object::Visibility::Public => true,
+                            goro_core::object::Visibility::Protected => {
+                                if let Some(ref s) = scope_class {
+                                    s == &class_lower || vm.class_extends(s, &class_lower) || vm.class_extends(&class_lower, s)
+                                } else { false }
+                            }
+                            goro_core::object::Visibility::Private => {
+                                if let Some(ref s) = scope_class { s == decl } else { false }
+                            }
+                        }
+                    } else { true };
+                    if !visible { continue; }
+                    let k = String::from_utf8_lossy(&prop_name).to_string();
+                    let new_prefix = if prefix.is_empty() {
+                        url_encode(&k, enc_type)
+                    } else {
+                        format!("{}%5B{}%5D", prefix, url_encode(&k, enc_type))
+                    };
+                    build_query_recursive(vm, parts, &new_prefix, &prop_val, separator, enc_type, numeric_prefix, depth + 1);
                 }
             }
             Value::Null | Value::Undef => {
-                // PHP's http_build_query encodes null as empty string
-                parts.push(format!("{}=", prefix));
+                // PHP's http_build_query skips null entirely
+            }
+            Value::Resource(_) => {
+                // PHP's http_build_query skips resources entirely
             }
             Value::True => {
                 parts.push(format!("{}=1", prefix));
@@ -5794,29 +5885,11 @@ fn http_build_query_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    if let Value::Array(arr) = data {
-        for (key, val) in arr.borrow().iter() {
-            let k = match key {
-                goro_core::array::ArrayKey::Int(n) => {
-                    if let Some(np) = &_numeric_prefix {
-                        format!("{}{}", np, n)
-                    } else {
-                        n.to_string()
-                    }
-                }
-                goro_core::array::ArrayKey::String(s) => s.to_string_lossy(),
-            };
-            let prefix = url_encode(&k, enc_type);
-            build_query_recursive(&mut parts, &prefix, &val, &separator, enc_type, &_numeric_prefix);
-        }
-    } else if let Value::Object(obj) = data {
-        // Also handle objects - get public properties
-        let obj = obj.borrow();
-        for (prop_name, prop_val) in &obj.properties {
-            let k = String::from_utf8_lossy(prop_name).to_string();
-            let prefix = url_encode(&k, enc_type);
-            build_query_recursive(&mut parts, &prefix, prop_val, &separator, enc_type, &_numeric_prefix);
-        }
+    // Use the recursive function with empty prefix for the top level.
+    // For arrays/objects this iterates entries; scalar top-level args would
+    // produce a TypeError in PHP — we silently no-op for unsupported types.
+    if matches!(data, Value::Array(_) | Value::Object(_)) {
+        build_query_recursive(vm, &mut parts, "", data, &separator, enc_type, &_numeric_prefix, 0);
     }
     Ok(Value::String(PhpString::from_string(
         parts.join(&separator),
@@ -13829,8 +13902,69 @@ fn token_name_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_bytes(name.as_bytes())))
 }
 
-fn request_parse_body_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Err(VmError { message: "request_parse_body() can only be called during a request".into(), line: vm.current_line })
+fn request_parse_body_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Validate $options (first argument) keys and value shapes. Real PHP only
+    // accepts specific string keys with int/string values.
+    let valid_keys: &[&[u8]] = &[
+        b"max_input_vars",
+        b"max_multipart_body_parts",
+        b"max_file_uploads",
+        b"upload_max_filesize",
+        b"post_max_size",
+    ];
+    let size_keys: &[&[u8]] = &[b"upload_max_filesize", b"post_max_size"];
+    if let Some(opts) = args.first() {
+        if let Value::Array(arr) = opts {
+            let pairs: Vec<(goro_core::array::ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (k, v) in pairs {
+                match k {
+                    goro_core::array::ArrayKey::Int(_) => {
+                        let exc = vm.create_exception(b"ValueError", "Invalid integer key in $options argument", 0);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                    }
+                    goro_core::array::ArrayKey::String(s) => {
+                        let bytes = s.as_bytes();
+                        if !valid_keys.iter().any(|vk| *vk == bytes) {
+                            let exc = vm.create_exception(b"ValueError", &format!("Invalid key \"{}\" in $options argument", s.to_string_lossy()), 0);
+                            vm.current_exception = Some(exc);
+                            return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                        }
+                        // Check value type
+                        if let Value::Array(_) = v {
+                            let exc = vm.create_exception(b"ValueError", "Invalid array value in $options argument", 0);
+                            vm.current_exception = Some(exc);
+                            return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                        }
+                        // For *_max_filesize/post_max_size keys: validate suffix (K/M/G).
+                        if size_keys.iter().any(|sk| *sk == bytes) {
+                            if let Value::String(strval) = &v {
+                                let raw = strval.as_bytes();
+                                if let Some(&last) = raw.last() {
+                                    if last.is_ascii_alphabetic()
+                                        && !matches!(last, b'K' | b'M' | b'G' | b'k' | b'm' | b'g')
+                                    {
+                                        let mult = std::str::from_utf8(&[last]).unwrap_or("?").to_string();
+                                        vm.emit_warning(&format!(
+                                            "Invalid quantity \"{}\": unknown multiplier \"{}\", interpreting as \"1\" for backwards compatibility",
+                                            strval.to_string_lossy(),
+                                            mult
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // After validation, request_parse_body fails with a RequestParseBodyException
+    // because we have no request context to parse.
+    let exc = vm.create_exception(b"RequestParseBodyException", "Request does not provide a content type", 0);
+    vm.current_exception = Some(exc);
+    Err(VmError { message: "Uncaught RequestParseBodyException".to_string(), line: 0 })
 }
 
 fn ignore_user_abort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
