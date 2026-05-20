@@ -235,6 +235,10 @@ impl<'a> RegexParser<'a> {
                     let greedy = if self.peek() == Some(b'?') {
                         self.advance();
                         !default_greedy
+                    } else if self.peek() == Some(b'+') {
+                        // Possessive `*+` — treat as greedy
+                        self.advance();
+                        true
                     } else {
                         default_greedy
                     };
@@ -269,6 +273,10 @@ impl<'a> RegexParser<'a> {
                     let greedy = if self.peek() == Some(b'?') {
                         self.advance();
                         !default_greedy
+                    } else if self.peek() == Some(b'+') {
+                        // Possessive `?+`
+                        self.advance();
+                        true
                     } else {
                         default_greedy
                     };
@@ -287,6 +295,10 @@ impl<'a> RegexParser<'a> {
                         let greedy = if self.peek() == Some(b'?') {
                             self.advance();
                             !default_greedy
+                        } else if self.peek() == Some(b'+') {
+                            // Possessive `{n,m}+`
+                            self.advance();
+                            true
                         } else {
                             default_greedy
                         };
@@ -620,6 +632,7 @@ impl<'a> RegexParser<'a> {
             b"M" => UnicodeClassKind::Mark,
             b"N" => UnicodeClassKind::Number,
             b"Nd" => UnicodeClassKind::NumberDecimal,
+            b"Nl" | b"No" => UnicodeClassKind::Number,
             b"P" => UnicodeClassKind::Punctuation,
             b"S" => UnicodeClassKind::Symbol,
             b"Z" => UnicodeClassKind::Separator,
@@ -629,6 +642,16 @@ impl<'a> RegexParser<'a> {
             b"Lt" => UnicodeClassKind::TitlecaseLetter,
             b"Lm" => UnicodeClassKind::ModifierLetter,
             b"Lo" => UnicodeClassKind::OtherLetter,
+            // Treat punctuation sub-categories as Punctuation
+            b"Pc" | b"Pd" | b"Pe" | b"Pf" | b"Pi" | b"Po" | b"Ps" => UnicodeClassKind::Punctuation,
+            // Symbol sub-categories
+            b"Sc" | b"Sk" | b"Sm" | b"So" => UnicodeClassKind::Symbol,
+            // Separator sub-categories
+            b"Zl" | b"Zp" | b"Zs" => UnicodeClassKind::Separator,
+            // Mark sub-categories
+            b"Mc" | b"Me" | b"Mn" => UnicodeClassKind::Mark,
+            // Other sub-categories
+            b"Cc" | b"Cf" | b"Cn" | b"Co" | b"Cs" => UnicodeClassKind::Other,
             b"Cyrillic" => UnicodeClassKind::ScriptCyrillic,
             b"Greek" => UnicodeClassKind::ScriptGreek,
             b"Latin" => UnicodeClassKind::ScriptLatin,
@@ -637,6 +660,10 @@ impl<'a> RegexParser<'a> {
             b"Hebrew" => UnicodeClassKind::ScriptHebrew,
             b"Hiragana" => UnicodeClassKind::ScriptHiragana,
             b"Katakana" => UnicodeClassKind::ScriptKatakana,
+            // Common letter union (Xan = alphanumeric)
+            b"Xan" => UnicodeClassKind::UniWord,
+            // ASCII property
+            b"ASCII" => UnicodeClassKind::PosixAscii,
             _ => {
                 return Err(format!(
                     "Unknown property name after \\p",
@@ -1210,7 +1237,7 @@ impl<'a> RegexParser<'a> {
             }
         }
 
-        Err("unclosed character class".into())
+        Err(format!("missing terminating ] for character class at offset {}", self.pos))
     }
 
     fn peek_ahead(&self, n: usize) -> Option<u8> {
@@ -2654,7 +2681,17 @@ fn ensure_string_pattern(vm: &mut Vm, val: &Value, func: &str) -> Result<PhpStri
 pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.preg_last_error = 0;
     let pattern = match args.first() {
-        Some(v) => ensure_string_pattern(vm, v, "preg_match")?,
+        Some(v) => {
+            // Pre-initialize $matches to NULL so it isn't undefined on a TypeError.
+            if matches!(v, Value::Array(_) | Value::Object(_)) {
+                if let Some(matches_ref) = args.get(2) {
+                    if let Value::Reference(r) = matches_ref {
+                        *r.borrow_mut() = Value::Null;
+                    }
+                }
+            }
+            ensure_string_pattern(vm, v, "preg_match")?
+        }
         None => {
             return Ok(Value::False);
         }
@@ -2709,29 +2746,25 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(_e) => {
             let msg = format_preg_error("preg_match()", &_e);
             vm.emit_warning(&msg);
+            vm.preg_last_error = 1; // PREG_INTERNAL_ERROR
+            // On compile error, set $matches to NULL
+            if let Some(matches_ref) = args.get(2) {
+                if let Value::Reference(r) = matches_ref {
+                    *r.borrow_mut() = Value::Null;
+                }
+            }
             return Ok(Value::False);
         }
     };
 
     let input = subject.as_bytes();
 
-    // Validate UTF-8 when /u modifier is used
-    if compiled.flags.utf8 && std::str::from_utf8(input).is_err() {
-        vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
-        // Clear matches array too
-        if let Some(matches_ref) = args.get(2) {
-            if let Value::Reference(r) = matches_ref {
-                *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
-            }
-        }
-        return Ok(Value::False);
-    }
-
-    // Validate offset is on a codepoint boundary for /u
+    // Validate offset is on a codepoint boundary for /u FIRST, so we report
+    // PREG_BAD_UTF8_OFFSET_ERROR rather than PREG_BAD_UTF8_ERROR for offsets
+    // that land on a continuation byte.
     if compiled.flags.utf8 && offset > 0 && offset < input.len() {
         let b = input[offset];
         if b & 0xC0 == 0x80 {
-            // Continuation byte — offset is in the middle of a codepoint
             vm.preg_last_error = 5; // PREG_BAD_UTF8_OFFSET_ERROR
             if let Some(matches_ref) = args.get(2) {
                 if let Value::Reference(r) = matches_ref {
@@ -2742,13 +2775,53 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // Validate UTF-8 from `offset` onwards when /u modifier is used. PCRE only
+    // checks the portion being matched, so a bad byte before `offset` is fine.
+    if compiled.flags.utf8 && offset <= input.len() && std::str::from_utf8(&input[offset..]).is_err() {
+        vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
+        if let Some(matches_ref) = args.get(2) {
+            if let Value::Reference(r) = matches_ref {
+                *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+            }
+        }
+        return Ok(Value::False);
+    }
+
     let result = compiled.find(input, offset);
 
     // If matches parameter was provided, try to fill it
     if let Some(matches_ref) = args.get(2) {
         if let Some(ref m) = result {
             let mut arr = PhpArray::new();
+            // Pre-compute, for each name, the preferred group index:
+            // - if any duplicate-named group matched, use the lowest matched index
+            // - otherwise, the first occurrence
+            let mut preferred: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
+            for (idx, name) in &compiled.group_names {
+                if !preferred.contains_key(name) {
+                    preferred.insert(name.clone(), *idx);
+                }
+                let cur = preferred[name];
+                let cur_matched = m.groups.get(cur).map(|g| g.is_some()).unwrap_or(false);
+                let this_matched = m.groups.get(*idx).map(|g| g.is_some()).unwrap_or(false);
+                if !cur_matched && this_matched {
+                    preferred.insert(name.clone(), *idx);
+                }
+            }
+            // PHP omits trailing unmatched groups unless PREG_UNMATCHED_AS_NULL is set.
+            let effective_len = if unmatched_as_null {
+                m.groups.len()
+            } else {
+                let mut last_matched = 0usize;
+                for (idx, g) in m.groups.iter().enumerate() {
+                    if g.is_some() {
+                        last_matched = idx + 1;
+                    }
+                }
+                last_matched
+            };
             for (i, capture) in m.groups.iter().enumerate() {
+                if i >= effective_len { break; }
                 let val = if let Some((start, end)) = capture {
                     let matched_text = &input[*start..*end];
                     if offset_capture {
@@ -2769,9 +2842,12 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 } else {
                     Value::String(PhpString::empty())
                 };
-                // Add named group entry before the numeric entry
+                // Add named group entry before the numeric entry, but only
+                // if this index is the preferred one for its name.
                 if let Some((_, name)) = compiled.group_names.iter().find(|(idx, _)| *idx == i) {
-                    arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                    if preferred.get(name).copied() == Some(i) {
+                        arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                    }
                 }
                 arr.set(ArrayKey::Int(i as i64), val);
             }
@@ -2800,7 +2876,17 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.preg_last_error = 0;
     let pattern = match args.first() {
-        Some(v) => ensure_string_pattern(vm, v, "preg_match_all")?,
+        Some(v) => {
+            // Pre-initialize $matches to NULL so it isn't undefined on a TypeError.
+            if matches!(v, Value::Array(_) | Value::Object(_)) {
+                if let Some(matches_ref) = args.get(2) {
+                    if let Value::Reference(r) = matches_ref {
+                        *r.borrow_mut() = Value::Null;
+                    }
+                }
+            }
+            ensure_string_pattern(vm, v, "preg_match_all")?
+        }
         None => {
             return Ok(Value::False);
         }
@@ -2814,6 +2900,14 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let flags = args.get(3).map(|v| v.to_long()).unwrap_or(0);
+    // Validate flags: PHP throws ValueError if non-PREG_* bits are set.
+    // PREG_PATTERN_ORDER=1, PREG_SET_ORDER=2, PREG_OFFSET_CAPTURE=256, PREG_UNMATCHED_AS_NULL=512
+    const VALID_PMA_FLAGS: i64 = 1 | 2 | 256 | 512;
+    if flags & !VALID_PMA_FLAGS != 0 {
+        let exc = vm.create_exception(b"ValueError", "preg_match_all(): Argument #4 ($flags) must be a PREG_* constant", 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+    }
     let set_order = (flags & 2) != 0; // PREG_SET_ORDER
     let offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
     let unmatched_as_null = (flags & 512) != 0; // PREG_UNMATCHED_AS_NULL
@@ -2843,6 +2937,13 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(c) => c,
         Err(_e) => {
             vm.emit_warning(&format_preg_error("preg_match_all()", &_e));
+            vm.preg_last_error = 1; // PREG_INTERNAL_ERROR
+            // On compile error, set $matches to NULL
+            if let Some(matches_ref) = args.get(2) {
+                if let Value::Reference(r) = matches_ref {
+                    *r.borrow_mut() = Value::Null;
+                }
+            }
             return Ok(Value::False);
         }
     };
@@ -3142,6 +3243,7 @@ fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u
         Ok(c) => c,
         Err(_e) => {
             vm.emit_warning(&format_preg_error("preg_replace()", &_e));
+            vm.preg_last_error = 1;
             return None;
         }
     };
@@ -3207,22 +3309,24 @@ fn apply_replacement(result: &mut Vec<u8>, replacement: &[u8], subject: &[u8], m
             i += 1;
             if i < replacement.len() {
                 if replacement[i] == b'{' {
-                    // ${n} syntax
-                    i += 1;
+                    // ${n} syntax - only valid if followed by digits and closing }
+                    let mut j = i + 1;
                     let mut num = 0usize;
                     let mut found_digit = false;
-                    while i < replacement.len() && replacement[i].is_ascii_digit() {
-                        num = num * 10 + (replacement[i] - b'0') as usize;
-                        i += 1;
+                    while j < replacement.len() && replacement[j].is_ascii_digit() {
+                        num = num * 10 + (replacement[j] - b'0') as usize;
+                        j += 1;
                         found_digit = true;
                     }
-                    if i < replacement.len() && replacement[i] == b'}' {
-                        i += 1;
-                    }
-                    if found_digit {
+                    if found_digit && j < replacement.len() && replacement[j] == b'}' {
+                        i = j + 1;
                         if let Some(Some((start, end))) = m.groups.get(num) {
                             result.extend_from_slice(&subject[*start..*end]);
                         }
+                    } else {
+                        // Not a valid ${n} reference — emit literal $ (or \) and continue
+                        result.push(escape_char);
+                        // i still points to '{' which will be emitted next
                     }
                 } else if replacement[i].is_ascii_digit() {
                     let mut num = (replacement[i] - b'0') as usize;
@@ -3283,6 +3387,7 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(c) => c,
         Err(_e) => {
             vm.emit_warning(&format_preg_error("preg_split()", &_e));
+            vm.preg_last_error = 1;
             return Ok(Value::False);
         }
     };
@@ -3841,6 +3946,7 @@ pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value,
 
 /// preg_grep($pattern, $array [, $flags])
 pub fn preg_grep(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.preg_last_error = 0;
     let pattern = match args.first() {
         Some(v) => ensure_string_pattern(vm, v, "preg_grep")?,
         None => return Ok(Value::False),
@@ -3858,6 +3964,7 @@ pub fn preg_grep(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(c) => c,
         Err(_e) => {
             vm.emit_warning(&format_preg_error("preg_grep()", &_e));
+            vm.preg_last_error = 1;
             return Ok(Value::False);
         }
     };
@@ -3870,6 +3977,12 @@ pub fn preg_grep(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning("Array to string conversion");
         }
         let subject = value.to_php_string();
+        // Validate UTF-8 when /u modifier is used (bug #75089: report error for every input)
+        if compiled.flags.utf8 && std::str::from_utf8(subject.as_bytes()).is_err() {
+            vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
+            // Don't include this entry in the result, but continue processing others
+            continue;
+        }
         let matches = compiled.find(subject.as_bytes(), 0).is_some();
         if matches != invert {
             result.set(key, value);
@@ -3977,7 +4090,7 @@ pub fn preg_last_error_msg(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
         2 => "Backtrack limit exhausted",
         3 => "Recursion limit exhausted",
         4 => "Malformed UTF-8 characters, possibly incorrectly encoded",
-        5 => "Offset doesn't correspond to the beginning of a valid UTF-8 code point",
+        5 => "The offset did not correspond to the beginning of a valid UTF-8 code point",
         6 => "JIT stack limit exhausted",
         _ => "Unknown error",
     };

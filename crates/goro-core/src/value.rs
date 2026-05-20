@@ -1397,8 +1397,9 @@ fn format_php_float_with_precision(f: f64, sig_digits: usize) -> String {
         s
     };
 
-    // Use scientific notation for very large/small numbers (like PHP)
-    if exp >= 15 || exp <= -5 {
+    // Use scientific notation for very large/small numbers (like PHP).
+    // PHP's %G uses scientific when exp >= sig_digits or exp < -4.
+    if exp as i64 >= sig_digits as i64 || exp <= -5 {
         // PHP uses uppercase E notation, always with at least one decimal digit
         let mantissa_part = if sig_count > 1 {
             format!("{}.{}", &sig_str[..1], &sig_str[1..])
