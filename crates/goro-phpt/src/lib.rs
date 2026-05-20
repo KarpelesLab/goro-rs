@@ -213,10 +213,28 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         }
     }
 
-    // Get the PHP source
-    let source = match test.file_section() {
-        Some(s) => s,
-        None => return TestResult::Error("missing --FILE-- section".into()),
+    // Get the PHP source. PHPT supports two forms:
+    //   --FILE--           : source embedded inline
+    //   --FILE_EXTERNAL--  : a single filename whose contents are the source
+    //                        (typically just `foo.inc` next to the .phpt file)
+    let inline_source = test.file_section();
+    let external_source: Option<String> = if inline_source.is_none() {
+        test.sections.get("FILE_EXTERNAL").and_then(|raw| {
+            let rel = raw.trim();
+            if rel.is_empty() { return None; }
+            let path = match test_dir {
+                Some(dir) => dir.join(rel),
+                None => std::path::PathBuf::from(rel),
+            };
+            std::fs::read_to_string(&path).ok()
+        })
+    } else {
+        None
+    };
+    let source: &str = match (inline_source, external_source.as_deref()) {
+        (Some(s), _) => s,
+        (None, Some(s)) => s,
+        (None, None) => return TestResult::Error("missing --FILE-- section".into()),
     };
 
     // Execute the source with a 5-second timeout
