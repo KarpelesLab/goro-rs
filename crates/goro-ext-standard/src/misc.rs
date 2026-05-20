@@ -8284,6 +8284,20 @@ fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(colon) = header_str.find(':') {
         let name = header_str[..colon].trim().as_bytes().to_vec();
         let value = header_str[colon + 1..].trim().as_bytes().to_vec();
+        // PHP auto-sets 401 when WWW-Authenticate is sent without an explicit
+        // status code (and the current code is still 200).
+        if name.eq_ignore_ascii_case(b"WWW-Authenticate") && response_code == 0 {
+            RESPONSE_CODE.with(|c| {
+                if c.get() == 200 { c.set(401); }
+            });
+        }
+        // PHP auto-sets 302 for Location: headers (unless code is already 3xx).
+        if name.eq_ignore_ascii_case(b"Location") && response_code == 0 {
+            RESPONSE_CODE.with(|c| {
+                let cur = c.get();
+                if cur == 200 || cur < 300 { c.set(302); }
+            });
+        }
         if replace {
             // Remove existing headers with the same name (case-insensitive)
             SENT_HEADERS.with(|h| {
