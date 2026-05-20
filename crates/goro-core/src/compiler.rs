@@ -130,6 +130,20 @@ impl Default for Compiler {
 }
 
 impl Compiler {
+    /// Map a method-call identifier to a synthetic name used by
+    /// `is_builtin_byref_param` to drive by-ref argument compilation
+    /// for known builtin OO methods. The synthetic name distinguishes
+    /// the method-call form (where source args have no leading $this)
+    /// from the procedural form (where $stmt is args[0]).
+    fn builtin_method_to_bridge_func(method_name: &[u8]) -> Option<Vec<u8>> {
+        let lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        match lower.as_slice() {
+            b"bind_param" => Some(b"__mysqli_stmt_bind_param_method".to_vec()),
+            b"bind_result" => Some(b"__mysqli_stmt_bind_result_method".to_vec()),
+            _ => None,
+        }
+    }
+
     /// Check if a builtin function's parameter at given position is by-reference
     fn is_builtin_byref_param(func_name: Option<&[u8]>, pos: usize) -> bool {
         match func_name {
@@ -208,6 +222,14 @@ impl Compiler {
                     (b"socket_recvfrom", 1) => true,
                     (b"socket_recvfrom", 4) => true,
                     (b"socket_recvfrom", 5) => true,
+                    // mysqli_stmt_bind_param($stmt, $types, &$var1, &$var2, ...)
+                    (b"mysqli_stmt_bind_param", p) if p >= 2 => true,
+                    // mysqli_stmt_bind_result($stmt, &$var1, &$var2, ...)
+                    (b"mysqli_stmt_bind_result", p) if p >= 1 => true,
+                    // mysqli_stmt::bind_param method form: ($types, &$var1, ...)
+                    (b"__mysqli_stmt_bind_param_method", p) if p >= 1 => true,
+                    // mysqli_stmt::bind_result method form: (&$var1, &$var2, ...)
+                    (b"__mysqli_stmt_bind_result_method", _) => true,
                     _ => false,
                 }
             }
@@ -8919,16 +8941,16 @@ impl Compiler {
                     None
                 };
 
-                let method_operand = match &method.kind {
+                let (method_operand, method_name_for_ref): (OperandType, Option<Vec<u8>>) = match &method.kind {
                     ExprKind::Identifier(name) => {
                         let name_idx = self
                             .op_array
                             .add_literal(Value::String(PhpString::from_vec(name.clone())));
-                        OperandType::Const(name_idx)
+                        (OperandType::Const(name_idx), Some(name.clone()))
                     }
                     _ => {
                         // Dynamic method name (e.g., $this->$method())
-                        self.compile_expr(method)?
+                        (self.compile_expr(method)?, None)
                     }
                 };
 
@@ -8940,7 +8962,12 @@ impl Compiler {
                     line: expr.span.line,
                 });
 
-                self.compile_send_args(args, expr.span.line)?;
+                // Pass method name through so by-ref args of known builtin methods
+                // (e.g. mysqli_stmt::bind_param) emit SendRef.
+                let bridge_name: Option<Vec<u8>> = method_name_for_ref
+                    .as_ref()
+                    .and_then(|m| Self::builtin_method_to_bridge_func(m));
+                self.compile_send_args_with_name(args, expr.span.line, bridge_name.as_deref())?;
 
                 self.op_array.emit(Op {
                     opcode: OpCode::DoFCall,
