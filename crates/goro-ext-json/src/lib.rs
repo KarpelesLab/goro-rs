@@ -94,6 +94,12 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None => 512,
         _ => 512,
     };
+    // Clamp max_depth to a value that's safe for the host Rust stack. The
+    // encoder recurses once per nested array/object, so accepting the PHP
+    // userland "default" of 2^31 means a long linked list overflows the OS
+    // stack instead of returning a clean JSON_ERROR_DEPTH. PHP itself uses
+    // zend.max_allowed_stack_size for this; we approximate with a fixed cap.
+    let max_depth = max_depth.min(1024);
     let throw_on_error = flags & JSON_THROW_ON_ERROR != 0;
 
     // Check for NAN/INF at top level
