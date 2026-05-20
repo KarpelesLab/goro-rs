@@ -433,18 +433,49 @@ fn hash_copy_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
-fn hash_pbkdf2_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn hash_pbkdf2_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
     let password = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let salt = args.get(2).unwrap_or(&Value::Null).to_php_string();
-    let iterations = args.get(3).map(|v| v.to_long()).unwrap_or(1) as usize;
-    let length = args.get(4).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let iterations_raw = args.get(3).map(|v| v.to_long()).unwrap_or(1);
+    let length_raw = args.get(4).map(|v| v.to_long()).unwrap_or(0);
     let raw = args.get(5).map(|v| v.is_truthy()).unwrap_or(false);
 
     let hash_len = compute_hash(&algo, b"").map(|h| h.len()).unwrap_or(0);
-    if hash_len == 0 {
-        return Ok(Value::False);
+    // hash_pbkdf2() requires a cryptographic algorithm. Reject the known
+    // non-cryptographic ones (CRC, FNV, adler, joaat, MurmurHash, xxhash).
+    let non_cryptographic = matches!(
+        algo.as_str(),
+        "adler32" | "crc32" | "crc32b" | "crc32c"
+            | "fnv132" | "fnv1a32" | "fnv164" | "fnv1a64"
+            | "joaat"
+            | "murmur3a" | "murmur3c" | "murmur3f"
+            | "xxh32" | "xxh64" | "xxh3" | "xxh128"
+    );
+    if hash_len == 0 || non_cryptographic {
+        let msg = "hash_pbkdf2(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
+    // Validate iterations: must be > 0. Without this check, negative values
+    // wrap around to usize::MAX and the iterations loop spins effectively
+    // forever.
+    if iterations_raw <= 0 {
+        let msg = "hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    // Validate length: must be >= 0.
+    if length_raw < 0 {
+        let msg = "hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let iterations = iterations_raw as usize;
+    let length = length_raw as usize;
 
     let output_len = if length == 0 { hash_len } else if raw { length } else { (length + 1) / 2 };
 
