@@ -258,6 +258,11 @@ impl Parser {
                         kind: StmtKind::Echo(vec![expr]),
                         span,
                     })
+                } else if matches!(self.peek(), TokenKind::Eof) {
+                    // <?php with no body / at end of file: emit a no-op so the
+                    // overall parse succeeds (matches PHP, which accepts a file
+                    // containing nothing but the opening tag).
+                    Ok(Statement { kind: StmtKind::Nop, span })
                 } else {
                     // <?php - just continue parsing
                     self.parse_statement()
