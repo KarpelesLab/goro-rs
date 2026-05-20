@@ -5744,6 +5744,11 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let path_str = path.to_string_lossy();
+    // Handle php://input - the request body for HTTP requests.
+    if path_str == "php://input" {
+        let body = get_request_body();
+        return Ok(Value::String(PhpString::from_vec(body)));
+    }
     // Handle http:// and https:// URLs via a minimal built-in HTTP/1.0 client.
     if path_str.starts_with("http://") || path_str.starts_with("https://") {
         // Extract optional context (HTTP method, headers, content) from arg 2.
@@ -8238,6 +8243,14 @@ fn scandir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 thread_local! {
     pub(crate) static SENT_HEADERS: std::cell::RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { std::cell::RefCell::new(Vec::new()) };
     pub(crate) static RESPONSE_CODE: std::cell::Cell<i64> = const { std::cell::Cell::new(200) };
+    // Request body for php://input
+    pub(crate) static REQUEST_BODY: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+pub fn set_request_body(body: Vec<u8>) {
+    REQUEST_BODY.with(|b| *b.borrow_mut() = body);
+}
+pub fn get_request_body() -> Vec<u8> {
+    REQUEST_BODY.with(|b| b.borrow().clone())
 }
 pub fn take_sent_headers() -> Vec<(Vec<u8>, Vec<u8>)> {
     SENT_HEADERS.with(|h| {

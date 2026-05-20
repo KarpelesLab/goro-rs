@@ -26,23 +26,45 @@ pub struct CliServerOptions {
 
 pub fn run(opts: CliServerOptions) -> ! {
     // Parse address
+    let now_str = || {
+        let secs = epoch_secs() as i64;
+        let (year, month, day, hour, min, sec, _) = gm_time(secs);
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            year, month, day, hour, min, sec
+        )
+    };
     let bind = match opts.addr.to_socket_addrs() {
         Ok(mut iter) => match iter.next() {
             Some(a) => a,
             None => {
-                eprintln!("Failed to resolve address {}", opts.addr);
+                eprintln!(
+                    "[{}] Failed to listen on {} (reason: address resolution failed)",
+                    now_str(),
+                    opts.addr
+                );
                 process::exit(1);
             }
         },
         Err(e) => {
-            eprintln!("Invalid address {}: {}", opts.addr, e);
+            eprintln!(
+                "[{}] Failed to listen on {} (reason: {})",
+                now_str(),
+                opts.addr,
+                e
+            );
             process::exit(1);
         }
     };
     let listener = match TcpListener::bind(bind) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to bind {}: {}", bind, e);
+            eprintln!(
+                "[{}] Failed to listen on {} (reason: {})",
+                now_str(),
+                bind,
+                e
+            );
             process::exit(1);
         }
     };
@@ -795,6 +817,8 @@ fn execute_php_request(
     // Clear any headers/code from a previous request in this process
     let _ = goro_ext_standard::misc::take_sent_headers();
     let _ = goro_ext_standard::misc::take_response_code();
+    // Make the request body readable via php://input
+    goro_ext_standard::misc::set_request_body(body.to_vec());
     let exec_result = vm.execute(&op_array);
     let output = vm.take_output();
     let response_code = goro_ext_standard::misc::take_response_code();
