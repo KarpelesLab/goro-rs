@@ -210,8 +210,9 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         None => return TestResult::Error("missing --FILE-- section".into()),
     };
 
-    // Execute the source with a 5-second timeout
-    let output = match execute_php_with_timeout_and_filename(source.as_bytes(), 5, test_dir, &ini_settings, filename) {
+    // Execute the source with a timeout (longer for tests that spawn a server).
+    let timeout_secs: u64 = if source.contains("php_cli_server_start") { 30 } else { 5 };
+    let output = match execute_php_with_timeout_and_filename(source.as_bytes(), timeout_secs, test_dir, &ini_settings, filename) {
         Ok(output) => output,
         Err(e) => return TestResult::Error(e),
     };
@@ -807,6 +808,53 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
         vm.register_class(class);
     }
 
+    // Provide a minimal $_SERVER superglobal ONLY when the test depends on
+    // the cli_server helper (which uses $_SERVER['PHP_SELF']). Tests that
+    // touch $_SERVER themselves typically expect the "Undefined global
+    // variable" warning, so don't auto-populate it for them.
+    let source_str = std::str::from_utf8(source).unwrap_or("");
+    if source_str.contains("php_cli_server") {
+        use goro_core::array::{ArrayKey, PhpArray};
+        let mut server = PhpArray::new();
+        let script_name = filename.to_string();
+        let base_name = std::path::Path::new(&script_name)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "phpt".to_string());
+        server.set(
+            ArrayKey::String(PhpString::from_bytes(b"PHP_SELF")),
+            Value::String(PhpString::from_string(format!("/{}", base_name))),
+        );
+        server.set(
+            ArrayKey::String(PhpString::from_bytes(b"SCRIPT_NAME")),
+            Value::String(PhpString::from_string(format!("/{}", base_name))),
+        );
+        server.set(
+            ArrayKey::String(PhpString::from_bytes(b"SCRIPT_FILENAME")),
+            Value::String(PhpString::from_string(script_name.clone())),
+        );
+        server.set(
+            ArrayKey::String(PhpString::from_bytes(b"argv")),
+            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(PhpArray::new()))),
+        );
+        server.set(
+            ArrayKey::String(PhpString::from_bytes(b"argc")),
+            Value::Long(0),
+        );
+        for k in ["PATH", "HOME", "USER", "TEST_PHP_EXECUTABLE", "TEST_PHP_EXECUTABLE_ESCAPED"] {
+            if let Ok(v) = std::env::var(k) {
+                server.set(
+                    ArrayKey::String(PhpString::from_string(k.to_string())),
+                    Value::String(PhpString::from_string(v)),
+                );
+            }
+        }
+        vm.set_global(
+            b"_SERVER".to_vec(),
+            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(server))),
+        );
+    }
+
     match vm.execute(&op_array) {
         Ok(_) => Ok(vm.take_output()),
         Err(e) => {
@@ -1195,6 +1243,15 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     let mut fail = 0;
     let mut skip = 0;
     let mut error = 0;
+
+    // Make sure subprocesses launched by tests (e.g. via proc_open from
+    // php_cli_server.inc) use this goro binary rather than the system `php`.
+    if std::env::var("TEST_PHP_EXECUTABLE").is_err() {
+        if let Ok(exe) = std::env::current_exe() {
+            unsafe { std::env::set_var("TEST_PHP_EXECUTABLE", &exe); }
+            unsafe { std::env::set_var("TEST_PHP_EXECUTABLE_ESCAPED", exe.to_string_lossy().to_string()); }
+        }
+    }
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_phpt_files(dir, &mut files);
