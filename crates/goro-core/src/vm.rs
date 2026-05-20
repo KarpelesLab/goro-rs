@@ -12366,35 +12366,10 @@ impl Vm {
         let minutes = (time_of_day % 3600) / 60;
         let seconds = time_of_day % 60;
 
-        fn dty(days: i64) -> (i64, u32, u32) {
-            let mut y = 1970i64;
-            let mut d = days;
-            if d >= 0 {
-                loop {
-                    let dy = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-                    if d < dy { break; }
-                    d -= dy;
-                    y += 1;
-                }
-            } else {
-                loop {
-                    y -= 1;
-                    let dy = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-                    d += dy;
-                    if d >= 0 { break; }
-                }
-            }
-            let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-            let mdays = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-            let mut m = 0u32;
-            for md in &mdays {
-                if d < *md as i64 { break; }
-                d -= *md as i64;
-                m += 1;
-            }
-            (y, m + 1, d as u32 + 1)
-        }
-        let (year, month, day) = dty(days_since_epoch);
+        // Use the closed-form Hinnant algorithm in days_to_ymd_static. The
+        // previous local `dty` walked year-by-year, which for extreme
+        // timestamps (PHP_INT_MAX-class) iterated ~290e9 times and hung.
+        let (year, month, day) = Self::days_to_ymd_static(days_since_epoch);
         if year > 9999 {
             format!("+{:05}-{:02}-{:02} {:02}:{:02}:{:02}.000000", year, month, day, hours, minutes, seconds)
         } else if year < 0 {
@@ -12411,37 +12386,9 @@ impl Vm {
         let minutes = (time_of_day % 3600) / 60;
         let seconds = time_of_day % 60;
 
-        // days_to_ymd helper
-        fn days_to_ymd(days: i64) -> (i64, u32, u32) {
-            let mut y = 1970i64;
-            let mut remaining = days;
-            if remaining >= 0 {
-                loop {
-                    let days_in_year = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
-                    if remaining < days_in_year { break; }
-                    remaining -= days_in_year;
-                    y += 1;
-                }
-            } else {
-                loop {
-                    y -= 1;
-                    let days_in_year = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
-                    remaining += days_in_year;
-                    if remaining >= 0 { break; }
-                }
-            }
-            let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-            let month_days = [31, if is_leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-            let mut m = 0;
-            for md in &month_days {
-                if remaining < *md as i64 { break; }
-                remaining -= *md as i64;
-                m += 1;
-            }
-            (y, m + 1, remaining as u32 + 1)
-        }
-
-        let (year, month, day) = days_to_ymd(days_since_epoch);
+        // Use the closed-form Hinnant algorithm. The previous local loop
+        // walked year-by-year and hung for extreme timestamps.
+        let (year, month, day) = Self::days_to_ymd_static(days_since_epoch);
 
         let mut result = String::new();
         let fmt_bytes = format.as_bytes();
