@@ -1,6 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
+use goro_core::value::Value;
+
 /// Represents a PHP curl handle with all its options and response data.
 #[derive(Clone)]
 pub struct CurlHandle {
@@ -27,6 +29,9 @@ pub struct CurlHandle {
     pub userpwd: Option<String>,
     pub http_auth: i64,
     pub fail_on_error: bool,
+
+    /// CURLOPT_PRIVATE - holds arbitrary user-provided value
+    pub private: Value,
 
     // Response (filled after curl_exec)
     pub response_code: i64,
@@ -66,6 +71,8 @@ impl CurlHandle {
             http_auth: 0,
             fail_on_error: false,
 
+            private: Value::Null,
+
             response_code: 0,
             response_headers: Vec::new(),
             response_body: Vec::new(),
@@ -102,6 +109,7 @@ impl CurlHandle {
         self.userpwd = None;
         self.http_auth = 0;
         self.fail_on_error = false;
+        self.private = Value::Null;
 
         self.response_code = 0;
         self.response_headers.clear();
@@ -116,7 +124,31 @@ impl CurlHandle {
     }
 }
 
+/// Wrapper that clears the handle's `private` Value fields on Drop.
+/// This avoids the "thread local panicked on drop" issue when a CurlHandle
+/// stored in CURL_HANDLES outlives FREED_OBJECT_IDS during shutdown.
+pub struct HandleStore {
+    pub handles: RefCell<HashMap<i64, CurlHandle>>,
+}
+
+impl Default for HandleStore {
+    fn default() -> Self {
+        Self { handles: RefCell::new(HashMap::new()) }
+    }
+}
+
+impl Drop for HandleStore {
+    fn drop(&mut self) {
+        // Best-effort: forget the inner HashMap to avoid running drop on the
+        // CurlHandles. This deliberately leaks at shutdown, but avoids a
+        // thread-local-after-destruction panic when Value::Object inside a
+        // CurlHandle tries to access FREED_OBJECT_IDS during teardown.
+        let map = std::mem::take(&mut *self.handles.borrow_mut());
+        std::mem::forget(map);
+    }
+}
+
 thread_local! {
-    pub static CURL_HANDLES: RefCell<HashMap<i64, CurlHandle>> = RefCell::new(HashMap::new());
+    pub static CURL_HANDLES: HandleStore = HandleStore::default();
     pub static NEXT_CURL_ID: Cell<i64> = const { Cell::new(1) };
 }
