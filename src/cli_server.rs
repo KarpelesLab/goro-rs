@@ -188,7 +188,10 @@ fn handle_connection(
     let raw_uri = parts.next().unwrap_or("/").to_string();
     let protocol = parts.next().unwrap_or("HTTP/1.1").to_string();
 
-    let mut headers: HashMap<String, String> = HashMap::new();
+    // Use an insertion-order vector here; tests iterate $_SERVER and expect
+    // HTTP_* entries in the order they appeared in the request.
+    let mut header_list: Vec<(String, String)> = Vec::new();
+    let mut headers_lc: HashMap<String, String> = HashMap::new();
     for line in lines {
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
@@ -197,9 +200,15 @@ fn handle_connection(
         if let Some(colon) = trimmed.find(':') {
             let name = trimmed[..colon].trim().to_string();
             let value = trimmed[colon + 1..].trim().to_string();
-            headers.insert(name.to_ascii_lowercase(), value);
+            // Avoid duplicates in the ordered list
+            let name_lc = name.to_ascii_lowercase();
+            if !headers_lc.contains_key(&name_lc) {
+                header_list.push((name.clone(), value.clone()));
+            }
+            headers_lc.insert(name_lc, value);
         }
     }
+    let headers = headers_lc;
 
     // Body (if Content-Length present, read remaining)
     let mut body: Vec<u8> = request_data[hdr_end..].to_vec();
@@ -389,10 +398,13 @@ fn handle_connection(
         &script_filename,
         &path_info,
         &headers,
+        &header_list,
         &body,
         doc_root,
     );
 
+    // PHP's cli-server emits HTTP/1.0 for fatal-error (500) responses.
+    let resp_proto = if status == 500 { "HTTP/1.0" } else { protocol.as_str() };
     send_response_with_host_proto(
         &mut stream,
         status,
@@ -401,7 +413,7 @@ fn handle_connection(
         &output,
         host,
         port,
-        &protocol,
+        resp_proto,
     )?;
     Ok(())
 }
@@ -493,6 +505,9 @@ fn send_response_with_host_proto(
         if k.eq_ignore_ascii_case(b"Connection") { have_conn = true; }
     }
     if !have_host && !host.is_empty() {
+        // PHP cli-server emits the request's Host header value back. Defer
+        // to that if the request supplied one (passed through via host: just
+        // the hostname; port appended if standard ports unused).
         write!(buf, "Host: {}:{}\r\n", host, port)?;
     }
     if !have_date {
@@ -642,6 +657,7 @@ fn execute_php_request(
     script_filename: &Path,
     path_info: &str,
     headers: &HashMap<String, String>,
+    header_list: &[(String, String)],
     body: &[u8],
     doc_root: &Path,
 ) -> (u16, Vec<(Vec<u8>, Vec<u8>)>, Vec<u8>) {
@@ -731,8 +747,8 @@ fn execute_php_request(
     set_kv(&mut server, b"REQUEST_TIME", &epoch_secs().to_string().into_bytes());
     set_kv_float(&mut server, b"REQUEST_TIME_FLOAT", epoch_secs_f64());
 
-    // HTTP_* from headers
-    for (k, v) in headers {
+    // HTTP_* from headers - iterate in insertion order
+    for (k, v) in header_list {
         let upper = k.to_ascii_uppercase().replace('-', "_");
         // Content-Type and Content-Length are also set without HTTP_ prefix
         if k.eq_ignore_ascii_case("content-type") {
@@ -841,7 +857,7 @@ fn execute_php_request(
     let response_headers: Vec<(Vec<u8>, Vec<u8>)> = goro_ext_standard::misc::take_sent_headers();
 
     if let Err(_e) = exec_result {
-        // Append fatal error to output (mirroring main.rs)
+        // Uncaught fatal error => HTTP 500 per PHP cli-server behaviour.
         let mut body_out = output;
         if let Some(exc) = vm.current_exception.take() {
             if let Value::Object(obj) = &exc {
@@ -856,7 +872,7 @@ fn execute_php_request(
                 body_out.extend_from_slice(fatal.as_bytes());
             }
         }
-        return (status, response_headers, body_out);
+        return (500, response_headers, body_out);
     }
     (status, response_headers, output)
 }
