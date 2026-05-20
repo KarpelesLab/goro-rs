@@ -5818,10 +5818,55 @@ fn http_fetch(url: &str, vm: &mut Vm) -> Value {
     http_fetch_ctx(url, vm, "GET", &[], &[])
 }
 
-/// Minimal HTTP/1.0 client used by file_get_contents for http:// URLs.
-/// Returns body on success, Value::False on failure (and emits a warning).
-/// Only supports http:// (not https://).
 fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, String)], body: &[u8]) -> Value {
+    // Follow up to 20 redirects (PHP default is 20).
+    let mut cur_url = url.to_string();
+    let mut cur_method = method.to_string();
+    let mut cur_headers: Vec<(String, String)> = headers.to_vec();
+    let mut cur_body: Vec<u8> = body.to_vec();
+    for _ in 0..20 {
+        let (status, location, response_body) = http_fetch_once(&cur_url, vm, &cur_method, &cur_headers, &cur_body);
+        if response_body.is_none() {
+            return Value::False;
+        }
+        let response_body = response_body.unwrap();
+        // Follow 3xx Location redirects.
+        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && location.is_some() {
+            let loc = location.unwrap();
+            let next_url = if loc.starts_with("http://") || loc.starts_with("https://") {
+                loc
+            } else if let Some(slash) = cur_url.find("://").and_then(|s| cur_url[s + 3..].find('/').map(|p| s + 3 + p)) {
+                let base = &cur_url[..slash];
+                if loc.starts_with('/') { format!("{}{}", base, loc) } else { format!("{}/{}", base, loc) }
+            } else {
+                format!("{}{}", cur_url.trim_end_matches('/'), if loc.starts_with('/') { loc.clone() } else { format!("/{}", loc) })
+            };
+            // For 301/302/303 -> downgrade to GET (PHP behaviour with default
+            // follow_location); for 307/308 keep method+body.
+            if status == 301 || status == 302 || status == 303 {
+                cur_method = "GET".to_string();
+                cur_body.clear();
+                // Strip Content-Length / Content-Type since body is gone
+                cur_headers.retain(|(k, _)| {
+                    !k.eq_ignore_ascii_case("content-length") && !k.eq_ignore_ascii_case("content-type")
+                });
+            }
+            cur_url = next_url;
+            continue;
+        }
+        return Value::String(PhpString::from_vec(response_body));
+    }
+    Value::False
+}
+
+/// Performs a single HTTP/1.0 request. Returns (status, Location, body).
+fn http_fetch_once(
+    url: &str,
+    vm: &mut Vm,
+    method: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> (u16, Option<String>, Option<Vec<u8>>) {
     use std::io::{Read as IoRead, Write as IoWrite};
     use std::net::{TcpStream, ToSocketAddrs};
 
@@ -5833,9 +5878,9 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
             "file_get_contents(): https:// is not supported (URL: {})",
             url
         ));
-        return Value::False;
+        return (0, None, None);
     } else {
-        return Value::False;
+        return (0, None, None);
     };
     let (host_port, path) = match after_scheme.find('/') {
         Some(i) => (&after_scheme[..i], &after_scheme[i..]),
@@ -5857,7 +5902,7 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
                     "file_get_contents({}): Failed to open stream: HTTP request failed!",
                     url
                 ));
-                return Value::False;
+                return (0, None, None);
             }
         },
         Err(_) => {
@@ -5865,7 +5910,7 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
                 "file_get_contents({}): Failed to open stream: HTTP request failed!",
                 url
             ));
-            return Value::False;
+            return (0, None, None);
         }
     };
     let mut stream = match TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(10)) {
@@ -5875,7 +5920,7 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
                 "file_get_contents({}): Failed to open stream: HTTP request failed!",
                 url
             ));
-            return Value::False;
+            return (0, None, None);
         }
     };
     let _ = stream.set_nodelay(true);
@@ -5914,7 +5959,7 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
             "file_get_contents({}): Failed to open stream: HTTP request failed!",
             url
         ));
-        return Value::False;
+        return (0, None, None);
     }
     let mut buf = Vec::new();
     if stream.read_to_end(&mut buf).is_err() {
@@ -5922,7 +5967,7 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
             "file_get_contents({}): Failed to open stream: HTTP request failed!",
             url
         ));
-        return Value::False;
+        return (0, None, None);
     }
     // Split headers from body
     let sep = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -5933,13 +5978,15 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
                 "file_get_contents({}): Failed to open stream: HTTP request failed!",
                 url
             ));
-            return Value::False;
+            return (0, None, None);
         }
     };
     let headers_part = &buf[..sep];
     let body = buf[sep + 4..].to_vec();
 
-    // Expose response headers via $http_response_header (a PHP global).
+    // Parse status code and Location header
+    let mut status: u16 = 200;
+    let mut location: Option<String> = None;
     let mut http_headers = PhpArray::new();
     if let Ok(hs) = std::str::from_utf8(headers_part) {
         for (i, line) in hs.split("\r\n").enumerate() {
@@ -5947,6 +5994,20 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
                 ArrayKey::Int(i as i64),
                 Value::String(PhpString::from_string(line.to_string())),
             );
+            if i == 0 {
+                // "HTTP/1.x NNN ..." - extract status
+                let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                if parts.len() >= 2 {
+                    if let Ok(s) = parts[1].parse::<u16>() {
+                        status = s;
+                    }
+                }
+            } else if let Some(colon) = line.find(':') {
+                let name = line[..colon].trim();
+                if name.eq_ignore_ascii_case("Location") {
+                    location = Some(line[colon + 1..].trim().to_string());
+                }
+            }
         }
     }
     vm.set_global(
@@ -5954,7 +6015,7 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
         Value::Array(Rc::new(RefCell::new(http_headers))),
     );
 
-    Value::String(PhpString::from_vec(body))
+    (status, location, Some(body))
 }
 
 fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
