@@ -246,7 +246,12 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
             if let Some(clean) = test.sections.get("CLEAN") {
                 let clean_trimmed = clean.trim();
                 if !clean_trimmed.is_empty() {
-                    let _ = execute_php_with_timeout_and_filename(clean_trimmed.as_bytes(), 5, test_dir, &ini_settings, filename);
+                    let clean_filename = if filename.ends_with(".php") {
+                        format!("{}.clean.php", &filename[..filename.len() - 4])
+                    } else {
+                        format!("{}.clean.php", filename)
+                    };
+                    let _ = execute_php_with_timeout_and_filename(clean_trimmed.as_bytes(), 5, test_dir, &ini_settings, &clean_filename);
                 }
             }
             return TestResult::Error(e);
@@ -256,10 +261,17 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     // Run CLEAN section after the main FILE section so that leftover files
     // (e.g. files created with fopen("x")) don't cause cascading failures
     // when subsequent test runs check for "file already exists" warnings.
+    // Use a `.clean.php` filename like the upstream PHP test runner does so
+    // tests that compute paths from basename(__FILE__, ".clean.php") work.
     if let Some(clean) = test.sections.get("CLEAN") {
         let clean_trimmed = clean.trim();
         if !clean_trimmed.is_empty() {
-            let _ = execute_php_with_timeout_and_filename(clean_trimmed.as_bytes(), 5, test_dir, &ini_settings, filename);
+            let clean_filename = if filename.ends_with(".php") {
+                format!("{}.clean.php", &filename[..filename.len() - 4])
+            } else {
+                format!("{}.clean.php", filename)
+            };
+            let _ = execute_php_with_timeout_and_filename(clean_trimmed.as_bytes(), 5, test_dir, &ini_settings, &clean_filename);
         }
     }
 

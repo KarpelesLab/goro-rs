@@ -4043,8 +4043,8 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Some(Value::Object(obj)) = description {
             let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             if class_lower == b"assertionerror" || class_lower == b"exception" || class_lower == b"error"
-                || goro_core::vm::is_builtin_subclass(&class_lower, b"exception")
-                || goro_core::vm::is_builtin_subclass(&class_lower, b"error")
+                || vm.class_extends(&class_lower, b"exception")
+                || vm.class_extends(&class_lower, b"error")
             {
                 vm.current_exception = Some(Value::Object(obj.clone()));
                 return Err(VmError {
@@ -5486,9 +5486,10 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             fmt_pos += 1;
 
             // Skip leading whitespace for numeric types and %s (NOSKIP for %c and %[)
+            // PHP/C isspace: space, \t, \n, \v, \f, \r
             match spec {
                 b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'g' | b'E' | b'G' | b's' => {
-                    while input_pos < input_bytes.len() && (input_bytes[input_pos] == b' ' || input_bytes[input_pos] == b'\t' || input_bytes[input_pos] == b'\n' || input_bytes[input_pos] == b'\r') {
+                    while input_pos < input_bytes.len() && matches!(input_bytes[input_pos], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
                         input_pos += 1;
                     }
                 }
@@ -5619,7 +5620,7 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     let start = input_pos;
                     let max = width.unwrap_or(usize::MAX);
                     let mut count = 0;
-                    while input_pos < input_bytes.len() && input_bytes[input_pos] != b' ' && input_bytes[input_pos] != b'\t' && input_bytes[input_pos] != b'\n' && input_bytes[input_pos] != b'\r' && count < max {
+                    while input_pos < input_bytes.len() && !matches!(input_bytes[input_pos], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') && count < max {
                         input_pos += 1;
                         count += 1;
                     }
@@ -5632,16 +5633,13 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 b'c' => {
-                    // Read up to width non-whitespace chars (default 1).
-                    // Like %s but does not skip leading whitespace.
+                    // Read up to width characters (default 1). Does not skip
+                    // leading whitespace and accepts any byte (including
+                    // whitespace), matching PHP/C scanf semantics.
                     let n = width.unwrap_or(1);
                     let start = input_pos;
                     let mut count = 0;
                     while input_pos < input_bytes.len() && count < n {
-                        let b = input_bytes[input_pos];
-                        if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
-                            break;
-                        }
                         input_pos += 1;
                         count += 1;
                     }
@@ -5729,10 +5727,10 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             nconversions += 1;
-        } else if format_bytes[fmt_pos] == b' ' || format_bytes[fmt_pos] == b'\t' || format_bytes[fmt_pos] == b'\n' {
+        } else if matches!(format_bytes[fmt_pos], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
             // Whitespace in format matches any amount of whitespace in input
             fmt_pos += 1;
-            while input_pos < input_bytes.len() && (input_bytes[input_pos] == b' ' || input_bytes[input_pos] == b'\t' || input_bytes[input_pos] == b'\n') {
+            while input_pos < input_bytes.len() && matches!(input_bytes[input_pos], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
                 input_pos += 1;
             }
         } else {
@@ -6505,6 +6503,13 @@ pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>
 
 fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    // Empty filename → ValueError, matching PHP's behavior.
+    if path.as_bytes().is_empty() {
+        let msg = "Path must not be empty";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+    }
     let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let _context = args.get(2);
     let context = _context;
@@ -9594,6 +9599,13 @@ fn hex_digit_misc(b: u8) -> Option<u8> {
 
 fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    // Empty filename → ValueError, matching PHP's behavior.
+    if filename.is_empty() {
+        let msg = "fopen(): Argument #1 ($filename) cannot be empty";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+    }
     // Preserve the original filename for the uri field of stream_get_meta_data.
     // PHP keeps the path as passed to fopen() (including any file:// prefix).
     let original_uri = filename.clone();
@@ -10083,10 +10095,10 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Ok(n) => {
                     buf.truncate(n);
                     // PHP marks EOF when fewer bytes than requested are read
-                    // from a regular file (matches PHP's feof() semantics).
-                    // We skip this for SpecialStream variants (memory/temp/
-                    // stdout/stderr/output) where short reads don't imply EOF.
-                    if n < length && matches!(fh.special, SpecialStream::None) {
+                    // from a stream. This applies to plain files and to
+                    // php://memory / php://temp (which are seekable, so once
+                    // we hit the end we report EOF).
+                    if n < length && matches!(fh.special, SpecialStream::None | SpecialStream::Memory | SpecialStream::Temp) {
                         fh.eof = true;
                     }
                     Ok(Value::String(PhpString::from_vec(buf)))
@@ -12991,10 +13003,19 @@ fn tempnam_fn3(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg, line: vm.current_line });
     }
     let dir = args.first().unwrap_or(&Value::Null).to_php_string();
-    let dir_str = if dir.is_empty() {
+    let raw_dir_str = if dir.is_empty() {
         std::env::temp_dir().to_string_lossy().to_string()
     } else {
         dir.to_string_lossy()
+    };
+    // Resolve the directory to a canonical path (like PHP's expand_filepath
+    // before opening). If the requested directory doesn't exist or isn't
+    // writable, fall back to the system temp dir.
+    let dir_path = std::path::Path::new(&raw_dir_str);
+    let canonical = dir_path.canonicalize().ok();
+    let dir_str = match canonical {
+        Some(p) if p.is_dir() => p.to_string_lossy().to_string(),
+        _ => std::env::temp_dir().to_string_lossy().to_string(),
     };
     // PHP uses only the basename of the prefix and truncates to 64 chars.
     let prefix_bytes = prefix.as_bytes();
@@ -16021,8 +16042,13 @@ fn mangle_property_name(name: &[u8], declaring_class: &[u8], visibility: Option<
 fn stream_set_blocking_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
-fn stream_set_timeout_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+fn stream_set_timeout_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    // Require an open stream resource (throws TypeError on closed/non-resource).
+    let _fid = require_open_stream(vm, arg, "stream_set_timeout")?;
+    // For regular file streams we return false; sockets would set SO_RCVTIMEO.
+    // We do not yet track per-stream timeouts.
+    Ok(Value::False)
 }
 fn stream_set_write_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
@@ -16281,6 +16307,13 @@ fn apply_context_params(vm: &mut Vm, ctx: &mut StreamContext, params: &Value) ->
                     ctx.notification = Some(v.clone());
                 }
                 b"options" => {
+                    // If $v is not an array, raise TypeError matching PHP.
+                    if !matches!(v, Value::Array(_)) {
+                        let msg = "Invalid stream/context parameter".to_string();
+                        let exc = vm.throw_type_error(msg.clone());
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: msg, line: vm.current_line });
+                    }
                     ctx.options = validate_context_options(vm, v)?;
                 }
                 _ => {}
@@ -16500,7 +16533,33 @@ thread_local! {
     static DEFAULT_STREAM_CTX: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
 }
 
-fn stream_context_get_default_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn stream_context_get_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Accept optional $options array. If provided, validate and merge.
+    if let Some(opts) = args.first() {
+        if !matches!(opts, Value::Null | Value::Undef) {
+            let merged = validate_context_options(vm, opts)?;
+            let fid = DEFAULT_STREAM_CTX.with(|d| {
+                if let Some(id) = d.get() { return id; }
+                let id = NEXT_FILE_ID.with(|n| { let v = n.get(); n.set(v + 1); v });
+                STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(id, StreamContext::default()); });
+                goro_core::value::register_resource(id, b"stream-context");
+                d.set(Some(id));
+                id
+            });
+            STREAM_CONTEXTS.with(|c| {
+                let mut cb = c.borrow_mut();
+                if let Some(ctx) = cb.get_mut(&fid) {
+                    for (wrapper, opt_map) in merged {
+                        let entry = ctx.options.entry(wrapper).or_default();
+                        for (k, v) in opt_map {
+                            entry.insert(k, v);
+                        }
+                    }
+                }
+            });
+            return Ok(Value::Resource(fid));
+        }
+    }
     let fid = DEFAULT_STREAM_CTX.with(|d| {
         if let Some(id) = d.get() { return id; }
         let id = NEXT_FILE_ID.with(|n| { let v = n.get(); n.set(v + 1); v });
@@ -16720,7 +16779,20 @@ fn stream_get_line_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn stream_set_chunk_size_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(8192)) }
+fn stream_set_chunk_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let _fid = require_open_stream(vm, arg, "stream_set_chunk_size")?;
+    let size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if size <= 0 {
+        let msg = "stream_set_chunk_size(): Argument #2 ($size) must be greater than 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    // We don't currently honour the chunk size internally. Return the default
+    // 8192 so callers see a sane previous value.
+    Ok(Value::Long(8192))
+}
 fn stream_socket_recvfrom_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn stream_socket_sendto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
 fn stream_socket_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
@@ -17479,17 +17551,39 @@ fn set_file_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0)) // success
 }
 
-fn stream_resolve_include_path_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-    let path = std::path::Path::new(&*filename);
-    if path.exists() {
-        match path.canonicalize() {
-            Ok(p) => Ok(Value::String(PhpString::from_string(p.to_string_lossy().into_owned()))),
-            Err(_) => Ok(Value::False),
-        }
-    } else {
-        Ok(Value::False)
+    if filename.is_empty() { return Ok(Value::False); }
+    // Absolute paths resolve directly.
+    let p = std::path::Path::new(&*filename);
+    if p.is_absolute() {
+        return Ok(match std::fs::canonicalize(p) {
+            Ok(cp) => Value::String(PhpString::from_string(cp.to_string_lossy().into_owned())),
+            Err(_) => Value::False,
+        });
     }
+    // Walk the include_path. set_include_path stores into vm.constants[b"include_path"].
+    let include_path = vm
+        .constants
+        .get(b"include_path".as_ref())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| ".".to_string());
+    let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
+    for entry in include_path.split(sep) {
+        if entry.is_empty() { continue; }
+        let candidate = if entry == "." {
+            std::path::PathBuf::from(&*filename)
+        } else {
+            std::path::PathBuf::from(entry).join(&*filename)
+        };
+        if candidate.exists() {
+            return Ok(match std::fs::canonicalize(&candidate) {
+                Ok(cp) => Value::String(PhpString::from_string(cp.to_string_lossy().into_owned())),
+                Err(_) => Value::String(PhpString::from_string(candidate.to_string_lossy().into_owned())),
+            });
+        }
+    }
+    Ok(Value::False)
 }
 
 fn stream_supports_lock_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
