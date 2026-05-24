@@ -62,6 +62,15 @@ fn arg_type_name(val: &Value) -> String {
     }
 }
 
+/// Compare two values as PHP would compare them in array_*_assoc functions:
+/// cast both to string and compare bytes. This matches PHP's
+/// `string_compare_function` semantics used in zend_hash_array_diff/intersect_assoc.
+fn php_value_string_eq(a: &Value, b: &Value) -> bool {
+    let a = a.deref();
+    let b = b.deref();
+    a.to_php_string().as_bytes() == b.to_php_string().as_bytes()
+}
+
 fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name: Option<&str>, param_num: u32) -> Result<(), VmError> {
     let make_msg = |type_name: &str| -> String {
         if let Some(name) = param_name {
@@ -10306,7 +10315,9 @@ fn array_u_op(
                     let cmp_result = call_user_func(vm, &[callback.clone(), key_val.clone(), okey_val.clone()])?;
                     if cmp_result.to_long() == 0 {
                         if also_compare_values {
-                            if value.equals(ovalue) {
+                            // PHP uses string comparison (zend_compare with string semantics)
+                            // for values in array_*_assoc functions, not loose `==`.
+                            if php_value_string_eq(value, ovalue) {
                                 found_in_this = true;
                                 break;
                             }
