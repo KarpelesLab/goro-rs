@@ -165,10 +165,8 @@ fn date_default_timezone_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
 }
 
 fn date_default_timezone_get(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let tz = vm.constants.get(b"__default_timezone".as_ref())
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::from_bytes(b"UTC"));
-    Ok(Value::String(tz))
+    let tz = get_default_tz(vm);
+    Ok(Value::String(PhpString::from_string(tz)))
 }
 
 fn time_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -288,7 +286,23 @@ fn mktime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         year
     };
 
-    let days = ymd_to_days(year, month as u32, day as u32);
+    // Normalize month/day with overflow handling: PHP allows month=0 (Dec previous year),
+    // negative months, day=0 (last of previous month), etc.
+    // First normalize month into year.
+    let mut y = year;
+    let mut m = month;
+    if m > 0 {
+        y += (m - 1) / 12;
+        m = (m - 1) % 12 + 1;
+    } else {
+        // m <= 0: subtract from year.
+        y += (m - 12) / 12;
+        m = ((m % 12) + 12) % 12;
+        if m == 0 { m = 12; }
+    }
+    // Now compute days from year/month/1 then add (day - 1).
+    let base_days = ymd_to_days(y, m as u32, 1);
+    let days = base_days + day - 1;
     let local_ts = days * 86400 + hour * 3600 + minute * 60 + second;
 
     // Adjust for timezone - mktime interprets args as local time
@@ -553,13 +567,25 @@ fn strftime_impl(_vm: &mut Vm, args: &[Value], use_gmt: bool) -> Result<Value, V
     // ISO week (Monday-based, week containing Jan 4 is week 1)
     let iso_dow = if dow == 0 { 7 } else { dow }; // Mon=1..Sun=7
     let iso_week = {
-        let jan1_days = ymd_to_days(year, 1, 1);
-        let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7;
-        let iso_jan1_dow: i64 = if jan1_dow == 0 { 7 } else { jan1_dow };
-        let ordinal = yday;
-        let wk = (ordinal - 1 + (iso_jan1_dow - 1)) / 7;
-        let iso_w = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
-        if iso_w == 0 { 52 } else { iso_w }
+        let current_days = days_since_epoch;
+        let iso_week1_start = |y: i64| -> i64 {
+            let jan4 = ymd_to_days(y, 1, 4);
+            let jan4_dow = ((jan4 + 4) % 7 + 7) % 7;
+            let iso_dow = if jan4_dow == 0 { 7 } else { jan4_dow };
+            jan4 - (iso_dow - 1)
+        };
+        let cur_year_start = iso_week1_start(year);
+        if current_days < cur_year_start {
+            let prev_start = iso_week1_start(year - 1);
+            (current_days - prev_start) / 7 + 1
+        } else {
+            let next_start = iso_week1_start(year + 1);
+            if current_days >= next_start {
+                (current_days - next_start) / 7 + 1
+            } else {
+                (current_days - cur_year_start) / 7 + 1
+            }
+        }
     };
     // ISO year
     let iso_year: i64 = {
@@ -731,47 +757,17 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    // Detect inline timezone in the input string (e.g. "...CET" or "...+01:00")
-    // unless an explicit DateTimeZone was passed.
-    let user_passed_tz = matches!(tz_arg, Some(Value::Object(_)));
+    // Detect inline timezone in the input string (e.g. "...CET" or "...+01:00" or "...Europe/Oslo").
+    // If found, it overrides the tz_arg per PHP semantics.
     let is_at_timestamp = datetime_str.starts_with('@');
     let mut effective_tz = tz_name.clone();
     let mut effective_tz_type: i64 = 3;
-    if !is_at_timestamp && !user_passed_tz {
-        let trimmed = datetime_str.trim();
-        let is_abbrev_not_utc = |s: &str| -> bool {
-            !s.eq_ignore_ascii_case("UTC")
-                && (is_known_tz_abbrev_or_name(s) || s.eq_ignore_ascii_case("GMT"))
-                && !s.contains('/')
-        };
-        let normalize_offset = |s: &str| -> String {
-            // Convert +HHMM to +HH:MM
-            let b = s.as_bytes();
-            if b.len() == 5 && (b[0] == b'+' || b[0] == b'-')
-                && b[1..].iter().all(|c| c.is_ascii_digit())
-            {
-                format!("{}{}{}:{}{}", b[0] as char, b[1] as char, b[2] as char, b[3] as char, b[4] as char)
-            } else {
-                s.to_string()
-            }
-        };
-        if !trimmed.is_empty() {
-            if parse_tz_offset(trimmed).is_some() {
-                effective_tz = normalize_offset(trimmed);
-                effective_tz_type = 1;
-            } else if is_abbrev_not_utc(trimmed) {
-                effective_tz = trimmed.to_uppercase();
-                effective_tz_type = 2;
-            } else if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
-                let tail = trimmed[idx+1..].trim();
-                if parse_tz_offset(tail).is_some() {
-                    effective_tz = normalize_offset(tail);
-                    effective_tz_type = 1;
-                } else if is_abbrev_not_utc(tail) {
-                    effective_tz = tail.to_uppercase();
-                    effective_tz_type = 2;
-                }
-            }
+    let mut clean_dt_str = datetime_str.clone();
+    if !is_at_timestamp {
+        if let Some((stripped, tz, tz_type)) = extract_inline_timezone(&datetime_str) {
+            effective_tz = tz;
+            effective_tz_type = tz_type;
+            clean_dt_str = stripped;
         }
     }
     if is_at_timestamp {
@@ -779,10 +775,10 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         effective_tz_type = 1;
     }
 
-    let timestamp = if datetime_str.is_empty() || datetime_str.eq_ignore_ascii_case("now") {
+    let timestamp = if clean_dt_str.is_empty() || clean_dt_str.eq_ignore_ascii_case("now") {
         now_secs
     } else {
-        match parse_datetime_string(&datetime_str, now_secs) {
+        match parse_datetime_string(&clean_dt_str, now_secs) {
             Some(ts) => {
                 // The parsed timestamp is assumed to be in UTC; adjust to account for
                 // the fact that the input is in the given timezone
@@ -806,18 +802,110 @@ fn date_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
+/// Extract a trailing inline timezone from a datetime string.
+/// Returns (datetime_without_tz, tz_name, tz_type) where tz_type is 1=offset, 2=abbrev, 3=identifier.
+pub fn extract_inline_timezone(input: &str) -> Option<(String, String, i64)> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalize_offset = |s: &str| -> String {
+        let b = s.as_bytes();
+        if b.len() == 5 && (b[0] == b'+' || b[0] == b'-')
+            && b[1..].iter().all(|c| c.is_ascii_digit())
+        {
+            format!("{}{}{}:{}{}", b[0] as char, b[1] as char, b[2] as char, b[3] as char, b[4] as char)
+        } else {
+            s.to_string()
+        }
+    };
+
+    // If the whole thing is just a TZ.
+    if parse_tz_offset(trimmed).is_some() {
+        return Some((String::new(), normalize_offset(trimmed), 1));
+    }
+    if trimmed.contains('/') && is_known_tz_identifier(trimmed) {
+        return Some((String::new(), trimmed.to_string(), 3));
+    }
+    if !trimmed.contains('/') && is_known_tz_abbrev_or_name(trimmed) {
+        let upper = trimmed.to_uppercase();
+        // UTC and Z are normalized to type 1 "UTC". GMT stays as type 2 "GMT".
+        if upper == "UTC" || upper == "Z" {
+            return Some((String::new(), "UTC".to_string(), 1));
+        }
+        return Some((String::new(), upper, 2));
+    }
+
+    // Look for trailing TZ at the last whitespace boundary.
+    if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace()) {
+        let tail = trimmed[idx+1..].trim();
+        let head = trimmed[..idx].trim_end();
+        if parse_tz_offset(tail).is_some() {
+            return Some((head.to_string(), normalize_offset(tail), 1));
+        }
+        if tail.contains('/') && is_known_tz_identifier(tail) {
+            return Some((head.to_string(), tail.to_string(), 3));
+        }
+        if !tail.contains('/') && is_known_tz_abbrev_or_name(tail) {
+            let upper = tail.to_uppercase();
+            if upper == "UTC" || upper == "Z" {
+                return Some((head.to_string(), "UTC".to_string(), 1));
+            }
+            return Some((head.to_string(), upper, 2));
+        }
+        // Trailing TZ might be glued without space, like "2005-07-14T22:30:41+0200"
+    }
+
+    // Look for a trailing offset glued to the time (e.g. "...22:30:41+0200" or "...41-07:00").
+    // Find the last '+' or '-' that begins a valid offset substring.
+    let bytes = trimmed.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'+' || bytes[i] == b'-' {
+            // Must not be at start (it would be a sign for year)
+            if i == 0 { break; }
+            let tail = &trimmed[i..];
+            if parse_tz_offset(tail).is_some() {
+                // Make sure the char before is not part of date "1995-01-02" (digit-).
+                // For our case, we want trailing TZ; the char just before is typically a digit (time/seconds).
+                // Only accept if length of tail >= 5 (e.g. +0500 or +05:00 or +05:00:00).
+                let head = trimmed[..i].trim_end();
+                return Some((head.to_string(), normalize_offset(tail), 1));
+            }
+        }
+    }
+
+    // Trailing "Z" suffix.
+    if trimmed.ends_with('Z') || trimmed.ends_with('z') {
+        let head = trimmed[..trimmed.len()-1].trim_end().to_string();
+        return Some((head, "UTC".to_string(), 1));
+    }
+
+    None
+}
+
 /// getdate - return associative array with date components
 fn getdate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let timestamp = args.get(0).map(|v| v.to_long());
+    let user_ts = timestamp;
 
-    let secs = timestamp.unwrap_or_else(|| {
+    let secs_utc = timestamp.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
     });
 
-    let days_since_epoch = secs / 86400;
+    // Apply the default timezone offset for local fields.
+    let tz_name = get_default_tz(_vm);
+    let (offset, _) = timezone_offset_and_abbrev(&tz_name, secs_utc);
+    let secs = secs_utc + offset;
+    // Keep `[0]` slot as the original UTC ts.
+    let raw_ts = user_ts.unwrap_or(secs_utc);
+
+    let days_since_epoch = if secs >= 0 { secs / 86400 } else { (secs - 86399) / 86400 };
     let time_of_day = ((secs % 86400) + 86400) % 86400;
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
@@ -908,7 +996,7 @@ fn getdate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             month_names[month as usize].to_string(),
         )),
     );
-    result.set(ArrayKey::Int(0), Value::Long(secs));
+    result.set(ArrayKey::Int(0), Value::Long(raw_ts));
 
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
@@ -918,14 +1006,17 @@ fn localtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let timestamp = args.get(0).map(|v| v.to_long());
     let is_assoc = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
 
-    let secs = timestamp.unwrap_or_else(|| {
+    let secs_utc = timestamp.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
     });
+    let tz_name = get_default_tz(_vm);
+    let (offset, _) = timezone_offset_and_abbrev(&tz_name, secs_utc);
+    let secs = secs_utc + offset;
 
-    let days_since_epoch = secs / 86400;
+    let days_since_epoch = if secs >= 0 { secs / 86400 } else { (secs - 86399) / 86400 };
     let time_of_day = ((secs % 86400) + 86400) % 86400;
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
@@ -1218,9 +1309,17 @@ fn date_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn get_default_tz(vm: &Vm) -> String {
-    vm.constants.get(b"__default_timezone".as_ref())
-        .map(|v| v.to_php_string().to_string_lossy())
-        .unwrap_or_else(|| "UTC".to_string())
+    // Prefer the value set by date_default_timezone_set, fall back to the
+    // 'date.timezone' INI value, finally default to UTC.
+    if let Some(v) = vm.constants.get(b"__default_timezone".as_ref()) {
+        let s = v.to_php_string().to_string_lossy();
+        if !s.is_empty() { return s; }
+    }
+    if let Some(v) = vm.constants.get(b"date.timezone".as_ref()) {
+        let s = v.to_php_string().to_string_lossy();
+        if !s.is_empty() { return s; }
+    }
+    "UTC".to_string()
 }
 
 /// Check if a UTC timestamp falls in US DST (2nd Sunday March 2am to 1st Sunday November 2am local)
@@ -1280,6 +1379,16 @@ fn is_eu_dst(timestamp: i64) -> bool {
 }
 
 /// Get the UTC offset (in seconds) and abbreviation for a timezone name at a given timestamp
+/// Look up a fixed offset for a TZ *abbreviation* (no DST adjustment).
+/// Used when a string explicitly specifies an abbreviation rather than a TZ identifier.
+pub fn timezone_offset_for_abbrev_fixed(abbrev: &str) -> Option<(i64, String)> {
+    let upper = abbrev.to_uppercase();
+    if let Some(off) = abbrev_to_offset(&upper) {
+        return Some((off, upper));
+    }
+    None
+}
+
 pub fn timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, String) {
     match tz_name {
         "UTC" | "utc" | "GMT" | "GMT0" | "GMT+0" | "GMT-0" => (0, "UTC".to_string()),
@@ -1325,19 +1434,70 @@ pub fn timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, String
         "Europe/Paris" | "Europe/Berlin" | "Europe/Amsterdam" | "Europe/Brussels"
         | "Europe/Rome" | "Europe/Madrid" | "Europe/Vienna" | "Europe/Zurich"
         | "Europe/Copenhagen" | "Europe/Oslo" | "Europe/Stockholm" | "Europe/Prague"
-        | "Europe/Warsaw" | "Europe/Budapest" | "CET" => {
+        | "Europe/Warsaw" | "Europe/Budapest" => {
             if is_eu_dst(timestamp) { (2 * 3600, "CEST".to_string()) }
             else { (3600, "CET".to_string()) }
         }
         "Europe/Helsinki" | "Europe/Athens" | "Europe/Istanbul" | "Europe/Kiev"
-        | "Europe/Bucharest" | "EET" => {
+        | "Europe/Bucharest" => {
             if is_eu_dst(timestamp) { (3 * 3600, "EEST".to_string()) }
             else { (2 * 3600, "EET".to_string()) }
         }
-        "Europe/Lisbon" | "WET" => {
+        "Europe/Lisbon" => {
             if is_eu_dst(timestamp) { (3600, "WEST".to_string()) }
             else { (0, "WET".to_string()) }
         }
+        // Fixed-offset abbreviations (no DST applied).
+        "CET" => (3600, "CET".to_string()),
+        "MET" => (3600, "MET".to_string()),
+        "EST5EDT" => {
+            if is_us_dst(timestamp, -5 * 3600) { (-4 * 3600, "EDT".to_string()) }
+            else { (-5 * 3600, "EST".to_string()) }
+        }
+        "CST6CDT" => {
+            if is_us_dst(timestamp, -6 * 3600) { (-5 * 3600, "CDT".to_string()) }
+            else { (-6 * 3600, "CST".to_string()) }
+        }
+        "MST7MDT" => {
+            if is_us_dst(timestamp, -7 * 3600) { (-6 * 3600, "MDT".to_string()) }
+            else { (-7 * 3600, "MST".to_string()) }
+        }
+        "PST8PDT" => {
+            if is_us_dst(timestamp, -8 * 3600) { (-7 * 3600, "PDT".to_string()) }
+            else { (-8 * 3600, "PST".to_string()) }
+        }
+        "CEST" => (2 * 3600, "CEST".to_string()),
+        "EET" => (2 * 3600, "EET".to_string()),
+        "EEST" => (3 * 3600, "EEST".to_string()),
+        "WET" => (0, "WET".to_string()),
+        "WEST" => (3600, "WEST".to_string()),
+        "EST" => (-5 * 3600, "EST".to_string()),
+        "EDT" => (-4 * 3600, "EDT".to_string()),
+        "CST" => (-6 * 3600, "CST".to_string()),
+        "CDT" => (-5 * 3600, "CDT".to_string()),
+        "MST" => (-7 * 3600, "MST".to_string()),
+        "MDT" => (-6 * 3600, "MDT".to_string()),
+        "PST" => (-8 * 3600, "PST".to_string()),
+        "PDT" => (-7 * 3600, "PDT".to_string()),
+        "AKST" => (-9 * 3600, "AKST".to_string()),
+        "AKDT" => (-8 * 3600, "AKDT".to_string()),
+        "HST" => (-10 * 3600, "HST".to_string()),
+        "AST" => (-4 * 3600, "AST".to_string()),
+        "ADT" => (-3 * 3600, "ADT".to_string()),
+        "JST" => (9 * 3600, "JST".to_string()),
+        "KST" => (9 * 3600, "KST".to_string()),
+        "SGT" => (8 * 3600, "SGT".to_string()),
+        "HKT" => (8 * 3600, "HKT".to_string()),
+        "AEST" => (10 * 3600, "AEST".to_string()),
+        "AEDT" => (11 * 3600, "AEDT".to_string()),
+        "ACST" => (9 * 3600 + 1800, "ACST".to_string()),
+        "ACDT" => (10 * 3600 + 1800, "ACDT".to_string()),
+        "AWST" => (8 * 3600, "AWST".to_string()),
+        "NZST" => (12 * 3600, "NZST".to_string()),
+        "NZDT" => (13 * 3600, "NZDT".to_string()),
+        "BST" => (3600, "BST".to_string()),
+        "MSK" => (3 * 3600, "MSK".to_string()),
+        "IST" => (5 * 3600 + 1800, "IST".to_string()),
         "Europe/Moscow" => (3 * 3600, "MSK".to_string()),
         "Asia/Tokyo" | "Japan" => (9 * 3600, "JST".to_string()),
         "Asia/Shanghai" | "Asia/Hong_Kong" | "PRC" | "Asia/Taipei" => (8 * 3600, "CST".to_string()),
@@ -1463,6 +1623,22 @@ pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_name: &str, tz
                     result.push_str(&format!("{:04}", year));
                 }
             }
+            b'X' => {
+                if year < 0 {
+                    result.push_str(&format!("-{:04}", -year));
+                } else {
+                    result.push_str(&format!("+{:04}", year));
+                }
+            }
+            b'x' => {
+                if year < 0 {
+                    result.push_str(&format!("-{:04}", -year));
+                } else if year >= 10000 {
+                    result.push_str(&format!("+{}", year));
+                } else {
+                    result.push_str(&format!("{:04}", year));
+                }
+            }
             b'y' => result.push_str(&format!("{:02}", year % 100)),
             b'm' => result.push_str(&format!("{:02}", month)),
             b'n' => result.push_str(&format!("{}", month)),
@@ -1580,20 +1756,28 @@ pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_name: &str, tz
                 result.push_str(&format!("{}", doy));
             }
             b'W' => {
-                // ISO 8601 week number
-                let jan1_days = ymd_to_days(year, 1, 1);
-                let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7; // 0=Sun
-                let iso_jan1_dow = if jan1_dow == 0 { 7 } else { jan1_dow }; // 1=Mon..7=Sun
-                let ordinal_day = {
-                    let days_in_months = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-                    let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
-                    let mut d = days_in_months[((month - 1).max(0) as usize).min(11)] + day;
-                    if month > 2 { d += leap; }
-                    d
+                // ISO 8601 week number (Monday-based weeks; week 1 contains Jan 4).
+                let current_days = ymd_to_days(year, month as u32, day as u32);
+                // Helper: ISO week 1 start (Monday) for a given year.
+                let iso_week1_start = |y: i64| -> i64 {
+                    let jan4 = ymd_to_days(y, 1, 4);
+                    let jan4_dow = ((jan4 + 4) % 7 + 7) % 7; // 0=Sun, 1=Mon..
+                    let iso_dow = if jan4_dow == 0 { 7 } else { jan4_dow }; // 1=Mon..7=Sun
+                    jan4 - (iso_dow - 1)
                 };
-                let wk = (ordinal_day as i64 - 1 + (iso_jan1_dow - 1) as i64) / 7;
-                let iso_week = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
-                let iso_week = if iso_week == 0 { 52 } else { iso_week };
+                let cur_year_start = iso_week1_start(year);
+                let iso_week: i64 = if current_days < cur_year_start {
+                    // Belongs to ISO year = year - 1
+                    let prev_start = iso_week1_start(year - 1);
+                    (current_days - prev_start) / 7 + 1
+                } else {
+                    let next_start = iso_week1_start(year + 1);
+                    if current_days >= next_start {
+                        (current_days - next_start) / 7 + 1
+                    } else {
+                        (current_days - cur_year_start) / 7 + 1
+                    }
+                };
                 result.push_str(&format!("{:02}", iso_week));
             }
             b'B' => {
@@ -1751,6 +1935,22 @@ pub fn format_timestamp(format: &str, secs: i64) -> String {
                     result.push_str(&format!("{:04}", year));
                 }
             }
+            b'X' => {
+                if year < 0 {
+                    result.push_str(&format!("-{:04}", -year));
+                } else {
+                    result.push_str(&format!("+{:04}", year));
+                }
+            }
+            b'x' => {
+                if year < 0 {
+                    result.push_str(&format!("-{:04}", -year));
+                } else if year >= 10000 {
+                    result.push_str(&format!("+{}", year));
+                } else {
+                    result.push_str(&format!("{:04}", year));
+                }
+            }
             b'y' => result.push_str(&format!("{:02}", year % 100)),
             b'm' => result.push_str(&format!("{:02}", month)),
             b'n' => result.push_str(&format!("{}", month)),
@@ -1829,19 +2029,26 @@ pub fn format_timestamp(format: &str, secs: i64) -> String {
                 result.push_str(&format!("{}", doy));
             }
             b'W' => {
-                let jan1_days = ymd_to_days(year, 1, 1);
-                let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7;
-                let iso_jan1_dow = if jan1_dow == 0 { 7 } else { jan1_dow };
-                let ordinal_day = {
-                    let days_in_months = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-                    let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
-                    let mut d = days_in_months[((month - 1).max(0) as usize).min(11)] + day;
-                    if month > 2 { d += leap; }
-                    d
+                // ISO 8601 week number (Monday-based weeks; week 1 contains Jan 4).
+                let current_days = ymd_to_days(year, month as u32, day as u32);
+                let iso_week1_start = |y: i64| -> i64 {
+                    let jan4 = ymd_to_days(y, 1, 4);
+                    let jan4_dow = ((jan4 + 4) % 7 + 7) % 7;
+                    let iso_dow = if jan4_dow == 0 { 7 } else { jan4_dow };
+                    jan4 - (iso_dow - 1)
                 };
-                let wk = (ordinal_day as i64 - 1 + (iso_jan1_dow - 1) as i64) / 7;
-                let iso_week = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
-                let iso_week = if iso_week == 0 { 52 } else { iso_week };
+                let cur_year_start = iso_week1_start(year);
+                let iso_week: i64 = if current_days < cur_year_start {
+                    let prev_start = iso_week1_start(year - 1);
+                    (current_days - prev_start) / 7 + 1
+                } else {
+                    let next_start = iso_week1_start(year + 1);
+                    if current_days >= next_start {
+                        (current_days - next_start) / 7 + 1
+                    } else {
+                        (current_days - cur_year_start) / 7 + 1
+                    }
+                };
                 result.push_str(&format!("{:02}", iso_week));
             }
             b'B' => {
@@ -1929,6 +2136,28 @@ pub fn parse_datetime_string(input: &str, now: i64) -> Option<i64> {
         || s.eq_ignore_ascii_case("GMT") || is_known_tz_abbrev_or_name(s)
     {
         return Some(now);
+    }
+
+    // Handle "<date> noon" / "<date> midnight" by splitting the trailing keyword
+    // off and applying it as a time-of-day on the parsed date.
+    {
+        let lower = s.to_lowercase();
+        let (kw, tod_secs) = if lower.ends_with(" noon") {
+            (" noon", 12 * 3600i64)
+        } else if lower.ends_with(" midnight") {
+            (" midnight", 0i64)
+        } else {
+            ("", -1i64)
+        };
+        if !kw.is_empty() {
+            let date_part = &s[..s.len() - kw.len()];
+            if let Some(date_ts) = try_parse_absolute(date_part)
+                .or_else(|| try_parse_textual_date(date_part))
+            {
+                let day = if date_ts >= 0 { date_ts / 86400 } else { (date_ts - 86399) / 86400 };
+                return Some(day * 86400 + tod_secs);
+            }
+        }
     }
 
     // Try absolute date formats first
@@ -2462,20 +2691,38 @@ fn try_parse_textual_date(s: &str) -> Option<i64> {
         }
     }
 
+    // Helper: PHP 2-digit year expansion: 00-69 -> 2000-2069, 70-99 -> 1970-1999.
+    let expand_year = |y_str: &str, y: i64| -> i64 {
+        if y_str.len() <= 2 && y >= 0 && y < 100 {
+            if y < 70 { 2000 + y } else { 1900 + y }
+        } else {
+            y
+        }
+    };
+
     let mut ymd: Option<(i64, u32, u32)> = None;
     // Try "Mon d Y" or "Mon dth Y"
     if date_parts.len() >= 3 {
         if let Some(&(_, mon)) = month_names.iter().find(|(name, _)| *name == date_parts[0]) {
             let day_str = date_parts[1].trim_end_matches(|c: char| !c.is_ascii_digit());
-            if let (Ok(day), Ok(year)) = (day_str.parse::<u32>(), date_parts[2].parse::<i64>()) {
-                ymd = Some((year, mon, day));
+            if let (Ok(day), Ok(year_raw)) = (day_str.parse::<u32>(), date_parts[2].parse::<i64>()) {
+                ymd = Some((expand_year(date_parts[2], year_raw), mon, day));
             }
         }
         if ymd.is_none() {
             if let Some(&(_, mon)) = month_names.iter().find(|(name, _)| *name == date_parts[1]) {
                 let day_str = date_parts[0].trim_end_matches(|c: char| !c.is_ascii_digit());
-                if let (Ok(day), Ok(year)) = (day_str.parse::<u32>(), date_parts[2].parse::<i64>()) {
-                    ymd = Some((year, mon, day));
+                if let (Ok(day), Ok(year_raw)) = (day_str.parse::<u32>(), date_parts[2].parse::<i64>()) {
+                    ymd = Some((expand_year(date_parts[2], year_raw), mon, day));
+                }
+            }
+        }
+        // Also try "Y Mon d" (year first)
+        if ymd.is_none() {
+            if let Some(&(_, mon)) = month_names.iter().find(|(name, _)| *name == date_parts[1]) {
+                let day_str = date_parts[2].trim_end_matches(|c: char| !c.is_ascii_digit());
+                if let (Ok(year_raw), Ok(day)) = (date_parts[0].parse::<i64>(), day_str.parse::<u32>()) {
+                    ymd = Some((expand_year(date_parts[0], year_raw), mon, day));
                 }
             }
         }
@@ -2503,7 +2750,67 @@ fn try_parse_textual_date(s: &str) -> Option<i64> {
         }
         time_secs = h_adj * 3600 + m * 60 + sec;
     }
-    Some(days * 86400 + time_secs)
+
+    // Apply timezone offset/abbreviation if present in tokens.
+    let mut tz_offset: i64 = 0;
+    if let Some(tz) = tz_token {
+        if let Some(off) = parse_tz_offset(tz) {
+            tz_offset = off;
+        } else {
+            let upper = tz.to_uppercase();
+            if upper != "UTC" && upper != "GMT" && upper != "Z" {
+                if let Some(off) = abbrev_to_offset(&upper) {
+                    tz_offset = off;
+                }
+            }
+        }
+    }
+
+    Some(days * 86400 + time_secs - tz_offset)
+}
+
+/// Map a timezone abbreviation to its standard-time offset in seconds.
+fn abbrev_to_offset(abbrev: &str) -> Option<i64> {
+    match abbrev {
+        "GMT" | "UTC" | "UT" | "Z" => Some(0),
+        "EST" => Some(-5 * 3600),
+        "EDT" => Some(-4 * 3600),
+        "CST" => Some(-6 * 3600),
+        "CDT" => Some(-5 * 3600),
+        "MST" => Some(-7 * 3600),
+        "MDT" => Some(-6 * 3600),
+        "PST" => Some(-8 * 3600),
+        "PDT" => Some(-7 * 3600),
+        "AKST" => Some(-9 * 3600),
+        "AKDT" => Some(-8 * 3600),
+        "HST" => Some(-10 * 3600),
+        "AST" => Some(-4 * 3600),
+        "ADT" => Some(-3 * 3600),
+        "NST" => Some(-3 * 3600 - 1800),
+        "NDT" => Some(-2 * 3600 - 1800),
+        "CET" | "MET" => Some(3600),
+        "CEST" | "MEST" => Some(2 * 3600),
+        "WET" => Some(0),
+        "WEST" | "BST" => Some(3600),
+        "EET" => Some(2 * 3600),
+        "EEST" => Some(3 * 3600),
+        "MSK" => Some(3 * 3600),
+        "MSD" => Some(4 * 3600),
+        "JST" => Some(9 * 3600),
+        "KST" => Some(9 * 3600),
+        "CCT" | "CST_CHINA" => Some(8 * 3600),
+        "HKT" => Some(8 * 3600),
+        "SGT" => Some(8 * 3600),
+        "IST" => Some(5 * 3600 + 1800),
+        "AEST" => Some(10 * 3600),
+        "AEDT" => Some(11 * 3600),
+        "ACST" => Some(9 * 3600 + 1800),
+        "ACDT" => Some(10 * 3600 + 1800),
+        "AWST" => Some(8 * 3600),
+        "NZST" => Some(12 * 3600),
+        "NZDT" => Some(13 * 3600),
+        _ => None,
+    }
 }
 
 fn vm_is_numeric_offset(s: &str) -> bool {
@@ -3087,17 +3394,257 @@ fn date_create_from_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let timestamp = parse_with_format(&format, &datetime_str, now_secs);
+    // Honour the optional $timezone argument as the default.
+    let tz_arg = args.get(2);
+    let default_tz_name = if let Some(Value::Object(tz_obj)) = tz_arg {
+        let tz_borrow = tz_obj.borrow();
+        let tz = tz_borrow.get_property(b"timezone").to_php_string().to_string_lossy();
+        if tz.is_empty() { get_default_tz(_vm) } else { tz }
+    } else {
+        get_default_tz(_vm)
+    };
 
-    match timestamp {
-        Some(ts) => {
+    let parsed = parse_with_format_ex(&format, &datetime_str, now_secs);
+
+    match parsed {
+        Some((local_ts, tz_opt)) => {
+            // Determine the effective timezone (parsed > arg > default)
+            let (effective_tz, effective_tz_type): (String, i64) = if let Some((tz, ty)) = tz_opt {
+                (tz, ty)
+            } else {
+                let ty = if parse_tz_offset(&default_tz_name).is_some() {
+                    1
+                } else if !default_tz_name.contains('/') && is_known_tz_abbrev_or_name(&default_tz_name)
+                    && !default_tz_name.eq_ignore_ascii_case("UTC")
+                    && !default_tz_name.eq_ignore_ascii_case("GMT")
+                {
+                    2
+                } else {
+                    3
+                };
+                (default_tz_name.clone(), ty)
+            };
+            // The parsed timestamp is naively local; convert to UTC via the timezone.
+            let (offset, _) = timezone_offset_and_abbrev(&effective_tz, local_ts);
+            let ts = local_ts - offset;
+
             let obj_id = _vm.next_object_id();
             let mut obj = PhpObject::new(b"DateTime".to_vec(), obj_id);
             obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
+            // For var_dump-style display.
+            let (display_off, _) = timezone_offset_and_abbrev(&effective_tz, ts);
+            let date_str = format_timestamp("Y-m-d H:i:s", ts + display_off) + ".000000";
+            obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
+            obj.set_property(b"timezone_type".to_vec(), Value::Long(effective_tz_type));
+            obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(effective_tz)));
             Ok(Value::Object(Rc::new(RefCell::new(obj))))
         }
         None => Ok(Value::False),
     }
+}
+
+/// Like `parse_with_format` but also returns any timezone parsed from the
+/// input (as (name, type) where type is 1=offset, 2=abbreviation, 3=identifier).
+fn parse_with_format_ex(format: &str, datetime: &str, now: i64) -> Option<(i64, Option<(String, i64)>)> {
+    let now_days = now / 86400;
+    let _ = now_days;
+    let (now_year, now_month, now_day) = days_to_ymd(now / 86400);
+
+    let mut year = now_year;
+    let mut month = now_month;
+    let mut day = now_day;
+    let mut hour = 0i64;
+    let mut minute = 0i64;
+    let mut second = 0i64;
+    let mut has_time = false;
+    let mut parsed_tz: Option<(String, i64)> = None;
+
+    let fmt_bytes = format.as_bytes();
+    let dt_bytes = datetime.as_bytes();
+    let mut fi = 0;
+    let mut di = 0;
+
+    while fi < fmt_bytes.len() && di <= dt_bytes.len() {
+        let fc = fmt_bytes[fi];
+        match fc {
+            b'Y' => {
+                let end = (di + 4).min(dt_bytes.len());
+                let s = std::str::from_utf8(&dt_bytes[di..end]).ok()?;
+                year = s.parse().ok()?;
+                di = end;
+            }
+            b'y' => {
+                let end = (di + 2).min(dt_bytes.len());
+                let s = std::str::from_utf8(&dt_bytes[di..end]).ok()?;
+                let y: i64 = s.parse().ok()?;
+                year = if y >= 70 { 1900 + y } else { 2000 + y };
+                di = end;
+            }
+            b'm' | b'n' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], if fc == b'm' { 2 } else { 2 })?;
+                month = val as u32;
+                di += consumed;
+            }
+            b'd' | b'j' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], if fc == b'd' { 2 } else { 2 })?;
+                day = val as u32;
+                di += consumed;
+            }
+            b'H' | b'G' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                hour = val;
+                has_time = true;
+                di += consumed;
+            }
+            b'h' | b'g' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                hour = val;
+                has_time = true;
+                di += consumed;
+            }
+            b'i' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                minute = val;
+                di += consumed;
+            }
+            b's' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                second = val;
+                di += consumed;
+            }
+            b'U' => {
+                let start = di;
+                let neg = di < dt_bytes.len() && dt_bytes[di] == b'-';
+                if neg { di += 1; }
+                while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() {
+                    di += 1;
+                }
+                let s = std::str::from_utf8(&dt_bytes[start..di]).ok()?;
+                let ts: i64 = s.parse().ok()?;
+                return Some((ts, Some(("+00:00".to_string(), 1))));
+            }
+            b'A' | b'a' => {
+                if di + 2 <= dt_bytes.len() {
+                    let ampm = std::str::from_utf8(&dt_bytes[di..di+2]).ok()?.to_lowercase();
+                    if ampm == "pm" && hour < 12 {
+                        hour += 12;
+                    } else if ampm == "am" && hour == 12 {
+                        hour = 0;
+                    }
+                    di += 2;
+                }
+            }
+            b'u' | b'v' => {
+                while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() {
+                    di += 1;
+                }
+            }
+            b'O' | b'P' | b'p' => {
+                // Optional GMT/UTC prefix.
+                if di + 3 <= dt_bytes.len() {
+                    let prefix = std::str::from_utf8(&dt_bytes[di..di+3]).unwrap_or("");
+                    if prefix.eq_ignore_ascii_case("GMT") || prefix.eq_ignore_ascii_case("UTC") {
+                        di += 3;
+                    }
+                }
+                if di < dt_bytes.len() && (dt_bytes[di] == b'Z' || dt_bytes[di] == b'z') {
+                    parsed_tz = Some(("+00:00".to_string(), 1));
+                    di += 1;
+                } else if di + 5 <= dt_bytes.len()
+                    && (dt_bytes[di] == b'+' || dt_bytes[di] == b'-')
+                    && dt_bytes[di+1].is_ascii_digit()
+                    && dt_bytes[di+2].is_ascii_digit()
+                {
+                    let sign = dt_bytes[di] as char;
+                    if di + 6 <= dt_bytes.len() && dt_bytes[di + 3] == b':'
+                        && dt_bytes[di+4].is_ascii_digit() && dt_bytes[di+5].is_ascii_digit()
+                    {
+                        let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
+                        let mm = std::str::from_utf8(&dt_bytes[di+4..di+6]).ok()?;
+                        parsed_tz = Some((format!("{}{}:{}", sign, hh, mm), 1));
+                        di += 6;
+                    } else if dt_bytes[di+3].is_ascii_digit() && dt_bytes[di+4].is_ascii_digit() {
+                        let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
+                        let mm = std::str::from_utf8(&dt_bytes[di+3..di+5]).ok()?;
+                        parsed_tz = Some((format!("{}{}:{}", sign, hh, mm), 1));
+                        di += 5;
+                    } else {
+                        let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
+                        parsed_tz = Some((format!("{}{}:00", sign, hh), 1));
+                        di += 3;
+                    }
+                } else {
+                    return None;
+                }
+            }
+            b'e' | b'T' => {
+                // Timezone abbreviation or identifier.
+                let start = di;
+                while di < dt_bytes.len() {
+                    let b = dt_bytes[di];
+                    if b == b' ' || b == b'\t' || b == b',' || b == b';' {
+                        break;
+                    }
+                    di += 1;
+                }
+                if di > start {
+                    let tok = &datetime[start..di];
+                    // Treat GMT+0200 / UTC+0200 etc.
+                    if tok.len() >= 8 && tok[..3].eq_ignore_ascii_case("GMT")
+                        && (tok.as_bytes()[3] == b'+' || tok.as_bytes()[3] == b'-')
+                    {
+                        let sign = tok.as_bytes()[3] as char;
+                        let rest = &tok[4..];
+                        if rest.len() == 4 {
+                            parsed_tz = Some((format!("{}{}:{}", sign, &rest[..2], &rest[2..]), 1));
+                        } else if rest.len() == 5 && rest.as_bytes()[2] == b':' {
+                            parsed_tz = Some((format!("{}{}", sign, rest), 1));
+                        }
+                    } else if is_known_tz_identifier(tok) && tok.contains('/') {
+                        parsed_tz = Some((tok.to_string(), 3));
+                    } else if is_known_tz_abbrev_or_name(tok) {
+                        parsed_tz = Some((tok.to_string(), 2));
+                    }
+                }
+            }
+            b'\\' => {
+                fi += 1;
+                if fi < fmt_bytes.len() && di < dt_bytes.len() {
+                    di += 1;
+                }
+            }
+            b' ' | b'-' | b'/' | b':' | b'.' => {
+                if di < dt_bytes.len() {
+                    di += 1;
+                }
+            }
+            b'!' => {
+                year = 1970;
+                month = 1;
+                day = 1;
+                hour = 0;
+                minute = 0;
+                second = 0;
+            }
+            b'|' => {
+                if !has_time {
+                    hour = 0;
+                    minute = 0;
+                    second = 0;
+                }
+            }
+            _ => {
+                if di < dt_bytes.len() {
+                    di += 1;
+                }
+            }
+        }
+        fi += 1;
+    }
+
+    let _ = now_day;
+    let days = ymd_to_days(year, month, day);
+    Some((days * 86400 + hour * 3600 + minute * 60 + second, parsed_tz))
 }
 
 /// Parse a datetime string using a format string (like PHP's DateTime::createFromFormat)
@@ -3274,9 +3821,12 @@ fn date_date_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     if let Value::Object(o) = obj {
         let ts = o.borrow().get_property(b"__timestamp").to_long();
-        let time_of_day = ((ts % 86400) + 86400) % 86400;
-        // Normalize month/day: PHP handles overflow (month 13 = Jan next year, day 32 = next month)
-        // First normalize month
+        let tz = o.borrow().get_property(b"timezone").to_php_string().to_string_lossy();
+        let (offset, _) = timezone_offset_and_abbrev(&tz, ts);
+        // Work in local time: shift ts by offset, then split.
+        let local_ts = ts + offset;
+        let time_of_day = ((local_ts % 86400) + 86400) % 86400;
+        // Normalize month: PHP handles overflow.
         let (adj_year, adj_month) = if month > 0 {
             let y = year + (month - 1) / 12;
             let m = ((month - 1) % 12 + 1) as u32;
@@ -3287,13 +3837,15 @@ fn date_date_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let m = if m == 0 { 12 } else { m };
             (y, m)
         };
-        // Use day as-is (ymd_to_days handles overflow for days)
         let new_days = ymd_to_days(adj_year, adj_month, 1) + (day - 1);
-        let new_ts = new_days * 86400 + time_of_day;
+        let new_local_ts = new_days * 86400 + time_of_day;
+        // Convert back to UTC using offset for the new local time.
+        let (new_offset, _) = timezone_offset_and_abbrev(&tz, new_local_ts - offset);
+        let new_ts = new_local_ts - new_offset;
         let mut ob = o.borrow_mut();
         ob.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
-        // Update the date display property
-        let date_str = format_timestamp("Y-m-d H:i:s", new_ts) + ".000000";
+        let (disp_offset, _) = timezone_offset_and_abbrev(&tz, new_ts);
+        let date_str = format_timestamp("Y-m-d H:i:s", new_ts + disp_offset) + ".000000";
         ob.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
         drop(ob);
         Ok(obj.clone())
@@ -3311,11 +3863,18 @@ fn date_time_set_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     if let Value::Object(o) = obj {
         let ts = o.borrow().get_property(b"__timestamp").to_long();
-        let days = if ts >= 0 { ts / 86400 } else { (ts - 86399) / 86400 };
-        let new_ts = days * 86400 + hour * 3600 + minute * 60 + second;
+        let tz = o.borrow().get_property(b"timezone").to_php_string().to_string_lossy();
+        let (offset, _) = timezone_offset_and_abbrev(&tz, ts);
+        // Work in local time
+        let local_ts = ts + offset;
+        let days = if local_ts >= 0 { local_ts / 86400 } else { (local_ts - 86399) / 86400 };
+        let new_local_ts = days * 86400 + hour * 3600 + minute * 60 + second;
+        let (new_offset, _) = timezone_offset_and_abbrev(&tz, new_local_ts - offset);
+        let new_ts = new_local_ts - new_offset;
         let mut ob = o.borrow_mut();
         ob.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
-        let date_str = format_timestamp("Y-m-d H:i:s", new_ts) + ".000000";
+        let (disp_offset, _) = timezone_offset_and_abbrev(&tz, new_ts);
+        let date_str = format_timestamp("Y-m-d H:i:s", new_ts + disp_offset) + ".000000";
         ob.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
         drop(ob);
         Ok(obj.clone())
@@ -3336,12 +3895,60 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
     let mut hours = 0i64;
     let mut minutes = 0i64;
     let mut seconds = 0i64;
+    let mut matched_any = false;
 
     let mut i = 0;
     while i < tokens.len() {
-        if let Ok(val) = tokens[i].parse::<i64>() {
+        let tok = tokens[i];
+        // Bare relative keywords.
+        let is_kw = matches!(tok,
+            "yesterday" | "tomorrow" | "midnight" | "noon" | "today" | "now"
+            | "last" | "next" | "first" | "second" | "third" | "fourth" | "fifth"
+            | "sixth" | "seventh" | "eighth" | "ninth" | "tenth" | "eleventh" | "twelfth"
+            | "back" | "front"
+        );
+        // Time-of-day modifiers don't add to relative components but are valid.
+        if matches!(tok, "noon" | "midnight" | "today" | "now") {
+            matched_any = true;
+            i += 1;
+            continue;
+        }
+        if tok == "tomorrow" { days += 1; matched_any = true; i += 1; continue; }
+        if tok == "yesterday" { days -= 1; matched_any = true; i += 1; continue; }
+        // "last/next <unit>" -> +/-1 unit
+        if (tok == "last" || tok == "next" || tok == "previous") && i + 1 < tokens.len() {
+            let sign: i64 = if tok == "last" || tok == "previous" { -1 } else { 1 };
+            let unit = tokens[i + 1].trim_end_matches('s');
+            let known = matches!(unit,
+                "year" | "month" | "day" | "hour" | "minute" | "min"
+                | "second" | "sec" | "week"
+                | "monday" | "tuesday" | "wednesday" | "thursday" | "friday"
+                | "saturday" | "sunday"
+            );
+            if known {
+                match unit {
+                    "year" => years += sign,
+                    "month" => months += sign,
+                    "day" => days += sign,
+                    "hour" => hours += sign,
+                    "minute" | "min" => minutes += sign,
+                    "second" | "sec" => seconds += sign,
+                    "week" => days += sign * 7,
+                    // weekday names => +/- 7 days as a placeholder
+                    _ => days += sign * 7,
+                }
+                matched_any = true;
+                i += 2;
+                continue;
+            }
+        }
+        if let Ok(val) = tok.parse::<i64>() {
             if i + 1 < tokens.len() {
                 let unit = tokens[i + 1].trim_end_matches('s');
+                let is_known = matches!(unit,
+                    "year" | "month" | "day" | "hour" | "minute" | "min"
+                    | "second" | "sec" | "week" | "fortnight"
+                );
                 match unit {
                     "year" => years = val,
                     "month" => months = val,
@@ -3350,28 +3957,52 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
                     "minute" | "min" => minutes = val,
                     "second" | "sec" => seconds = val,
                     "week" => days += val * 7,
+                    "fortnight" => days += val * 14,
                     _ => {}
                 }
+                if is_known { matched_any = true; }
                 i += 2;
                 continue;
             }
         }
+        // Drop bare relative keywords without consuming logic.
+        if is_kw { matched_any = true; }
         i += 1;
+    }
+
+    // PHP throws when the string contains no recognised relative tokens.
+    if !matched_any {
+        // Find position of first non-whitespace character to mimic PHP's
+        // "at position N (c)" error.
+        let (pos, ch) = s
+            .char_indices()
+            .find(|(_, c)| !c.is_whitespace())
+            .map(|(p, c)| (p, c))
+            .unwrap_or((0, ' '));
+        let err_msg = format!(
+            "Unknown or bad format ({}) at position {} ({}): The timezone could not be found in the database",
+            s, pos, ch
+        );
+        let line = _vm.current_line;
+        let exc = _vm.create_exception(b"DateMalformedIntervalStringException", &err_msg, line);
+        _vm.current_exception = Some(exc);
+        return Err(VmError { message: err_msg, line });
     }
 
     let obj_id = _vm.next_object_id();
     let mut obj = PhpObject::new(b"DateInterval".to_vec(), obj_id);
-    obj.set_property(b"y".to_vec(), Value::Long(years));
-    obj.set_property(b"m".to_vec(), Value::Long(months));
-    obj.set_property(b"d".to_vec(), Value::Long(days));
-    obj.set_property(b"h".to_vec(), Value::Long(hours));
-    obj.set_property(b"i".to_vec(), Value::Long(minutes));
-    obj.set_property(b"s".to_vec(), Value::Long(seconds));
-    obj.set_property(b"f".to_vec(), Value::Double(0.0));
-    obj.set_property(b"invert".to_vec(), Value::Long(0));
-    obj.set_property(b"days".to_vec(), Value::False);
+    // PHP only exposes from_string + date_string for date-string-created intervals.
+    // Store the parsed components under "__" prefixed keys for internal use.
     obj.set_property(b"from_string".to_vec(), Value::True);
     obj.set_property(b"date_string".to_vec(), Value::String(PhpString::from_string(s.clone())));
+    obj.set_property(b"__y".to_vec(), Value::Long(years));
+    obj.set_property(b"__m".to_vec(), Value::Long(months));
+    obj.set_property(b"__d".to_vec(), Value::Long(days));
+    obj.set_property(b"__h".to_vec(), Value::Long(hours));
+    obj.set_property(b"__i".to_vec(), Value::Long(minutes));
+    obj.set_property(b"__s".to_vec(), Value::Long(seconds));
+    obj.set_property(b"__f".to_vec(), Value::Double(0.0));
+    obj.set_property(b"__invert".to_vec(), Value::Long(0));
 
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
@@ -3380,6 +4011,13 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
 fn timezone_open_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let tz_str = args.first().unwrap_or(&Value::Null).to_php_string();
     let tz_bytes = tz_str.as_bytes();
+    // PHP rejects strings containing NUL bytes before validating the timezone.
+    if tz_bytes.contains(&0u8) {
+        let msg = "timezone_open(): Argument #1 ($timezone) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let tz_name = String::from_utf8_lossy(tz_bytes).to_string();
 
     // Validate timezone format/identity
@@ -3624,39 +4262,74 @@ fn timezone_abbreviations_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value
 /// timezone_name_from_abbr($abbr, $utcOffset = -1, $isDST = -1)
 fn timezone_name_from_abbr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let abbr = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
-    let _utc_offset = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
-    let _is_dst = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+    let utc_offset = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+    let is_dst = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
 
-    let tz = match abbr.as_str() {
-        "est" => "America/New_York",
-        "edt" => "America/New_York",
-        "cst" => "America/Chicago",
-        "cdt" => "America/Chicago",
-        "mst" => "America/Denver",
-        "mdt" => "America/Denver",
-        "pst" => "America/Los_Angeles",
-        "pdt" => "America/Los_Angeles",
-        "gmt" => "Europe/London",
-        "utc" => "UTC",
-        "cet" => "Europe/Berlin",
-        "cest" => "Europe/Berlin",
-        "eet" => "Europe/Helsinki",
-        "eest" => "Europe/Helsinki",
-        "msk" => "Europe/Moscow",
-        "jst" => "Asia/Tokyo",
-        "kst" => "Asia/Seoul",
-        "ist" => "Asia/Kolkata",
-        "aest" => "Australia/Sydney",
-        "acst" => "Australia/Adelaide",
-        "nzst" => "Pacific/Auckland",
-        "nzdt" => "Pacific/Auckland",
-        "hst" => "Pacific/Honolulu",
-        "akst" => "America/Anchorage",
-        "brt" => "America/Sao_Paulo",
-        "sast" => "Africa/Johannesburg",
-        "eat" => "Africa/Nairobi",
-        "wat" => "Africa/Lagos",
-        "wet" => "Europe/London",
+    if !abbr.is_empty() {
+        let tz = match abbr.as_str() {
+            "est" => "America/New_York",
+            "edt" => "America/New_York",
+            "cst" => "America/Chicago",
+            "cdt" => "America/Chicago",
+            "mst" => "America/Denver",
+            "mdt" => "America/Denver",
+            "pst" => "America/Los_Angeles",
+            "pdt" => "America/Los_Angeles",
+            "gmt" => "Europe/London",
+            "utc" => "UTC",
+            "cet" => "Europe/Berlin",
+            "cest" => "Europe/Berlin",
+            "eet" => "Europe/Helsinki",
+            "eest" => "Europe/Helsinki",
+            "msk" => "Europe/Moscow",
+            "jst" => "Asia/Tokyo",
+            "kst" => "Asia/Seoul",
+            "ist" => "Asia/Kolkata",
+            "aest" => "Australia/Sydney",
+            "acst" => "Australia/Adelaide",
+            "nzst" => "Pacific/Auckland",
+            "nzdt" => "Pacific/Auckland",
+            "hst" => "Pacific/Honolulu",
+            "akst" => "America/Anchorage",
+            "brt" => "America/Sao_Paulo",
+            "sast" => "Africa/Johannesburg",
+            "eat" => "Africa/Nairobi",
+            "wat" => "Africa/Lagos",
+            "wet" => "Europe/London",
+            _ => return Ok(Value::False),
+        };
+        return Ok(Value::String(PhpString::from_string(tz.to_string())));
+    }
+
+    // When abbr is empty, look up by UTC offset and DST flag.
+    // PHP requires both arguments for the canonical-zone lookup;
+    // calling with only the offset returns false.
+    if utc_offset < 0 || is_dst < 0 { return Ok(Value::False); }
+    let secs = utc_offset;
+    let tz = match (secs, is_dst) {
+        (0, _) => "UTC",
+        (3600, 0) => "Europe/Paris",
+        (3600, 1) => "Europe/London",
+        (7200, 0) => "Europe/Helsinki",
+        (7200, 1) => "Europe/Berlin",
+        (10800, 0) => "Europe/Moscow",
+        (10800, 1) => "Europe/Helsinki",
+        (14400, _) => "Asia/Dubai",
+        (18000, _) => "Asia/Karachi",
+        (19800, _) => "Asia/Kolkata",
+        (21600, _) => "Asia/Dhaka",
+        (25200, _) => "Asia/Bangkok",
+        (28800, _) => "Asia/Shanghai",
+        (32400, _) => "Asia/Tokyo",
+        (34200, _) => "Australia/Adelaide",
+        (36000, _) => "Australia/Sydney",
+        (43200, _) => "Pacific/Auckland",
+        (-18000, _) => "America/New_York",
+        (-21600, _) => "America/Chicago",
+        (-25200, _) => "America/Denver",
+        (-28800, _) => "America/Los_Angeles",
+        (-32400, _) => "America/Anchorage",
+        (-36000, _) => "Pacific/Honolulu",
         _ => return Ok(Value::False),
     };
     Ok(Value::String(PhpString::from_string(tz.to_string())))
