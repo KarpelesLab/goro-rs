@@ -479,7 +479,37 @@ pub fn reflection_function_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
     }
 
     // Handle array callables like [ClassName, method] - these should throw for ReflectionFunction
-    if let Value::Array(_) = &arg {
+    if let Value::Array(arr) = &arg {
+        // Closures with captured `use ($var)` are internally represented
+        // as an array whose first element is a `__closure_*` name. Treat
+        // those as Closure objects.
+        let first_is_closure_str = arr.borrow().values().next().and_then(|v| {
+            if let Value::String(s) = v {
+                let b = s.as_bytes();
+                if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_")
+                    || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_")
+                {
+                    Some(s.clone())
+                } else { None }
+            } else { None }
+        });
+        if let Some(s) = first_is_closure_str {
+            // Capture the trailing values (use-var bindings).
+            let captured: Vec<Value> = arr.borrow().values().skip(1).cloned().collect();
+            let mut obj = this.borrow_mut();
+            obj.set_property(b"name".to_vec(), Value::String(PhpString::from_bytes(b"{closure}")));
+            obj.set_property(b"__reflection_target".to_vec(), Value::String(s));
+            obj.set_property(b"__reflection_is_closure".to_vec(), Value::True);
+            if !captured.is_empty() {
+                let mut arr_captured = PhpArray::new();
+                for v in captured {
+                    arr_captured.push(v);
+                }
+                obj.set_property(b"__reflection_closure_captured".to_vec(),
+                    Value::Array(Rc::new(RefCell::new(arr_captured))));
+            }
+            return true;
+        }
         let err_msg = "ReflectionFunction::__construct(): Argument #1 ($function) must be of type Closure|string, array given".to_string();
         let exc = vm.create_exception(b"TypeError", &err_msg, line);
         vm.current_exception = Some(exc);
@@ -3690,7 +3720,35 @@ pub fn reflection_function_method(
             }
         }
         b"getclosureusedvariables" => {
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+            let ob = obj.borrow();
+            let captured = match ob.get_property(b"__reflection_closure_captured") {
+                Value::Array(a) => Some(a),
+                _ => None,
+            };
+            drop(ob);
+            if let Some(captured_arr) = captured {
+                // Map captured values onto the closure's first N cv_names —
+                // those are the lexical `use` variables (in source order).
+                let cv_names: Vec<Vec<u8>> = vm.user_functions.get(func_lower.as_slice())
+                    .map(|op| op.cv_names.clone())
+                    .unwrap_or_default();
+                let values: Vec<Value> = captured_arr.borrow().values().cloned().collect();
+                let mut out = PhpArray::new();
+                // Skip leading `$this` slot if present.
+                let mut name_offset = 0usize;
+                if cv_names.first().map(|n| n.as_slice() == b"this").unwrap_or(false) {
+                    name_offset = 1;
+                }
+                for (i, v) in values.iter().enumerate() {
+                    if let Some(n) = cv_names.get(name_offset + i) {
+                        let key = ArrayKey::String(PhpString::from_vec(n.clone()));
+                        out.set(key, v.clone());
+                    }
+                }
+                Some(Value::Array(Rc::new(RefCell::new(out))))
+            } else {
+                Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+            }
         }
         b"hastentativereturntype" => {
             Some(Value::False)
