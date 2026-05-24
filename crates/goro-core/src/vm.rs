@@ -11261,10 +11261,11 @@ impl Vm {
                             let fields = args.get(1).cloned().unwrap_or(Value::Null);
                             let separator = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| ",".to_string());
                             let enclosure = args.get(3).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\"".to_string());
-                            let _escape = args.get(4).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\\".to_string());
+                            let escape = args.get(4).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\\".to_string());
                             let eol = args.get(5).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\n".to_string());
                             let sep_char = separator.chars().next().unwrap_or(',');
                             let encl_char = enclosure.chars().next().unwrap_or('"');
+                            let esc_char: Option<char> = escape.chars().next();
 
                             // Build CSV line
                             let mut csv_line = String::new();
@@ -11279,11 +11280,24 @@ impl Vm {
                                     let needs_quote = s.contains(sep_char) || s.contains(encl_char) || s.contains('\n') || s.contains('\r') || s.contains(' ');
                                     if needs_quote {
                                         csv_line.push(encl_char);
-                                        for c in s.chars() {
+                                        let chars: Vec<char> = s.chars().collect();
+                                        let mut i = 0;
+                                        while i < chars.len() {
+                                            let c = chars[i];
+                                            // PHP: if escape char precedes the
+                                            // enclosure, do not double the
+                                            // enclosure (the escape char takes
+                                            // care of it).
                                             if c == encl_char {
-                                                csv_line.push(encl_char);
+                                                let prev_is_escape = esc_char.is_some()
+                                                    && i > 0
+                                                    && chars[i - 1] == esc_char.unwrap();
+                                                if !prev_is_escape {
+                                                    csv_line.push(encl_char);
+                                                }
                                             }
                                             csv_line.push(c);
+                                            i += 1;
                                         }
                                         csv_line.push(encl_char);
                                     } else {

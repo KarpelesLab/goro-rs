@@ -12401,6 +12401,11 @@ fn fputcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let b = s.as_bytes();
         if b.is_empty() { b'"' } else { b[0] }
     }).unwrap_or(b'"');
+    let escape: Option<u8> = args.get(4).map(|v| {
+        let s = v.to_php_string();
+        let b = s.as_bytes();
+        if b.is_empty() { None } else { Some(b[0]) }
+    }).unwrap_or(Some(b'\\'));
 
     let mut line = String::new();
     let arr = fields.borrow();
@@ -12415,11 +12420,20 @@ fn fputcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let needs_enclosure = s.contains(separator as char) || s.contains(enclosure as char) || s.contains('\n') || s.contains('\r');
         if needs_enclosure {
             line.push(enclosure as char);
-            for c in s.chars() {
+            let chars: Vec<char> = s.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                let c = chars[i];
                 if c == enclosure as char {
-                    line.push(enclosure as char);
+                    let prev_is_escape = escape
+                        .map(|e| i > 0 && chars[i - 1] == e as char)
+                        .unwrap_or(false);
+                    if !prev_is_escape {
+                        line.push(enclosure as char);
+                    }
                 }
                 line.push(c);
+                i += 1;
             }
             line.push(enclosure as char);
         } else {
