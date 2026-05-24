@@ -139,6 +139,28 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"MB_CASE_LOWER_SIMPLE".to_vec(), Value::Long(4));
     vm.constants.insert(b"MB_CASE_FOLD_SIMPLE".to_vec(), Value::Long(5));
     vm.constants.insert(b"MB_CASE_TITLE_SIMPLE".to_vec(), Value::Long(6));
+
+    // Default mbstring.* INI keys to empty strings so ini_get() returns "".
+    // PHP's mbstring registers these at startup with empty default values.
+    // Only set if not already configured.
+    for key in [
+        "mbstring.http_input",
+        "mbstring.http_output",
+        "mbstring.internal_encoding",
+        "mbstring.encoding_translation",
+        "mbstring.detect_order",
+        "mbstring.substitute_character",
+        "mbstring.func_overload",
+        "mbstring.regex_retry_limit",
+        "mbstring.regex_stack_limit",
+        "mbstring.strict_detection",
+        "mbstring.language",
+        "mbstring.http_output_conv_mimetypes",
+    ] {
+        if !vm.constants.contains_key(key.as_bytes()) {
+            vm.constants.insert(key.as_bytes().to_vec(), Value::String(PhpString::empty()));
+        }
+    }
 }
 
 // ========== Encoding conversion helpers ==========
@@ -661,9 +683,17 @@ fn mb_detect_encoding(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// Get the currently effective internal encoding from the VM, checking
-/// both `mbstring.internal_encoding` (mbstring-specific) and the core
+/// the runtime override (set by mb_internal_encoding()), then
+/// `mbstring.internal_encoding` (mbstring-specific), and finally the core
 /// `internal_encoding` directive. Defaults to UTF-8 if unset.
 fn current_internal_encoding(vm: &Vm) -> String {
+    // Runtime override has highest priority
+    if let Some(val) = vm.constants.get(b"__mbstring.runtime_internal_encoding".as_ref()) {
+        let s = val.to_php_string().to_string_lossy();
+        if !s.is_empty() {
+            return canonical_encoding_name(&s);
+        }
+    }
     if let Some(val) = vm.constants.get(b"mbstring.internal_encoding".as_ref()) {
         let s = val.to_php_string().to_string_lossy();
         if !s.is_empty() {
@@ -715,6 +745,15 @@ fn canonical_encoding_name(name: &str) -> String {
         "ascii" | "us-ascii" => "ASCII".to_string(),
         "euc-jp" | "eucjp" => "EUC-JP".to_string(),
         "sjis" | "shift_jis" | "shift-jis" => "SJIS".to_string(),
+        "eucjp-win" => "eucJP-win".to_string(),
+        "sjis-win" => "SJIS-win".to_string(),
+        "uhc" => "UHC".to_string(),
+        "hz" => "HZ".to_string(),
+        "base64" => "BASE64".to_string(),
+        "7bit" => "7bit".to_string(),
+        "8bit" => "8bit".to_string(),
+        "binary" => "BINARY".to_string(),
+        "html-entities" | "html" => "HTML-ENTITIES".to_string(),
         "iso-2022-jp" => "ISO-2022-JP".to_string(),
         "jis" => "JIS".to_string(),
         "iso-2022-kr" => "ISO-2022-KR".to_string(),
@@ -752,6 +791,7 @@ fn mb_internal_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let is_valid = resolve_encoding(&enc).is_some()
             || matches!(enc_lower.as_str(),
                 "utf-8" | "ascii" | "jis" | "utf-7" | "utf7"
+                | "utf7-imap" | "utf-7-imap"
                 | "ucs-4" | "ucs4" | "ucs-4be" | "ucs4be" | "ucs-4le" | "ucs4le"
                 | "ucs-2" | "ucs2" | "ucs-2be" | "ucs2be" | "ucs-2le" | "ucs2le"
                 | "utf-16" | "utf16" | "utf-16be" | "utf16be" | "utf-16le" | "utf16le"
@@ -764,10 +804,27 @@ fn mb_internal_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 | "iso-8859-5" | "iso-8859-6" | "iso-8859-7" | "iso-8859-8"
                 | "iso-8859-9" | "iso-8859-10" | "iso-8859-13" | "iso-8859-14"
                 | "iso-8859-15" | "iso-8859-16"
+                | "eucjp-win" | "sjis-win"
+                | "sjis-mac" | "sjis-mobile#docomo" | "sjis-mobile#kddi" | "sjis-mobile#softbank"
+                | "utf8-mobile#docomo" | "utf8-mobile#kddi-a" | "utf8-mobile#kddi-b" | "utf8-mobile#softbank"
+                | "iso-2022-jp-mobile#kddi" | "iso-2022-jp-2004" | "iso-2022-jp-kddi"
+                | "sjis-2004"
+                | "hz" | "uhc" | "euc-cn" | "euc-tw" | "euc-kr"
+                | "cp936" | "cp950" | "big-5" | "big5"
+                | "iso-2022-kr" | "armscii-8" | "armscii8"
+                | "windows-1251" | "windows-1252" | "windows-1254" | "windows-1255" | "windows-1256" | "windows-1257" | "windows-1258"
+                | "cp866" | "cp1251" | "cp1252" | "cp1254"
+                | "koi8-r" | "koi8r" | "koi8-u" | "koi8u"
+                | "gb18030" | "gb18030-2022"
+                | "binary"
             );
         if is_valid {
             let canonical = canonical_encoding_name(&enc);
-            vm.constants.insert(b"mbstring.internal_encoding".to_vec(), Value::String(PhpString::from_string(canonical)));
+            // mb_internal_encoding() sets a runtime override that does NOT
+            // modify the INI value (this matches PHP behaviour - ini_get()
+            // returns the configured INI value, not the runtime one).
+            vm.constants.insert(b"__mbstring.runtime_internal_encoding".to_vec(),
+                Value::String(PhpString::from_string(canonical)));
             Ok(Value::True)
         } else {
             let msg = format!("mb_internal_encoding(): Argument #1 ($encoding) must be a valid encoding, \"{}\" given", enc);
@@ -1937,11 +1994,53 @@ fn mb_convert_case_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn mb_language_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.is_empty() || matches!(args.first(), Some(Value::Null)) {
-        return Ok(Value::String(PhpString::from_bytes(b"neutral")));
+/// Canonical mb_language name from any accepted alias.
+/// Returns None for unknown languages.
+fn canonical_mb_language(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "japanese" | "ja" => Some("Japanese"),
+        "english" | "en" => Some("English"),
+        "uni" => Some("uni"),
+        "neutral" => Some("neutral"),
+        "russian" | "ru" => Some("Russian"),
+        "german" | "de" => Some("German"),
+        "armenian" | "hy" => Some("Armenian"),
+        "turkish" | "tr" => Some("Turkish"),
+        "simplified chinese" | "zh-cn" | "chinese-simplified" => Some("Simplified Chinese"),
+        "traditional chinese" | "zh-tw" | "chinese-traditional" => Some("Traditional Chinese"),
+        "korean" | "ko" => Some("Korean"),
+        _ => None,
     }
-    Ok(Value::True)
+}
+
+fn mb_language_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Read current language from constants; fall back to "neutral"
+    let current_lang = _vm.constants.get(b"mbstring.language".as_ref())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "neutral".to_string());
+
+    if args.is_empty() || matches!(args.first(), Some(Value::Null)) {
+        // Always return canonical form
+        let canon = canonical_mb_language(&current_lang).unwrap_or("neutral");
+        return Ok(Value::String(PhpString::from_string(canon.to_string())));
+    }
+
+    let new_lang = args[0].to_php_string().to_string_lossy();
+    match canonical_mb_language(&new_lang) {
+        Some(canon) => {
+            _vm.constants.insert(b"mbstring.language".to_vec(),
+                Value::String(PhpString::from_string(canon.to_string())));
+            Ok(Value::True)
+        }
+        None => {
+            let msg = format!("mb_language(): Argument #1 ($language) must be a valid language, \"{}\" given", new_lang);
+            let exc = _vm.create_exception(b"ValueError", &msg, 0);
+            _vm.current_exception = Some(exc);
+            Err(VmError { message: msg, line: _vm.current_line })
+        }
+    }
 }
 
 fn mb_list_encodings_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -2209,6 +2308,7 @@ fn mb_get_info_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     match info_lower.as_slice() {
         b"internal_encoding" => Ok(Value::String(PhpString::from_bytes(b"UTF-8"))),
+        b"http_input" => Ok(Value::Null),
         b"http_output" => Ok(Value::String(PhpString::from_bytes(b"UTF-8"))),
         b"http_output_conv_mimetypes" => Ok(Value::String(PhpString::from_bytes(b"^(text/|application/xhtml\\+xml)"))),
         b"mail_charset" => Ok(Value::String(PhpString::from_bytes(b"UTF-8"))),
@@ -2243,20 +2343,43 @@ fn mb_get_info_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             arr.set(ArrayKey::String(PhpString::from_bytes(b"strict_detection")), Value::String(PhpString::from_bytes(b"Off")));
             Ok(Value::Array(Rc::new(RefCell::new(arr))))
         }
-        _ => Ok(Value::False),
+        _ => {
+            _vm.emit_warning("mb_get_info(): argument #1 ($type) must be a valid type");
+            Ok(Value::False)
+        },
     }
 }
 
 fn mb_regex_encoding_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.is_empty() {
+    if args.is_empty() || matches!(args.first(), Some(Value::Null)) {
         return Ok(Value::String(PhpString::from_bytes(b"UTF-8")));
+    }
+    let enc = args[0].to_php_string().to_string_lossy();
+    if !is_known_encoding(&enc) {
+        let msg = format!(
+            "mb_regex_encoding(): Argument #1 ($encoding) must be a valid encoding, \"{}\" given",
+            enc
+        );
+        let exc = _vm.create_exception(b"ValueError", &msg, 0);
+        _vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: _vm.current_line });
     }
     Ok(Value::True)
 }
 
 fn mb_http_output_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.is_empty() {
+    if args.is_empty() || matches!(args.first(), Some(Value::Null)) {
         return Ok(Value::String(PhpString::from_bytes(b"UTF-8")));
+    }
+    let enc = args[0].to_php_string().to_string_lossy();
+    if !is_known_encoding(&enc) {
+        let msg = format!(
+            "mb_http_output(): Argument #1 ($encoding) must be a valid encoding, \"{}\" given",
+            enc
+        );
+        let exc = _vm.create_exception(b"ValueError", &msg, 0);
+        _vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: _vm.current_line });
     }
     Ok(Value::True)
 }
