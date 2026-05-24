@@ -288,7 +288,23 @@ fn mktime(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         year
     };
 
-    let days = ymd_to_days(year, month as u32, day as u32);
+    // Normalize month/day with overflow handling: PHP allows month=0 (Dec previous year),
+    // negative months, day=0 (last of previous month), etc.
+    // First normalize month into year.
+    let mut y = year;
+    let mut m = month;
+    if m > 0 {
+        y += (m - 1) / 12;
+        m = (m - 1) % 12 + 1;
+    } else {
+        // m <= 0: subtract from year.
+        y += (m - 12) / 12;
+        m = ((m % 12) + 12) % 12;
+        if m == 0 { m = 12; }
+    }
+    // Now compute days from year/month/1 then add (day - 1).
+    let base_days = ymd_to_days(y, m as u32, 1);
+    let days = base_days + day - 1;
     let local_ts = days * 86400 + hour * 3600 + minute * 60 + second;
 
     // Adjust for timezone - mktime interprets args as local time
@@ -3609,17 +3625,18 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
 
     let obj_id = _vm.next_object_id();
     let mut obj = PhpObject::new(b"DateInterval".to_vec(), obj_id);
-    obj.set_property(b"y".to_vec(), Value::Long(years));
-    obj.set_property(b"m".to_vec(), Value::Long(months));
-    obj.set_property(b"d".to_vec(), Value::Long(days));
-    obj.set_property(b"h".to_vec(), Value::Long(hours));
-    obj.set_property(b"i".to_vec(), Value::Long(minutes));
-    obj.set_property(b"s".to_vec(), Value::Long(seconds));
-    obj.set_property(b"f".to_vec(), Value::Double(0.0));
-    obj.set_property(b"invert".to_vec(), Value::Long(0));
-    obj.set_property(b"days".to_vec(), Value::False);
+    // PHP only exposes from_string + date_string for date-string-created intervals.
+    // Store the parsed components under "__" prefixed keys for internal use.
     obj.set_property(b"from_string".to_vec(), Value::True);
     obj.set_property(b"date_string".to_vec(), Value::String(PhpString::from_string(s.clone())));
+    obj.set_property(b"__y".to_vec(), Value::Long(years));
+    obj.set_property(b"__m".to_vec(), Value::Long(months));
+    obj.set_property(b"__d".to_vec(), Value::Long(days));
+    obj.set_property(b"__h".to_vec(), Value::Long(hours));
+    obj.set_property(b"__i".to_vec(), Value::Long(minutes));
+    obj.set_property(b"__s".to_vec(), Value::Long(seconds));
+    obj.set_property(b"__f".to_vec(), Value::Double(0.0));
+    obj.set_property(b"__invert".to_vec(), Value::Long(0));
 
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }

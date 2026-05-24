@@ -10086,12 +10086,22 @@ impl Vm {
                         }
                         b"settimezone" => {
                             let tz_arg = args.get(1).cloned().unwrap_or(Value::Null);
-                            let new_tz = if let Value::Object(tz_obj) = &tz_arg {
+                            let (new_tz, new_type) = if let Value::Object(tz_obj) = &tz_arg {
                                 let tz_borrow = tz_obj.borrow();
                                 let tz = tz_borrow.get_property(b"timezone").to_php_string().to_string_lossy();
-                                if tz.is_empty() { "UTC".to_string() } else { tz }
+                                let stored_type = tz_borrow.get_property(b"timezone_type");
+                                let ty = match &stored_type {
+                                    Value::Long(n) if *n >= 1 && *n <= 3 => *n,
+                                    _ => {
+                                        if vm_parse_tz_offset(&tz).is_some() { 1 }
+                                        else if vm_is_tz_abbrev(&tz) { 2 }
+                                        else { 3 }
+                                    }
+                                };
+                                let tz = if tz.is_empty() { "UTC".to_string() } else { tz };
+                                (tz, ty)
                             } else {
-                                "UTC".to_string()
+                                ("UTC".to_string(), 3i64)
                             };
                             if is_immutable {
                                 let obj_id = self.next_object_id;
@@ -10105,7 +10115,7 @@ impl Vm {
                                 let local_ts = ts + offset;
                                 let date_str = Self::format_utc_datetime(local_ts);
                                 new_obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(new_type));
                                 new_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(new_tz)));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
@@ -10115,7 +10125,7 @@ impl Vm {
                                 let date_str = Self::format_utc_datetime(local_ts);
                                 let mut ob = obj.borrow_mut();
                                 ob.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                                ob.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                                ob.set_property(b"timezone_type".to_vec(), Value::Long(new_type));
                                 ob.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(new_tz)));
                                 drop(ob);
                                 Some(this.clone())
@@ -10252,13 +10262,17 @@ impl Vm {
                             drop(ob);
                             let new_ts = if let Value::Object(iv) = &interval {
                                 let iv = iv.borrow();
-                                let y = iv.get_property(b"y").to_long();
-                                let m = iv.get_property(b"m").to_long();
-                                let d = iv.get_property(b"d").to_long();
-                                let h = iv.get_property(b"h").to_long();
-                                let i = iv.get_property(b"i").to_long();
-                                let s = iv.get_property(b"s").to_long();
-                                let invert = iv.get_property(b"invert").to_long();
+                                let get_dual = |k: &[u8], k2: &[u8]| -> Value {
+                                    let v = iv.get_property(k);
+                                    if !matches!(v, Value::Null) { v } else { iv.get_property(k2) }
+                                };
+                                let y = get_dual(b"y", b"__y").to_long();
+                                let m = get_dual(b"m", b"__m").to_long();
+                                let d = get_dual(b"d", b"__d").to_long();
+                                let h = get_dual(b"h", b"__h").to_long();
+                                let i = get_dual(b"i", b"__i").to_long();
+                                let s = get_dual(b"s", b"__s").to_long();
+                                let invert = get_dual(b"invert", b"__invert").to_long();
                                 let sign: i64 = if invert != 0 { -1 } else { 1 };
                                 let mut result_ts = ts;
                                 // Apply year/month changes
@@ -10310,13 +10324,17 @@ impl Vm {
                             drop(ob);
                             let new_ts = if let Value::Object(iv) = &interval {
                                 let iv = iv.borrow();
-                                let y = iv.get_property(b"y").to_long();
-                                let m = iv.get_property(b"m").to_long();
-                                let d = iv.get_property(b"d").to_long();
-                                let h = iv.get_property(b"h").to_long();
-                                let i = iv.get_property(b"i").to_long();
-                                let s = iv.get_property(b"s").to_long();
-                                let invert = iv.get_property(b"invert").to_long();
+                                let get_dual = |k: &[u8], k2: &[u8]| -> Value {
+                                    let v = iv.get_property(k);
+                                    if !matches!(v, Value::Null) { v } else { iv.get_property(k2) }
+                                };
+                                let y = get_dual(b"y", b"__y").to_long();
+                                let m = get_dual(b"m", b"__m").to_long();
+                                let d = get_dual(b"d", b"__d").to_long();
+                                let h = get_dual(b"h", b"__h").to_long();
+                                let i = get_dual(b"i", b"__i").to_long();
+                                let s = get_dual(b"s", b"__s").to_long();
+                                let invert = get_dual(b"invert", b"__invert").to_long();
                                 let sign: i64 = if invert != 0 { 1 } else { -1 };
                                 let mut result_ts = ts;
                                 if y != 0 || m != 0 {
@@ -10425,14 +10443,21 @@ impl Vm {
                         b"format" => {
                             let format_str = args.get(1).cloned().unwrap_or(Value::Null).to_php_string().to_string_lossy();
                             let ob = obj.borrow();
-                            let y = ob.get_property(b"y").to_long();
-                            let m = ob.get_property(b"m").to_long();
-                            let d = ob.get_property(b"d").to_long();
-                            let h = ob.get_property(b"h").to_long();
-                            let i = ob.get_property(b"i").to_long();
-                            let s = ob.get_property(b"s").to_long();
+                            // For DateInterval created via createFromDateString, the y/m/d/.. fields
+                            // are stored under "__y", "__m", etc. (hidden from var_dump).
+                            let get_dual = |k: &[u8], k2: &[u8]| -> Value {
+                                let v = ob.get_property(k);
+                                if !matches!(v, Value::Null) { v } else { ob.get_property(k2) }
+                            };
+                            let y = get_dual(b"y", b"__y").to_long();
+                            let m = get_dual(b"m", b"__m").to_long();
+                            let d = get_dual(b"d", b"__d").to_long();
+                            let h = get_dual(b"h", b"__h").to_long();
+                            let i = get_dual(b"i", b"__i").to_long();
+                            let s = get_dual(b"s", b"__s").to_long();
                             let days = ob.get_property(b"days");
-                            let invert = ob.get_property(b"invert").to_long();
+                            let invert = get_dual(b"invert", b"__invert").to_long();
+                            let f = get_dual(b"f", b"__f").to_double();
 
                             let mut result = String::new();
                             let fmt_bytes = format_str.as_bytes();
