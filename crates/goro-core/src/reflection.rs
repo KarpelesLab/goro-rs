@@ -1024,9 +1024,22 @@ pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u3
         }
     }
 
+    // The visible `class` property reflects the constant's declaring class,
+    // not the class the reflection was constructed on. Walk up the parent
+    // chain to find it (regular constants only — enum cases stay on the
+    // enum they were declared on, which is also the class we were given).
+    let declaring_class = if reflector_name.eq_ignore_ascii_case("ReflectionEnumUnitCase")
+        || reflector_name.eq_ignore_ascii_case("ReflectionEnumBackedCase")
+    {
+        canonical_class.clone()
+    } else {
+        find_constant_declaring_class(vm, &class_lower, const_name.as_bytes())
+            .unwrap_or_else(|| canonical_class.clone())
+    };
+
     let mut obj = this.borrow_mut();
     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(const_name.clone())));
-    obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical_class)));
+    obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(declaring_class)));
     obj.set_property(b"__reflection_value".to_vec(), unwrapped);
     true
 }
@@ -1401,6 +1414,22 @@ pub fn reflection_class_method(
             }
         }
         b"newinstancewithoutconstructor" => {
+            // Internal final classes cannot be created without their ctor.
+            let no_ctorless: &[&[u8]] = &[
+                b"generator", b"fiber", b"closure",
+            ];
+            if no_ctorless.iter().any(|c| *c == class_lower.as_slice()) {
+                let canonical = vm.classes.get(&class_lower)
+                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                    .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower));
+                let err_msg = format!(
+                    "Class {} is an internal class marked as final that cannot be instantiated without invoking its constructor",
+                    canonical
+                );
+                let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
             // Create an instance without calling the constructor
             let obj_id = vm.next_object_id();
             let canonical = vm.classes.get(&class_lower)
@@ -2108,6 +2137,20 @@ pub fn reflection_class_docall(
                 }
             }
             b"newinstance" => {
+                // Internal types that cannot be created via reflection at all.
+                let no_new: &[(&[u8], &str)] = &[
+                    (b"generator", "Generator"),
+                    (b"fiber", "Fiber"),
+                ];
+                if let Some((_, name)) = no_new.iter().find(|(c, _)| *c == class_lower.as_slice()) {
+                    let err_msg = format!(
+                        "The \"{}\" class is reserved for internal use and cannot be manually instantiated",
+                        name
+                    );
+                    let exc = vm.create_exception(b"Error", &err_msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 // Create instance and call constructor with remaining args
                 let obj_id = vm.next_object_id();
                 let canonical = vm.classes.get(&class_lower)
@@ -4355,9 +4398,10 @@ pub fn reflection_property_docall(
         match method {
             b"getvalue" => {
                 if is_static {
-                    // For static properties, look up from class
-                    let val = vm.classes.get(&class_lower)
-                        .and_then(|c| c.static_properties.get(prop_name.as_bytes()).cloned())
+                    // Static properties are stored on the class that declared
+                    // them, even when reflected via a subclass. Walk up the
+                    // parent chain to find the storage slot.
+                    let val = find_static_property_value(vm, &class_lower, prop_name.as_bytes())
                         .unwrap_or(Value::Null);
                     Some(val)
                 } else if let Some(target) = args.get(1) {
@@ -4388,7 +4432,10 @@ pub fn reflection_property_docall(
                     } else {
                         Value::Null
                     };
-                    if let Some(ce) = vm.classes.get_mut(&class_lower) {
+                    // Store on the declaring class, not the reflected one.
+                    let declaring = find_static_property_owner(vm, &class_lower, prop_name.as_bytes())
+                        .unwrap_or_else(|| class_lower.clone());
+                    if let Some(ce) = vm.classes.get_mut(declaring.as_slice()) {
                         ce.static_properties.insert(prop_name.as_bytes().to_vec(), value);
                     }
                 } else if args.len() >= 3 {
@@ -6184,9 +6231,70 @@ pub fn create_reflection_class_constant(vm: &mut Vm, class_name: &str, const_nam
     let obj_id = vm.next_object_id();
     let mut obj = PhpObject::new(b"ReflectionClassConstant".to_vec(), obj_id);
     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(const_name.to_string())));
-    obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(class_name.to_string())));
+    // Walk up the parent chain to find which class actually declares this
+    // constant. The visible `class` property and getDeclaringClass() both
+    // return the declaring class, not the class the reflection was made on.
+    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    let const_lower: Vec<u8> = const_name.as_bytes().to_vec();
+    let declaring = find_constant_declaring_class(vm, &class_lower, &const_lower)
+        .unwrap_or_else(|| class_name.to_string());
+    obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(declaring)));
     obj.set_property(b"__reflection_value".to_vec(), value);
     Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+/// Walk a class's parent chain to find the class that declares a given
+/// static property. Static properties are stored on the declaring class,
+/// even when accessed via a subclass.
+fn find_static_property_owner(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> Option<Vec<u8>> {
+    let mut owner: Option<Vec<u8>> = None;
+    let mut cur: Option<Vec<u8>> = Some(class_lower.to_vec());
+    let mut visited: Vec<Vec<u8>> = Vec::new();
+    while let Some(c) = cur {
+        if visited.contains(&c) { break; }
+        visited.push(c.clone());
+        if let Some(ce) = vm.classes.get(c.as_slice()) {
+            if ce.properties.iter().any(|p| p.is_static && p.name == prop_name) {
+                owner = Some(c.clone());
+            }
+            cur = ce.parent.as_ref()
+                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+        } else {
+            break;
+        }
+    }
+    owner
+}
+
+/// Walk a class's parent chain to find a static property's current value.
+fn find_static_property_value(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> Option<Value> {
+    let owner = find_static_property_owner(vm, class_lower, prop_name)?;
+    vm.classes.get(owner.as_slice())
+        .and_then(|c| c.static_properties.get(prop_name).cloned())
+}
+
+/// Walk a class's parent chain (and interfaces) to find the deepest ancestor
+/// that declares the given constant. Used for ReflectionClassConstant::class
+/// and ::getDeclaringClass() so that inherited constants report their actual
+/// definition site rather than the child class.
+fn find_constant_declaring_class(vm: &Vm, class_lower: &[u8], const_name: &[u8]) -> Option<String> {
+    let mut owner: Option<String> = None;
+    let mut cur: Option<Vec<u8>> = Some(class_lower.to_vec());
+    let mut visited: Vec<Vec<u8>> = Vec::new();
+    while let Some(c) = cur {
+        if visited.contains(&c) { break; }
+        visited.push(c.clone());
+        if let Some(ce) = vm.classes.get(c.as_slice()) {
+            if ce.constants.contains_key(const_name) {
+                owner = Some(String::from_utf8_lossy(&ce.name).to_string());
+            }
+            cur = ce.parent.as_ref()
+                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+        } else {
+            break;
+        }
+    }
+    owner
 }
 
 /// Create ReflectionParameter objects for a function's parameters
