@@ -6401,6 +6401,10 @@ fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
+    // Empty path: silently return false (matches PHP behavior)
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
     if !vm.check_open_basedir("touch", &path_str) {
         return Ok(Value::False);
     }
@@ -6413,7 +6417,8 @@ fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         if let Err(e) = std::fs::write(p, b"") {
-            vm.emit_warning(&format!("touch(): Unable to create file {} because {}", path_str, e));
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("touch(): Unable to create file {} because {}", path_str, msg));
             return Ok(Value::False);
         }
     }
@@ -9048,7 +9053,17 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if has_read_filters {
         return Ok(Value::String(PhpString::from_vec(read_filtered(vm, fid, length))));
     }
-    FILE_HANDLES.with(|handles| {
+    // Detect write-only mode (w/a/x/c without '+')
+    let is_write_only = FILE_HANDLES.with(|h| {
+        h.borrow().get(&fid).map(|fh| {
+            let mode = &fh.mode;
+            // Strip 'b'/'t'/'e' suffixes
+            let core: String = mode.chars().filter(|c| matches!(*c, 'r'|'w'|'a'|'x'|'c'|'+')).collect();
+            // Write-only if mode does not contain 'r' or '+'
+            !core.contains('r') && !core.contains('+')
+        }).unwrap_or(false)
+    });
+    let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             let mut buf = vec![0u8; length];
@@ -9061,12 +9076,34 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     buf.truncate(n);
                     Ok(Value::String(PhpString::from_vec(buf)))
                 }
-                Err(_) => Ok(Value::False),
+                Err(e) => {
+                    // Capture errno before we drop the borrow
+                    Err(e.raw_os_error().unwrap_or(0))
+                }
             }
         } else {
             Ok(Value::False)
         }
-    })
+    });
+    match result {
+        Ok(v) => Ok(v),
+        Err(errno) => {
+            if is_write_only {
+                // PHP emits a Notice on fread of write-only stream
+                let line = vm.current_line;
+                vm.emit_notice_at(&format!(
+                    "fread(): Read of {} bytes failed with errno={} {}",
+                    length,
+                    errno,
+                    match errno {
+                        9 => "Bad file descriptor",
+                        _ => "Unknown error",
+                    }
+                ), line);
+            }
+            Ok(Value::False)
+        }
+    }
 }
 
 /// Helper: read up to `length` post-filter bytes from a stream with one
@@ -9277,9 +9314,14 @@ fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let whence = args.get(2).map(|v| v.to_long()).unwrap_or(0);
 
-    FILE_HANDLES.with(|handles| {
+    let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
+            // Track whether this is a special stream that doesn't support seek.
+            let is_unseekable_special = matches!(
+                fh.special,
+                SpecialStream::Stdout | SpecialStream::Stderr | SpecialStream::Output
+            );
             fh.eof = false;
             let seek = match whence {
                 0 => SeekFrom::Start(offset as u64), // SEEK_SET
@@ -9287,14 +9329,25 @@ fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 2 => SeekFrom::End(offset),            // SEEK_END
                 _ => SeekFrom::Start(offset as u64),
             };
+            if is_unseekable_special {
+                return Err(true); // emit warning
+            }
             match fh.file.seek(seek) {
-                Ok(_) => Ok(Value::Long(0)),
-                Err(_) => Ok(Value::Long(-1)),
+                Ok(_) => Ok(0i64),
+                Err(_) => Ok(-1),
             }
         } else {
+            Err(false)
+        }
+    });
+    match result {
+        Ok(v) => Ok(Value::Long(v)),
+        Err(true) => {
+            vm.emit_warning("fseek(): Stream does not support seeking");
             Ok(Value::Long(-1))
         }
-    })
+        Err(false) => Ok(Value::Long(-1)),
+    }
 }
 
 fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -11181,18 +11234,47 @@ fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn filetype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn filetype_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
     let p = std::path::Path::new(&*path_str);
-    let ft = if p.is_file() {
-        "file"
-    } else if p.is_dir() {
-        "dir"
-    } else if p.read_link().is_ok() {
+    // Use symlink_metadata so that symlinks are reported as "link" (not whatever they point to)
+    let md = match std::fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("filetype(): Lstat failed for {}: {}", path_str, msg));
+            return Ok(Value::False);
+        }
+    };
+    let ft_type = md.file_type();
+    let ft = if ft_type.is_symlink() {
         "link"
+    } else if ft_type.is_file() {
+        "file"
+    } else if ft_type.is_dir() {
+        "dir"
     } else {
-        "unknown"
+        // Unix-specific: detect character/block/fifo/socket devices
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if ft_type.is_char_device() {
+                "char"
+            } else if ft_type.is_block_device() {
+                "block"
+            } else if ft_type.is_fifo() {
+                "fifo"
+            } else if ft_type.is_socket() {
+                "socket"
+            } else {
+                "unknown"
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            "unknown"
+        }
     };
     Ok(Value::String(PhpString::from_bytes(ft.as_bytes())))
 }
@@ -12484,10 +12566,14 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("filemtime", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
         return Ok(Value::False);
     }
-    match std::fs::metadata(&*path.to_string_lossy()) {
+    if !vm.check_open_basedir("filemtime", &path_str) {
+        return Ok(Value::False);
+    }
+    match std::fs::metadata(&*path_str) {
         Ok(meta) => {
             if let Ok(modified) = meta.modified() {
                 let secs = modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -12497,7 +12583,7 @@ fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Err(_) => {
-            vm.emit_warning(&format!("filemtime(): stat failed for {}", path.to_string_lossy()));
+            vm.emit_warning(&format!("filemtime(): stat failed for {}", path_str));
             Ok(Value::False)
         }
     }
@@ -12505,10 +12591,14 @@ fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("fileatime", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
         return Ok(Value::False);
     }
-    match std::fs::metadata(&*path.to_string_lossy()) {
+    if !vm.check_open_basedir("fileatime", &path_str) {
+        return Ok(Value::False);
+    }
+    match std::fs::metadata(&*path_str) {
         Ok(meta) => {
             if let Ok(accessed) = meta.accessed() {
                 let secs = accessed.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -12518,14 +12608,50 @@ fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Err(_) => {
-            vm.emit_warning(&format!("fileatime(): stat failed for {}", path.to_string_lossy()));
+            vm.emit_warning(&format!("fileatime(): stat failed for {}", path_str));
             Ok(Value::False)
         }
     }
 }
 
 fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    filemtime_fn(vm, args)
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("filectime", &path_str) {
+        return Ok(Value::False);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&*path_str) {
+            Ok(meta) => Ok(Value::Long(meta.ctime() as i64)),
+            Err(_) => {
+                vm.emit_warning(&format!("filectime(): stat failed for {}", path_str));
+                Ok(Value::False)
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Fall back to created on non-Unix
+        match std::fs::metadata(&*path_str) {
+            Ok(meta) => {
+                if let Ok(c) = meta.created() {
+                    let secs = c.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    Ok(Value::Long(secs as i64))
+                } else {
+                    Ok(Value::False)
+                }
+            }
+            Err(_) => {
+                vm.emit_warning(&format!("filectime(): stat failed for {}", path_str));
+                Ok(Value::False)
+            }
+        }
+    }
 }
 
 fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
