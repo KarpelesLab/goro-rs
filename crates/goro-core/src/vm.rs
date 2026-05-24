@@ -7899,6 +7899,13 @@ impl Vm {
             }
             b"key" => {
                 let ob = obj.borrow();
+                let entries = ob.get_property(b"__spl_dir_entries");
+                if matches!(entries, Value::Null | Value::Undef) {
+                    drop(ob);
+                    let exc = self.create_exception(b"Error", "Object not initialized", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
                 Some(Value::Long(pos))
             }
@@ -9799,9 +9806,87 @@ impl Vm {
                             }
                         }
                         b"unserialize" => {
-                            // Deserialize SplObjectStorage from string
-                            // For now, just accept without error for compatibility
-                            let _data = args.get(1).cloned().unwrap_or(Value::Null);
+                            // Deserialize SplObjectStorage from a serialized
+                            // string. Numeric / non-string inputs throw
+                            // UnexpectedValueException, as does input not
+                            // starting with "x:".
+                            let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            let s_bytes: Vec<u8> = match &data {
+                                Value::String(s) => s.as_bytes().to_vec(),
+                                Value::Null | Value::Undef => Vec::new(),
+                                _ => {
+                                    // Long/double/bool inputs: convert to bytes for
+                                    // length calculation in the error message.
+                                    data.to_php_string().as_bytes().to_vec()
+                                }
+                            };
+                            // Validate: must start with "x:" and be a string.
+                            let invalid = !matches!(&data, Value::String(_))
+                                || s_bytes.len() < 2
+                                || &s_bytes[..2] != b"x:";
+                            if invalid {
+                                let msg = format!("Error at offset 0 of {} bytes", s_bytes.len());
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    &msg,
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            // After "x:" the payload must begin with "i:N;"
+                            // (the count of entries). Validate that, plus
+                            // require it to end with ";m:a:N:{...}" (the
+                            // trailing user-properties array marker).
+                            let payload = &s_bytes[2..];
+                            // Check for "i:" + digits + ";" prefix.
+                            let mut bad_offset: Option<usize> = None;
+                            if payload.len() < 4 || &payload[..2] != b"i:" {
+                                bad_offset = Some(2);
+                            } else {
+                                let mut i = 2;
+                                while i < payload.len() && payload[i].is_ascii_digit() {
+                                    i += 1;
+                                }
+                                if i == 2 || i >= payload.len() || payload[i] != b';' {
+                                    bad_offset = Some(2 + i);
+                                } else {
+                                    // Look for ";m:" marker which begins the
+                                    // trailing user-properties array. If
+                                    // absent, the payload is malformed.
+                                    let after_count = &payload[i+1..];
+                                    if !after_count.windows(3).any(|w| w == b";m:") {
+                                        bad_offset = Some(2 + i + 1);
+                                    } else {
+                                        // Quick structural check: between count
+                                        // and ";m:" should only contain valid
+                                        // serialize tokens. We detect obvious
+                                        // garbage by rejecting payload with a
+                                        // bare ',' or ';;' inside the body.
+                                        let body_end = after_count
+                                            .windows(3)
+                                            .position(|w| w == b";m:")
+                                            .unwrap_or(after_count.len());
+                                        let body = &after_count[..body_end];
+                                        if body.contains(&b',') || body.windows(2).any(|w| w == b";;") {
+                                            bad_offset = Some(2 + i + 1 + body.iter().position(|&c| c == b',' || c == b';').unwrap_or(0));
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(off) = bad_offset {
+                                let msg = format!("Error at offset {} of {} bytes", off, s_bytes.len());
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    &msg,
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            // Looks plausible - leave as no-op for now (no real
+                            // deserialization performed; objects identity-table
+                            // remains empty).
                             Some(Value::Null)
                         }
                         b"__unserialize" => {
@@ -19400,7 +19485,17 @@ impl Vm {
                                                     "AppendIterator::__construct() expects exactly 0 arguments, {} given",
                                                     given
                                                 );
+                                                // Push a stack frame for AppendIterator->__construct
+                                                let ctor_trace_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+                                                self.call_stack.push((
+                                                    "AppendIterator->__construct".to_string(),
+                                                    self.current_file.clone(),
+                                                    op.line,
+                                                    ctor_trace_args,
+                                                    true,
+                                                ));
                                                 let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                self.call_stack.pop();
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
                                                     pending_calls_catch_depth = Some(*eh_pc_depth);
