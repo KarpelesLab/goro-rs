@@ -5927,7 +5927,14 @@ impl Vm {
                 let ob = obj.borrow();
                 let arr = ob.get_property(storage_prop);
                 let pos = ob.get_property(b"__spl_pos");
-                let iter_mode = ob.get_property(b"__spl_iter_mode");
+                // Prefer the snapshot taken at rewind() time so changing the
+                // iterator mode mid-iteration does not flip direction.
+                let snapshot = ob.get_property(b"__spl_iter_mode_snapshot");
+                let iter_mode = if matches!(snapshot, Value::Null | Value::Undef) {
+                    ob.get_property(b"__spl_iter_mode")
+                } else {
+                    snapshot
+                };
                 let mode = if let Value::Long(m) = iter_mode { m } else { 0 };
                 let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
                 if let Value::Array(a) = arr {
@@ -6003,6 +6010,12 @@ impl Vm {
             b"rewind" => {
                 let mut ob = obj.borrow_mut();
                 ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                // Snapshot the current iterator mode so the iteration
+                // direction is consistent even if setIteratorMode() is
+                // called while iterating.
+                let mode = ob.get_property(b"__spl_iter_mode");
+                let snap = if let Value::Long(_) = mode { mode } else { Value::Long(0) };
+                ob.set_property(b"__spl_iter_mode_snapshot".to_vec(), snap);
                 Some(Value::Null)
             }
             b"getiteratormode" => {
