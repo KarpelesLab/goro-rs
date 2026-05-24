@@ -5151,6 +5151,8 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut results: Vec<Value> = Vec::new();
     let mut input_pos = 0usize;
     let mut fmt_pos = 0usize;
+    let mut nconversions: usize = 0;
+    let mut underflow = false;
 
     while fmt_pos < format_bytes.len() {
         if format_bytes[fmt_pos] == b'%' {
@@ -5203,14 +5205,21 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let spec = format_bytes[fmt_pos];
             fmt_pos += 1;
 
-            // Skip leading whitespace for numeric types
+            // Skip leading whitespace for numeric types and %s (NOSKIP for %c and %[)
             match spec {
-                b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'g' => {
+                b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'g' | b'E' | b'G' | b's' => {
                     while input_pos < input_bytes.len() && (input_bytes[input_pos] == b' ' || input_bytes[input_pos] == b'\t' || input_bytes[input_pos] == b'\n' || input_bytes[input_pos] == b'\r') {
                         input_pos += 1;
                     }
                 }
                 _ => {}
+            }
+
+            // Check for underflow: if at EOF when trying to start a conversion
+            // (other than %n which doesn't consume input), bail.
+            if input_pos >= input_bytes.len() && spec != b'n' {
+                underflow = true;
+                break;
             }
 
             match spec {
@@ -5325,16 +5334,21 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 b's' => {
-                    // Read non-whitespace string
+                    // Read non-whitespace string. If no characters consumed,
+                    // result is NULL (PHP behavior).
                     let start = input_pos;
                     let max = width.unwrap_or(usize::MAX);
                     let mut count = 0;
-                    while input_pos < input_bytes.len() && input_bytes[input_pos] != b' ' && input_bytes[input_pos] != b'\t' && input_bytes[input_pos] != b'\n' && count < max {
+                    while input_pos < input_bytes.len() && input_bytes[input_pos] != b' ' && input_bytes[input_pos] != b'\t' && input_bytes[input_pos] != b'\n' && input_bytes[input_pos] != b'\r' && count < max {
                         input_pos += 1;
                         count += 1;
                     }
                     if !suppress {
-                        results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                        if input_pos > start {
+                            results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                        } else {
+                            results.push(Value::Null);
+                        }
                     }
                 }
                 b'c' => {
@@ -5434,6 +5448,7 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     return Err(VmError { message: msg, line: vm.current_line });
                 }
             }
+            nconversions += 1;
         } else if format_bytes[fmt_pos] == b' ' || format_bytes[fmt_pos] == b'\t' || format_bytes[fmt_pos] == b'\n' {
             // Whitespace in format matches any amount of whitespace in input
             fmt_pos += 1;
@@ -5446,6 +5461,15 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 input_pos += 1;
             }
             fmt_pos += 1;
+        }
+    }
+
+    // Underflow + no conversions yet → PHP returns NULL (no refs) or -1 (refs).
+    if underflow && nconversions == 0 {
+        if has_refs {
+            return Ok(Value::Long(-1));
+        } else {
+            return Ok(Value::Null);
         }
     }
 
