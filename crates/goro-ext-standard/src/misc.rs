@@ -2084,12 +2084,16 @@ fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), VmError> {
+    validate_callback_generic(vm, callback, "array_map", "Argument #1 ($callback)")
+}
+
+fn validate_callback_generic(vm: &mut Vm, callback: &Value, fn_name: &str, arg_label: &str) -> Result<(), VmError> {
     match callback {
         Value::Null => Ok(()), // null is valid (identity/zip)
         Value::String(s) => {
             let name = s.as_bytes();
             if name.is_empty() {
-                let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, function \"\" not found or invalid function name".to_string();
+                let msg = format!("{}(): {} must be a valid callback or null, function \"\" not found or invalid function name", fn_name, arg_label);
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
                 return Err(VmError { message: msg, line: vm.current_line });
@@ -2105,13 +2109,15 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
                         if class.get_method(&method_lower).is_some() {
                             return Ok(());
                         }
-                        let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, class '{}' does not have a method '{}'",
+                        let msg = format!("{}(): {} must be a valid callback or null, class '{}' does not have a method '{}'",
+                            fn_name, arg_label,
                             String::from_utf8_lossy(class_name), String::from_utf8_lossy(method_name));
                         let exc = vm.throw_type_error(msg.clone());
                         vm.current_exception = Some(exc);
                         return Err(VmError { message: msg, line: vm.current_line });
                     }
-                    let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, class \"{}\" not found",
+                    let msg = format!("{}(): {} must be a valid callback or null, class \"{}\" not found",
+                        fn_name, arg_label,
                         String::from_utf8_lossy(class_name));
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
@@ -2123,10 +2129,25 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
             if name_lower.starts_with(b"__closure_") || name_lower.starts_with(b"__arrow_") {
                 return Ok(());
             }
+            // PHP language constructs cannot be used as callbacks
+            const LANG_CONSTRUCTS: &[&[u8]] = &[
+                b"echo", b"print", b"isset", b"unset", b"empty",
+                b"include", b"include_once", b"require", b"require_once",
+                b"eval", b"exit", b"die", b"list", b"array",
+            ];
+            if LANG_CONSTRUCTS.contains(&name_lower.as_slice()) {
+                let msg = format!("{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
+                    fn_name, arg_label,
+                    String::from_utf8_lossy(name));
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
             if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
                 return Ok(());
             }
-            let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, function \"{}\" not found or invalid function name",
+            let msg = format!("{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
+                fn_name, arg_label,
                 String::from_utf8_lossy(name));
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -2136,7 +2157,7 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
             let arr_borrow = arr.borrow();
             let len = arr_borrow.len();
             if len != 2 {
-                let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, array callback must have exactly two members".to_string();
+                let msg = format!("{}(): {} must be a valid callback or null, array callback must have exactly two members", fn_name, arg_label);
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
                 return Err(VmError { message: msg, line: vm.current_line });
@@ -2152,14 +2173,14 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
                     if vm.classes.contains_key(&class_lower) {
                         return Ok(());
                     }
-                    let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, first array member is not a valid class name or object".to_string();
+                    let msg = format!("{}(): {} must be a valid callback or null, first array member is not a valid class name or object", fn_name, arg_label);
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
                     Err(VmError { message: msg, line: vm.current_line })
                 }
                 Value::Object(_) => Ok(()),
                 _ => {
-                    let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, first array member is not a valid class name or object".to_string();
+                    let msg = format!("{}(): {} must be a valid callback or null, first array member is not a valid class name or object", fn_name, arg_label);
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
                     Err(VmError { message: msg, line: vm.current_line })
@@ -2173,13 +2194,13 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
                     return Ok(());
                 }
             }
-            let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, no array or string given".to_string();
+            let msg = format!("{}(): {} must be a valid callback or null, no array or string given", fn_name, arg_label);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             Err(VmError { message: msg, line: vm.current_line })
         }
         _ => {
-            let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, no array or string given".to_string();
+            let msg = format!("{}(): {} must be a valid callback or null, no array or string given", fn_name, arg_label);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             Err(VmError { message: msg, line: vm.current_line })
@@ -2396,6 +2417,26 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 result.set(key.clone(), mapped);
             }
         } else if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+            // Check required argument count - array_map calls user function with 1 arg
+            // plus captured args. Verify the function accepts this.
+            let provided = (1 + captured_args.len()) as u32;
+            let required = user_fn.required_param_count;
+            if provided < required {
+                let display_name = String::from_utf8_lossy(&func_name).into_owned();
+                let total_params = user_fn.param_count;
+                let has_optional = total_params > required;
+                let qualifier = if has_optional { "at least" } else { "exactly" };
+                let plural = if required == 1 { "" } else { "s" };
+                let pass_plural = if provided == 1 { "" } else { "s" };
+                let msg = format!(
+                    "Too few arguments to function {}(), {} passed and {} {} expected",
+                    display_name, provided, qualifier, required
+                );
+                let _ = (plural, pass_plural);
+                let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: vm.current_line });
+            }
             for (key, val) in arr.iter() {
                 let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
                 // Pass captured vars first, then the element
@@ -2445,6 +2486,7 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
         if has_callback {
             let cb = callback.unwrap().clone();
+            validate_callback_generic(vm, &cb, "array_filter", "Argument #2 ($callback)")?;
 
             for (key, val) in &arr_data {
                 let key_val = match key {
