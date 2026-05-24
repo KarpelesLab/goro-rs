@@ -3984,27 +3984,54 @@ fn get_declared_interfaces_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
 fn property_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_or_obj = args.first().unwrap_or(&Value::Null);
     let prop_name = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    // Helper: walk class hierarchy, checking visibility of inherited private.
+    fn class_has_visible_prop(vm: &Vm, class_lower: &[u8], pname: &[u8]) -> bool {
+        if let Some(ce) = vm.classes.get(class_lower) {
+            for prop in &ce.properties {
+                if prop.name != pname { continue; }
+                // Inherited private props are not visible on subclasses.
+                let decl_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if prop.visibility == Visibility::Private && decl_lower != class_lower {
+                    continue;
+                }
+                return true;
+            }
+        }
+        false
+    }
     match class_or_obj {
-        Value::Object(obj) => Ok(if obj.borrow().has_property(prop_name.as_bytes()) {
-            Value::True
-        } else {
-            Value::False
-        }),
+        Value::Object(obj) => {
+            let ob = obj.borrow();
+            let class_lower: Vec<u8> = ob.class_name.iter().map(|c| c.to_ascii_lowercase()).collect();
+            // Declared property check (filters out inherited private).
+            let declared = class_has_visible_prop(vm, &class_lower, prop_name.as_bytes());
+            if declared { return Ok(Value::True); }
+            // Otherwise check whether this is a dynamic instance property
+            // (a key on the object that is not declared anywhere on the class
+            // hierarchy).
+            let on_inst = ob.has_property(prop_name.as_bytes());
+            drop(ob);
+            if !on_inst { return Ok(Value::False); }
+            let mut declared_anywhere = false;
+            let mut current = Some(class_lower);
+            while let Some(cl) = current {
+                if let Some(ce) = vm.classes.get(&cl) {
+                    if ce.properties.iter().any(|p| p.name == prop_name.as_bytes()) {
+                        declared_anywhere = true;
+                        break;
+                    }
+                    current = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                } else { break; }
+            }
+            Ok(if !declared_anywhere { Value::True } else { Value::False })
+        }
         Value::String(s) => {
             let class_lower: Vec<u8> = s
                 .as_bytes()
                 .iter()
                 .map(|c| c.to_ascii_lowercase())
                 .collect();
-            Ok(if let Some(class) = vm.classes.get(&class_lower) {
-                if class.properties.iter().any(|p| p.name == prop_name.as_bytes()) {
-                    Value::True
-                } else {
-                    Value::False
-                }
-            } else {
-                Value::False
-            })
+            Ok(if class_has_visible_prop(vm, &class_lower, prop_name.as_bytes()) { Value::True } else { Value::False })
         }
         _ => {
             let type_name = Vm::value_type_name(class_or_obj);
@@ -13125,35 +13152,53 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let prop_name = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
     let prop_bytes = prop_name.as_bytes();
 
+    // Helper: a property is "visible" on `class_lower` if declared on it OR
+    // declared on an ancestor with non-private visibility.
+    fn class_has_visible_prop(vm: &Vm, class_lower: &[u8], pname: &[u8]) -> bool {
+        if let Some(ce) = vm.get_class_def(class_lower) {
+            for prop in &ce.properties {
+                if prop.name != pname { continue; }
+                let decl_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if prop.visibility == Visibility::Private && decl_lower != class_lower {
+                    continue;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     match obj_or_class {
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
-            // Check instance properties
-            if obj_borrow.has_property(prop_bytes) {
+            let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Declared property check (filters out inherited private).
+            if class_has_visible_prop(vm, &class_lower, prop_bytes) {
                 return Ok(Value::True);
             }
-            // Check class definition
-            let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            drop(obj_borrow);
-            if let Some(class_def) = vm.get_class_def(&class_lower) {
-                for prop in &class_def.properties {
-                    if prop.name == prop_bytes {
-                        return Ok(Value::True);
-                    }
-                }
+            // Otherwise consider this as a dynamic property only if it is
+            // present on the instance AND not declared anywhere on the
+            // class hierarchy (so that inherited private props don't count).
+            if !obj_borrow.has_property(prop_bytes) {
+                return Ok(Value::False);
             }
-            Ok(Value::False)
+            drop(obj_borrow);
+            let mut declared_anywhere = false;
+            let mut current = Some(class_lower);
+            while let Some(cl) = current {
+                if let Some(ce) = vm.get_class_def(&cl) {
+                    if ce.properties.iter().any(|p| p.name == prop_bytes) {
+                        declared_anywhere = true;
+                        break;
+                    }
+                    current = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                } else { break; }
+            }
+            Ok(if !declared_anywhere { Value::True } else { Value::False })
         }
         Value::String(s) => {
             let class_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-            if let Some(class_def) = vm.get_class_def(&class_lower) {
-                for prop in &class_def.properties {
-                    if prop.name == prop_bytes {
-                        return Ok(Value::True);
-                    }
-                }
-            }
-            Ok(Value::False)
+            Ok(if class_has_visible_prop(vm, &class_lower, prop_bytes) { Value::True } else { Value::False })
         }
         _ => Ok(Value::Null),
     }

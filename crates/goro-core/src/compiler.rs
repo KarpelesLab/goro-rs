@@ -1868,11 +1868,18 @@ impl Compiler {
 
                 // Set up parameter CVs and default values
                 func_compiler.op_array.param_count = params.len() as u32;
-                // Count required params (those without defaults and not variadic)
-                func_compiler.op_array.required_param_count = params
-                    .iter()
-                    .filter(|p| p.default.is_none() && !p.variadic)
-                    .count() as u32;
+                // required_param_count: equals the index AFTER the last required
+                // parameter (1-based position). Optional params that appear before
+                // a required one are implicitly treated as required (PHP 8.0+).
+                func_compiler.op_array.required_param_count = {
+                    let mut last_req: i64 = -1;
+                    for (i, p) in params.iter().enumerate() {
+                        if !p.variadic && p.default.is_none() {
+                            last_req = i as i64;
+                        }
+                    }
+                    (last_req + 1) as u32
+                };
                 // Compile parameter attributes
                 func_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                 // Record which parameters are by-reference

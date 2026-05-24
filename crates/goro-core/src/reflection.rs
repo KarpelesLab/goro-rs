@@ -1319,34 +1319,29 @@ pub fn reflection_class_method(
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"getstaticproperties" => {
-            // Include own static props and inherited non-private statics.
+            // Include own static props (including own private) and inherited
+            // non-private statics. Properties stored on this class with
+            // declaring_class != self are inherited; private inherited ones
+            // must be excluded.
             let mut result = PhpArray::new();
-            let mut chain: Vec<Vec<u8>> = Vec::new();
-            chain.push(class_lower.clone());
             if let Some(ce) = vm.classes.get(&class_lower) {
-                let mut parent = ce.parent.clone();
-                while let Some(ref p) = parent {
-                    let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    chain.push(p_lower.clone());
-                    if let Some(pce) = vm.classes.get(&p_lower) {
-                        parent = pce.parent.clone();
-                    } else {
-                        break;
-                    }
-                }
-            }
-            for (idx, link) in chain.iter().enumerate() {
-                if let Some(lce) = vm.classes.get(link) {
-                    for prop in &lce.properties {
-                        if !prop.is_static { continue; }
-                        if idx > 0 && prop.visibility == Visibility::Private { continue; }
-                        let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
-                        if result.get(&key).is_none() {
-                            let val = lce.static_properties.get(&prop.name)
-                                .cloned()
-                                .unwrap_or_else(|| prop.default.clone());
-                            result.set(key, val);
-                        }
+                for prop in &ce.properties {
+                    if !prop.is_static { continue; }
+                    let decl_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let is_inherited = decl_lower != class_lower;
+                    if is_inherited && prop.visibility == Visibility::Private { continue; }
+                    let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
+                    if result.get(&key).is_none() {
+                        // Static value is stored on the declaring class
+                        let val = if is_inherited {
+                            vm.classes.get(&decl_lower)
+                                .and_then(|d| d.static_properties.get(&prop.name).cloned())
+                                .unwrap_or_else(|| prop.default.clone())
+                        } else {
+                            ce.static_properties.get(&prop.name).cloned()
+                                .unwrap_or_else(|| prop.default.clone())
+                        };
+                        result.set(key, val);
                     }
                 }
             }
@@ -1564,14 +1559,33 @@ pub fn reflection_class_docall(
                         true
                     }))
                     .unwrap_or(false);
-                // Also check dynamic properties on the reflected object.
+                // Also check dynamic properties on the reflected object,
+                // but exclude properties that ARE declared on the class
+                // hierarchy (including inherited private). Those are not
+                // "dynamic" for purposes of hasProperty visibility.
                 let has_dynamic = if !has {
                     let ob = obj.borrow();
                     let self_obj = ob.get_property(b"__reflection_object");
                     drop(ob);
                     if let Value::Object(inst) = &self_obj {
                         let io = inst.borrow();
-                        io.has_property(prop_name.as_bytes())
+                        let on_instance = io.has_property(prop_name.as_bytes());
+                        if !on_instance { false } else {
+                            // If any class in the hierarchy declares this property,
+                            // it is not a true dynamic property.
+                            let mut declared_anywhere = false;
+                            let mut current = Some(class_lower.clone());
+                            while let Some(cl) = current {
+                                if let Some(ce) = vm.classes.get(&cl) {
+                                    if ce.properties.iter().any(|p| p.name == prop_name.as_bytes()) {
+                                        declared_anywhere = true;
+                                        break;
+                                    }
+                                    current = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                } else { break; }
+                            }
+                            !declared_anywhere
+                        }
                     } else {
                         false
                     }
@@ -1831,14 +1845,32 @@ pub fn reflection_class_docall(
                     }))
                     .map(|p| p.declaring_class.clone());
                 // For ReflectionObject, check the actual object for dynamic
-                // properties.
+                // properties. Inherited private props leave entries on the
+                // instance, but those are NOT dynamic — only treat a property
+                // as dynamic when it's not declared anywhere on the hierarchy.
                 let has_dynamic = if prop_info.is_none() {
                     let ob = obj.borrow();
                     let self_obj = ob.get_property(b"__reflection_object");
                     drop(ob);
                     if let Value::Object(inst) = &self_obj {
                         let io = inst.borrow();
-                        io.has_property(prop_name.as_bytes())
+                        let on_inst = io.has_property(prop_name.as_bytes());
+                        drop(io);
+                        if !on_inst { false } else {
+                            // Check whether declared anywhere in hierarchy
+                            let mut declared_anywhere = false;
+                            let mut current = Some(class_lower.clone());
+                            while let Some(cl) = current {
+                                if let Some(ce) = vm.classes.get(&cl) {
+                                    if ce.properties.iter().any(|p| p.name == prop_name.as_bytes()) {
+                                        declared_anywhere = true;
+                                        break;
+                                    }
+                                    current = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                } else { break; }
+                            }
+                            !declared_anywhere
+                        }
                     } else {
                         false
                     }
@@ -6578,11 +6610,13 @@ fn reflection_class_to_string(
         s.push_str("\n  - Static properties [0] {\n  }\n");
     }
 
-    // Static methods. Hide property hook synthetic methods.
+    // Static methods. Hide property hook synthetic methods. Inherited private
+    // methods are not exposed on subclasses.
     if let Some(ce) = vm.classes.get(class_lower) {
         let static_methods: Vec<_> = ce.methods.values()
             .filter(|m| m.is_static)
             .filter(|m| !m.name.starts_with(b"__property_get_") && !m.name.starts_with(b"__property_set_"))
+            .filter(|m| !(m.visibility == Visibility::Private && m.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>() != *class_lower))
             .collect();
         s.push_str(&format!("\n  - Static methods [{}] {{\n", static_methods.len()));
         let total = static_methods.len();
