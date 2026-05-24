@@ -6128,11 +6128,56 @@ fn check_access_bit(path: &str, owner_bit: u32, group_bit: u32, other_bit: u32) 
     mode & bit != 0
 }
 /// Read a file with optional compress.zlib:// (gzip/zlib decompression) prefix.
+/// Lexically normalize a filesystem path, collapsing `.` and `..` segments
+/// without touching the filesystem. This mirrors PHP's behavior where
+/// `foo/bar/../baz` resolves to `foo/baz` even if `bar` doesn't exist.
+/// Preserves leading `/`, but not symlinks.
+pub(crate) fn normalize_path_lexical(p: &str) -> String {
+    if p.is_empty() {
+        return p.to_string();
+    }
+    let is_absolute = p.starts_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for seg in p.split('/') {
+        match seg {
+            "" => {} // skip empty parts (caused by //)
+            "." => {} // skip current
+            ".." => {
+                if let Some(last) = out.last() {
+                    if *last != ".." {
+                        out.pop();
+                        continue;
+                    }
+                }
+                if !is_absolute {
+                    out.push("..");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    let joined = out.join("/");
+    let result = if is_absolute {
+        format!("/{}", joined)
+    } else if joined.is_empty() {
+        ".".to_string()
+    } else {
+        joined
+    };
+    // Preserve trailing slash if original had one (matters for directory dispatch).
+    if p.ends_with('/') && !result.ends_with('/') {
+        format!("{}/", result)
+    } else {
+        result
+    }
+}
+
 pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     if let Some(real_path) = path_str.strip_prefix("compress.zlib://") {
         let real_path = real_path.strip_prefix("file://").unwrap_or(real_path);
-        let data = std::fs::read(real_path)?;
+        let real_path = normalize_path_lexical(real_path);
+        let data = std::fs::read(&real_path)?;
         if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
             let mut dec = flate2::read::GzDecoder::new(data.as_slice());
             let mut buf = Vec::new();
@@ -6148,7 +6193,13 @@ pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>
         }
         return Ok(data);
     }
-    std::fs::read(path_str)
+    // Apply lexical normalization for plain filesystem paths.
+    let normalized = if !path_str.contains("://") {
+        normalize_path_lexical(path_str)
+    } else {
+        path_str.to_string()
+    };
+    std::fs::read(&normalized)
 }
 
 fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -6604,7 +6655,14 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn realpath_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::canonicalize(&*path.to_string_lossy() as &str) {
+    let path_str = path.to_string_lossy().to_string();
+    // PHP: realpath("") and realpath(".") return the current working dir.
+    let resolved_input = if path_str.is_empty() {
+        ".".to_string()
+    } else {
+        path_str
+    };
+    match std::fs::canonicalize(&resolved_input) {
         Ok(p) => Ok(Value::String(PhpString::from_string(
             p.to_string_lossy().to_string(),
         ))),
@@ -9453,18 +9511,27 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         filename.to_string()
     };
 
+    // For plain (non-scheme) paths, lexically normalize so that
+    // foo/bar/../baz resolves to foo/baz even if bar doesn't exist.
+    // Matches PHP's expand_filepath behavior.
+    let open_path = if !filename.contains("://") {
+        normalize_path_lexical(&filename)
+    } else {
+        filename.clone()
+    };
+
     let file = match mode_clean.as_str() {
-        "r" => std::fs::File::open(&filename),
-        "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&filename),
-        "w" => std::fs::File::create(&filename),
-        "w+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&filename),
-        "a" => std::fs::OpenOptions::new().write(true).append(true).create(true).open(&filename),
-        "a+" => std::fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(&filename),
-        "x" => std::fs::OpenOptions::new().write(true).create_new(true).open(&filename),
-        "x+" => std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&filename),
-        "c" => std::fs::OpenOptions::new().write(true).create(true).open(&filename),
-        "c+" => std::fs::OpenOptions::new().read(true).write(true).create(true).open(&filename),
-        _ => std::fs::File::open(&filename), // default to read
+        "r" => std::fs::File::open(&open_path),
+        "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&open_path),
+        "w" => std::fs::File::create(&open_path),
+        "w+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&open_path),
+        "a" => std::fs::OpenOptions::new().write(true).append(true).create(true).open(&open_path),
+        "a+" => std::fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(&open_path),
+        "x" => std::fs::OpenOptions::new().write(true).create_new(true).open(&open_path),
+        "x+" => std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&open_path),
+        "c" => std::fs::OpenOptions::new().write(true).create(true).open(&open_path),
+        "c+" => std::fs::OpenOptions::new().read(true).write(true).create(true).open(&open_path),
+        _ => std::fs::File::open(&open_path), // default to read
     };
 
     match file {
