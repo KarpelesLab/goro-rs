@@ -3150,9 +3150,13 @@ impl Compiler {
                                         closure_compiler.current_parent_class = self.current_parent_class.clone();
                                         closure_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
                                         closure_compiler.op_array.param_count = closure_params.len() as u32;
-                                        closure_compiler.op_array.required_param_count = closure_params.iter()
-                                            .take_while(|p| p.default.is_none() && !p.variadic)
-                                            .count() as u32;
+                                        closure_compiler.op_array.required_param_count = {
+                                            let mut last_req: i64 = -1;
+                                            for (i, p) in closure_params.iter().enumerate() {
+                                                if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                            }
+                                            (last_req + 1) as u32
+                                        };
                                         closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
                                         closure_compiler.op_array.param_has_default = closure_params.iter().map(|p| p.default.is_some()).collect();
                                         for p in closure_params {
@@ -4118,10 +4122,13 @@ impl Compiler {
                                 // Set param_count and required_param_count for the method
                                 method_compiler.op_array.param_count = params.len() as u32
                                     + if *is_static { 0 } else { 1 }; // +1 for $this
-                                method_compiler.op_array.required_param_count = params
-                                    .iter()
-                                    .filter(|p| p.default.is_none() && !p.variadic)
-                                    .count() as u32;
+                                method_compiler.op_array.required_param_count = {
+                                    let mut last_req: i64 = -1;
+                                    for (i, p) in params.iter().enumerate() {
+                                        if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                    }
+                                    (last_req + 1) as u32
+                                };
                                 // Record by-ref params (offset by 1 for non-static methods due to $this)
                                 if *is_static {
                                     method_compiler.op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
@@ -4360,10 +4367,13 @@ impl Compiler {
                                 }
                                 abstract_op_array.param_count = params.len() as u32
                                     + if *is_static { 0 } else { 1 };
-                                abstract_op_array.required_param_count = params
-                                    .iter()
-                                    .filter(|p| p.default.is_none() && !p.variadic)
-                                    .count() as u32;
+                                abstract_op_array.required_param_count = {
+                                    let mut last_req: i64 = -1;
+                                    for (i, p) in params.iter().enumerate() {
+                                        if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                    }
+                                    (last_req + 1) as u32
+                                };
                                 if *is_static {
                                     abstract_op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
                                     abstract_op_array.param_has_default = params.iter().map(|p| p.default.is_some()).collect();
@@ -4741,9 +4751,13 @@ impl Compiler {
                                         closure_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
                                         // Compile params and body
                                         closure_compiler.op_array.param_count = closure_params.len() as u32;
-                                        closure_compiler.op_array.required_param_count = closure_params.iter()
-                                            .take_while(|p| p.default.is_none() && !p.variadic)
-                                            .count() as u32;
+                                        closure_compiler.op_array.required_param_count = {
+                                            let mut last_req: i64 = -1;
+                                            for (i, p) in closure_params.iter().enumerate() {
+                                                if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                            }
+                                            (last_req + 1) as u32
+                                        };
                                         closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
                                         closure_compiler.op_array.param_has_default = closure_params.iter().map(|p| p.default.is_some()).collect();
                                         for p in closure_params {
@@ -7887,10 +7901,13 @@ impl Compiler {
                 closure_compiler.op_array.param_count = params.len() as u32
                     + use_vars.len() as u32
                     + if !*is_static && self.current_class.is_some() { 1 } else { 0 };
-                closure_compiler.op_array.required_param_count = params
-                    .iter()
-                    .filter(|p| p.default.is_none() && !p.variadic)
-                    .count() as u32;
+                closure_compiler.op_array.required_param_count = {
+                    let mut last_req: i64 = -1;
+                    for (i, p) in params.iter().enumerate() {
+                        if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                    }
+                    (last_req + 1) as u32
+                };
                 // Compile parameter attributes
                 closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                 // Record by-ref params for closures (with offset for $this and use vars)
