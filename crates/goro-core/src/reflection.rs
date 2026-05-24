@@ -3221,13 +3221,19 @@ pub fn reflection_method_docall(
                         vm.current_exception = Some(exc);
                         return Some(Value::Null);
                     }
-                    // Validate target_obj for non-static methods.
+                    // Validate target_obj for non-static methods. PHP uses
+                    // the method's declaring class for the type check, not
+                    // the class the reflection was created on. This lets
+                    // (new ReflectionMethod(B::class, 'method'))->invoke(A)
+                    // work when B inherits the method from A.
                     if !m.is_static {
                         match &target_obj {
                             Value::Object(o) => {
                                 let obj_class_lower: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                let ok = obj_class_lower == class_lower
-                                    || vm.class_extends(&obj_class_lower, &class_lower);
+                                let decl_lower: Vec<u8> = m.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let target_lower = if !decl_lower.is_empty() { decl_lower } else { class_lower.clone() };
+                                let ok = obj_class_lower == target_lower
+                                    || vm.class_extends(&obj_class_lower, &target_lower);
                                 if !ok {
                                     let msg = "Given object is not an instance of the class this method was declared in";
                                     let exc = vm.create_exception(b"ReflectionException", msg, vm.current_line);
@@ -4319,11 +4325,36 @@ pub fn reflection_property_docall(
                         ce.static_properties.insert(prop_name.as_bytes().to_vec(), value);
                     }
                 } else if args.len() >= 3 {
-                    let target = &args[1];
+                    let target = args[1].clone();
                     let value = args[2].clone();
-                    if let Value::Object(target_obj) = target {
+                    if let Value::Object(target_obj) = &target {
+                        // For typed properties, coerce the incoming value to
+                        // satisfy the declared type when possible. In particular
+                        // an object that is __toString()-able coerces to string
+                        // when assigned to a string-typed property — bug #79683.
+                        let prop_type = vm.classes.get(&class_lower)
+                            .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                            .and_then(|p| p.property_type.clone());
+                        let mut coerced = value.clone();
+                        if let Some(pt) = &prop_type {
+                            // Walk through Nullable wrapper
+                            let inner = match pt {
+                                crate::opcode::ParamType::Nullable(inner) => inner.as_ref(),
+                                other => other,
+                            };
+                            if let crate::opcode::ParamType::Simple(name) = inner {
+                                if name.as_slice() == b"string" {
+                                    if let Value::Object(_) = &coerced {
+                                        let s = vm.value_to_string(&coerced);
+                                        if vm.current_exception.is_none() {
+                                            coerced = Value::String(s);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let mut target_ob = target_obj.borrow_mut();
-                        target_ob.set_property(prop_name.as_bytes().to_vec(), value);
+                        target_ob.set_property(prop_name.as_bytes().to_vec(), coerced);
                     }
                 }
                 Some(Value::Null)
