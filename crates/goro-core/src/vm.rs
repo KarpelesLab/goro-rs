@@ -1943,11 +1943,27 @@ impl Vm {
                             }
                         }
                     }
+                    // PHP composes the deprecation suffix as: ["since <ver>"] [", "] [<msg>]
+                    // - both set:        "since X.Y, msg"
+                    // - only since:      "since X.Y"
+                    // - only msg:        "msg"
+                    // - neither:         ""
                     let msg_str = match &msg_val {
                         Some(Value::String(s)) => s.to_string_lossy(),
                         _ => String::new(),
                     };
-                    return Some(msg_str);
+                    let since_str = match &since_val {
+                        Some(Value::String(s)) => s.to_string_lossy(),
+                        _ => String::new(),
+                    };
+                    let combined = if !since_str.is_empty() && !msg_str.is_empty() {
+                        format!("since {}, {}", since_str, msg_str)
+                    } else if !since_str.is_empty() {
+                        format!("since {}", since_str)
+                    } else {
+                        msg_str
+                    };
+                    return Some(combined);
                 }
                 return Some(String::new());
             }
