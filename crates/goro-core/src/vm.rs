@@ -7727,6 +7727,24 @@ impl Vm {
             b"__tostring" | b"tostring" => {
                 Some(Value::String(PhpString::from_string(path_str)))
             }
+            b"__debuginfo" => {
+                // PHP exposes the SplFileInfo internal state through two
+                // private fields: pathName (full path) and fileName (basename).
+                let mut arr = PhpArray::new();
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00pathName")),
+                    Value::String(PhpString::from_string(path_str.clone())),
+                );
+                let filename = std::path::Path::new(&path_str)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00fileName")),
+                    Value::String(PhpString::from_string(filename)),
+                );
+                Some(Value::Array(Rc::new(RefCell::new(arr))))
+            }
             b"setfileclass" => None, // handled in handle_spl_docall
             b"setinfoclass" => None, // handled in handle_spl_docall
             b"getfileinfo" | b"getpathinfo" => {
@@ -7839,6 +7857,27 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
     ) -> Option<Value> {
         match method {
+            b"count" => {
+                // FilesystemIterator/RecursiveDirectoryIterator/GlobIterator
+                // are Countable through GlobIterator. PHP throws an Error if
+                // the iterator has not been initialised (constructed via
+                // Reflection's newInstanceWithoutConstructor).
+                let ob = obj.borrow();
+                let entries = ob.get_property(b"__spl_dir_entries");
+                if matches!(entries, Value::Null | Value::Undef) {
+                    drop(ob);
+                    let class_canonical = self.builtin_canonical_name(_class_lower);
+                    let msg = format!("{} is not initialized", class_canonical);
+                    let exc = self.create_exception(b"Error", &msg, 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                if let Value::Array(a) = entries {
+                    Some(Value::Long(a.borrow().len() as i64))
+                } else {
+                    Some(Value::Long(0))
+                }
+            }
             b"rewind" => {
                 let mut ob = obj.borrow_mut();
                 ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
@@ -8274,12 +8313,18 @@ impl Vm {
                 let path_str = path_val.to_php_string().to_string_lossy();
                 drop(ob);
                 let mut arr = PhpArray::new();
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"pathName")), Value::String(PhpString::from_string(path_str.clone())));
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00pathName")),
+                    Value::String(PhpString::from_string(path_str.clone())),
+                );
                 let filename = std::path::Path::new(&path_str)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"fileName")), Value::String(PhpString::from_string(filename)));
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00fileName")),
+                    Value::String(PhpString::from_string(filename)),
+                );
                 Some(Value::Array(Rc::new(RefCell::new(arr))))
             }
             _ => None,
@@ -9845,18 +9890,20 @@ impl Vm {
                                 drop(ob);
                                 if has_user_compare {
                                     // Insertion sort using user comparator with corruption tracking.
+                                    // PHP semantics: compare(parent_priority, new_priority).
+                                    // While compare(parent, new) < 0 the new element sifts up.
                                     let mut aborted = false;
                                     'outer: for i in 1..entries.len() {
                                         let mut j = i;
                                         while j > 0 {
-                                            let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j].1.clone(), entries[j-1].1.clone()])
+                                            let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j-1].1.clone(), entries[j].1.clone()])
                                                 .unwrap_or(Value::Long(0));
                                             if self.current_exception.is_some() {
                                                 aborted = true;
                                                 break 'outer;
                                             }
                                             let cmp = cmp_v.to_long();
-                                            if cmp > 0 {
+                                            if cmp < 0 {
                                                 entries.swap(j-1, j);
                                                 j -= 1;
                                             } else {
@@ -10003,22 +10050,24 @@ impl Vm {
                                 let len = entries.len();
                                 if len > 1 {
                                     if has_user_compare {
-                                        // Use insertion sort with user compare. If the
-                                        // user comparator throws, mark the heap corrupted
-                                        // and bail out — the in-progress entry has
-                                        // already been pushed but cannot be ordered.
+                                        // Use insertion sort with user compare. PHP calls
+                                        // compare(parent, new); while result < 0 the new
+                                        // element sifts up. If the user comparator throws,
+                                        // mark the heap corrupted and bail out — the
+                                        // in-progress entry has already been pushed but
+                                        // cannot be ordered.
                                         let mut aborted = false;
                                         'outer: for i in 1..len {
                                             let mut j = i;
                                             while j > 0 {
-                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j].clone(), entries[j-1].clone()])
+                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j-1].clone(), entries[j].clone()])
                                                     .unwrap_or(Value::Null);
                                                 if self.current_exception.is_some() {
                                                     aborted = true;
                                                     break 'outer;
                                                 }
                                                 let cmp = cmp_v.to_long();
-                                                if cmp > 0 {
+                                                if cmp < 0 {
                                                     entries.swap(j-1, j);
                                                     j -= 1;
                                                 } else {
@@ -10089,23 +10138,24 @@ impl Vm {
                                     drop(ob);
                                     if has_user_compare && entries.len() >= 2 {
                                         let this_val = this.clone();
-                                        // Run one compare() to flush any potential throw.
+                                        // Run one compare(parent, child) to flush any potential throw.
                                         let _ = self.call_object_method(&this_val, b"compare", &[entries[0].clone(), entries[1].clone()]);
                                         if self.current_exception.is_some() {
                                             obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
                                             return Some(Value::Null);
                                         }
                                         // Insertion-sort with user compare to restore order.
+                                        // PHP semantics: compare(parent, new); sift up while < 0.
                                         for i in 1..entries.len() {
                                             let mut j = i;
                                             while j > 0 {
-                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j].clone(), entries[j-1].clone()]);
+                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j-1].clone(), entries[j].clone()]);
                                                 if self.current_exception.is_some() {
                                                     obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
                                                     return Some(Value::Null);
                                                 }
                                                 let cmp = cmp_v.unwrap_or(Value::Long(0)).to_long();
-                                                if cmp > 0 {
+                                                if cmp < 0 {
                                                     entries.swap(j-1, j);
                                                     j -= 1;
                                                 } else {
@@ -11170,7 +11220,9 @@ impl Vm {
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_default();
-                            let result = if !suffix.is_empty() && name.ends_with(&suffix) {
+                            // PHP basename() does not strip the suffix if it
+                            // equals the entire basename (avoid empty result).
+                            let result = if !suffix.is_empty() && name.ends_with(&suffix) && name.len() > suffix.len() {
                                 name[..name.len() - suffix.len()].to_string()
                             } else {
                                 name
@@ -11315,7 +11367,9 @@ impl Vm {
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_default();
-                            let result = if !suffix.is_empty() && name.ends_with(&suffix) {
+                            // PHP basename() does not strip the suffix if it
+                            // equals the entire basename (avoid empty result).
+                            let result = if !suffix.is_empty() && name.ends_with(&suffix) && name.len() > suffix.len() {
                                 name[..name.len() - suffix.len()].to_string()
                             } else {
                                 name
@@ -11371,7 +11425,9 @@ impl Vm {
                             } else {
                                 String::new()
                             };
-                            let result = if !suffix.is_empty() && name.ends_with(&suffix) {
+                            // PHP basename() does not strip the suffix if it
+                            // equals the entire basename (avoid empty result).
+                            let result = if !suffix.is_empty() && name.ends_with(&suffix) && name.len() > suffix.len() {
                                 name[..name.len() - suffix.len()].to_string()
                             } else {
                                 name
