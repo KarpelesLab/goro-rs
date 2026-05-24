@@ -6151,24 +6151,23 @@ impl Vm {
             b"setinfo" => None, // handled in handle_spl_docall
             b"offsetget" => None, // handled in handle_spl_docall
             b"__serialize" => {
+                // PHP 8.5 SplObjectStorage::__serialize returns a two-element
+                // array: [0 => flat [obj0, data0, obj1, data1, ...] storage,
+                //         1 => associative array of declared properties].
                 let ob = obj.borrow();
                 let objects = ob.get_property(b"__spl_objects");
                 let data = ob.get_property(b"__spl_array");
-                let mut result = PhpArray::new();
+                let mut pairs = PhpArray::new();
                 if let Value::Array(objs) = objects {
                     if let Value::Array(dat) = data {
                         let objs = objs.borrow();
                         let dat = dat.borrow();
                         for ((_, o), (_, d)) in objs.iter().zip(dat.iter()) {
-                            result.push(o.clone());
-                            result.push(d.clone());
+                            pairs.push(o.clone());
+                            pairs.push(d.clone());
                         }
                     }
                 }
-                // Append a trailing associative array with user/protected/private
-                // properties so subclasses with declared properties serialize
-                // correctly. PHP's SplObjectStorage uses this slot as the
-                // tail element of the result array.
                 let mut props = PhpArray::new();
                 for (name, val) in ob.properties.iter() {
                     if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
@@ -6181,6 +6180,8 @@ impl Vm {
                     }
                     props.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
                 }
+                let mut result = PhpArray::new();
+                result.push(Value::Array(Rc::new(RefCell::new(pairs))));
                 result.push(Value::Array(Rc::new(RefCell::new(props))));
                 Some(Value::Array(Rc::new(RefCell::new(result))))
             }
@@ -8782,32 +8783,186 @@ impl Vm {
                             Some(Value::Null)
                         }
                         b"__unserialize" => {
-                            // Restore from the ['flags' => ..., 'storage' => [...], 'iteratorClass' => ...] format
+                            // PHP ArrayObject::__unserialize() accepts two
+                            // forms.
+                            //
+                            // (a) New PHP 8.5 named-key form, written by
+                            //     __serialize(): ['flags' => int, 'storage'
+                            //     => array|object, 'iteratorClass' => string,
+                            //     'properties' => array]
+                            //
+                            // (b) Legacy positional form preserved for
+                            //     compatibility with hand-crafted serialize
+                            //     payloads: [0 => int flags, 1 =>
+                            //     array|object storage, 2 => array
+                            //     properties, optional 3 => string
+                            //     iteratorClass].
+                            //
+                            // Form (b) is validated strictly: bad types throw
+                            // 'Incomplete or ill-typed serialization data',
+                            // and a non-array/object storage throws 'Passed
+                            // variable is not an array or object'. Form (a)
+                            // is accepted with best-effort restoration.
                             let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            let class_canonical = self.builtin_canonical_name(class);
                             if let Value::Array(a) = &data {
-                                let a = a.borrow();
+                                let a_borrow = a.borrow();
                                 let flags_key = ArrayKey::String(PhpString::from_bytes(b"flags"));
                                 let storage_key = ArrayKey::String(PhpString::from_bytes(b"storage"));
                                 let iter_key = ArrayKey::String(PhpString::from_bytes(b"iteratorClass"));
                                 let props_key = ArrayKey::String(PhpString::from_bytes(b"properties"));
+                                // Detect named-key form.
+                                let is_named = a_borrow.get(&flags_key).is_some()
+                                    || a_borrow.get(&storage_key).is_some()
+                                    || a_borrow.get(&iter_key).is_some()
+                                    || a_borrow.get(&props_key).is_some();
+                                if is_named {
+                                    let mut ob = obj.borrow_mut();
+                                    if let Some(v) = a_borrow.get(&flags_key) {
+                                        ob.set_property(b"__spl_flags".to_vec(), v.clone());
+                                    }
+                                    if let Some(v) = a_borrow.get(&storage_key) {
+                                        ob.set_property(b"__spl_array".to_vec(), v.clone());
+                                    }
+                                    if let Some(v) = a_borrow.get(&iter_key) {
+                                        ob.set_property(b"__spl_iterator_class".to_vec(), v.clone());
+                                    }
+                                    if let Some(Value::Array(p)) = a_borrow.get(&props_key) {
+                                        let p = p.borrow();
+                                        for (k, v) in p.iter() {
+                                            if let ArrayKey::String(s) = k {
+                                                ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                            }
+                                        }
+                                    }
+                                    return Some(Value::Null);
+                                }
+                                // Positional form: must have at least 3
+                                // elements (flags, storage, properties) and
+                                // an optional 4th (iteratorClass).
+                                let len = a_borrow.len();
+                                if len < 3 {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                // i:0 must be a long (PHP rejects bool/string/etc.)
+                                let flags_v = a_borrow.get(&ArrayKey::Int(0)).cloned();
+                                if !matches!(flags_v, Some(Value::Long(_))) {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                let storage_v = a_borrow.get(&ArrayKey::Int(1)).cloned();
+                                let storage_is_ok = matches!(storage_v,
+                                    Some(Value::Array(_)) | Some(Value::Object(_)));
+                                let props_v = a_borrow.get(&ArrayKey::Int(2)).cloned();
+                                let props_is_ok = matches!(props_v, Some(Value::Array(_)));
+                                // Order of checks (mirroring PHP): if i:3 is
+                                // present, its type (string) is validated
+                                // BEFORE storage shape. If properties is bad
+                                // ("ill-typed") that wins over storage too.
+                                let iter_class_v = a_borrow.get(&ArrayKey::Int(3)).cloned();
+                                let iter_class_is_ok = match &iter_class_v {
+                                    None => true,
+                                    Some(Value::String(_)) => true,
+                                    _ => false,
+                                };
+                                if !iter_class_is_ok {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                if !props_is_ok {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                if !storage_is_ok {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Passed variable is not an array or object",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                // Optional iteratorClass at i:3 must reference
+                                // an existing class that implements Iterator.
+                                if let Some(ic) = &iter_class_v {
+                                    let icn = ic.to_php_string();
+                                    let icn_bytes = icn.as_bytes();
+                                    let icn_lower: Vec<u8> = icn_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let exists = self.classes.contains_key(&icn_lower)
+                                        || self.is_known_builtin_class(&icn_lower);
+                                    if !exists {
+                                        drop(a_borrow);
+                                        let msg = format!(
+                                            "Cannot deserialize {} with iterator class '{}'; no such class exists",
+                                            class_canonical, String::from_utf8_lossy(icn_bytes)
+                                        );
+                                        let exc = self.create_exception(
+                                            b"InvalidArgumentException",
+                                            &msg,
+                                            self.current_line,
+                                        );
+                                        self.current_exception = Some(exc);
+                                        return Some(Value::Null);
+                                    }
+                                    let implements_iter = icn_lower == b"arrayiterator"
+                                        || icn_lower == b"recursivearrayiterator"
+                                        || self.class_extends(&icn_lower, b"arrayiterator")
+                                        || self.class_implements_interface(&icn_lower, b"iterator")
+                                        || self.builtin_implements_interface(&icn_lower, b"iterator");
+                                    if !implements_iter {
+                                        drop(a_borrow);
+                                        let msg = format!(
+                                            "Cannot deserialize {} with iterator class '{}'; this class does not implement the Iterator interface",
+                                            class_canonical, String::from_utf8_lossy(icn_bytes)
+                                        );
+                                        let exc = self.create_exception(
+                                            b"InvalidArgumentException",
+                                            &msg,
+                                            self.current_line,
+                                        );
+                                        self.current_exception = Some(exc);
+                                        return Some(Value::Null);
+                                    }
+                                }
+                                // Apply state.
                                 let mut ob = obj.borrow_mut();
-                                if let Some(v) = a.get(&flags_key) {
-                                    ob.set_property(b"__spl_flags".to_vec(), v.clone());
-                                }
-                                if let Some(v) = a.get(&storage_key) {
-                                    ob.set_property(b"__spl_array".to_vec(), v.clone());
-                                }
-                                if let Some(v) = a.get(&iter_key) {
-                                    ob.set_property(b"__spl_iterator_class".to_vec(), v.clone());
-                                }
-                                // Restore user/protected/private properties (saved via __serialize).
-                                if let Some(Value::Array(p)) = a.get(&props_key) {
-                                    let p = p.borrow();
-                                    for (k, v) in p.iter() {
+                                if let Some(v) = flags_v { ob.set_property(b"__spl_flags".to_vec(), v); }
+                                if let Some(v) = storage_v { ob.set_property(b"__spl_array".to_vec(), v); }
+                                if let Some(Value::Array(p)) = props_v {
+                                    for (k, v) in p.borrow().iter() {
                                         if let ArrayKey::String(s) = k {
                                             ob.set_property(s.as_bytes().to_vec(), v.clone());
                                         }
                                     }
+                                }
+                                if let Some(v) = iter_class_v {
+                                    ob.set_property(b"__spl_iterator_class".to_vec(), v);
                                 }
                             }
                             Some(Value::Null)
@@ -9338,16 +9493,47 @@ impl Vm {
                             Some(Value::Null)
                         }
                         b"__unserialize" => {
-                            // __unserialize receives [0 => flags, 1 => dllist, 2 => props]
-                            let data = args.get(1).cloned().unwrap_or(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                            if let Value::Array(a) = data {
+                            // __unserialize receives [0 => flags (int), 1 =>
+                            // dllist (array), 2 => props (array)]. Every slot
+                            // must be present and well-typed; any mismatch
+                            // throws UnexpectedValueException.
+                            let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            if let Value::Array(a) = &data {
                                 let a_borrow = a.borrow();
-                                let flags = a_borrow.get(&ArrayKey::Int(0)).cloned().unwrap_or(Value::Long(0));
-                                let dllist = a_borrow.get(&ArrayKey::Int(1)).cloned().unwrap_or(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                let flags_v = a_borrow.get(&ArrayKey::Int(0)).cloned();
+                                let dllist_v = a_borrow.get(&ArrayKey::Int(1)).cloned();
+                                let props_v = a_borrow.get(&ArrayKey::Int(2)).cloned();
+                                let flags_ok = matches!(flags_v, Some(Value::Long(_)));
+                                let dllist_ok = matches!(dllist_v, Some(Value::Array(_)));
+                                let props_ok = matches!(props_v, Some(Value::Array(_)));
+                                if !(flags_ok && dllist_ok && props_ok) {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
                                 drop(a_borrow);
                                 let mut ob = obj.borrow_mut();
-                                ob.set_property(b"__spl_iter_mode".to_vec(), flags);
-                                ob.set_property(b"__spl_array".to_vec(), dllist);
+                                ob.set_property(b"__spl_iter_mode".to_vec(), flags_v.unwrap());
+                                ob.set_property(b"__spl_array".to_vec(), dllist_v.unwrap());
+                                if let Some(Value::Array(p)) = props_v {
+                                    for (k, v) in p.borrow().iter() {
+                                        if let ArrayKey::String(s) = k {
+                                            ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                        }
+                                    }
+                                }
+                            } else {
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    "Incomplete or ill-typed serialization data",
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
                             }
                             Some(Value::Null)
                         }
@@ -9903,46 +10089,98 @@ impl Vm {
                             Some(Value::Null)
                         }
                         b"__unserialize" => {
-                            // PHP's SplObjectStorage::__unserialize() receives
-                            // an indexed array of [obj0, data0, obj1, data1, ...]
-                            // optionally followed by an assoc array of trailing
-                            // user properties.
+                            // PHP 8.5 SplObjectStorage::__unserialize() receives
+                            // a 2-element array: [0 => array of pairs (obj,
+                            // data, obj, data, ...), 1 => array of user
+                            // properties]. The pairs array must have an even
+                            // number of entries and its even indices must be
+                            // objects.
                             let data = args.get(1).cloned().unwrap_or(Value::Null);
-                            if let Value::Array(a) = &data {
-                                let entries: Vec<(ArrayKey, Value)> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                let mut storage = PhpArray::new();
-                                let mut objects = PhpArray::new();
-                                let mut i = 0;
-                                while i < entries.len() {
-                                    let cur = &entries[i].1;
-                                    // A trailing associative array (string keys)
-                                    // is the user-properties slot.
-                                    if let Value::Array(extra) = cur {
-                                        let eb = extra.borrow();
-                                        let is_assoc = eb.iter().any(|(k, _)| matches!(k, ArrayKey::String(_)));
-                                        if is_assoc {
-                                            let mut ob = obj.borrow_mut();
-                                            for (k, v) in eb.iter() {
-                                                if let ArrayKey::String(s) = k {
-                                                    ob.set_property(s.as_bytes().to_vec(), v.clone());
-                                                }
-                                            }
-                                            i += 1;
-                                            continue;
-                                        }
-                                    }
-                                    if i + 1 >= entries.len() { break; }
-                                    let val = entries[i + 1].1.clone();
-                                    if let Value::Object(key_o) = cur {
-                                        let hash = format!("{:016x}", key_o.borrow().object_id);
-                                        storage.set(ArrayKey::String(PhpString::from_string(hash.clone())), val);
-                                        objects.set(ArrayKey::String(PhpString::from_string(hash)), cur.clone());
-                                    }
-                                    i += 2;
+                            let outer = match &data {
+                                Value::Array(a) => a.clone(),
+                                _ => {
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
                                 }
-                                let mut ob = obj.borrow_mut();
-                                ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(storage))));
-                                ob.set_property(b"__spl_objects".to_vec(), Value::Array(Rc::new(RefCell::new(objects))));
+                            };
+                            let outer_b = outer.borrow();
+                            let pairs_v = outer_b.get(&ArrayKey::Int(0)).cloned();
+                            let props_v = outer_b.get(&ArrayKey::Int(1)).cloned();
+                            let pairs_arr = match pairs_v {
+                                Some(Value::Array(p)) => p,
+                                _ => {
+                                    drop(outer_b);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                            };
+                            if !matches!(props_v, Some(Value::Array(_))) {
+                                drop(outer_b);
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    "Incomplete or ill-typed serialization data",
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            drop(outer_b);
+                            let entries: Vec<(ArrayKey, Value)> = pairs_arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            if entries.len() % 2 != 0 {
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    "Odd number of elements",
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            // First, validate every key slot is an object.
+                            let mut i = 0;
+                            while i < entries.len() {
+                                if !matches!(&entries[i].1, Value::Object(_)) {
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Non-object key",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                i += 2;
+                            }
+                            let mut storage = PhpArray::new();
+                            let mut objects = PhpArray::new();
+                            let mut i = 0;
+                            while i < entries.len() {
+                                let cur = &entries[i].1;
+                                let val = entries[i + 1].1.clone();
+                                if let Value::Object(key_o) = cur {
+                                    let hash = format!("{:016x}", key_o.borrow().object_id);
+                                    storage.set(ArrayKey::String(PhpString::from_string(hash.clone())), val);
+                                    objects.set(ArrayKey::String(PhpString::from_string(hash)), cur.clone());
+                                }
+                                i += 2;
+                            }
+                            let mut ob = obj.borrow_mut();
+                            ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(storage))));
+                            ob.set_property(b"__spl_objects".to_vec(), Value::Array(Rc::new(RefCell::new(objects))));
+                            if let Some(Value::Array(p)) = props_v {
+                                for (k, v) in p.borrow().iter() {
+                                    if let ArrayKey::String(s) = k {
+                                        ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                    }
+                                }
                             }
                             Some(Value::Null)
                         }
