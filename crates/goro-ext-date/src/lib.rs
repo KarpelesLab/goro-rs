@@ -569,13 +569,25 @@ fn strftime_impl(_vm: &mut Vm, args: &[Value], use_gmt: bool) -> Result<Value, V
     // ISO week (Monday-based, week containing Jan 4 is week 1)
     let iso_dow = if dow == 0 { 7 } else { dow }; // Mon=1..Sun=7
     let iso_week = {
-        let jan1_days = ymd_to_days(year, 1, 1);
-        let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7;
-        let iso_jan1_dow: i64 = if jan1_dow == 0 { 7 } else { jan1_dow };
-        let ordinal = yday;
-        let wk = (ordinal - 1 + (iso_jan1_dow - 1)) / 7;
-        let iso_w = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
-        if iso_w == 0 { 52 } else { iso_w }
+        let current_days = days_since_epoch;
+        let iso_week1_start = |y: i64| -> i64 {
+            let jan4 = ymd_to_days(y, 1, 4);
+            let jan4_dow = ((jan4 + 4) % 7 + 7) % 7;
+            let iso_dow = if jan4_dow == 0 { 7 } else { jan4_dow };
+            jan4 - (iso_dow - 1)
+        };
+        let cur_year_start = iso_week1_start(year);
+        if current_days < cur_year_start {
+            let prev_start = iso_week1_start(year - 1);
+            (current_days - prev_start) / 7 + 1
+        } else {
+            let next_start = iso_week1_start(year + 1);
+            if current_days >= next_start {
+                (current_days - next_start) / 7 + 1
+            } else {
+                (current_days - cur_year_start) / 7 + 1
+            }
+        }
     };
     // ISO year
     let iso_year: i64 = {
@@ -1738,20 +1750,28 @@ pub fn format_timestamp_with_tz(format: &str, local_secs: i64, tz_name: &str, tz
                 result.push_str(&format!("{}", doy));
             }
             b'W' => {
-                // ISO 8601 week number
-                let jan1_days = ymd_to_days(year, 1, 1);
-                let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7; // 0=Sun
-                let iso_jan1_dow = if jan1_dow == 0 { 7 } else { jan1_dow }; // 1=Mon..7=Sun
-                let ordinal_day = {
-                    let days_in_months = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-                    let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
-                    let mut d = days_in_months[((month - 1).max(0) as usize).min(11)] + day;
-                    if month > 2 { d += leap; }
-                    d
+                // ISO 8601 week number (Monday-based weeks; week 1 contains Jan 4).
+                let current_days = ymd_to_days(year, month as u32, day as u32);
+                // Helper: ISO week 1 start (Monday) for a given year.
+                let iso_week1_start = |y: i64| -> i64 {
+                    let jan4 = ymd_to_days(y, 1, 4);
+                    let jan4_dow = ((jan4 + 4) % 7 + 7) % 7; // 0=Sun, 1=Mon..
+                    let iso_dow = if jan4_dow == 0 { 7 } else { jan4_dow }; // 1=Mon..7=Sun
+                    jan4 - (iso_dow - 1)
                 };
-                let wk = (ordinal_day as i64 - 1 + (iso_jan1_dow - 1) as i64) / 7;
-                let iso_week = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
-                let iso_week = if iso_week == 0 { 52 } else { iso_week };
+                let cur_year_start = iso_week1_start(year);
+                let iso_week: i64 = if current_days < cur_year_start {
+                    // Belongs to ISO year = year - 1
+                    let prev_start = iso_week1_start(year - 1);
+                    (current_days - prev_start) / 7 + 1
+                } else {
+                    let next_start = iso_week1_start(year + 1);
+                    if current_days >= next_start {
+                        (current_days - next_start) / 7 + 1
+                    } else {
+                        (current_days - cur_year_start) / 7 + 1
+                    }
+                };
                 result.push_str(&format!("{:02}", iso_week));
             }
             b'B' => {
@@ -2003,19 +2023,26 @@ pub fn format_timestamp(format: &str, secs: i64) -> String {
                 result.push_str(&format!("{}", doy));
             }
             b'W' => {
-                let jan1_days = ymd_to_days(year, 1, 1);
-                let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7;
-                let iso_jan1_dow = if jan1_dow == 0 { 7 } else { jan1_dow };
-                let ordinal_day = {
-                    let days_in_months = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-                    let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
-                    let mut d = days_in_months[((month - 1).max(0) as usize).min(11)] + day;
-                    if month > 2 { d += leap; }
-                    d
+                // ISO 8601 week number (Monday-based weeks; week 1 contains Jan 4).
+                let current_days = ymd_to_days(year, month as u32, day as u32);
+                let iso_week1_start = |y: i64| -> i64 {
+                    let jan4 = ymd_to_days(y, 1, 4);
+                    let jan4_dow = ((jan4 + 4) % 7 + 7) % 7;
+                    let iso_dow = if jan4_dow == 0 { 7 } else { jan4_dow };
+                    jan4 - (iso_dow - 1)
                 };
-                let wk = (ordinal_day as i64 - 1 + (iso_jan1_dow - 1) as i64) / 7;
-                let iso_week = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
-                let iso_week = if iso_week == 0 { 52 } else { iso_week };
+                let cur_year_start = iso_week1_start(year);
+                let iso_week: i64 = if current_days < cur_year_start {
+                    let prev_start = iso_week1_start(year - 1);
+                    (current_days - prev_start) / 7 + 1
+                } else {
+                    let next_start = iso_week1_start(year + 1);
+                    if current_days >= next_start {
+                        (current_days - next_start) / 7 + 1
+                    } else {
+                        (current_days - cur_year_start) / 7 + 1
+                    }
+                };
                 result.push_str(&format!("{:02}", iso_week));
             }
             b'B' => {
