@@ -11646,7 +11646,12 @@ impl Vm {
                                 use std::io::Write;
                                 if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path_str) {
                                     match f.write(data.as_bytes()) {
-                                        Ok(n) => Some(Value::Long(n as i64)),
+                                        Ok(n) => {
+                                            let mut ob = obj.borrow_mut();
+                                            let prev = if let Value::Long(b) = ob.get_property(b"__spl_byte_pos") { b } else { 0 };
+                                            ob.set_property(b"__spl_byte_pos".to_vec(), Value::Long(prev + n as i64));
+                                            Some(Value::Long(n as i64))
+                                        }
                                         Err(_) => Some(Value::False),
                                     }
                                 } else {
