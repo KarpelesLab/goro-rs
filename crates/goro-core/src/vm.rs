@@ -17454,31 +17454,120 @@ impl Vm {
                         let tokens = lexer.tokenize();
                         let src = source.as_bytes();
                         let mut result = PhpArray::new();
-                        for token in &tokens {
-                            if matches!(token.kind, goro_parser::token::TokenKind::Eof) {
+                        // Pre-pass: combine adjacent T_STRING / T_NS_SEPARATOR / T_NAMESPACE
+                        // sequences into T_NAME_QUALIFIED (Foo\Bar), T_NAME_FULLY_QUALIFIED
+                        // (\Foo\Bar), or T_NAME_RELATIVE (namespace\Foo). Combining requires
+                        // zero whitespace/comments between consecutive lexer tokens (i.e.
+                        // next token's start == previous token's end).
+                        use goro_parser::token::TokenKind as TK;
+                        let is_ident = |k: &TK| matches!(k, TK::Identifier(_));
+                        let mut i = 0usize;
+                        let mut combined: Vec<(i64, usize, usize, u32)> = Vec::with_capacity(tokens.len());
+                        while i < tokens.len() {
+                            let tok = &tokens[i];
+                            if matches!(tok.kind, TK::Eof) {
+                                i += 1;
                                 continue;
                             }
-                            let token_id = goro_parser::token::token_kind_to_php_id(&token.kind);
-                            let start = token.span.start as usize;
-                            let end = token.span.end as usize;
-                            let text = if start < src.len() && end <= src.len() && start < end {
-                                &src[start..end]
+                            let token_id = goro_parser::token::token_kind_to_php_id(&tok.kind);
+                            let s_start = tok.span.start as usize;
+                            let s_end = tok.span.end as usize;
+                            let s_line = tok.span.line;
+
+                            // Look-ahead helper: is next token directly adjacent (no
+                            // intervening whitespace/comments) and a given kind?
+                            let adjacent = |idx: usize, end_pos: usize| -> bool {
+                                tokens.get(idx).map_or(false, |t| t.span.start as usize == end_pos)
+                            };
+
+                            // Case 1: starts with `\` Backslash + Identifier → T_NAME_FULLY_QUALIFIED
+                            if matches!(tok.kind, TK::Backslash) && adjacent(i + 1, s_end) && tokens.get(i + 1).map_or(false, |t| is_ident(&t.kind)) {
+                                let mut j = i + 1;
+                                let mut end = tokens[j].span.end as usize;
+                                j += 1;
+                                // Chain: (\Ident)( \Ident)*
+                                while j + 1 < tokens.len()
+                                    && matches!(tokens[j].kind, TK::Backslash)
+                                    && tokens[j].span.start as usize == end
+                                    && is_ident(&tokens[j + 1].kind)
+                                    && tokens[j + 1].span.start as usize == tokens[j].span.end as usize
+                                {
+                                    end = tokens[j + 1].span.end as usize;
+                                    j += 2;
+                                }
+                                if j > i + 1 {
+                                    combined.push((263, s_start, end, s_line));
+                                    i = j;
+                                    continue;
+                                }
+                            }
+                            // Case 2: `namespace` (T_NAMESPACE = 374) + `\` + Identifier → T_NAME_RELATIVE
+                            if matches!(tok.kind, TK::Namespace) && adjacent(i + 1, s_end)
+                                && tokens.get(i + 1).map_or(false, |t| matches!(t.kind, TK::Backslash))
+                                && tokens.get(i + 2).map_or(false, |t| is_ident(&t.kind))
+                                && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
+                            {
+                                let mut j = i + 3;
+                                let mut end = tokens[i + 2].span.end as usize;
+                                while j + 1 < tokens.len()
+                                    && matches!(tokens[j].kind, TK::Backslash)
+                                    && tokens[j].span.start as usize == end
+                                    && is_ident(&tokens[j + 1].kind)
+                                    && tokens[j + 1].span.start as usize == tokens[j].span.end as usize
+                                {
+                                    end = tokens[j + 1].span.end as usize;
+                                    j += 2;
+                                }
+                                combined.push((264, s_start, end, s_line));
+                                i = j;
+                                continue;
+                            }
+                            // Case 3: Identifier + `\` + Identifier → T_NAME_QUALIFIED
+                            if is_ident(&tok.kind)
+                                && tokens.get(i + 1).map_or(false, |t| matches!(t.kind, TK::Backslash))
+                                && tokens[i + 1].span.start as usize == s_end
+                                && tokens.get(i + 2).map_or(false, |t| is_ident(&t.kind))
+                                && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
+                            {
+                                let mut j = i + 3;
+                                let mut end = tokens[i + 2].span.end as usize;
+                                while j + 1 < tokens.len()
+                                    && matches!(tokens[j].kind, TK::Backslash)
+                                    && tokens[j].span.start as usize == end
+                                    && is_ident(&tokens[j + 1].kind)
+                                    && tokens[j + 1].span.start as usize == tokens[j].span.end as usize
+                                {
+                                    end = tokens[j + 1].span.end as usize;
+                                    j += 2;
+                                }
+                                combined.push((265, s_start, end, s_line));
+                                i = j;
+                                continue;
+                            }
+
+                            // Fallback: emit single token.
+                            let id_for_combined = if token_id == 0 {
+                                let c = src.get(s_start).copied().unwrap_or(0) as i64;
+                                c
+                            } else {
+                                token_id
+                            };
+                            combined.push((id_for_combined, s_start, s_end, s_line));
+                            i += 1;
+                        }
+
+                        for (id_val, s_start, s_end, s_line) in combined {
+                            let text: &[u8] = if s_start < src.len() && s_end <= src.len() && s_start < s_end {
+                                &src[s_start..s_end]
                             } else {
                                 b""
-                            };
-                            let (id_val, text_val) = if token_id == 0 {
-                                // Single-char token: id is the ASCII codepoint of the char
-                                let c = text.first().copied().unwrap_or(0) as i64;
-                                (c, text)
-                            } else {
-                                (token_id, text)
                             };
                             let obj_id = self.next_object_id();
                             let mut tok_obj = PhpObject::new(class_name.clone(), obj_id);
                             tok_obj.set_property(b"id".to_vec(), Value::Long(id_val));
-                            tok_obj.set_property(b"text".to_vec(), Value::String(PhpString::from_bytes(text_val)));
-                            tok_obj.set_property(b"line".to_vec(), Value::Long(token.span.line as i64));
-                            tok_obj.set_property(b"pos".to_vec(), Value::Long(token.span.start as i64));
+                            tok_obj.set_property(b"text".to_vec(), Value::String(PhpString::from_bytes(text)));
+                            tok_obj.set_property(b"line".to_vec(), Value::Long(s_line as i64));
+                            tok_obj.set_property(b"pos".to_vec(), Value::Long(s_start as i64));
                             // If the class defines additional properties with defaults, initialize them.
                             if class_part != b"phptoken" {
                                 self.apply_class_property_defaults(&mut tok_obj, class_part);

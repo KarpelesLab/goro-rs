@@ -241,8 +241,27 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     let timeout_secs: u64 = if source.contains("php_cli_server_start") { 30 } else { 5 };
     let output = match execute_php_with_timeout_and_filename(source.as_bytes(), timeout_secs, test_dir, &ini_settings, filename) {
         Ok(output) => output,
-        Err(e) => return TestResult::Error(e),
+        Err(e) => {
+            // Run CLEAN section even on error so leftover files don't cascade.
+            if let Some(clean) = test.sections.get("CLEAN") {
+                let clean_trimmed = clean.trim();
+                if !clean_trimmed.is_empty() {
+                    let _ = execute_php_with_timeout_and_filename(clean_trimmed.as_bytes(), 5, test_dir, &ini_settings, filename);
+                }
+            }
+            return TestResult::Error(e);
+        },
     };
+
+    // Run CLEAN section after the main FILE section so that leftover files
+    // (e.g. files created with fopen("x")) don't cause cascading failures
+    // when subsequent test runs check for "file already exists" warnings.
+    if let Some(clean) = test.sections.get("CLEAN") {
+        let clean_trimmed = clean.trim();
+        if !clean_trimmed.is_empty() {
+            let _ = execute_php_with_timeout_and_filename(clean_trimmed.as_bytes(), 5, test_dir, &ini_settings, filename);
+        }
+    }
 
     let actual = String::from_utf8_lossy(&output).to_string();
     // Normalize \r\n to \n for comparison (PHP test files use \n line endings)

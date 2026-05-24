@@ -9315,6 +9315,26 @@ thread_local! {
     /// rewinddir are called with no argument or null. PHP keeps this state per
     /// request; opendir() updates it.
     static CURRENT_DIR_RESOURCE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+    /// Stream contexts keyed by resource id. Each entry stores the options
+    /// (wrapper => option_name => value) and params (notification, options).
+    static STREAM_CONTEXTS: RefCell<StdHashMap<i64, StreamContext>> = RefCell::new(StdHashMap::new());
+    /// User-defined stream wrappers: scheme -> (class_name, flags).
+    static USER_WRAPPERS: RefCell<StdHashMap<Vec<u8>, UserWrapper>> = RefCell::new(StdHashMap::new());
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct StreamContext {
+    /// Map: wrapper_name -> map(option_name -> Value)
+    pub options: std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>,
+    /// Notification callback (or null if unset).
+    pub notification: Option<Value>,
+}
+
+#[derive(Clone)]
+pub(crate) struct UserWrapper {
+    pub class_name: Vec<u8>,
+    #[allow(dead_code)]
+    pub flags: i64,
 }
 
 pub(crate) struct DirHandle {
@@ -9408,10 +9428,63 @@ struct FileHandle {
     filter_read_pending: Vec<u8>,
     /// Buffer of post-filter bytes ready to be returned by fread/fgets.
     filter_read_ready: Vec<u8>,
+    /// URI that opened this stream (file path or php:// URL). Reported via stream_get_meta_data().
+    pub uri: String,
+    /// Wrapper type reported via stream_get_meta_data. Defaults to "plainfile" for files.
+    pub wrapper_type: String,
+    /// Stream type reported via stream_get_meta_data. Defaults to "STDIO".
+    pub stream_type: String,
+    /// Whether this stream is seekable.
+    pub seekable: bool,
+    /// For user-stream wrappers: object instance of the wrapper class.
+    pub user_wrapper: Option<Value>,
+    /// For user-stream wrappers: PHP class name of the wrapper class.
+    #[allow(dead_code)]
+    pub user_wrapper_class: Option<Vec<u8>>,
+    /// For user-stream wrappers: scheme name (e.g. "var" for "var://").
+    #[allow(dead_code)]
+    pub user_scheme: Option<String>,
 }
 
 fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
     alloc_file_handle_special(file, mode, SpecialStream::None)
+}
+
+fn alloc_file_handle_uri(file: std::fs::File, mode: &str, uri: &str) -> i64 {
+    let fid = alloc_file_handle_special(file, mode, SpecialStream::None);
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            fh.uri = uri.to_string();
+        }
+    });
+    fid
+}
+
+fn alloc_file_handle_special_uri(file: std::fs::File, mode: &str, special: SpecialStream, uri: &str) -> i64 {
+    let fid = alloc_file_handle_special(file, mode, special);
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            fh.uri = uri.to_string();
+            // For php:// streams, set wrapper_type and stream_type appropriately.
+            match special {
+                SpecialStream::Memory => {
+                    fh.wrapper_type = "PHP".to_string();
+                    fh.stream_type = "MEMORY".to_string();
+                }
+                SpecialStream::Temp => {
+                    fh.wrapper_type = "PHP".to_string();
+                    fh.stream_type = "TEMP".to_string();
+                }
+                SpecialStream::Stdin | SpecialStream::Stdout | SpecialStream::Stderr | SpecialStream::Output => {
+                    fh.wrapper_type = "PHP".to_string();
+                    fh.stream_type = "STDIO".to_string();
+                    fh.seekable = false;
+                }
+                _ => {}
+            }
+        }
+    });
+    fid
 }
 
 /// Helper used by file functions to validate that the first argument is an
@@ -9443,6 +9516,13 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
                 special,
                 filter_read_pending: Vec::new(),
                 filter_read_ready: Vec::new(),
+                uri: String::new(),
+                wrapper_type: "plainfile".to_string(),
+                stream_type: "STDIO".to_string(),
+                seekable: true,
+                user_wrapper: None,
+                user_wrapper_class: None,
+                user_scheme: None,
             });
         });
         fid
@@ -9514,17 +9594,31 @@ fn hex_digit_misc(b: u8) -> Option<u8> {
 
 fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    // Preserve the original filename for the uri field of stream_get_meta_data.
+    // PHP keeps the path as passed to fopen() (including any file:// prefix).
+    let original_uri = filename.clone();
     let mode = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
+
+    // PHP fopen rejects null bytes embedded in the path.
+    if filename.contains('\0') {
+        vm.emit_warning(&format!(
+            "fopen(): Argument #1 ($filename) must not contain any null bytes"
+        ));
+        return Ok(Value::False);
+    }
 
     // Handle file:// URIs. Per RFC, file://[host]/path. If host is empty or
     // "localhost", treat as local path. Otherwise emit warnings matching PHP.
-    if let Some(rest) = filename.strip_prefix("file://") {
-        // rest is "[host]/path" (host may be empty). When the leading
-        // character is '/', the host is empty (i.e. file:///path → ///path
-        // becomes "/path" with empty host).
-        let (host, path) = match rest.find('/') {
-            Some(idx) => (&rest[..idx], &rest[idx..]),
-            None => (rest, ""),
+    // Use case-insensitive match for the scheme (RFC 3986 schemes are
+    // case-insensitive — PHP also accepts File://).
+    if filename.to_ascii_lowercase().starts_with("file://") {
+        let (rest, host, path): (String, String, String) = {
+            let r = filename[7..].to_string();
+            let (h, p) = match r.find('/') {
+                Some(idx) => (r[..idx].to_string(), r[idx..].to_string()),
+                None => (r.clone(), String::new()),
+            };
+            (r, h, p)
         };
         if !host.is_empty() && host != "localhost" {
             vm.emit_warning(&format!(
@@ -9538,7 +9632,7 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
         // Strip prefix and continue with local path handling.
-        filename = path.to_string();
+        filename = path;
     }
 
     // Handle http:// and https:// URLs via the built-in HTTP client. Fetch
@@ -9707,7 +9801,7 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Some(sp) = special {
             match tempfile::tempfile() {
                 Ok(f) => {
-                    let fid = alloc_file_handle_special(f, &mode, sp);
+                    let fid = alloc_file_handle_special_uri(f, &mode, sp, &filename);
                     goro_core::value::register_resource(fid, b"stream");
                     return Ok(Value::Resource(fid));
                 }
@@ -9873,7 +9967,9 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     match file {
         Ok(f) => {
-            let fid = alloc_file_handle(f, &mode);
+            // PHP's `uri` field in stream_get_meta_data preserves the path passed
+            // to fopen() (e.g. relative paths stay relative, file:// prefix is kept).
+            let fid = alloc_file_handle_uri(f, &mode, &original_uri);
             goro_core::value::register_resource(fid, b"stream");
             Ok(Value::Resource(fid))
         }
@@ -9930,6 +10026,15 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
             FILE_HANDLES.with(|h| {
                 let mut h = h.borrow_mut();
                 if let Some(fh) = h.get_mut(&fid) {
+                    // For append mode, writes always go to the end of the file.
+                    // PHP/POSIX 'a' / 'a+' mode requires this behavior. std::fs::OpenOptions
+                    // .append(true) on Linux already enforces it via O_APPEND for real
+                    // files, but tempfile-backed php://temp / php://memory streams need
+                    // an explicit seek since they are opened with .read+.write.
+                    let mode_chars: String = fh.mode.chars().filter(|&c| c != 'b' && c != 't' && c != 'e').collect();
+                    if mode_chars.starts_with('a') {
+                        let _ = fh.file.seek(SeekFrom::End(0));
+                    }
                     match fh.file.write(bytes) {
                         Ok(n) => n,
                         Err(_) => 0,
@@ -10084,16 +10189,24 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let original_len = to_write.len();
 
     // Check if the underlying stream allows writing.
-    let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
+    let (stream_mode, is_special) = FILE_HANDLES.with(|h| {
+        let b = h.borrow();
+        match b.get(&fid) {
+            Some(fh) => (Some(fh.mode.clone()), !matches!(fh.special, SpecialStream::None)),
+            None => (None, false),
+        }
+    });
     if let Some(ref m) = stream_mode {
         let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
         // 'r' (read-only) without '+' is not writable.
         if clean == "r" {
-            let line = vm.current_line;
-            vm.emit_notice_at(&format!(
-                "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
-                original_len
-            ), line);
+            if !is_special {
+                let line = vm.current_line;
+                vm.emit_notice_at(&format!(
+                    "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
+                    original_len
+                ), line);
+            }
             return Ok(Value::False);
         }
     }
@@ -16068,26 +16181,364 @@ fn stream_filter_remove_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     };
     if crate::stream_filters::remove_filter(fid) { Ok(Value::True) } else { Ok(Value::False) }
 }
-fn stream_context_create_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Allocate a unique id and register it as a stream-context resource.
+/// Validate that `arr` has shape ["wrapper"]["opt"] = value (i.e. two levels of arrays).
+/// On invalid, throws a ValueError matching PHP.
+fn validate_context_options(vm: &mut Vm, arr: &Value) -> Result<std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>, VmError> {
+    let mut out = std::collections::BTreeMap::new();
+    let outer = match arr {
+        Value::Array(a) => a.clone(),
+        _ => {
+            let msg = "Options should have the form [\"wrappername\"][\"optionname\"] = $value".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
+    let outer_b = outer.borrow();
+    for (k, v) in outer_b.iter() {
+        let key_bytes: Vec<u8> = match k {
+            ArrayKey::String(s) => s.as_bytes().to_vec(),
+            ArrayKey::Int(_) => {
+                let msg = "Options should have the form [\"wrappername\"][\"optionname\"] = $value".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        };
+        let inner = match v {
+            Value::Array(a) => a.clone(),
+            _ => {
+                let msg = "Options should have the form [\"wrappername\"][\"optionname\"] = $value".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        };
+        let inner_b = inner.borrow();
+        let mut opts = std::collections::BTreeMap::new();
+        for (ik, iv) in inner_b.iter() {
+            let ikey: Vec<u8> = match ik {
+                ArrayKey::String(s) => s.as_bytes().to_vec(),
+                ArrayKey::Int(n) => n.to_string().into_bytes(),
+            };
+            opts.insert(ikey, iv.clone());
+        }
+        out.insert(key_bytes, opts);
+    }
+    Ok(out)
+}
+
+fn type_name_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null | Value::Undef => "null",
+        Value::True | Value::False => "bool",
+        Value::Long(_) => "int",
+        Value::Double(_) => "float",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+        Value::Resource(_) => "resource",
+        Value::Reference(_) => "reference",
+        _ => "unknown",
+    }
+}
+
+fn resolve_context_id(val: &Value) -> Option<i64> {
+    let fid = val.to_long();
+    let has_ctx = STREAM_CONTEXTS.with(|c| c.borrow().contains_key(&fid));
+    if has_ctx { return Some(fid); }
+    // Stream resource: lazily attach default context.
+    let has_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
+    if has_stream {
+        STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(fid, StreamContext::default()); });
+        return Some(fid);
+    }
+    None
+}
+
+fn apply_context_params(vm: &mut Vm, ctx: &mut StreamContext, params: &Value) -> Result<(), VmError> {
+    let arr = match params {
+        Value::Array(a) => a.clone(),
+        _ => {
+            let msg = "Invalid stream/context parameter".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
+    let arr_b = arr.borrow();
+    for (k, v) in arr_b.iter() {
+        if let ArrayKey::String(s) = k {
+            match s.as_bytes() {
+                b"notification" => {
+                    let is_valid = matches!(v, Value::String(_) | Value::Array(_) | Value::Object(_));
+                    if !is_valid {
+                        let msg = "Invalid notification callback".to_string();
+                        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: msg, line: vm.current_line });
+                    }
+                    ctx.notification = Some(v.clone());
+                }
+                b"options" => {
+                    ctx.options = validate_context_options(vm, v)?;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn context_options_to_array(opts: &std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>) -> PhpArray {
+    let mut arr = PhpArray::new();
+    for (wrapper, inner) in opts {
+        let mut inner_arr = PhpArray::new();
+        for (k, v) in inner {
+            inner_arr.set(ArrayKey::String(PhpString::from_vec(k.clone())), v.clone());
+        }
+        arr.set(
+            ArrayKey::String(PhpString::from_vec(wrapper.clone())),
+            Value::Array(Rc::new(RefCell::new(inner_arr))),
+        );
+    }
+    arr
+}
+
+fn stream_context_create_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let mut ctx = StreamContext::default();
+    if let Some(opts_val) = args.first() {
+        if !matches!(opts_val, Value::Null | Value::Undef) {
+            if !matches!(opts_val, Value::Array(_)) {
+                let msg = format!(
+                    "stream_context_create(): Argument #1 ($options) must be of type ?array, {} given",
+                    type_name_of(opts_val)
+                );
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            ctx.options = validate_context_options(vm, opts_val)?;
+        }
+    }
+    if let Some(params_val) = args.get(1) {
+        if !matches!(params_val, Value::Null | Value::Undef) {
+            if !matches!(params_val, Value::Array(_)) {
+                let msg = format!(
+                    "stream_context_create(): Argument #2 ($params) must be of type ?array, {} given",
+                    type_name_of(params_val)
+                );
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            apply_context_params(vm, &mut ctx, params_val)?;
+        }
+    }
     let fid = NEXT_FILE_ID.with(|id| {
         let v = id.get();
         id.set(v + 1);
         v
     });
+    STREAM_CONTEXTS.with(|c| {
+        c.borrow_mut().insert(fid, ctx);
+    });
     goro_core::value::register_resource(fid, b"stream-context");
     Ok(Value::Resource(fid))
 }
-fn stream_context_set_option_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn stream_context_get_options_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
-fn stream_context_set_params_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn stream_context_get_params_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let mut arr = PhpArray::new();
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"options")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+
+fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ctx_val = args.first().unwrap_or(&Value::Null);
+    let fid = match resolve_context_id(ctx_val) {
+        Some(n) => n,
+        None => {
+            let msg = "stream_context_set_option(): Argument #1 ($context) must be a valid stream/context".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
+    let arg2 = args.get(1).unwrap_or(&Value::Null);
+    let arg3 = args.get(2);
+    let arg4 = args.get(3);
+    // Array signature: stream_context_set_option($ctx, array $options)
+    if matches!(arg2, Value::Array(_)) {
+        if let Some(v) = arg3 {
+            if !matches!(v, Value::Null | Value::Undef) {
+                let msg = "stream_context_set_option(): Argument #3 ($option_name) must be null when argument #2 ($wrapper_or_options) is an array".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+        if let Some(v) = arg4 {
+            if !matches!(v, Value::Null | Value::Undef) {
+                let msg = "stream_context_set_option(): Argument #4 ($value) cannot be provided when argument #2 ($wrapper_or_options) is an array".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+        let opts = validate_context_options(vm, arg2)?;
+        STREAM_CONTEXTS.with(|c| {
+            let mut cb = c.borrow_mut();
+            if let Some(ctx) = cb.get_mut(&fid) {
+                for (wrapper, opt_map) in opts {
+                    let entry = ctx.options.entry(wrapper).or_default();
+                    for (k, v) in opt_map {
+                        entry.insert(k, v);
+                    }
+                }
+            }
+        });
+        return Ok(Value::True);
+    }
+    // String/wrapper signature
+    if matches!(arg2, Value::String(_)) {
+        // 2-arg form: emit deprecation, then error on missing $option_name
+        if arg3.is_none() && arg4.is_none() {
+            vm.emit_deprecated("Calling stream_context_set_option() with 2 arguments is deprecated, use stream_context_set_options() instead");
+            let msg = "stream_context_set_option(): Argument #3 ($option_name) cannot be null when argument #2 ($wrapper_or_options) is a string".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        if matches!(arg3, Some(Value::Null | Value::Undef) | None) {
+            let msg = "stream_context_set_option(): Argument #3 ($option_name) cannot be null when argument #2 ($wrapper_or_options) is a string".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        if arg4.is_none() {
+            let msg = "stream_context_set_option(): Argument #4 ($value) must be provided when argument #2 ($wrapper_or_options) is a string".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        let wrapper = arg2.to_php_string().as_bytes().to_vec();
+        let opt = arg3.unwrap().to_php_string().as_bytes().to_vec();
+        let val = arg4.unwrap().clone();
+        STREAM_CONTEXTS.with(|c| {
+            let mut cb = c.borrow_mut();
+            if let Some(ctx) = cb.get_mut(&fid) {
+                let e = ctx.options.entry(wrapper).or_default();
+                e.insert(opt, val);
+            }
+        });
+        return Ok(Value::True);
+    }
+    Ok(Value::False)
+}
+
+fn stream_context_get_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ctx_val = args.first().unwrap_or(&Value::Null);
+    let fid = match resolve_context_id(ctx_val) {
+        Some(n) => n,
+        None => {
+            let msg = "stream_context_get_options(): Argument #1 ($stream_or_context) must be a valid stream/context".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
+    let arr = STREAM_CONTEXTS.with(|c| {
+        c.borrow().get(&fid).map(|ctx| context_options_to_array(&ctx.options)).unwrap_or_default()
+    });
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
-fn stream_context_get_default_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
-fn stream_context_set_default_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(0)) }
+
+fn stream_context_set_params_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ctx_val = args.first().unwrap_or(&Value::Null);
+    let fid = match resolve_context_id(ctx_val) {
+        Some(n) => n,
+        None => {
+            let msg = "stream_context_set_params(): Argument #1 ($context) must be a valid stream/context".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
+    let params = args.get(1).unwrap_or(&Value::Null);
+    let mut ctx_clone = STREAM_CONTEXTS.with(|c| c.borrow().get(&fid).cloned().unwrap_or_default());
+    apply_context_params(vm, &mut ctx_clone, params)?;
+    STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(fid, ctx_clone); });
+    Ok(Value::True)
+}
+
+fn stream_context_get_params_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ctx_val = args.first().unwrap_or(&Value::Null);
+    let fid = match resolve_context_id(ctx_val) {
+        Some(n) => n,
+        None => {
+            let msg = "stream_context_get_params(): Argument #1 ($stream_or_context) must be a valid stream/context".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
+    let mut arr = PhpArray::new();
+    STREAM_CONTEXTS.with(|c| {
+        if let Some(ctx) = c.borrow().get(&fid) {
+            if let Some(n) = &ctx.notification {
+                arr.set(ArrayKey::String(PhpString::from_bytes(b"notification")), n.clone());
+            }
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"options")),
+                Value::Array(Rc::new(RefCell::new(context_options_to_array(&ctx.options)))),
+            );
+        } else {
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"options")),
+                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+            );
+        }
+    });
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+thread_local! {
+    static DEFAULT_STREAM_CTX: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+fn stream_context_get_default_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let fid = DEFAULT_STREAM_CTX.with(|d| {
+        if let Some(id) = d.get() { return id; }
+        let id = NEXT_FILE_ID.with(|n| { let v = n.get(); n.set(v + 1); v });
+        STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(id, StreamContext::default()); });
+        goro_core::value::register_resource(id, b"stream-context");
+        d.set(Some(id));
+        id
+    });
+    Ok(Value::Resource(fid))
+}
+
+fn stream_context_set_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(opts) = args.first() {
+        if !matches!(opts, Value::Null | Value::Undef) {
+            let merged = validate_context_options(vm, opts)?;
+            let fid = DEFAULT_STREAM_CTX.with(|d| {
+                if let Some(id) = d.get() { return id; }
+                let id = NEXT_FILE_ID.with(|n| { let v = n.get(); n.set(v + 1); v });
+                STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(id, StreamContext::default()); });
+                goro_core::value::register_resource(id, b"stream-context");
+                d.set(Some(id));
+                id
+            });
+            STREAM_CONTEXTS.with(|c| {
+                let mut cb = c.borrow_mut();
+                if let Some(ctx) = cb.get_mut(&fid) {
+                    for (wrapper, opt_map) in merged {
+                        let entry = ctx.options.entry(wrapper).or_default();
+                        for (k, v) in opt_map {
+                            entry.insert(k, v);
+                        }
+                    }
+                }
+            });
+        }
+    }
+    stream_context_get_default_fn(vm, args)
+}
 
 fn stream_is_local_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
@@ -16102,33 +16553,117 @@ fn stream_is_local_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn stream_get_meta_data_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    // Accept either a stream resource or a directory resource.
+    let raw_fid = first.to_long();
+    let is_dir = DIR_HANDLES.with(|h| h.borrow().contains_key(&raw_fid));
+    if is_dir {
+        let mut arr = PhpArray::new();
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"timed_out")), Value::False);
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"blocked")), Value::True);
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"eof")), Value::False);
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"wrapper_type")), Value::String(PhpString::from_bytes(b"plainfile")));
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"stream_type")), Value::String(PhpString::from_bytes(b"dir")));
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"mode")), Value::String(PhpString::from_bytes(b"r")));
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"unread_bytes")), Value::Long(0));
+        arr.set(ArrayKey::String(PhpString::from_bytes(b"seekable")), Value::True);
+        return Ok(Value::Array(Rc::new(RefCell::new(arr))));
+    }
+    let fid = require_open_stream(vm, first, "stream_get_meta_data")?;
     let mut arr = PhpArray::new();
     FILE_HANDLES.with(|h| {
         if let Some(fh) = h.borrow().get(&fid) {
+            // For user streams, prepend wrapper_data (the wrapper object instance).
+            if let Some(obj) = &fh.user_wrapper {
+                arr.set(ArrayKey::String(PhpString::from_bytes(b"wrapper_data")), obj.clone());
+            }
+            // Order matches PHP's _php_stream_populate_meta_data():
+            // timed_out, blocked, eof, [wrapper_data], wrapper_type, stream_type,
+            // mode, unread_bytes, seekable, uri.
             arr.set(ArrayKey::String(PhpString::from_bytes(b"timed_out")), Value::False);
             arr.set(ArrayKey::String(PhpString::from_bytes(b"blocked")), Value::True);
             arr.set(ArrayKey::String(PhpString::from_bytes(b"eof")), if fh.eof { Value::True } else { Value::False });
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"wrapper_type")), Value::String(PhpString::from_bytes(b"plainfile")));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"stream_type")), Value::String(PhpString::from_bytes(b"STDIO")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"wrapper_type")), Value::String(PhpString::from_string(fh.wrapper_type.clone())));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"stream_type")), Value::String(PhpString::from_string(fh.stream_type.clone())));
             arr.set(ArrayKey::String(PhpString::from_bytes(b"mode")), Value::String(PhpString::from_string(fh.mode.clone())));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"unread_bytes")), Value::Long(0));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"seekable")), Value::True);
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"uri")), Value::String(PhpString::from_bytes(b"")));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"unread_bytes")), Value::Long(fh.filter_read_ready.len() as i64));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"seekable")), if fh.seekable { Value::True } else { Value::False });
+            if !fh.uri.is_empty() {
+                arr.set(ArrayKey::String(PhpString::from_bytes(b"uri")), Value::String(PhpString::from_string(fh.uri.clone())));
+            }
         }
     });
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
-fn stream_wrapper_register_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn stream_wrapper_unregister_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn stream_wrapper_restore_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn stream_wrapper_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let scheme = args.first().unwrap_or(&Value::Null).to_php_string().as_bytes().to_vec();
+    let class = args.get(1).unwrap_or(&Value::Null).to_php_string().as_bytes().to_vec();
+    let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    if scheme.is_empty() {
+        vm.emit_warning("stream_wrapper_register(): Protocol must not be empty");
+        return Ok(Value::False);
+    }
+    // Check if already registered (built-in or user). PHP returns false and emits
+    // a warning if a wrapper for this protocol already exists.
+    let scheme_lower: Vec<u8> = scheme.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let builtin = matches!(scheme_lower.as_slice(), b"file" | b"http" | b"https" | b"ftp" | b"ftps" | b"php" | b"data" | b"compress.zlib" | b"compress.bzip2" | b"phar" | b"glob");
+    let already_user = USER_WRAPPERS.with(|w| w.borrow().contains_key(&scheme_lower));
+    if builtin || already_user {
+        vm.emit_warning(&format!(
+            "stream_wrapper_register(): Protocol {}:// is already defined.",
+            String::from_utf8_lossy(&scheme)
+        ));
+        return Ok(Value::False);
+    }
+    USER_WRAPPERS.with(|w| {
+        w.borrow_mut().insert(scheme_lower, UserWrapper {
+            class_name: class,
+            flags,
+        });
+    });
+    Ok(Value::True)
+}
+
+fn stream_wrapper_unregister_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let scheme = args.first().unwrap_or(&Value::Null).to_php_string().as_bytes().to_vec();
+    let scheme_lower: Vec<u8> = scheme.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let was_present = USER_WRAPPERS.with(|w| w.borrow_mut().remove(&scheme_lower).is_some());
+    if !was_present {
+        // PHP also lets you "unregister" a built-in wrapper, which then needs to be
+        // restored. For now we report false on unknown schemes.
+        let builtin = matches!(scheme_lower.as_slice(), b"file" | b"http" | b"https" | b"ftp" | b"ftps" | b"php" | b"data" | b"compress.zlib" | b"compress.bzip2" | b"phar" | b"glob");
+        if !builtin {
+            vm.emit_warning(&format!(
+                "stream_wrapper_unregister(): Unable to unregister protocol {}://",
+                String::from_utf8_lossy(&scheme)
+            ));
+            return Ok(Value::False);
+        }
+    }
+    Ok(Value::True)
+}
+
+fn stream_wrapper_restore_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // No-op for built-ins (we don't allow unregistering them via stream_wrapper_unregister).
+    Ok(Value::True)
+}
 
 fn stream_get_wrappers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
-    arr.push(Value::String(PhpString::from_bytes(b"file")));
-    arr.push(Value::String(PhpString::from_bytes(b"php")));
+    // Built-in wrappers (alphabetical).
+    for name in &[
+        b"data" as &[u8], b"file", b"glob", b"http", b"https", b"php",
+    ] {
+        arr.push(Value::String(PhpString::from_bytes(name)));
+    }
+    // User-registered wrappers.
+    USER_WRAPPERS.with(|w| {
+        for scheme in w.borrow().keys() {
+            arr.push(Value::String(PhpString::from_vec(scheme.clone())));
+        }
+    });
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
@@ -16646,19 +17181,110 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut lexer = goro_parser::Lexer::new(source.as_bytes());
     lexer.set_preserve_trivia(true);
     let tokens = lexer.tokenize();
-
-    let mut result = PhpArray::new();
     let src = source.as_bytes();
 
+    // Pre-pass: combine adjacent Identifier / Backslash / Namespace sequences
+    // into T_NAME_QUALIFIED (Foo\Bar=265), T_NAME_FULLY_QUALIFIED (\Foo\Bar=263),
+    // or T_NAME_RELATIVE (namespace\Foo=264). Combining requires zero whitespace
+    // or comments between consecutive lexer tokens.
+    use goro_parser::token::TokenKind as TK;
+    let is_ident = |k: &TK| matches!(k, TK::Identifier(_));
+    // (token_id, start, end, line). token_id==0 represents a single-char token.
+    let mut combined: Vec<(i64, usize, usize, u32)> = Vec::with_capacity(tokens.len());
+    let mut i = 0usize;
+    while i < tokens.len() {
+        let tok = &tokens[i];
+        if matches!(tok.kind, TK::Eof) {
+            i += 1;
+            continue;
+        }
+        let token_id = goro_parser::token::token_kind_to_php_id(&tok.kind);
+        let s_start = tok.span.start as usize;
+        let s_end = tok.span.end as usize;
+        let s_line = tok.span.line;
+
+        let adjacent = |idx: usize, end_pos: usize| -> bool {
+            tokens.get(idx).map_or(false, |t| t.span.start as usize == end_pos)
+        };
+
+        // Case 1: `\` + Ident (+ \ Ident)* → T_NAME_FULLY_QUALIFIED (263)
+        if matches!(tok.kind, TK::Backslash)
+            && adjacent(i + 1, s_end)
+            && tokens.get(i + 1).map_or(false, |t| is_ident(&t.kind))
+        {
+            let mut j = i + 1;
+            let mut end = tokens[j].span.end as usize;
+            j += 1;
+            while j + 1 < tokens.len()
+                && matches!(tokens[j].kind, TK::Backslash)
+                && tokens[j].span.start as usize == end
+                && is_ident(&tokens[j + 1].kind)
+                && tokens[j + 1].span.start as usize == tokens[j].span.end as usize
+            {
+                end = tokens[j + 1].span.end as usize;
+                j += 2;
+            }
+            combined.push((263, s_start, end, s_line));
+            i = j;
+            continue;
+        }
+        // Case 2: `namespace` + `\` + Ident (+ \ Ident)* → T_NAME_RELATIVE (264)
+        if matches!(tok.kind, TK::Namespace)
+            && adjacent(i + 1, s_end)
+            && tokens.get(i + 1).map_or(false, |t| matches!(t.kind, TK::Backslash))
+            && tokens.get(i + 2).map_or(false, |t| is_ident(&t.kind))
+            && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
+        {
+            let mut j = i + 3;
+            let mut end = tokens[i + 2].span.end as usize;
+            while j + 1 < tokens.len()
+                && matches!(tokens[j].kind, TK::Backslash)
+                && tokens[j].span.start as usize == end
+                && is_ident(&tokens[j + 1].kind)
+                && tokens[j + 1].span.start as usize == tokens[j].span.end as usize
+            {
+                end = tokens[j + 1].span.end as usize;
+                j += 2;
+            }
+            combined.push((264, s_start, end, s_line));
+            i = j;
+            continue;
+        }
+        // Case 3: Ident + `\` + Ident (+ \ Ident)* → T_NAME_QUALIFIED (265)
+        if is_ident(&tok.kind)
+            && tokens.get(i + 1).map_or(false, |t| matches!(t.kind, TK::Backslash))
+            && tokens[i + 1].span.start as usize == s_end
+            && tokens.get(i + 2).map_or(false, |t| is_ident(&t.kind))
+            && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
+        {
+            let mut j = i + 3;
+            let mut end = tokens[i + 2].span.end as usize;
+            while j + 1 < tokens.len()
+                && matches!(tokens[j].kind, TK::Backslash)
+                && tokens[j].span.start as usize == end
+                && is_ident(&tokens[j + 1].kind)
+                && tokens[j + 1].span.start as usize == tokens[j].span.end as usize
+            {
+                end = tokens[j + 1].span.end as usize;
+                j += 2;
+            }
+            combined.push((265, s_start, end, s_line));
+            i = j;
+            continue;
+        }
+
+        // Fallback: emit single token; token_id==0 marks a punctuation token.
+        combined.push((token_id, s_start, s_end, s_line));
+        i += 1;
+    }
+
+    let mut result = PhpArray::new();
     // Track context for TOKEN_PARSE semi-reserved handling:
     // after `::` or `->` or `const`, a reserved keyword should tokenize as T_STRING.
     let mut last_meaningful_id: i64 = 0;
 
-    for token in &tokens {
-        if matches!(token.kind, goro_parser::token::TokenKind::Eof) {
-            continue;
-        }
-        let mut token_id = goro_parser::token::token_kind_to_php_id(&token.kind);
+    for (token_id_orig, start, end, line) in combined {
+        let mut token_id = token_id_orig;
 
         // In TOKEN_PARSE mode, demote a keyword to T_STRING when it follows
         // `::` (T_DOUBLE_COLON=397), `->` (T_OBJECT_OPERATOR=384), `?->`
@@ -16668,25 +17294,18 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             && token_id <= 342
             && matches!(last_meaningful_id, 397 | 384 | 385 | 312)
         {
-            // Keyword in reserved/semi-reserved range -> T_STRING
             token_id = 262;
         }
 
         if token_id == 0 {
-            let start = token.span.start as usize;
-            let end = token.span.end as usize;
             if start < src.len() && end <= src.len() && start < end {
                 let text = &src[start..end];
                 result.push(Value::String(PhpString::from_bytes(text)));
-                // Remember char token as last meaningful (but only certain chars
-                // reset the class-member context). `;` and `{` definitely reset.
                 if text == b";" || text == b"{" || text == b"}" {
                     last_meaningful_id = 0;
                 }
             }
         } else {
-            let start = token.span.start as usize;
-            let end = token.span.end as usize;
             let text = if start < src.len() && end <= src.len() && start < end {
                 &src[start..end]
             } else {
@@ -16695,9 +17314,8 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut token_arr = PhpArray::new();
             token_arr.set(ArrayKey::Int(0), Value::Long(token_id));
             token_arr.set(ArrayKey::Int(1), Value::String(PhpString::from_bytes(text)));
-            token_arr.set(ArrayKey::Int(2), Value::Long(token.span.line as i64));
+            token_arr.set(ArrayKey::Int(2), Value::Long(line as i64));
             result.push(Value::Array(Rc::new(RefCell::new(token_arr))));
-            // Track non-ignorable tokens for the TOKEN_PARSE context.
             if !goro_parser::token::token_id_is_ignorable(token_id) {
                 last_meaningful_id = token_id;
             }
