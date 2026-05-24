@@ -7630,11 +7630,38 @@ impl Vm {
             b"setfileclass" => None, // handled in handle_spl_docall
             b"setinfoclass" => None, // handled in handle_spl_docall
             b"getfileinfo" | b"getpathinfo" => {
-                // Returns a new SplFileInfo object for the path
+                // Returns a new SplFileInfo (or subclass) object for the path
+                // For getPathInfo, use the directory portion; for getFileInfo, use full path
+                let info_class = {
+                    let ob = obj.borrow();
+                    ob.get_property(b"__spl_info_class")
+                };
+                let class_name: Vec<u8> = match info_class {
+                    Value::String(s) if !s.as_bytes().is_empty() => s.as_bytes().to_vec(),
+                    _ => b"SplFileInfo".to_vec(),
+                };
+                let new_path = if method == b"getpathinfo" {
+                    // Get parent directory
+                    std::path::Path::new(&path_str).parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                } else {
+                    path_str.clone()
+                };
                 let obj_id = self.next_object_id;
                 self.next_object_id += 1;
-                let mut fi_obj = PhpObject::new(b"SplFileInfo".to_vec(), obj_id);
-                fi_obj.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(path_str)));
+                let mut fi_obj = PhpObject::new(class_name.clone(), obj_id);
+                fi_obj.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(new_path)));
+                // Also copy info_class so chained calls preserve the class setting
+                let info_class_val = {
+                    let ob = obj.borrow();
+                    ob.get_property(b"__spl_info_class")
+                };
+                if let Value::String(s) = &info_class_val {
+                    if !s.as_bytes().is_empty() {
+                        fi_obj.set_property(b"__spl_info_class".to_vec(), info_class_val);
+                    }
+                }
                 Some(Value::Object(Rc::new(RefCell::new(fi_obj))))
             }
             b"openfile" => {
@@ -7942,7 +7969,15 @@ impl Vm {
             b"next" => {
                 let mut ob = obj.borrow_mut();
                 let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
+                // Don't advance past EOF (line count is the "past end" position)
+                let lines = ob.get_property(b"__spl_file_lines");
+                let new_pos = if let Value::Array(a) = &lines {
+                    let len = a.borrow().len() as i64;
+                    if pos + 1 > len { len } else { pos + 1 }
+                } else {
+                    pos + 1
+                };
+                ob.set_property(b"__spl_pos".to_vec(), Value::Long(new_pos));
                 Some(Value::Null)
             }
             b"eof" => {
@@ -9074,7 +9109,25 @@ impl Vm {
                             Some(Value::Null)
                         }
                         b"add" => {
-                            let index = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
+                            let key_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            // Type check: must be int (or numeric string)
+                            let type_name = match &key_arg {
+                                Value::Array(_) => Some("array"),
+                                Value::Object(_) => Some("object"),
+                                Value::True | Value::False => None, // bool coerces
+                                Value::String(s) => {
+                                    let s_str = s.to_string_lossy();
+                                    if s_str.parse::<i64>().is_err() { Some("string") } else { None }
+                                }
+                                _ => None,
+                            };
+                            if let Some(tn) = type_name {
+                                let exc = self.create_exception(b"TypeError",
+                                    &format!("SplDoublyLinkedList::add(): Argument #1 ($index) must be of type int, {} given", tn), 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            let index = key_arg.to_long();
                             let val = args.get(2).cloned().unwrap_or(Value::Null);
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
@@ -10698,7 +10751,16 @@ impl Vm {
                         b"seek" => {
                             let pos = args.get(1).map(|v| v.to_long()).unwrap_or(0);
                             let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos));
+                            // PHP clamps seek to last line index when past EOF.
+                            // After seek past EOF, key() returns line_count.
+                            let lines = ob.get_property(b"__spl_file_lines");
+                            let clamped_pos = if let Value::Array(a) = &lines {
+                                let len = a.borrow().len() as i64;
+                                if pos < 0 { 0 } else if pos >= len { len } else { pos }
+                            } else {
+                                if pos < 0 { 0 } else { pos }
+                            };
+                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(clamped_pos));
                             Some(Value::Null)
                         }
                         b"setflags" => {
@@ -11083,6 +11145,28 @@ impl Vm {
                         }
                         b"setfileclass" | b"setinfoclass" => {
                             let class_name = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"SplFileInfo")));
+                            // Validate the class is derived from SplFileObject (setFileClass)
+                            // or SplFileInfo (setInfoClass)
+                            let class_str = class_name.to_php_string().to_string_lossy();
+                            let class_lower: Vec<u8> = class_str.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                            let (required, method_name) = if method == b"setfileclass" {
+                                (b"splfileobject".as_slice(), "SplFileInfo::setFileClass")
+                            } else {
+                                (b"splfileinfo".as_slice(), "SplFileInfo::setInfoClass")
+                            };
+                            let required_display = if method == b"setfileclass" { "SplFileObject" } else { "SplFileInfo" };
+                            // The class must be the required class itself or extend it
+                            let ok = class_lower == required || self.class_extends(&class_lower, required);
+                            if !ok {
+                                let line = self.current_line;
+                                let msg = format!(
+                                    "{}(): Argument #1 ($class) must be a class name derived from {}, {} given",
+                                    method_name, required_display, class_str
+                                );
+                                let exc = self.create_exception(b"TypeError", &msg, line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
                             let prop_name = if method == b"setfileclass" { b"__spl_file_class" } else { b"__spl_info_class" };
                             ob.set_property(prop_name.to_vec(), class_name);
@@ -11117,12 +11201,49 @@ impl Vm {
                         }
                         b"seek" => {
                             let pos = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                            let ob = obj.borrow();
+                            let entries = ob.get_property(b"__spl_dir_entries");
+                            let len = if let Value::Array(a) = entries {
+                                a.borrow().len() as i64
+                            } else {
+                                0
+                            };
+                            drop(ob);
+                            if pos < 0 || pos >= len {
+                                // Set pos past end so valid() returns false
+                                let mut ob = obj.borrow_mut();
+                                ob.set_property(b"__spl_pos".to_vec(), Value::Long(len));
+                                drop(ob);
+                                let msg = format!("Seek position {} is out of range", pos);
+                                let exc = self.create_exception(b"OutOfBoundsException", &msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
                             ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos));
                             Some(Value::Null)
                         }
                         b"setfileclass" | b"setinfoclass" => {
                             let class_name = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"SplFileInfo")));
+                            let class_str = class_name.to_php_string().to_string_lossy();
+                            let class_lower: Vec<u8> = class_str.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                            let (required, method_name) = if method == b"setfileclass" {
+                                (b"splfileobject".as_slice(), "SplFileInfo::setFileClass")
+                            } else {
+                                (b"splfileinfo".as_slice(), "SplFileInfo::setInfoClass")
+                            };
+                            let required_display = if method == b"setfileclass" { "SplFileObject" } else { "SplFileInfo" };
+                            let ok = class_lower == required || self.class_extends(&class_lower, required);
+                            if !ok {
+                                let line = self.current_line;
+                                let msg = format!(
+                                    "{}(): Argument #1 ($class) must be a class name derived from {}, {} given",
+                                    method_name, required_display, class_str
+                                );
+                                let exc = self.create_exception(b"TypeError", &msg, line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
                             let prop_name = if method == b"setfileclass" { b"__spl_file_class" } else { b"__spl_info_class" };
                             ob.set_property(prop_name.to_vec(), class_name);
