@@ -9368,8 +9368,9 @@ fn copy_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn mkdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let path = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path = path_v.to_string_lossy().to_string();
     let recursive = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     let result = if recursive {
         std::fs::create_dir_all(&path)
@@ -9378,15 +9379,30 @@ fn mkdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     match result {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("mkdir(): {}", msg));
+            Ok(Value::False)
+        }
     }
 }
 
-fn rmdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let path = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+fn rmdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path = path_v.to_string_lossy().to_string();
+    // Support file:// scheme for tests.
+    let path = if let Some(rest) = path.strip_prefix("file://") {
+        rest.to_string()
+    } else {
+        path
+    };
     match std::fs::remove_dir(&path) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("rmdir({}): {}", path, msg));
+            Ok(Value::False)
+        }
     }
 }
 fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -11341,29 +11357,53 @@ fn link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn unlink_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn unlink_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::remove_file(&*path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    match std::fs::remove_file(&*path_str) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("unlink({}): {}", path_str, msg));
+            Ok(Value::False)
+        }
     }
 }
 
-fn rename_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn rename_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let from = args.first().unwrap_or(&Value::Null).to_php_string();
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    match std::fs::rename(&*from.to_string_lossy(), &*to.to_string_lossy()) {
+    let from_str = from.to_string_lossy();
+    let to_str = to.to_string_lossy();
+    match std::fs::rename(&*from_str, &*to_str) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("rename({},{}): {}", from_str, to_str, msg));
+            Ok(Value::False)
+        }
     }
 }
 
-fn copy_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let from = args.first().unwrap_or(&Value::Null).to_php_string();
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    match std::fs::copy(&*from.to_string_lossy(), &*to.to_string_lossy()) {
+    let from_str = from.to_string_lossy();
+    let to_str = to.to_string_lossy();
+    if !std::path::Path::new(&*from_str).exists() {
+        vm.emit_warning(&format!(
+            "copy({}): Failed to open stream: No such file or directory",
+            from_str
+        ));
+        return Ok(Value::False);
+    }
+    match std::fs::copy(&*from_str, &*to_str) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("copy({}): Failed to open stream: {}", from_str, msg));
+            Ok(Value::False)
+        }
     }
 }
 
