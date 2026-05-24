@@ -4909,46 +4909,63 @@ fn nl2br_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 pub fn str_getcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
 
-    // Validate separator must be a single character
+    // Validate separator must be a single character (treat Null as not-provided).
     if let Some(sep_val) = args.get(1) {
-        let sep_str = sep_val.to_php_string();
-        if sep_str.len() != 1 {
-            let msg = "str_getcsv(): Argument #2 ($separator) must be a single character".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+        if !matches!(sep_val, Value::Null) {
+            let sep_str = sep_val.to_php_string();
+            if sep_str.len() != 1 {
+                let msg = "str_getcsv(): Argument #2 ($separator) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
         }
     }
     // Validate enclosure must be a single character
     if let Some(enc_val) = args.get(2) {
-        let enc_str = enc_val.to_php_string();
-        if enc_str.len() != 1 {
-            let msg = "str_getcsv(): Argument #3 ($enclosure) must be a single character".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+        if !matches!(enc_val, Value::Null) {
+            let enc_str = enc_val.to_php_string();
+            if enc_str.len() != 1 {
+                let msg = "str_getcsv(): Argument #3 ($enclosure) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
         }
     }
     // Validate escape must be a single character or empty string
     if let Some(esc_val) = args.get(3) {
-        let esc_str = esc_val.to_php_string();
-        if esc_str.len() > 1 {
-            let msg = "str_getcsv(): Argument #4 ($escape) must be empty or a single character".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+        if !matches!(esc_val, Value::Null) {
+            let esc_str = esc_val.to_php_string();
+            if esc_str.len() > 1 {
+                let msg = "str_getcsv(): Argument #4 ($escape) must be empty or a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
         }
     }
 
-    let separator = args.get(1).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b',')).unwrap_or(b',');
-    let enclosure = args.get(2).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b'"')).unwrap_or(b'"');
+    let separator = match args.get(1) {
+        Some(v) if !matches!(v, Value::Null) => {
+            v.to_php_string().as_bytes().first().copied().unwrap_or(b',')
+        }
+        _ => b',',
+    };
+    let enclosure = match args.get(2) {
+        Some(v) if !matches!(v, Value::Null) => {
+            v.to_php_string().as_bytes().first().copied().unwrap_or(b'"')
+        }
+        _ => b'"',
+    };
     // Escape: default is '\\' if not provided; None when explicit empty string passed.
-    let escape: Option<u8> = if args.len() < 4 {
-        Some(b'\\')
-    } else {
-        let s = args[3].to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { None } else { Some(b[0]) }
+    let escape: Option<u8> = match args.get(3) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { None } else { Some(b[0]) }
+        }
+        _ => Some(b'\\'),
     };
 
     let raw_bytes = s.as_bytes();

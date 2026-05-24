@@ -11464,30 +11464,89 @@ fn walk_recursive_inner(
 
 fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let _length = args.get(1).map(|v| v.to_long());
-    let separator = args.get(2).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { b',' } else { b[0] }
-    }).unwrap_or(b',');
-    let enclosure = args.get(3).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { b'"' } else { b[0] }
-    }).unwrap_or(b'"');
-    let escape = if args.len() < 5 {
-        // PHP 8.4+ deprecation: implicit default escape will change.
-        let line = vm.current_line;
-        vm.emit_deprecated_at(
-            "fgetcsv(): the $escape parameter must be provided as its default value will change",
-            line,
-        );
-        Some(b'\\')
-    } else {
-        let v = &args[4];
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { None } else { Some(b[0]) }
+    // Validate length argument (treat null/0 as "no limit").
+    if let Some(len_val) = args.get(1) {
+        if !matches!(len_val, Value::Null) {
+            let len = len_val.to_long();
+            if len != 0 && (len < 0 || len > i64::MAX - 1) {
+                let msg = format!(
+                    "fgetcsv(): Argument #2 ($length) must be between 0 and {}",
+                    i64::MAX - 1
+                );
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    // Validate separator must be a single character.
+    if let Some(v) = args.get(2) {
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() != 1 {
+                let msg = "fgetcsv(): Argument #3 ($separator) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    // Validate enclosure must be a single character.
+    if let Some(v) = args.get(3) {
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() != 1 {
+                let msg = "fgetcsv(): Argument #4 ($enclosure) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    // Validate escape (may be empty or single character).
+    if let Some(v) = args.get(4) {
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() > 1 {
+                let msg = "fgetcsv(): Argument #5 ($escape) must be empty or a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    let _length = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_long()) });
+    let separator = match args.get(2) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { b',' } else { b[0] }
+        }
+        _ => b',',
+    };
+    let enclosure = match args.get(3) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { b'"' } else { b[0] }
+        }
+        _ => b'"',
+    };
+    let escape = match args.get(4) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { None } else { Some(b[0]) }
+        }
+        _ => {
+            // PHP 8.4+ deprecation: implicit default escape will change.
+            let line = vm.current_line;
+            vm.emit_deprecated_at(
+                "fgetcsv(): the $escape parameter must be provided as its default value will change",
+                line,
+            );
+            Some(b'\\')
+        }
     };
 
     // Read line(s) from the file. When inside an enclosure, continue reading
@@ -13158,56 +13217,71 @@ fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => return Ok(Value::False),
     };
     // Validate separator/enclosure/escape — each must be a single character
-    // (escape may be empty). PHP throws ValueError for invalid sizes.
+    // (escape may be empty). PHP throws ValueError for invalid sizes. Null
+    // arguments are treated as not-provided (named-arg gaps).
     if let Some(v) = args.get(2) {
-        let s = v.to_php_string();
-        if s.len() != 1 {
-            let msg = "fputcsv(): Argument #3 ($separator) must be a single character".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() != 1 {
+                let msg = "fputcsv(): Argument #3 ($separator) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
         }
     }
     if let Some(v) = args.get(3) {
-        let s = v.to_php_string();
-        if s.len() != 1 {
-            let msg = "fputcsv(): Argument #4 ($enclosure) must be a single character".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() != 1 {
+                let msg = "fputcsv(): Argument #4 ($enclosure) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
         }
     }
     if let Some(v) = args.get(4) {
-        let s = v.to_php_string();
-        if s.len() > 1 {
-            let msg = "fputcsv(): Argument #5 ($escape) must be empty or a single character".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() > 1 {
+                let msg = "fputcsv(): Argument #5 ($escape) must be empty or a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
         }
     }
-    let separator = args.get(2).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { b',' } else { b[0] }
-    }).unwrap_or(b',');
-    let enclosure = args.get(3).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { b'"' } else { b[0] }
-    }).unwrap_or(b'"');
-    let escape: Option<u8> = if args.len() < 5 {
-        let line = vm.current_line;
-        vm.emit_deprecated_at(
-            "fputcsv(): the $escape parameter must be provided as its default value will change",
-            line,
-        );
-        Some(b'\\')
-    } else {
-        let v = &args[4];
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { None } else { Some(b[0]) }
+    let separator = match args.get(2) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { b',' } else { b[0] }
+        }
+        _ => b',',
+    };
+    let enclosure = match args.get(3) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { b'"' } else { b[0] }
+        }
+        _ => b'"',
+    };
+    let escape: Option<u8> = match args.get(4) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { None } else { Some(b[0]) }
+        }
+        _ => {
+            let line = vm.current_line;
+            vm.emit_deprecated_at(
+                "fputcsv(): the $escape parameter must be provided as its default value will change",
+                line,
+            );
+            Some(b'\\')
+        }
     };
 
     let mut line = String::new();
