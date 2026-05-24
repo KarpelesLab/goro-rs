@@ -2935,17 +2935,23 @@ fn array_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
 
         if pad_size < 0 {
-            // Pad at the beginning
+            // Pad at the beginning: pad values reindex from 0, string keys preserved
             for _ in 0..pad_count {
                 result.push(pad_value.clone());
             }
-            for (_k, v) in arr.iter() {
-                result.push(v.clone());
+            for (k, v) in arr.iter() {
+                match k {
+                    ArrayKey::Int(_) => { result.push(v.clone()); }
+                    ArrayKey::String(_) => { result.set(k.clone(), v.clone()); }
+                }
             }
         } else {
-            // Pad at the end
-            for (_k, v) in arr.iter() {
-                result.push(v.clone());
+            // Pad at the end: input first with string keys preserved, then pad values
+            for (k, v) in arr.iter() {
+                match k {
+                    ArrayKey::Int(_) => { result.push(v.clone()); }
+                    ArrayKey::String(_) => { result.set(k.clone(), v.clone()); }
+                }
             }
             for _ in 0..pad_count {
                 result.push(pad_value.clone());
@@ -3076,8 +3082,12 @@ fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Validate all arguments are arrays
     for (i, arg) in args.iter().enumerate() {
         if !matches!(arg, Value::Array(_)) {
-            let type_name = Vm::value_type_name(arg);
-            let msg = format!("array_diff(): Argument #{} must be of type array, {} given", i + 1, type_name);
+            let type_name = arg_type_name(arg);
+            let msg = if i == 0 {
+                format!("array_diff(): Argument #1 ($array) must be of type array, {} given", type_name)
+            } else {
+                format!("array_diff(): Argument #{} must be of type array, {} given", i + 1, type_name)
+            };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
@@ -3120,7 +3130,11 @@ fn array_intersect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Validate all arguments are arrays
     for (i, arg) in args.iter().enumerate() {
-        require_array_arg(vm, arg, "array_intersect", "array", (i + 1) as u32)?;
+        if i == 0 {
+            require_array_arg(vm, arg, "array_intersect", "array", 1)?;
+        } else {
+            require_array_arg_variadic(vm, arg, "array_intersect", (i + 1) as u32)?;
+        }
     }
     // Single array: return it as-is
     if args.len() == 1 {
@@ -4223,7 +4237,14 @@ fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
         for (_, val) in arr.iter() {
             let key = match val {
-                Value::Long(n) => ArrayKey::Int(*n),
+                Value::Long(n) => {
+                    // Resource ids (registered Longs > 3) should be treated as resources and skipped
+                    if *n > 3 && goro_core::value::is_registered_resource(*n) {
+                        vm.emit_warning("array_count_values(): Can only count string and integer values, entry skipped");
+                        continue;
+                    }
+                    ArrayKey::Int(*n)
+                }
                 Value::String(s) => ArrayKey::String(s.clone()),
                 _ => {
                     // PHP warns and skips non-int/non-string values
@@ -10234,6 +10255,7 @@ fn array_u_op(
             ArrayKey::String(s) => Value::String(s.clone()),
         };
         let mut found_in_all = true;
+        let mut found_in_any = false;
         for other in &other_arrays {
             let mut found_in_this = false;
             for (okey, ovalue) in other.iter() {
@@ -10265,10 +10287,14 @@ fn array_u_op(
             }
             if !found_in_this {
                 found_in_all = false;
-                break;
+            } else {
+                found_in_any = true;
             }
         }
-        if is_intersect == found_in_all {
+        // intersect: keep if found in ALL others
+        // diff: keep if NOT found in ANY other
+        let keep = if is_intersect { found_in_all } else { !found_in_any };
+        if keep {
             result.set(key.clone(), value.clone());
         }
     }
