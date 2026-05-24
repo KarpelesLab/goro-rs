@@ -9310,6 +9310,73 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Err(_) => return Ok(Value::False),
             }
         }
+
+        // php://fd/<n> -- duplicate the file descriptor <n>.
+        // php://fd is invalid (must include a number).
+        if lower == "fd" {
+            vm.emit_warning(&format!("fopen(): Invalid php:// URL specified"));
+            vm.emit_warning(&format!(
+                "fopen({}): Failed to open stream: operation failed",
+                filename
+            ));
+            return Ok(Value::False);
+        }
+        if let Some(fd_tail) = lower.strip_prefix("fd/") {
+            // Reject if trailing slash present or empty
+            if fd_tail.is_empty() || fd_tail.contains('/') {
+                vm.emit_warning(&format!(
+                    "fopen({}): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd>",
+                    filename
+                ));
+                return Ok(Value::False);
+            }
+            // Must be a non-negative integer < max FDs.
+            let parsed: Option<i64> = fd_tail.parse::<i64>().ok();
+            let max_fd: i64 = {
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    let lim = libc::sysconf(libc::_SC_OPEN_MAX);
+                    if lim > 0 { lim as i64 } else { 1024 }
+                }
+                #[cfg(not(target_os = "linux"))]
+                { 1024 }
+            };
+            match parsed {
+                Some(n) if n >= 0 && n < max_fd => {
+                    // Try to dup the fd. If dup fails, emit error.
+                    let dup_fd = unsafe { libc::dup(n as i32) };
+                    if dup_fd < 0 {
+                        let err = std::io::Error::last_os_error();
+                        let errno = err.raw_os_error().unwrap_or(0);
+                        vm.emit_warning(&format!(
+                            "fopen({}): Failed to open stream: Error duping file descriptor {}; possibly it doesn't exist: [{}]: {}",
+                            filename, n, errno, err
+                        ));
+                        return Ok(Value::False);
+                    }
+                    // Convert raw fd into File. We pick a SpecialStream variant
+                    // so writes route correctly: fd 1 -> Stdout, fd 2 -> Stderr,
+                    // others use None (writes go to the file itself).
+                    use std::os::unix::io::FromRawFd;
+                    let f = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+                    let sp = match n {
+                        1 => SpecialStream::Stdout,
+                        2 => SpecialStream::Stderr,
+                        _ => SpecialStream::None,
+                    };
+                    let fid = alloc_file_handle_special(f, &mode, sp);
+                    goro_core::value::register_resource(fid, b"stream");
+                    return Ok(Value::Resource(fid));
+                }
+                _ => {
+                    vm.emit_warning(&format!(
+                        "fopen({}): Failed to open stream: The file descriptors must be non-negative numbers smaller than {}",
+                        filename, max_fd
+                    ));
+                    return Ok(Value::False);
+                }
+            }
+        }
     }
 
     // Validate mode: first character must be one of r/w/a/x/c, optionally
@@ -9998,9 +10065,9 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if flags & 128 != 0 {
         libc_flags |= libc::GLOB_BRACE;
     }
-    // GLOB_ONLYDIR = 8192 in PHP
+    // GLOB_ONLYDIR = 1073741824 (0x40000000) in PHP
     #[cfg(target_os = "linux")]
-    if flags & 8192 != 0 {
+    if flags & 1073741824 != 0 {
         libc_flags |= libc::GLOB_ONLYDIR;
     }
 
@@ -10008,7 +10075,7 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // GLOB_ONLYDIR is a hint to the OS; on Linux it can still return
     // non-directories. PHP enforces it explicitly.
-    let only_dir = flags & 8192 != 0;
+    let only_dir = flags & 1073741824 != 0;
 
     let mut arr = PhpArray::new();
     if ret == 0 {
