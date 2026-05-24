@@ -1879,7 +1879,11 @@ impl Vm {
         }
     }
 
-    /// Check if attributes contain #[\Deprecated] and return the message
+    /// Check if attributes contain #[\Deprecated] and return the message.
+    ///
+    /// Validates that the constructor arguments match `Deprecated::__construct(?string $message = null, ?string $since = null)`.
+    /// On a type mismatch, sets `self.current_exception` to a TypeError and returns `None` —
+    /// the caller will skip the deprecation banner and the exception propagates via the dispatch loop.
     pub fn get_deprecated_message(&mut self, attrs: &[crate::object::RuntimeAttribute]) -> Option<String> {
         for attr in attrs {
             let lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -1888,24 +1892,102 @@ impl Vm {
                 if attr.args_op_array.ops.is_empty() {
                     return Some(String::new());
                 }
+                // Capture the call-site file/line BEFORE evaluating attribute args — running the
+                // args op_array can mutate current_file/current_line, and we want the trace frame
+                // to point at the line that triggered the deprecation, not the args ops.
+                let caller_file = self.current_file.clone();
+                let caller_line = self.current_line;
                 let args_val = self.execute_op_array_pub(&attr.args_op_array, vec![]).unwrap_or(Value::Null);
+                if self.current_exception.is_some() {
+                    return None;
+                }
                 if let Value::Array(arr) = &args_val {
                     let arr = arr.borrow();
-                    // Look for "message" named arg first, then first positional arg
-                    let msg = arr.get(&crate::array::ArrayKey::String(crate::string::PhpString::from_bytes(b"message")))
-                        .map(|v| v.to_php_string().to_string_lossy())
-                        .or_else(|| {
-                            // First positional (integer-keyed) arg
-                            arr.get(&crate::array::ArrayKey::Int(0))
-                                .map(|v| v.to_php_string().to_string_lossy())
-                        })
-                        .unwrap_or_default();
-                    return Some(msg);
+                    // Resolve $message (positional 0 or named "message") and $since (positional 1 or named "since")
+                    let msg_val = arr.get(&crate::array::ArrayKey::String(crate::string::PhpString::from_bytes(b"message")))
+                        .or_else(|| arr.get(&crate::array::ArrayKey::Int(0)))
+                        .cloned();
+                    let since_val = arr.get(&crate::array::ArrayKey::String(crate::string::PhpString::from_bytes(b"since")))
+                        .or_else(|| arr.get(&crate::array::ArrayKey::Int(1)))
+                        .cloned();
+                    drop(arr);
+                    // Validate each ?string argument
+                    for (idx, name, val) in [(1u32, "message", &msg_val), (2u32, "since", &since_val)] {
+                        if let Some(v) = val {
+                            if !matches!(v, Value::Null | Value::String(_)) {
+                                let type_name = self.format_arg_type(v);
+                                let display = self.format_arg_display(v);
+                                let msg = format!(
+                                    "Deprecated::__construct(): Argument #{} (${}) must be of type ?string, {} given",
+                                    idx, name, type_name
+                                );
+                                // Add the synthetic call frame to the trace so the stack shows Deprecated->__construct(...)
+                                let call_args = if let Some(mv) = &msg_val { vec![mv.clone()] } else { vec![] };
+                                let call_args = if let Some(sv) = &since_val {
+                                    let mut a = call_args;
+                                    a.push(sv.clone());
+                                    a
+                                } else { call_args };
+                                self.call_stack.push((
+                                    "Deprecated->__construct".to_string(),
+                                    caller_file.clone(),
+                                    caller_line,
+                                    call_args,
+                                    true,
+                                ));
+                                let exc = self.create_exception(b"TypeError", &msg, caller_line);
+                                self.call_stack.pop();
+                                self.current_exception = Some(exc);
+                                let _ = display;
+                                return None;
+                            }
+                        }
+                    }
+                    let msg_str = match &msg_val {
+                        Some(Value::String(s)) => s.to_string_lossy(),
+                        _ => String::new(),
+                    };
+                    return Some(msg_str);
                 }
                 return Some(String::new());
             }
         }
         None
+    }
+
+    /// PHP-style "type given" name for a Value used in TypeError messages.
+    fn format_arg_type(&self, v: &Value) -> String {
+        match v {
+            Value::Null => "null".to_string(),
+            Value::True | Value::False => "bool".to_string(),
+            Value::Long(_) => "int".to_string(),
+            Value::Double(_) => "float".to_string(),
+            Value::String(_) => "string".to_string(),
+            Value::Array(_) => "array".to_string(),
+            Value::Object(o) => {
+                let obj = o.borrow();
+                String::from_utf8_lossy(&obj.class_name).to_string()
+            }
+            _ => "unknown".to_string(),
+        }
+    }
+
+    /// PHP-style display form of a Value used in stack-trace argument rendering.
+    fn format_arg_display(&self, v: &Value) -> String {
+        match v {
+            Value::Null => "NULL".to_string(),
+            Value::True => "true".to_string(),
+            Value::False => "false".to_string(),
+            Value::Long(i) => i.to_string(),
+            Value::Double(f) => format!("{}", f),
+            Value::String(s) => format!("'{}'", s.to_string_lossy()),
+            Value::Array(_) => "Array".to_string(),
+            Value::Object(o) => {
+                let obj = o.borrow();
+                format!("Object({})", String::from_utf8_lossy(&obj.class_name))
+            }
+            _ => "unknown".to_string(),
+        }
     }
 
     /// Check if attributes contain #[\NoDiscard] and return the message
@@ -18593,7 +18675,32 @@ impl Vm {
                         // Check for #[\Deprecated] and #[\NoDiscard] attributes
                         if !user_fn.attributes.is_empty() {
                             let attrs_clone = user_fn.attributes.clone();
-                            if let Some(custom_msg) = self.get_deprecated_message(&attrs_clone) {
+                            let dep_msg = self.get_deprecated_message(&attrs_clone);
+                            // get_deprecated_message may raise TypeError on bad ?string args
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                    if catch_target > 0 {
+                                        ip = catch_target as usize;
+                                    } else if finally_target > 0 {
+                                        ip = finally_target as usize;
+                                    }
+                                    continue;
+                                }
+                                let exc_msg = self.current_exception
+                                    .as_ref()
+                                    .and_then(|e| if let Value::Object(o) = e {
+                                        let obj = o.borrow();
+                                        obj.properties.iter()
+                                            .find(|(k, _)| k == b"message")
+                                            .map(|(_, v)| v.to_php_string().to_string_lossy())
+                                    } else { None })
+                                    .unwrap_or_default();
+                                return Err(VmError {
+                                    message: format!("Uncaught TypeError: {}", exc_msg),
+                                    line: op.line,
+                                });
+                            }
+                            if let Some(custom_msg) = dep_msg {
                                 let fn_display = if !user_fn.display_name.is_empty() {
                                     String::from_utf8_lossy(&user_fn.display_name).into_owned()
                                 } else {
