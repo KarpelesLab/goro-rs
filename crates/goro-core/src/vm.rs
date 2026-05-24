@@ -16610,8 +16610,48 @@ impl Vm {
                         let result = Value::Object(Rc::new(RefCell::new(obj)));
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower == b"dateperiod::__set_state" {
-                        // DatePeriod::__set_state(array): rebuild from array.
+                        // DatePeriod::__set_state(array): rebuild from array, validating
+                        // the shape PHP expects. Returns Error("Invalid serialization
+                        // data for DatePeriod object") on type-mismatch.
                         let arr_arg = call.args.first().cloned().unwrap_or(Value::Null);
+                        let mut invalid = false;
+                        if let Value::Array(arr) = &arr_arg {
+                            let arr_b = arr.borrow();
+                            let check = |key: &[u8], pred: &dyn Fn(&Value) -> bool| -> bool {
+                                if let Some(v) = arr_b.get_str(key) { pred(&v) } else { true }
+                            };
+                            let is_obj_or_null = |v: &Value| matches!(v, Value::Object(_) | Value::Null);
+                            let is_obj_di = |v: &Value| {
+                                if let Value::Object(o) = v {
+                                    let class_lower: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    class_lower == b"dateinterval"
+                                        || self.class_is_subclass_of(&class_lower, b"dateinterval")
+                                } else { false }
+                            };
+                            let is_int = |v: &Value| matches!(v, Value::Long(n) if *n >= 0);
+                            let is_bool = |v: &Value| matches!(v, Value::True | Value::False);
+                            if !check(b"start", &is_obj_or_null) { invalid = true; }
+                            if !check(b"end", &is_obj_or_null) { invalid = true; }
+                            if !check(b"current", &is_obj_or_null) { invalid = true; }
+                            if !check(b"interval", &is_obj_di) { invalid = true; }
+                            if !check(b"recurrences", &is_int) { invalid = true; }
+                            if !check(b"include_start_date", &is_bool) { invalid = true; }
+                            if !check(b"include_end_date", &is_bool) { invalid = true; }
+                        } else {
+                            invalid = true;
+                        }
+                        if invalid {
+                            let err_msg = "Invalid serialization data for DatePeriod object".to_string();
+                            let exc = self.create_exception(b"Error", &err_msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                            }
+                        }
                         let obj_id = self.next_object_id();
                         let mut obj = PhpObject::new(b"DatePeriod".to_vec(), obj_id);
                         if let Value::Array(arr) = &arr_arg {
@@ -19466,11 +19506,29 @@ impl Vm {
                                             let opts = opts_arg.to_long();
                                             let include_start = (opts & 1) == 0;
                                             let include_end = (opts & 8) != 0;
+                                            // Validate recurrence count when it's the third positional arg.
+                                            if let Value::Long(n) = &end_arg {
+                                                if *n < 1 {
+                                                    drop(obj_mut);
+                                                    let err_msg = "DatePeriod::__construct(): Recurrence count must be greater or equal to 1 and lower than 2147483647".to_string();
+                                                    // PHP 8.3+ throws DateMalformedPeriodStringException (extends Exception).
+                                                    let exc = self.create_exception(b"DateMalformedPeriodStringException", &err_msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                                        pending_calls_catch_depth = Some(saved_pc);
+                                                        ip = catch_target as usize;
+                                                        continue;
+                                                    } else {
+                                                        return Err(VmError { message: format!("Uncaught DateMalformedPeriodStringException: {}", err_msg), line: op.line });
+                                                    }
+                                                }
+                                            }
                                             obj_mut.set_property(b"start".to_vec(), start_arg);
                                             obj_mut.set_property(b"current".to_vec(), Value::Null);
-                                            // If 3rd arg is int, it's recurrences.
+                                            // If 3rd arg is int, it's recurrences. PHP stores
+                                            // recurrences = constructor_arg + 1 (the start date counts).
                                             let (end_v, recurrences_v) = match &end_arg {
-                                                Value::Long(n) => (Value::Null, Value::Long(*n)),
+                                                Value::Long(n) => (Value::Null, Value::Long(*n + 1)),
                                                 Value::Object(_) => (end_arg.clone(), Value::Long(0)),
                                                 _ => (Value::Null, Value::Long(0)),
                                             };
