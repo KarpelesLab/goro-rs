@@ -25693,12 +25693,35 @@ impl Vm {
                                 _ => None,
                             }
                         } else if !has_user_method {
+                            // Push a synthetic call-stack frame for reflection
+                            // internal methods so exceptions thrown by them carry
+                            // the proper trace (e.g. ReflectionAttribute->newInstance).
+                            let frame_pushed_for_internal = if matches!(class_name_lower.as_slice(),
+                                b"reflectionattribute" | b"reflectionclass" | b"reflectionobject"
+                                | b"reflectionenum" | b"reflectionmethod" | b"reflectionfunction"
+                                | b"reflectionfunctionabstract" | b"reflectionproperty"
+                                | b"reflectionparameter" | b"reflectionextension"
+                                | b"reflectionnamedtype" | b"reflectionuniontype"
+                                | b"reflectionintersectiontype" | b"reflectionclassconstant"
+                                | b"reflectionconstant" | b"reflectionenumunitcase"
+                                | b"reflectionenumbackedcase")
+                            {
+                                let class_disp = crate::value::display_class_name(&class_name_orig);
+                                let func_disp = format!("{}->{}",
+                                    class_disp,
+                                    method_name.to_string_lossy());
+                                self.call_stack.push((func_disp, self.current_file.clone(), op.line, Vec::new(), true));
+                                true
+                            } else { false };
                             // SPL class method dispatch - try the class itself and parent chain
                             let mut spl_result = self.dispatch_spl_method(
                                 &class_name_lower,
                                 &method_name_lower,
                                 obj,
                             );
+                            if frame_pushed_for_internal {
+                                self.call_stack.pop();
+                            }
                             // If not found, try parent classes
                             if spl_result.is_none() {
                                 let mut check_class = class_name_lower.clone();

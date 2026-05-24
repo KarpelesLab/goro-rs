@@ -4579,11 +4579,14 @@ pub fn reflection_attribute_method(
             let attr_name = ob.get_property(b"__attr_name").to_php_string().to_string_lossy();
             let args = ob.get_property(b"__attr_args");
             drop(ob);
+            // Capture the call-site line before any inner op-array execution
+            // (e.g. evaluating #[Attribute(...)] args) overwrites self.current_line.
+            let call_site_line = vm.current_line;
             // Create a new instance of the attribute class
             let class_lower: Vec<u8> = attr_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
             if !vm.classes.contains_key(&class_lower) {
                 let err_msg = format!("Attribute class \"{}\" not found", attr_name);
-                let exc = vm.create_exception(b"Error", &err_msg, 0);
+                let exc = vm.create_exception(b"Error", &err_msg, call_site_line);
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
@@ -4594,7 +4597,7 @@ pub fn reflection_attribute_method(
             let is_attribute_class = attribute_args_op.is_some();
             if !is_attribute_class && class_lower != b"attribute" {
                 let err_msg = format!("Attempting to use non-attribute class \"{}\" as attribute", attr_name);
-                let exc = vm.create_exception(b"Error", &err_msg, 0);
+                let exc = vm.create_exception(b"Error", &err_msg, call_site_line);
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
@@ -4602,6 +4605,8 @@ pub fn reflection_attribute_method(
             let mut attr_flags: i64 = 127; // Default TARGET_ALL
             if let Some(args_op) = attribute_args_op {
                 let args_val = vm.execute_op_array_pub(&args_op, vec![]).unwrap_or(Value::Null);
+                // Restore the call-site line after the inner op-array updated it.
+                vm.current_line = call_site_line;
                 if let Value::Array(arr) = &args_val {
                     let arr_b = arr.borrow();
                     if let Some((_, flag_val)) = arr_b.iter().next() {
@@ -4619,7 +4624,7 @@ pub fn reflection_attribute_method(
                                 "Attribute::__construct(): Argument #1 ($flags) must be of type int, {} given",
                                 actual_type
                             );
-                            let exc = vm.create_exception(b"TypeError", &err_msg, 0);
+                            let exc = vm.create_exception(b"TypeError", &err_msg, call_site_line);
                             vm.current_exception = Some(exc);
                             return Some(Value::Null);
                         }
@@ -4627,7 +4632,7 @@ pub fn reflection_attribute_method(
                         if let Value::Long(n) = flag_val {
                             if *n < 0 || *n > (127 | 128) {
                                 let err_msg = "Invalid attribute flags specified".to_string();
-                                let exc = vm.create_exception(b"ValueError", &err_msg, 0);
+                                let exc = vm.create_exception(b"ValueError", &err_msg, call_site_line);
                                 vm.current_exception = Some(exc);
                                 return Some(Value::Null);
                             }
@@ -4666,7 +4671,7 @@ pub fn reflection_attribute_method(
                     "Attribute \"{}\" cannot target {} (allowed targets: {})",
                     attr_name, target_str, allowed.join(", ")
                 );
-                let exc = vm.create_exception(b"Error", &err_msg, 0);
+                let exc = vm.create_exception(b"Error", &err_msg, call_site_line);
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
@@ -4678,7 +4683,7 @@ pub fn reflection_attribute_method(
             };
             if is_repeated && (attr_flags & 128) == 0 {
                 let err_msg = format!("Attribute \"{}\" must not be repeated", attr_name);
-                let exc = vm.create_exception(b"Error", &err_msg, 0);
+                let exc = vm.create_exception(b"Error", &err_msg, call_site_line);
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
