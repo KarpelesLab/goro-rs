@@ -3132,12 +3132,14 @@ pub fn reflection_method_method(
                 let rcount = m.op_array.required_param_count as usize;
                 if pcount > 0 {
                     s.push_str(&format!("\n  - Parameters [{}] {{\n", pcount));
+                    let variadic_cv = m.op_array.variadic_param;
                     for i in 0..pcount {
                         let cv_idx = i + skip;
                         if cv_idx < m.op_array.cv_names.len() {
                             let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
-                            let required = i < rcount;
-                            let default_suffix = if !required {
+                            let is_variadic = variadic_cv.map(|v| v as usize == cv_idx).unwrap_or(false);
+                            let required = !is_variadic && i < rcount;
+                            let default_suffix = if !required && !is_variadic {
                                 if let Some(const_ref) = extract_param_default_constant(&m.op_array, cv_idx as u32) {
                                     let display = if let Some(rest) = const_ref.strip_prefix("global:") {
                                         rest.trim_start_matches('\\').to_string()
@@ -3153,8 +3155,9 @@ pub fn reflection_method_method(
                                     String::new()
                                 }
                             } else { String::new() };
-                            s.push_str(&format!("    Parameter #{} [ <{}> ${}{} ]\n", i,
-                                if required { "required" } else { "optional" }, pname, default_suffix));
+                            let variadic_prefix = if is_variadic { "..." } else { "" };
+                            s.push_str(&format!("    Parameter #{} [ <{}> {}${}{} ]\n", i,
+                                if required { "required" } else { "optional" }, variadic_prefix, pname, default_suffix));
                         }
                     }
                     s.push_str("  }\n");
@@ -3820,11 +3823,13 @@ pub fn reflection_function_method(
                 s.push_str(&format!("  @@ {} {} - {}\n", vm.current_file, op_array.decl_line, f_end));
                 if op_array.param_count > 0 {
                     s.push_str(&format!("\n  - Parameters [{}] {{\n", op_array.param_count));
+                    let variadic_cv = op_array.variadic_param;
                     for i in 0..op_array.param_count as usize {
                         if i < op_array.cv_names.len() {
                             let pname = String::from_utf8_lossy(&op_array.cv_names[i]);
-                            let required = i < op_array.required_param_count as usize;
-                            let default_suffix = if !required {
+                            let is_variadic = variadic_cv.map(|v| v as usize == i).unwrap_or(false);
+                            let required = !is_variadic && i < op_array.required_param_count as usize;
+                            let default_suffix = if !required && !is_variadic {
                                 if let Some(const_ref) = extract_param_default_constant(&op_array, i as u32) {
                                     let display = if let Some(rest) = const_ref.strip_prefix("global:") {
                                         rest.trim_start_matches('\\').to_string()
@@ -3840,8 +3845,9 @@ pub fn reflection_function_method(
                                     String::new()
                                 }
                             } else { String::new() };
-                            s.push_str(&format!("    Parameter #{} [ <{}> ${}{} ]\n", i,
-                                if required { "required" } else { "optional" }, pname, default_suffix));
+                            let variadic_prefix = if is_variadic { "..." } else { "" };
+                            s.push_str(&format!("    Parameter #{} [ <{}> {}${}{} ]\n", i,
+                                if required { "required" } else { "optional" }, variadic_prefix, pname, default_suffix));
                         }
                     }
                     s.push_str("  }\n");
@@ -5017,13 +5023,21 @@ pub fn reflection_parameter_method(
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
             drop(ob);
-            let is_optional = if let Some(op_array) = resolved_op_array.as_ref() {
+            let is_variadic = resolved_op_array.as_ref()
+                .and_then(|op| op.variadic_param)
+                .map(|v| v as usize == type_idx)
+                .unwrap_or(false);
+            // Variadic parameters are always considered "optional" in PHP's
+            // ReflectionParameter::__toString (PHP renders them with the
+            // <optional> tag and a ... prefix, no default-value suffix).
+            let is_optional = is_variadic || if let Some(op_array) = resolved_op_array.as_ref() {
                 param_idx >= op_array.required_param_count as usize
             } else {
                 false
             };
             let kind = if is_optional { "optional" } else { "required" };
-            let default_suffix = if is_optional {
+            let variadic_prefix = if is_variadic { "..." } else { "" };
+            let default_suffix = if is_optional && !is_variadic {
                 if let Some(op_array) = resolved_op_array.as_ref() {
                     // Prefer constant reference rendering when available
                     if let Some(const_ref) = extract_param_default_constant(op_array, type_idx as u32) {
@@ -5041,7 +5055,7 @@ pub fn reflection_parameter_method(
                 } else { String::new() }
             } else { String::new() };
             Some(Value::String(PhpString::from_string(
-                format!("Parameter #{} [ <{}> ${}{} ]", param_idx, kind, name, default_suffix)
+                format!("Parameter #{} [ <{}> {}${}{} ]", param_idx, kind, variadic_prefix, name, default_suffix)
             )))
         }
         _ => None,
@@ -6908,7 +6922,8 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
             let cv_idx = i + skip;
             if cv_idx < m.op_array.cv_names.len() {
                 let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
-                let required = i < required_count;
+                let is_variadic = m.op_array.variadic_param.map(|v| v as usize == cv_idx).unwrap_or(false);
+                let required = !is_variadic && i < required_count;
                 let type_str = if cv_idx < m.op_array.param_types.len() {
                     if let Some(ref pti) = m.op_array.param_types[cv_idx] {
                         format!("{} ", param_type_name(&pti.param_type))
@@ -6918,7 +6933,7 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
                 } else {
                     String::new()
                 };
-                let default_suffix = if !required {
+                let default_suffix = if !required && !is_variadic {
                     if let Some(const_ref) = extract_param_default_constant(&m.op_array, cv_idx as u32) {
                         let display = if let Some(rest) = const_ref.strip_prefix("global:") {
                             rest.trim_start_matches('\\').to_string()
@@ -6936,8 +6951,9 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
                 } else {
                     String::new()
                 };
-                s.push_str(&format!("        Parameter #{} [ <{}> {}${}{} ]\n", i,
-                    if required { "required" } else { "optional" }, type_str, pname, default_suffix));
+                let variadic_prefix = if is_variadic { "..." } else { "" };
+                s.push_str(&format!("        Parameter #{} [ <{}> {}{}${}{} ]\n", i,
+                    if required { "required" } else { "optional" }, type_str, variadic_prefix, pname, default_suffix));
             }
         }
         s.push_str("      }\n");
