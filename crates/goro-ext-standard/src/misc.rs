@@ -536,7 +536,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"show_source", highlight_file_fn);
     vm.register_function(b"php_strip_whitespace", php_strip_whitespace_fn);
     vm.register_function(b"disk_free_space", disk_free_space_fn);
-    vm.register_function(b"diskfreespace", disk_free_space_fn);
+    vm.register_function(b"diskfreespace", diskfreespace_fn);
     vm.register_function(b"disk_total_space", disk_total_space_fn);
     vm.register_function(b"get_resources", get_resources_fn);
     vm.register_function(b"closelog", closelog_fn);
@@ -6426,13 +6426,17 @@ fn chdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("filesize", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
         return Ok(Value::False);
     }
-    match std::fs::metadata(&*path.to_string_lossy() as &str) {
+    if !vm.check_open_basedir("filesize", &path_str) {
+        return Ok(Value::False);
+    }
+    match std::fs::metadata(&*path_str as &str) {
         Ok(m) => Ok(Value::Long(m.len() as i64)),
         Err(_) => {
-            vm.emit_warning(&format!("filesize(): stat failed for {}", path.to_string_lossy()));
+            vm.emit_warning(&format!("filesize(): stat failed for {}", path_str));
             Ok(Value::False)
         }
     }
@@ -11325,23 +11329,32 @@ fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("fileperms", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if path.as_bytes().contains(&0) {
+        let line = vm.current_line;
+        vm.emit_warning_at("fileperms(): Filename contains null byte", line);
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("fileperms", &path_str) {
         return Ok(Value::False);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_str) {
             Ok(m) => Ok(Value::Long(m.mode() as i64)),
             Err(_) => {
-                vm.emit_warning(&format!("fileperms(): stat failed for {}", path.to_string_lossy()));
+                vm.emit_warning(&format!("fileperms(): stat failed for {}", path_str));
                 Ok(Value::False)
             }
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = path_str;
         Ok(Value::Long(0o100644))
     }
 }
@@ -12803,16 +12816,25 @@ fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("fileinode", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if path.as_bytes().contains(&0) {
+        let line = vm.current_line;
+        vm.emit_warning_at("fileinode(): Filename contains null byte", line);
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("fileinode", &path_str) {
         return Ok(Value::False);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_str) {
             Ok(meta) => Ok(Value::Long(meta.ino() as i64)),
             Err(_) => {
-                vm.emit_warning(&format!("fileinode(): stat failed for {}", path.to_string_lossy()));
+                vm.emit_warning(&format!("fileinode(): stat failed for {}", path_str));
                 Ok(Value::False)
             }
         }
@@ -12823,16 +12845,25 @@ fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("fileowner", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if path.as_bytes().contains(&0) {
+        let line = vm.current_line;
+        vm.emit_warning_at("fileowner(): Filename contains null byte", line);
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("fileowner", &path_str) {
         return Ok(Value::False);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_str) {
             Ok(meta) => Ok(Value::Long(meta.uid() as i64)),
             Err(_) => {
-                vm.emit_warning(&format!("fileowner(): stat failed for {}", path.to_string_lossy()));
+                vm.emit_warning(&format!("fileowner(): stat failed for {}", path_str));
                 Ok(Value::False)
             }
         }
@@ -12843,16 +12874,25 @@ fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn filegroup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("filegroup", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if path.as_bytes().contains(&0) {
+        let line = vm.current_line;
+        vm.emit_warning_at("filegroup(): Filename contains null byte", line);
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("filegroup", &path_str) {
         return Ok(Value::False);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_str) {
             Ok(meta) => Ok(Value::Long(meta.gid() as i64)),
             Err(_) => {
-                vm.emit_warning(&format!("filegroup(): stat failed for {}", path.to_string_lossy()));
+                vm.emit_warning(&format!("filegroup(): stat failed for {}", path_str));
                 Ok(Value::False)
             }
         }
@@ -13467,16 +13507,67 @@ fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn flock_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // flock($handle, $operation) - stub that always succeeds
-    // Real file locking would need libc::flock
-    let _fid = args.first().unwrap_or(&Value::Null).to_long();
-    let _op = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Validate $operation arg before $stream arg (PHP order).
+    let op_arg = args.get(1).cloned().unwrap_or(Value::Long(0));
+    // Type-check operation arg: int or bool only; array/string -> TypeError.
+    let op = match &op_arg {
+        Value::Long(n) => *n,
+        Value::Double(d) => *d as i64,
+        Value::True => 1,
+        Value::False => 0,
+        Value::Null => 0,
+        Value::Array(_) => {
+            let msg = "flock(): Argument #2 ($operation) must be of type int, array given".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        Value::String(_) => {
+            let msg = "flock(): Argument #2 ($operation) must be of type int, string given".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        _ => op_arg.to_long(),
+    };
+    let basic = op & 3;
+    if basic == 0 {
+        let msg = "flock(): Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let arg = args.first().cloned().unwrap_or(Value::Null);
+    let fid = require_open_stream(vm, &arg, "flock")?;
+    // The 3rd argument (wouldblock) is a ref parameter; we don't bother
+    // tracking it for now.
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd_opt = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.file.as_raw_fd()));
+        if let Some(fd) = fd_opt {
+            // Translate PHP LOCK_* (1=SH, 2=EX, 3=UN, 4=NB) to libc flags.
+            let mut native: i32 = 0;
+            match basic {
+                1 => native |= libc::LOCK_SH,
+                2 => native |= libc::LOCK_EX,
+                3 => native |= libc::LOCK_UN,
+                _ => return Ok(Value::False),
+            }
+            if op & 4 != 0 {
+                native |= libc::LOCK_NB;
+            }
+            let r = unsafe { libc::flock(fd, native) };
+            return Ok(if r == 0 { Value::True } else { Value::False });
+        }
+    }
     Ok(Value::True)
 }
 
-fn fstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().cloned().unwrap_or(Value::Null);
+    let fid = require_open_stream(vm, &arg, "fstat")?;
     FILE_HANDLES.with(|handles| {
         let handles = handles.borrow();
         if let Some(fh) = handles.get(&fid) {
@@ -14722,8 +14813,58 @@ fn php_strip_whitespace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     }
 }
 
-fn disk_free_space_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Double(1073741824.0)) }
-fn disk_total_space_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Double(10737418240.0)) }
+fn disk_space_impl(vm: &mut Vm, args: &[Value], fn_name: &str, total: bool, called_as: &str) -> Result<Value, VmError> {
+    let path_val = args.first().cloned().unwrap_or(Value::Null);
+    let path_str = path_val.to_php_string();
+    let path_bytes = path_str.as_bytes();
+    if path_bytes.is_empty() {
+        let msg = "Path cannot be empty".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    if path_bytes.contains(&0u8) {
+        let msg = format!("{}(): Argument #1 ($directory) must not contain any null bytes", fn_name);
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let path_string = String::from_utf8_lossy(path_bytes).to_string();
+    let path = std::path::Path::new(&path_string);
+    if !path.exists() {
+        let line = vm.current_line;
+        vm.emit_warning_at(&format!("{}(): No such file or directory", called_as), line);
+        return Ok(Value::False);
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let c_path = match CString::new(path_bytes) {
+            Ok(c) => c,
+            Err(_) => return Ok(Value::False),
+        };
+        let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
+        if r != 0 {
+            let line = vm.current_line;
+            vm.emit_warning_at(&format!("{}(): {}", called_as, std::io::Error::last_os_error()), line);
+            return Ok(Value::False);
+        }
+        let result = if total {
+            buf.f_blocks as f64 * buf.f_frsize as f64
+        } else {
+            buf.f_bavail as f64 * buf.f_frsize as f64
+        };
+        Ok(Value::Double(result))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::Double(if total { 10737418240.0 } else { 1073741824.0 }))
+    }
+}
+fn disk_free_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_free_space", false, "disk_free_space") }
+fn diskfreespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_free_space", false, "diskfreespace") }
+fn disk_total_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_total_space", true, "disk_total_space") }
 fn get_resources_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
 fn closelog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn openlog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }

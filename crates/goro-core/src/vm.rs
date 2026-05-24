@@ -23476,6 +23476,18 @@ impl Vm {
                                             op.line,
                                         );
                                     }
+                                    if resolved && const_name.as_slice() == b"FILE_BINARY" {
+                                        self.emit_deprecated_at(
+                                            "Constant FILE_BINARY is deprecated since 8.1, as the constant has no effect",
+                                            op.line,
+                                        );
+                                    }
+                                    if resolved && const_name.as_slice() == b"FILE_TEXT" {
+                                        self.emit_deprecated_at(
+                                            "Constant FILE_TEXT is deprecated since 8.1, as the constant has no effect",
+                                            op.line,
+                                        );
+                                    }
                                     if !resolved {
                                         // Constant not found - throw Undefined constant error (PHP 8+)
                                         let const_display = String::from_utf8_lossy(&const_name).to_string();
