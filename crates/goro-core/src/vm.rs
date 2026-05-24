@@ -8142,6 +8142,12 @@ impl Vm {
             }
             b"eof" => {
                 let ob = obj.borrow();
+                // If the file is being written to (we maintain a byte counter
+                // via fputcsv/fwrite), the stream is positioned just past the
+                // last byte written, which by PHP semantics is *not* eof.
+                if matches!(ob.get_property(b"__spl_byte_pos"), Value::Long(_)) {
+                    return Some(Value::False);
+                }
                 let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
                 let lines = ob.get_property(b"__spl_file_lines");
                 if let Value::Array(a) = lines {
@@ -8195,8 +8201,13 @@ impl Vm {
             b"fwrite" => None, // handled in handle_spl_docall
             b"fflush" => Some(Value::True),
             b"ftell" => {
-                // Return byte position (approximation: sum of line lengths up to current position)
+                // Return byte position. Prefer an explicit byte counter
+                // maintained by fputcsv/fwrite/etc; fall back to summing line
+                // lengths up to current position.
                 let ob = obj.borrow();
+                if let Value::Long(b) = ob.get_property(b"__spl_byte_pos") {
+                    return Some(Value::Long(b));
+                }
                 let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
                 let lines = ob.get_property(b"__spl_file_lines");
                 if let Value::Array(a) = lines {
@@ -11565,6 +11576,11 @@ impl Vm {
                                     let _ = f.write_all(csv_bytes);
                                 }
                             }
+                            // Maintain an explicit byte counter so ftell()
+                            // returns the post-write file position.
+                            let mut ob = obj.borrow_mut();
+                            let prev = if let Value::Long(b) = ob.get_property(b"__spl_byte_pos") { b } else { 0 };
+                            ob.set_property(b"__spl_byte_pos".to_vec(), Value::Long(prev + bytes_written));
                             Some(Value::Long(bytes_written))
                         }
                         b"fwrite" => {
