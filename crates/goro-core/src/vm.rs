@@ -29716,7 +29716,25 @@ impl Vm {
                         let mut type_error: Option<String> = None;
                         let caller_scope_for_prop = self.current_class_scope()
                             .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        if let Some((vis, declaring_class, prop_is_readonly, prop_type, set_vis)) = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_prop.as_deref()) {
+                        // If the runtime class allows dynamic properties and the only
+                        // matching property is an inherited *private* one not visible
+                        // from the current scope, treat it as a dynamic property
+                        // (PHP allows this on subclasses with #[AllowDynamicProperties]).
+                        let allows_dynamic = self.classes.get(&class_lower)
+                            .map(|c| c.allow_dynamic_properties || c.name.eq_ignore_ascii_case(b"stdClass"))
+                            .unwrap_or(false);
+                        let resolved_prop = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_prop.as_deref());
+                        let skip_inherited_private = if let Some((vis, declaring_class, _, _, _)) = &resolved_prop {
+                            let decl_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            allows_dynamic
+                                && *vis == Visibility::Private
+                                && decl_lower != class_lower
+                                && caller_scope_for_prop.as_deref() != Some(decl_lower.as_slice())
+                        } else {
+                            false
+                        };
+                        let effective_prop = if skip_inherited_private { None } else { resolved_prop };
+                        if let Some((vis, declaring_class, prop_is_readonly, prop_type, set_vis)) = effective_prop {
                             // Use set_visibility for write access checks if present
                             let effective_write_vis = set_vis.unwrap_or(vis);
                             if effective_write_vis != Visibility::Public {
