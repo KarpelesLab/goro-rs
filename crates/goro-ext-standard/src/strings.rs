@@ -4988,7 +4988,15 @@ pub fn str_getcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// Parse one CSV record into fields. Implements PHP's php_fgetcsv algorithm.
 /// `bytes` should have any trailing CR/LF already stripped.
 pub(crate) fn parse_csv_fields(bytes: &[u8], delimiter: u8, enclosure: u8, escape: Option<u8>) -> PhpArray {
+    parse_csv_fields_ex(bytes, delimiter, enclosure, escape).0
+}
+
+/// Same as parse_csv_fields but also returns true if the parsing ended with
+/// an unterminated enclosed field (so the caller may want to splice in more
+/// data and re-parse).
+pub(crate) fn parse_csv_fields_ex(bytes: &[u8], delimiter: u8, enclosure: u8, escape: Option<u8>) -> (PhpArray, bool) {
     let mut result = PhpArray::new();
+    let mut unterminated = false;
     let limit = bytes.len();
     let mut bptr = 0usize;
     let mut first_field = true;
@@ -5013,7 +5021,7 @@ pub(crate) fn parse_csv_fields(bytes: &[u8], delimiter: u8, enclosure: u8, escap
         if first_field && bptr >= limit {
             // empty line: return blank record
             // PHP returns array(NULL) — caller handles
-            return result;
+            return (result, unterminated);
         }
         first_field = false;
 
@@ -5039,6 +5047,7 @@ pub(crate) fn parse_csv_fields(bytes: &[u8], delimiter: u8, enclosure: u8, escap
                         _ => {
                             // Unterminated — take everything verbatim.
                             temp.extend_from_slice(&bytes[hunk_begin..bptr]);
+                            unterminated = true;
                         }
                     }
                     break;
@@ -5118,7 +5127,7 @@ pub(crate) fn parse_csv_fields(bytes: &[u8], delimiter: u8, enclosure: u8, escap
             break;
         }
     }
-    result
+    (result, unterminated)
 }
 
 fn str_word_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

@@ -11549,62 +11549,72 @@ fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    // Read line(s) from the file. When inside an enclosure, continue reading
-    // across line breaks so the field can span lines (PHP behaviour).
-    let line_result = FILE_HANDLES.with(|handles| {
-        let mut handles = handles.borrow_mut();
-        let fh = handles.get_mut(&fid)?;
-        let mut buf = Vec::new();
-        let mut byte = [0u8; 1];
-        let mut in_quotes = false;
-        let mut closed_in_buf = true; // tracks whether parse ends outside quotes
-        loop {
-            match fh.file.read(&mut byte) {
-                Ok(0) => {
-                    fh.eof = true;
-                    break;
-                }
-                Ok(_) => {
-                    if byte[0] == enclosure {
-                        in_quotes = !in_quotes;
-                    }
-                    if byte[0] == b'\n' && !in_quotes {
+    // Read one line at a time. When the CSV parser reports an unterminated
+    // enclosure, keep appending more lines and re-parse.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut first_chunk = true;
+    let mut hit_eof = false;
+    let arr: PhpArray = loop {
+        let chunk = FILE_HANDLES.with(|handles| {
+            let mut handles = handles.borrow_mut();
+            let fh = handles.get_mut(&fid)?;
+            let mut local = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                match fh.file.read(&mut byte) {
+                    Ok(0) => {
+                        fh.eof = true;
                         break;
                     }
-                    buf.push(byte[0]);
-                }
-                Err(_) => break,
-            }
-        }
-        closed_in_buf = !in_quotes;
-        if buf.is_empty() && fh.eof {
-            None
-        } else {
-            Some((buf, closed_in_buf))
-        }
-    });
-
-    match line_result {
-        None => Ok(Value::False),
-        Some((mut line_bytes, closed_in_buf)) => {
-            // Only strip trailing CR/LF when the buffer ended cleanly (outside
-            // an enclosure). Unterminated enclosures preserve the final
-            // newline because PHP keeps it as part of the field.
-            if closed_in_buf {
-                if line_bytes.last() == Some(&b'\r') {
-                    line_bytes.pop();
+                    Ok(_) => {
+                        local.push(byte[0]);
+                        if byte[0] == b'\n' { break; }
+                    }
+                    Err(_) => break,
                 }
             }
-            // PHP fgetcsv on a blank line returns `array(1) { [0]=> NULL }`.
-            if line_bytes.is_empty() {
-                let mut arr = PhpArray::new();
-                arr.push(Value::Null);
-                return Ok(Value::Array(Rc::new(RefCell::new(arr))));
+            Some(local)
+        });
+        match chunk {
+            None => {
+                // No file handle.
+                return Ok(Value::False);
             }
-            let arr = crate::strings::parse_csv_fields(&line_bytes, separator, enclosure, escape);
-            Ok(Value::Array(Rc::new(RefCell::new(arr))))
+            Some(line) => {
+                if line.is_empty() {
+                    // EOF — stop accumulating.
+                    hit_eof = true;
+                    if buf.is_empty() {
+                        return Ok(Value::False);
+                    }
+                    break crate::strings::parse_csv_fields_ex(&buf, separator, enclosure, escape).0;
+                }
+                buf.extend_from_slice(&line);
+            }
         }
-    }
+        // Strip trailing CR/LF for parsing attempt.
+        let mut try_bytes = buf.clone();
+        if try_bytes.last() == Some(&b'\n') {
+            try_bytes.pop();
+            if try_bytes.last() == Some(&b'\r') {
+                try_bytes.pop();
+            }
+        }
+        // Blank line at start: PHP returns array(NULL).
+        if first_chunk && try_bytes.is_empty() {
+            let mut a = PhpArray::new();
+            a.push(Value::Null);
+            return Ok(Value::Array(Rc::new(RefCell::new(a))));
+        }
+        first_chunk = false;
+        let (fields, unterminated) = crate::strings::parse_csv_fields_ex(&try_bytes, separator, enclosure, escape);
+        if unterminated {
+            continue;
+        }
+        break fields;
+    };
+    let _ = hit_eof;
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
 fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
