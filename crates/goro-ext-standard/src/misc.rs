@@ -11490,67 +11490,60 @@ fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if b.is_empty() { None } else { Some(b[0]) }
     };
 
-    // Read a line from the file
-    let line = FILE_HANDLES.with(|handles| {
+    // Read line(s) from the file. When inside an enclosure, continue reading
+    // across line breaks so the field can span lines (PHP behaviour).
+    let line_result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
-        if let Some(fh) = handles.get_mut(&fid) {
-            let mut buf = Vec::new();
-            let mut byte = [0u8; 1];
-            let mut in_quotes = false;
-            loop {
-                match fh.file.read(&mut byte) {
-                    Ok(0) => {
-                        fh.eof = true;
+        let fh = handles.get_mut(&fid)?;
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        let mut in_quotes = false;
+        let mut closed_in_buf = true; // tracks whether parse ends outside quotes
+        loop {
+            match fh.file.read(&mut byte) {
+                Ok(0) => {
+                    fh.eof = true;
+                    break;
+                }
+                Ok(_) => {
+                    if byte[0] == enclosure {
+                        in_quotes = !in_quotes;
+                    }
+                    if byte[0] == b'\n' && !in_quotes {
                         break;
                     }
-                    Ok(_) => {
-                        if byte[0] == enclosure {
-                            in_quotes = !in_quotes;
-                        }
-                        if byte[0] == b'\n' && !in_quotes {
-                            break;
-                        }
-                        buf.push(byte[0]);
-                    }
-                    Err(_) => break,
+                    buf.push(byte[0]);
                 }
+                Err(_) => break,
             }
-            if buf.is_empty() && fh.eof {
-                None
-            } else {
-                // Remove trailing \r
-                if buf.last() == Some(&b'\r') {
-                    buf.pop();
-                }
-                Some(buf)
-            }
-        } else {
+        }
+        closed_in_buf = !in_quotes;
+        if buf.is_empty() && fh.eof {
             None
+        } else {
+            Some((buf, closed_in_buf))
         }
     });
 
-    match line {
+    match line_result {
         None => Ok(Value::False),
-        Some(line_bytes) => {
+        Some((mut line_bytes, closed_in_buf)) => {
+            // Only strip trailing CR/LF when the buffer ended cleanly (outside
+            // an enclosure). Unterminated enclosures preserve the final
+            // newline because PHP keeps it as part of the field.
+            if closed_in_buf {
+                if line_bytes.last() == Some(&b'\r') {
+                    line_bytes.pop();
+                }
+            }
             // PHP fgetcsv on a blank line returns `array(1) { [0]=> NULL }`.
             if line_bytes.is_empty() {
                 let mut arr = PhpArray::new();
                 arr.push(Value::Null);
                 return Ok(Value::Array(Rc::new(RefCell::new(arr))));
             }
-            // Parse CSV line
-            let line_str = String::from_utf8_lossy(&line_bytes);
-            let csv_args = vec![
-                Value::String(PhpString::from_string(line_str.to_string())),
-                Value::String(PhpString::from_bytes(&[separator])),
-                Value::String(PhpString::from_bytes(&[enclosure])),
-                if let Some(e) = escape {
-                    Value::String(PhpString::from_bytes(&[e]))
-                } else {
-                    Value::String(PhpString::from_bytes(b""))
-                },
-            ];
-            crate::strings::str_getcsv_fn(vm, &csv_args)
+            let arr = crate::strings::parse_csv_fields(&line_bytes, separator, enclosure, escape);
+            Ok(Value::Array(Rc::new(RefCell::new(arr))))
         }
     }
 }
