@@ -1766,6 +1766,10 @@ impl Compiler {
                 func_compiler.op_array.doc_comment = func_doc_comment.clone();
                 func_compiler.op_array.strict_types = self.op_array.strict_types;
                 func_compiler.op_array.attributes = self.compile_attributes(func_attributes);
+                // Carry the source filename so ReflectionFunction::getFileName()
+                // can report where the function was declared, not where it was
+                // first looked up.
+                func_compiler.op_array.filename = self.source_file.clone();
                 func_compiler.source_file = self.source_file.clone();
                 func_compiler.anon_class_name_map = self.anon_class_name_map.clone();
 
