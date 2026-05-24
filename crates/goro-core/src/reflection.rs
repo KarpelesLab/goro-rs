@@ -1633,7 +1633,13 @@ pub fn reflection_class_docall(
                     let declaring_canonical = vm.classes.get(declaring_lower.as_slice())
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                         .unwrap_or_else(|| String::from_utf8_lossy(&declaring_lower).to_string());
-                    Some(create_reflection_method(vm, &declaring_canonical, &canonical_method))
+                    // Pass the lookup class so __toString can show
+                    // "<user, inherits Parent>" when the method was fetched
+                    // from a child class but is declared on a parent.
+                    let lookup_canonical = vm.classes.get(&class_lower)
+                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                        .unwrap_or_else(|| target.clone());
+                    Some(create_reflection_method_with_lookup(vm, &declaring_canonical, &canonical_method, Some(&lookup_canonical)))
                 } else if class_lower == b"closure" && method_lower == b"__invoke" {
                     // Synthesise ReflectionMethod for Closure::__invoke by
                     // pointing at the underlying function name captured when
@@ -2970,6 +2976,13 @@ pub fn reflection_method_method(
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
             let class = ob.get_property(b"class").to_php_string().to_string_lossy();
+            // If the method was looked up via ReflectionClass::getMethod on a
+            // child, the lookup class is recorded here. Use it for the
+            // inheritance check; otherwise fall back to __reflection_class.
+            let effective_class_lower: Vec<u8> = match ob.get_property(b"__reflection_lookup_class") {
+                Value::String(s) => s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect(),
+                _ => class_lower.clone(),
+            };
             drop(ob);
 
             let method_def = vm.classes.get(&class_lower)
@@ -2992,7 +3005,7 @@ pub fn reflection_method_method(
                 // Determine if this method is inherited from a different
                 // declaring class — for "<user, inherits Parent>" header.
                 let declaring_lower = &m.declaring_class;
-                let owner_display = if declaring_lower != &class_lower {
+                let owner_display = if declaring_lower != &effective_class_lower {
                     vm.classes.get(declaring_lower.as_slice())
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                 } else {
@@ -5804,6 +5817,15 @@ pub fn create_reflection_class(vm: &mut Vm, class_name: &str) -> Value {
 
 /// Create a ReflectionMethod object for a given class and method name
 pub fn create_reflection_method(vm: &mut Vm, class_name: &str, method_name: &str) -> Value {
+    create_reflection_method_with_lookup(vm, class_name, method_name, None)
+}
+
+/// Create a ReflectionMethod with an optional lookup-class override.
+/// `class_name` is the declaring class (used for `$class` / `__reflection_class`).
+/// `lookup_class` is the class the method was originally fetched from; it
+/// surfaces as `<user, inherits Declaring>` in __toString output when it
+/// differs from the declaring class.
+pub fn create_reflection_method_with_lookup(vm: &mut Vm, class_name: &str, method_name: &str, lookup_class: Option<&str>) -> Value {
     let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
     let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
 
@@ -5822,6 +5844,16 @@ pub fn create_reflection_method(vm: &mut Vm, class_name: &str, method_name: &str
     obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical_class.clone())));
     obj.set_property(b"__reflection_class".to_vec(), Value::String(PhpString::from_string(canonical_class)));
     obj.set_property(b"__reflection_method".to_vec(), Value::String(PhpString::from_vec(method_lower)));
+    if let Some(lookup) = lookup_class {
+        let lookup_canonical = {
+            let lookup_lower: Vec<u8> = lookup.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            vm.classes.get(&lookup_lower)
+                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or_else(|| lookup.to_string())
+        };
+        obj.set_property(b"__reflection_lookup_class".to_vec(),
+            Value::String(PhpString::from_string(lookup_canonical)));
+    }
     Value::Object(Rc::new(RefCell::new(obj)))
 }
 
@@ -5982,6 +6014,40 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
             }
         }
         ParamType::Union(types) => {
+            // PHP expands `iterable` inside a union to `Traversable|array`.
+            let mut expanded: Vec<ParamType> = Vec::new();
+            for t in types {
+                match t {
+                    ParamType::Simple(n) if n == b"iterable" => {
+                        expanded.push(ParamType::Simple(b"Traversable".to_vec()));
+                        expanded.push(ParamType::Simple(b"array".to_vec()));
+                    }
+                    _ => expanded.push(t.clone()),
+                }
+            }
+            let types: &Vec<ParamType> = &expanded;
+            // PHP normalizes `T|null` to nullable `?T` and exposes it as a
+            // single ReflectionNamedType (not a union).
+            let non_null: Vec<&ParamType> = types.iter().filter(|t| !matches!(t, ParamType::Simple(n) if n == b"null")).collect();
+            let has_null = types.iter().any(|t| matches!(t, ParamType::Simple(n) if n == b"null"));
+            if has_null && non_null.len() == 1 {
+                if let ParamType::Simple(name) = non_null[0] {
+                    let resolved = resolve_name(name, scope_class);
+                    let type_name = String::from_utf8_lossy(&resolved).to_string();
+                    let obj_id = vm.next_object_id();
+                    let mut obj = PhpObject::new(b"ReflectionNamedType".to_vec(), obj_id);
+                    let is_builtin = matches!(
+                        name.as_slice(),
+                        b"int" | b"float" | b"string" | b"bool" | b"array" | b"callable"
+                            | b"void" | b"null" | b"mixed" | b"never" | b"object"
+                            | b"iterable" | b"false" | b"true"
+                    );
+                    obj.set_property(b"__type_name".to_vec(), Value::String(PhpString::from_string(type_name)));
+                    obj.set_property(b"__allows_null".to_vec(), Value::True);
+                    obj.set_property(b"__is_builtin".to_vec(), if is_builtin { Value::True } else { Value::False });
+                    return Value::Object(Rc::new(RefCell::new(obj)));
+                }
+            }
             let mut type_arr = PhpArray::new();
             let mut allows_null = false;
             for t in types {
