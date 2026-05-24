@@ -10146,16 +10146,32 @@ impl Vm {
                         }
                         b"setdate" => {
                             let year = args.get(1).cloned().unwrap_or(Value::Null).to_long();
-                            let month = args.get(2).cloned().unwrap_or(Value::Null).to_long() as u32;
-                            let day = args.get(3).cloned().unwrap_or(Value::Null).to_long() as u32;
+                            let month = args.get(2).cloned().unwrap_or(Value::Null).to_long();
+                            let day = args.get(3).cloned().unwrap_or(Value::Null).to_long();
                             let ob = obj.borrow();
                             let ts = ob.get_property(b"__timestamp").to_long();
                             let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+                            let tz_type = ob.get_property(b"timezone_type").to_long();
                             drop(ob);
-                            let time_of_day = ((ts % 86400) + 86400) % 86400;
-                            let new_days = vm_ymd_to_days(year, month, day);
-                            let new_ts = new_days * 86400 + time_of_day;
                             let tz_name = if tz.is_empty() { "UTC".to_string() } else { tz };
+                            // Local-time math; PHP normalizes month/day overflow.
+                            let (offset_in, _) = vm_timezone_offset_and_abbrev(&tz_name, ts);
+                            let local_ts = ts + offset_in;
+                            let time_of_day = ((local_ts % 86400) + 86400) % 86400;
+                            let (adj_year, adj_month) = if month > 0 {
+                                let y = year + (month - 1) / 12;
+                                let m = ((month - 1) % 12 + 1) as u32;
+                                (y, m)
+                            } else {
+                                let y = year + (month - 12) / 12;
+                                let m = (12 - ((-month) % 12)) as u32;
+                                let m = if m == 0 { 12 } else { m };
+                                (y, m)
+                            };
+                            let new_days = vm_ymd_to_days(adj_year, adj_month, 1) + (day - 1);
+                            let new_local_ts = new_days * 86400 + time_of_day;
+                            let (new_offset, _) = vm_timezone_offset_and_abbrev(&tz_name, new_local_ts - offset_in);
+                            let new_ts = new_local_ts - new_offset;
                             if is_immutable {
                                 let obj_id = self.next_object_id;
                                 self.next_object_id += 1;
@@ -10164,7 +10180,7 @@ impl Vm {
                                 let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, new_ts);
                                 let date_str = Self::format_utc_datetime(new_ts + offset);
                                 new_obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(if tz_type == 0 { 3 } else { tz_type }));
                                 new_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
@@ -10184,10 +10200,17 @@ impl Vm {
                             let ob = obj.borrow();
                             let ts = ob.get_property(b"__timestamp").to_long();
                             let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+                            let tz_type = ob.get_property(b"timezone_type").to_long();
                             drop(ob);
-                            let days = ts / 86400;
-                            let new_ts = days * 86400 + hour * 3600 + minute * 60 + second;
                             let tz_name = if tz.is_empty() { "UTC".to_string() } else { tz };
+                            // Compute current local time = ts + offset, then derive new local ts.
+                            let (offset_in, _) = vm_timezone_offset_and_abbrev(&tz_name, ts);
+                            let local_ts = ts + offset_in;
+                            let days = if local_ts >= 0 { local_ts / 86400 } else { (local_ts - 86399) / 86400 };
+                            let new_local_ts = days * 86400 + hour * 3600 + minute * 60 + second;
+                            // Convert back to UTC.
+                            let (new_offset, _) = vm_timezone_offset_and_abbrev(&tz_name, new_local_ts - offset_in);
+                            let new_ts = new_local_ts - new_offset;
                             if is_immutable {
                                 let obj_id = self.next_object_id;
                                 self.next_object_id += 1;
@@ -10196,7 +10219,7 @@ impl Vm {
                                 let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, new_ts);
                                 let date_str = Self::format_utc_datetime(new_ts + offset);
                                 new_obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(if tz_type == 0 { 3 } else { tz_type }));
                                 new_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
@@ -32376,25 +32399,51 @@ pub fn vm_timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, Str
             if vm_is_eu_dst(timestamp) { (3600, "BST".to_string()) }
             else { (0, "GMT".to_string()) }
         }
-        "Europe/Lisbon" | "WET" => {
+        "Europe/Lisbon" => {
             if vm_is_eu_dst(timestamp) { (3600, "WEST".to_string()) }
             else { (0, "WET".to_string()) }
         }
         "Europe/Paris" | "Europe/Berlin" | "Europe/Amsterdam" | "Europe/Brussels"
         | "Europe/Rome" | "Europe/Madrid" | "Europe/Vienna" | "Europe/Zurich"
         | "Europe/Stockholm" | "Europe/Oslo" | "Europe/Copenhagen"
-        | "Europe/Warsaw" | "Europe/Prague" | "Europe/Budapest"
-        | "CET" => {
+        | "Europe/Warsaw" | "Europe/Prague" | "Europe/Budapest" => {
             if vm_is_eu_dst(timestamp) { (2 * 3600, "CEST".to_string()) }
             else { (3600, "CET".to_string()) }
         }
         "Europe/Helsinki" | "Europe/Athens" | "Europe/Bucharest"
         | "Europe/Sofia" | "Europe/Tallinn" | "Europe/Vilnius"
         | "Europe/Riga" | "Europe/Kiev" | "Europe/Kyiv"
-        | "EET" | "Europe/Istanbul" => {
+        | "Europe/Istanbul" => {
             if vm_is_eu_dst(timestamp) { (3 * 3600, "EEST".to_string()) }
             else { (2 * 3600, "EET".to_string()) }
         }
+        // Standalone abbreviations: fixed offset, no DST.
+        "CET" => (3600, "CET".to_string()),
+        "MET" => (3600, "MET".to_string()),
+        "EST5EDT" => {
+            if vm_is_us_dst(timestamp, -5 * 3600) { (-4 * 3600, "EDT".to_string()) }
+            else { (-5 * 3600, "EST".to_string()) }
+        }
+        "CST6CDT" => {
+            if vm_is_us_dst(timestamp, -6 * 3600) { (-5 * 3600, "CDT".to_string()) }
+            else { (-6 * 3600, "CST".to_string()) }
+        }
+        "MST7MDT" => {
+            if vm_is_us_dst(timestamp, -7 * 3600) { (-6 * 3600, "MDT".to_string()) }
+            else { (-7 * 3600, "MST".to_string()) }
+        }
+        "PST8PDT" => {
+            if vm_is_us_dst(timestamp, -8 * 3600) { (-7 * 3600, "PDT".to_string()) }
+            else { (-8 * 3600, "PST".to_string()) }
+        }
+        "CEST" => (2 * 3600, "CEST".to_string()),
+        "EET" => (2 * 3600, "EET".to_string()),
+        "EEST" => (3 * 3600, "EEST".to_string()),
+        "WET" => (0, "WET".to_string()),
+        "WEST" => (3600, "WEST".to_string()),
+        "BST" => (3600, "BST".to_string()),
+        "MEZ" => (3600, "MEZ".to_string()),
+        "MESZ" => (2 * 3600, "MESZ".to_string()),
         "Europe/Moscow" | "Europe/Minsk" => (3 * 3600, "MSK".to_string()),
         "Asia/Dubai" => (4 * 3600, "GST".to_string()),
         "Asia/Karachi" => (5 * 3600, "PKT".to_string()),
