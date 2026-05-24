@@ -15515,11 +15515,18 @@ fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
-fn popen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let command = args.first().unwrap_or(&Value::Null).to_php_string();
     let mode = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"r"));
     let cmd_str = command.to_string_lossy();
     let mode_str = mode.to_string_lossy();
+    // Validate mode: PHP accepts only "r", "rb", "w", "wb".
+    if !matches!(mode_str.as_str(), "r" | "rb" | "w" | "wb") {
+        let msg = "popen(): Argument #2 ($mode) must be one of \"r\", \"rb\", \"w\", or \"wb\"".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     use std::process::{Command, Stdio};
     let child = if mode_str.contains('r') {
         Command::new("sh").arg("-c").arg(&*cmd_str).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()
