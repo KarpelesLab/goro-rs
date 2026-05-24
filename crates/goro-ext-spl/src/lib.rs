@@ -424,7 +424,57 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                 if use_keys {
                     match key {
                         Value::Long(n) => result.set(ArrayKey::Int(n), value),
-                        Value::String(s) => result.set(ArrayKey::String(s), value),
+                        Value::String(s) => {
+                            // PHP coerces numeric strings to int keys in array
+                            // context. Match the engine's behaviour.
+                            let key_bytes = s.as_bytes();
+                            let trimmed = std::str::from_utf8(key_bytes).ok().and_then(|t| t.parse::<i64>().ok());
+                            match trimmed {
+                                Some(n) if n.to_string().as_bytes() == key_bytes => {
+                                    result.set(ArrayKey::Int(n), value)
+                                }
+                                _ => result.set(ArrayKey::String(s), value),
+                            }
+                        }
+                        Value::Double(f) => {
+                            // PHP emits a deprecation notice for non-integer
+                            // float keys and truncates toward zero.
+                            if f.fract() != 0.0 {
+                                vm.emit_deprecated(&format!(
+                                    "Implicit conversion from float {} to int loses precision",
+                                    f
+                                ));
+                            }
+                            result.set(ArrayKey::Int(f as i64), value);
+                        }
+                        Value::True => result.set(ArrayKey::Int(1), value),
+                        Value::False => result.set(ArrayKey::Int(0), value),
+                        Value::Null => {
+                            vm.emit_deprecated("Using null as an array offset is deprecated, use an empty string instead");
+                            result.set(ArrayKey::String(PhpString::from_bytes(b"")), value);
+                        }
+                        Value::Array(_) => {
+                            // PHP throws TypeError "Cannot access offset of
+                            // type array on array".
+                            let line = vm.current_line;
+                            let exc = vm.create_exception(
+                                b"TypeError",
+                                "Cannot access offset of type array on array",
+                                line,
+                            );
+                            vm.current_exception = Some(exc);
+                            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                        }
+                        Value::Object(_) => {
+                            let line = vm.current_line;
+                            let exc = vm.create_exception(
+                                b"TypeError",
+                                "Cannot access offset of type object on array",
+                                line,
+                            );
+                            vm.current_exception = Some(exc);
+                            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                        }
                         _ => result.push(value),
                     }
                 } else {
