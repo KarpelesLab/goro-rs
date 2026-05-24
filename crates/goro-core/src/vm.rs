@@ -20323,6 +20323,49 @@ impl Vm {
                                         }
                                         b"reflectionextension" => {
                                             // ReflectionExtension::__construct(string $name)
+                                            // Validate argument count (must be exactly 1).
+                                            let user_args = call.args.len().saturating_sub(1);
+                                            if user_args != 1 {
+                                                drop(obj_mut);
+                                                let msg = format!("ReflectionExtension::__construct() expects exactly 1 argument, {} given", user_args);
+                                                let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                                    pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                } else {
+                                                    return Err(VmError {
+                                                        message: format!("Uncaught ArgumentCountError: {}", msg),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
+                                            // Validate type of the name argument (must be string).
+                                            let actual_value = match &call.args[1] {
+                                                Value::Reference(r) => r.borrow().clone(),
+                                                v => v.clone(),
+                                            };
+                                            if !matches!(&actual_value, Value::String(_)) {
+                                                drop(obj_mut);
+                                                let type_name = Self::value_type_name(&actual_value);
+                                                let msg = format!(
+                                                    "ReflectionExtension::__construct(): Argument #1 ($name) must be of type string, {} given",
+                                                    type_name
+                                                );
+                                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                                    pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                } else {
+                                                    return Err(VmError {
+                                                        message: format!("Uncaught TypeError: {}", msg),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
                                             if call.args.len() > 1 {
                                                 let raw = call.args[1].to_php_string().to_string_lossy();
                                                 // Canonicalize known extension names; otherwise pass through unchanged.
