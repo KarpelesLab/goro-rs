@@ -23777,6 +23777,18 @@ impl Vm {
                                 op.line,
                             );
                         }
+                        if name_bytes == b"FILE_BINARY" {
+                            self.emit_deprecated_at(
+                                "Constant FILE_BINARY is deprecated since 8.1, as the constant has no effect",
+                                op.line,
+                            );
+                        }
+                        if name_bytes == b"FILE_TEXT" {
+                            self.emit_deprecated_at(
+                                "Constant FILE_TEXT is deprecated since 8.1, as the constant has no effect",
+                                op.line,
+                            );
+                        }
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
                         // PHP 8: undefined constants are fatal errors

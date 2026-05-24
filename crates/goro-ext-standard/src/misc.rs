@@ -6309,7 +6309,9 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // If $data is a resource, it should be a stream resource.
     if let Value::Resource(rid) = data_val {
         let is_open_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(rid));
-        if !is_open_stream {
+        let rtype = goro_core::value::resource_type_of(*rid);
+        let is_stream = is_open_stream || rtype.as_deref() == Some(b"stream".as_ref());
+        if !is_stream {
             let msg = "file_put_contents(): supplied resource is not a valid stream resource".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -9117,6 +9119,13 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 Ok(n) => {
                     buf.truncate(n);
+                    // PHP marks EOF when fewer bytes than requested are read
+                    // from a regular file (matches PHP's feof() semantics).
+                    // We skip this for SpecialStream variants (memory/temp/
+                    // stdout/stderr/output) where short reads don't imply EOF.
+                    if n < length && matches!(fh.special, SpecialStream::None) {
+                        fh.eof = true;
+                    }
                     Ok(Value::String(PhpString::from_vec(buf)))
                 }
                 Err(e) => {
@@ -11262,11 +11271,20 @@ fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let b = s.as_bytes();
         if b.is_empty() { b'"' } else { b[0] }
     }).unwrap_or(b'"');
-    let escape = args.get(4).map(|v| {
+    let escape = if args.len() < 5 {
+        // PHP 8.4+ deprecation: implicit default escape will change.
+        let line = vm.current_line;
+        vm.emit_deprecated_at(
+            "fgetcsv(): the $escape parameter must be provided as its default value will change",
+            line,
+        );
+        Some(b'\\')
+    } else {
+        let v = &args[4];
         let s = v.to_php_string();
         let b = s.as_bytes();
         if b.is_empty() { None } else { Some(b[0]) }
-    }).unwrap_or(Some(b'\\'));
+    };
 
     // Read a line from the file
     let line = FILE_HANDLES.with(|handles| {
@@ -11310,6 +11328,12 @@ fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match line {
         None => Ok(Value::False),
         Some(line_bytes) => {
+            // PHP fgetcsv on a blank line returns `array(1) { [0]=> NULL }`.
+            if line_bytes.is_empty() {
+                let mut arr = PhpArray::new();
+                arr.push(Value::Null);
+                return Ok(Value::Array(Rc::new(RefCell::new(arr))));
+            }
             // Parse CSV line
             let line_str = String::from_utf8_lossy(&line_bytes);
             let csv_args = vec![
@@ -11651,10 +11675,9 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    // Valid flags: FILE_USE_INCLUDE_PATH (1) | FILE_IGNORE_NEW_LINES (2) |
-    // FILE_SKIP_EMPTY_LINES (4) | FILE_APPEND/FILE_NO_DEFAULT_CONTEXT (8/16).
-    // For file(): only 1, 2, 4 are valid. Throw ValueError on any other bits.
-    if flags & !7 != 0 {
+    // Valid flags for file(): FILE_USE_INCLUDE_PATH (1) | FILE_IGNORE_NEW_LINES (2)
+    // | FILE_SKIP_EMPTY_LINES (4) | FILE_NO_DEFAULT_CONTEXT (16) = 0x17.
+    if flags & !0x17 != 0 {
         let msg = "file(): Argument #2 ($flags) must be a valid flag value".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
@@ -12924,7 +12947,7 @@ fn chgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-fn fputcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let fields = match args.get(1) {
         Some(Value::Array(arr)) => arr.clone(),
@@ -12940,11 +12963,19 @@ fn fputcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let b = s.as_bytes();
         if b.is_empty() { b'"' } else { b[0] }
     }).unwrap_or(b'"');
-    let escape: Option<u8> = args.get(4).map(|v| {
+    let escape: Option<u8> = if args.len() < 5 {
+        let line = vm.current_line;
+        vm.emit_deprecated_at(
+            "fputcsv(): the $escape parameter must be provided as its default value will change",
+            line,
+        );
+        Some(b'\\')
+    } else {
+        let v = &args[4];
         let s = v.to_php_string();
         let b = s.as_bytes();
         if b.is_empty() { None } else { Some(b[0]) }
-    }).unwrap_or(Some(b'\\'));
+    };
 
     let mut line = String::new();
     let arr = fields.borrow();
@@ -14863,7 +14894,7 @@ fn disk_space_impl(vm: &mut Vm, args: &[Value], fn_name: &str, total: bool, call
     }
 }
 fn disk_free_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_free_space", false, "disk_free_space") }
-fn diskfreespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_free_space", false, "diskfreespace") }
+fn diskfreespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "diskfreespace", false, "diskfreespace") }
 fn disk_total_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_total_space", true, "disk_total_space") }
 fn get_resources_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
 fn closelog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
