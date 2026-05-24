@@ -1964,10 +1964,15 @@ fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_search(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_search(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let needle = args.first().unwrap_or(&Value::Null);
     let strict = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
-    if let Some(Value::Array(arr)) = args.get(1) {
+    let haystack_raw = args.get(1).cloned().unwrap_or(Value::Null);
+    let haystack = match &haystack_raw {
+        Value::Reference(r) => r.borrow().clone(),
+        v => v.clone(),
+    };
+    if let Value::Array(arr) = &haystack {
         let arr = arr.borrow();
         for (key, val) in arr.iter() {
             let matches = if strict {
@@ -1982,8 +1987,14 @@ fn array_search(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 });
             }
         }
+        return Ok(Value::False);
     }
-    Ok(Value::False)
+    // Throw TypeError for non-array haystack
+    let type_name = Vm::value_type_name(&haystack);
+    let msg = format!("array_search(): Argument #2 ($haystack) must be of type array, {} given", type_name);
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError { message: msg, line: vm.current_line })
 }
 
 fn array_key_exists(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2005,9 +2016,14 @@ fn array_key_exists(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn in_array(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let needle = args.first().unwrap_or(&Value::Null);
-    if let Some(Value::Array(arr)) = args.get(1) {
+    let haystack_raw = args.get(1).cloned().unwrap_or(Value::Null);
+    let haystack = match &haystack_raw {
+        Value::Reference(r) => r.borrow().clone(),
+        v => v.clone(),
+    };
+    if let Value::Array(arr) = &haystack {
         let strict = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
         let arr = arr.borrow();
         for (_, val) in arr.iter() {
@@ -2019,8 +2035,14 @@ fn in_array(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Ok(Value::True);
             }
         }
+        return Ok(Value::False);
     }
-    Ok(Value::False)
+    // Throw TypeError for non-array haystack
+    let type_name = Vm::value_type_name(&haystack);
+    let msg = format!("in_array(): Argument #2 ($haystack) must be of type array, {} given", type_name);
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError { message: msg, line: vm.current_line })
 }
 
 fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), VmError> {
@@ -3365,23 +3387,22 @@ fn range_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .unwrap_or(1.0)
             .max(f64::EPSILON);
         let mut result = PhpArray::new();
+        // Use iteration counter to avoid accumulated floating point errors.
+        // PHP computes count = floor((|end - start|) / step + EPSILON) + 1
+        let diff = (end - start).abs();
+        let count = (diff / step + 1e-9).floor() as i64 + 1;
+        let count = count.min(10_000_001);
         if start <= end {
-            let mut v = start;
-            while v <= end + f64::EPSILON {
+            for i in 0..count {
+                let v = start + (i as f64) * step;
+                if v > end + 1e-9 { break; }
                 result.push(Value::Double(v));
-                v += step;
-                if result.len() > 10000 {
-                    break;
-                }
             }
         } else {
-            let mut v = start;
-            while v >= end - f64::EPSILON {
+            for i in 0..count {
+                let v = start - (i as f64) * step;
+                if v < end - 1e-9 { break; }
                 result.push(Value::Double(v));
-                v -= step;
-                if result.len() > 10000 {
-                    break;
-                }
             }
         }
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
