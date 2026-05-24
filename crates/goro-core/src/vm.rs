@@ -10013,6 +10013,72 @@ impl Vm {
                             };
                             Some(Value::Long(n))
                         }
+                        b"__unserialize" => {
+                            // PHP 8.5: __unserialize receives [props_array, internal_array].
+                            // internal_array has 'flags' and 'heap_elements' keys.
+                            // Flags are validated: (flags & EXTR_BOTH) must be non-zero,
+                            // and excess bits are masked.
+                            let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            if let Value::Array(top) = &data {
+                                let top_b = top.borrow();
+                                let internal = top_b.get(&ArrayKey::Int(1)).cloned();
+                                drop(top_b);
+                                if let Some(Value::Array(internal_arr)) = internal {
+                                    let internal_b = internal_arr.borrow();
+                                    let flags_v = internal_b
+                                        .get(&ArrayKey::String(PhpString::from_bytes(b"flags")))
+                                        .cloned()
+                                        .unwrap_or(Value::Long(1));
+                                    let flags = flags_v.to_long();
+                                    // EXTR_BOTH = 3. Mask flags & 3; if result is 0, fail.
+                                    let masked = flags & 3;
+                                    if masked == 0 {
+                                        drop(internal_b);
+                                        let class_canonical = self.builtin_canonical_name(class);
+                                        let msg = format!(
+                                            "Invalid serialization data for {} object",
+                                            class_canonical
+                                        );
+                                        let exc = self.create_exception(
+                                            b"Exception",
+                                            &msg,
+                                            self.current_line,
+                                        );
+                                        self.current_exception = Some(exc);
+                                        return Some(Value::Null);
+                                    }
+                                    let elements = internal_b
+                                        .get(&ArrayKey::String(PhpString::from_bytes(b"heap_elements")))
+                                        .cloned();
+                                    drop(internal_b);
+                                    let mut ob = obj.borrow_mut();
+                                    ob.set_property(b"__spl_extract_flags".to_vec(), Value::Long(masked));
+                                    // heap_elements is an indexed array of {data, priority} pairs.
+                                    let mut new_arr = PhpArray::new();
+                                    let mut new_pri = PhpArray::new();
+                                    if let Some(Value::Array(elems)) = elements {
+                                        for (_k, v) in elems.borrow().iter() {
+                                            if let Value::Array(pair) = v {
+                                                let p = pair.borrow();
+                                                let d = p
+                                                    .get(&ArrayKey::String(PhpString::from_bytes(b"data")))
+                                                    .cloned()
+                                                    .unwrap_or(Value::Null);
+                                                let pr = p
+                                                    .get(&ArrayKey::String(PhpString::from_bytes(b"priority")))
+                                                    .cloned()
+                                                    .unwrap_or(Value::Null);
+                                                new_arr.push(d);
+                                                new_pri.push(pr);
+                                            }
+                                        }
+                                    }
+                                    ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(new_arr))));
+                                    ob.set_property(b"__spl_priorities".to_vec(), Value::Array(Rc::new(RefCell::new(new_pri))));
+                                }
+                            }
+                            Some(Value::Null)
+                        }
                         _ => None,
                     }
                 }
