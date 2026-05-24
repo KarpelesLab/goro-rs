@@ -279,6 +279,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"fseek", fseek_fn);
     vm.register_function(b"ftell", ftell_fn);
     vm.register_function(b"fflush", fflush_fn);
+    vm.register_function(b"fsync", fsync_fn);
+    vm.register_function(b"fdatasync", fdatasync_fn);
     vm.register_function(b"unlink", unlink_fn);
     vm.register_function(b"rename", rename_fn);
     vm.register_function(b"copy", copy_fn);
@@ -6014,6 +6016,13 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let body = get_request_body();
         return Ok(Value::String(PhpString::from_vec(body)));
     }
+    // php://stdin / php://stdout / php://stderr / php://memory / php://temp:
+    // file_get_contents on these should return false (no warning) or empty.
+    if path_str == "php://stdin" || path_str == "php://stdout" || path_str == "php://stderr"
+        || path_str == "php://memory" || path_str.starts_with("php://temp")
+    {
+        return Ok(Value::False);
+    }
     // http:// and https:// via the built-in minimal HTTP client.
     if path_str.starts_with("http://") || path_str.starts_with("https://") {
         let mut method = "GET".to_string();
@@ -6056,6 +6065,16 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if !vm.check_open_basedir("file_get_contents", &path_str) {
             return Ok(Value::False);
         }
+    }
+    // If path is an existing directory, emit a notice rather than failing
+    // silently. PHP says: "Read of N bytes failed with errno=21 Is a directory".
+    if !path_str.contains("://") && std::path::Path::new(&*path_str).is_dir() {
+        let line = vm.current_line;
+        vm.emit_notice_at(
+            "file_get_contents(): Read of 8192 bytes failed with errno=21 Is a directory",
+            line,
+        );
+        return Ok(Value::String(PhpString::empty()));
     }
     match read_path_with_wrappers(&path_str) {
         Ok(data) => {
@@ -6287,6 +6306,26 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     let data_val = args.get(1).unwrap_or(&Value::Null);
+    // If $data is a resource, it should be a stream resource.
+    if let Value::Resource(rid) = data_val {
+        let is_open_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(rid));
+        if !is_open_stream {
+            let msg = "file_put_contents(): supplied resource is not a valid stream resource".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
+    // If $context (arg 3) is a resource, it should be a valid Stream-Context.
+    if let Some(Value::Resource(rid)) = args.get(3) {
+        let bytes = goro_core::value::resource_type_of(*rid);
+        if bytes.as_deref() != Some(b"stream-context".as_ref()) {
+            let msg = "file_put_contents(): supplied resource is not a valid Stream-Context resource".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
     let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let append = flags & 8 != 0; // FILE_APPEND
     let lock_ex = flags & 2 != 0; // LOCK_EX
@@ -9396,6 +9435,61 @@ fn fflush_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
+fn fsync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fsync")?;
+    let result = FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            // Special streams (stdout/stderr/memory/temp) can't fsync
+            if !matches!(fh.special, SpecialStream::None) {
+                return Err(());
+            }
+            match fh.file.sync_all() {
+                Ok(_) => Ok(true),
+                Err(_) => Ok(false),
+            }
+        } else {
+            Err(())
+        }
+    });
+    match result {
+        Ok(true) => Ok(Value::True),
+        Ok(false) => Ok(Value::False),
+        Err(()) => {
+            vm.emit_warning("fsync(): Can't fsync this stream!");
+            Ok(Value::False)
+        }
+    }
+}
+
+fn fdatasync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fdatasync")?;
+    let result = FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            if !matches!(fh.special, SpecialStream::None) {
+                return Err(());
+            }
+            match fh.file.sync_data() {
+                Ok(_) => Ok(true),
+                Err(_) => Ok(false),
+            }
+        } else {
+            Err(())
+        }
+    });
+    match result {
+        Ok(true) => Ok(Value::True),
+        Ok(false) => Ok(Value::False),
+        Err(()) => {
+            vm.emit_warning("fdatasync(): Can't fsync this stream!");
+            Ok(Value::False)
+        }
+    }
+}
+
 fn unlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     match std::fs::remove_file(&filename) {
@@ -9424,6 +9518,13 @@ fn copy_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
+    // Null byte check (PHP raises ValueError as TypeError message)
+    if path_v.as_bytes().contains(&0) {
+        let msg = "mkdir(): Argument #1 ($directory) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let path = path_v.to_string_lossy().to_string();
     let recursive = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     let result = if recursive {
@@ -9443,6 +9544,12 @@ fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn rmdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
+    if path_v.as_bytes().contains(&0) {
+        let msg = "rmdir(): Argument #1 ($directory) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let path = path_v.to_string_lossy().to_string();
     // Support file:// scheme for tests.
     let path = if let Some(rest) = path.strip_prefix("file://") {
@@ -11246,9 +11353,8 @@ fn filetype_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Use symlink_metadata so that symlinks are reported as "link" (not whatever they point to)
     let md = match std::fs::symlink_metadata(p) {
         Ok(m) => m,
-        Err(e) => {
-            let msg = strip_os_error(&e.to_string());
-            vm.emit_warning(&format!("filetype(): Lstat failed for {}: {}", path_str, msg));
+        Err(_) => {
+            vm.emit_warning(&format!("filetype(): Lstat failed for {}", path_str));
             return Ok(Value::False);
         }
     };
@@ -11446,6 +11552,12 @@ fn link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn unlink_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if path.as_bytes().contains(&0) {
+        let msg = "unlink(): Argument #1 ($filename) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let path_str = path.to_string_lossy();
     match std::fs::remove_file(&*path_str) {
         Ok(_) => Ok(Value::True),
@@ -11523,12 +11635,22 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    // Valid flags: FILE_USE_INCLUDE_PATH (1) | FILE_IGNORE_NEW_LINES (2) |
+    // FILE_SKIP_EMPTY_LINES (4) | FILE_APPEND/FILE_NO_DEFAULT_CONTEXT (8/16).
+    // For file(): only 1, 2, 4 are valid. Throw ValueError on any other bits.
+    if flags & !7 != 0 {
+        let msg = "file(): Argument #2 ($flags) must be a valid flag value".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let ignore_new_lines = flags & 2 != 0; // FILE_IGNORE_NEW_LINES
     let skip_empty = flags & 4 != 0; // FILE_SKIP_EMPTY_LINES
-    match read_path_with_wrappers(&path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    match read_path_with_wrappers(&path_str) {
         Ok(content) => {
             let mut result = PhpArray::new();
             if content.is_empty() {
@@ -11568,7 +11690,10 @@ fn file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!("file({}): Failed to open stream: No such file or directory", path_str));
+            Ok(Value::False)
+        }
     }
 }
 
