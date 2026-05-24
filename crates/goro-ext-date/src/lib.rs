@@ -2105,6 +2105,28 @@ pub fn parse_datetime_string(input: &str, now: i64) -> Option<i64> {
         return Some(now);
     }
 
+    // Handle "<date> noon" / "<date> midnight" by splitting the trailing keyword
+    // off and applying it as a time-of-day on the parsed date.
+    {
+        let lower = s.to_lowercase();
+        let (kw, tod_secs) = if lower.ends_with(" noon") {
+            (" noon", 12 * 3600i64)
+        } else if lower.ends_with(" midnight") {
+            (" midnight", 0i64)
+        } else {
+            ("", -1i64)
+        };
+        if !kw.is_empty() {
+            let date_part = &s[..s.len() - kw.len()];
+            if let Some(date_ts) = try_parse_absolute(date_part)
+                .or_else(|| try_parse_textual_date(date_part))
+            {
+                let day = if date_ts >= 0 { date_ts / 86400 } else { (date_ts - 86399) / 86400 };
+                return Some(day * 86400 + tod_secs);
+            }
+        }
+    }
+
     // Try absolute date formats first
     if let Some(ts) = try_parse_absolute(s) {
         return Some(ts);
@@ -3645,6 +3667,13 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
 fn timezone_open_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let tz_str = args.first().unwrap_or(&Value::Null).to_php_string();
     let tz_bytes = tz_str.as_bytes();
+    // PHP rejects strings containing NUL bytes before validating the timezone.
+    if tz_bytes.contains(&0u8) {
+        let msg = "timezone_open(): Argument #1 ($timezone) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let tz_name = String::from_utf8_lossy(tz_bytes).to_string();
 
     // Validate timezone format/identity

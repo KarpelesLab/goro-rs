@@ -5139,15 +5139,39 @@ impl Vm {
                     b"__serialize" => {
                         let ob = obj.borrow();
                         let mut arr = PhpArray::new();
-                        for k in [b"y" as &[u8], b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days", b"from_string"] {
-                            arr.set(ArrayKey::String(PhpString::from_bytes(k)), ob.get_property(k));
-                        }
-                        // Append user-defined properties.
-                        let std_props: [&[u8]; 10] = [b"y", b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days", b"from_string"];
-                        for (name, val) in ob.properties.iter() {
-                            if name.starts_with(b"__") { continue; }
-                            if std_props.iter().any(|k| k == &name.as_slice()) { continue; }
-                            arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                        let from_string_val = ob.get_property(b"from_string");
+                        let is_from_string = matches!(from_string_val, Value::True);
+                        if is_from_string {
+                            // For DateInterval::createFromDateString(), PHP only serializes
+                            // from_string + date_string (and any user-defined extra props).
+                            arr.set(
+                                ArrayKey::String(PhpString::from_bytes(b"from_string")),
+                                from_string_val,
+                            );
+                            arr.set(
+                                ArrayKey::String(PhpString::from_bytes(b"date_string")),
+                                ob.get_property(b"date_string"),
+                            );
+                            let std_props: [&[u8]; 2] = [b"from_string", b"date_string"];
+                            for (name, val) in ob.properties.iter() {
+                                if name.starts_with(b"__") { continue; }
+                                if std_props.iter().any(|k| k == &name.as_slice()) { continue; }
+                                arr.set(
+                                    ArrayKey::String(PhpString::from_vec(name.clone())),
+                                    val.clone(),
+                                );
+                            }
+                        } else {
+                            for k in [b"y" as &[u8], b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days", b"from_string"] {
+                                arr.set(ArrayKey::String(PhpString::from_bytes(k)), ob.get_property(k));
+                            }
+                            // Append user-defined properties.
+                            let std_props: [&[u8]; 10] = [b"y", b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days", b"from_string"];
+                            for (name, val) in ob.properties.iter() {
+                                if name.starts_with(b"__") { continue; }
+                                if std_props.iter().any(|k| k == &name.as_slice()) { continue; }
+                                arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                            }
                         }
                         Some(Value::Array(Rc::new(RefCell::new(arr))))
                     }
@@ -10259,6 +10283,7 @@ impl Vm {
                             let ob = obj.borrow();
                             let ts = ob.get_property(b"__timestamp").to_long();
                             let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+                            let src_tz_type = ob.get_property(b"timezone_type").to_long();
                             drop(ob);
                             let new_ts = if let Value::Object(iv) = &interval {
                                 let iv = iv.borrow();
@@ -10302,7 +10327,8 @@ impl Vm {
                                 let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, new_ts);
                                 let date_str = Self::format_utc_datetime(new_ts + offset);
                                 new_obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                                let tz_type_out = if src_tz_type != 0 { src_tz_type } else { 3 };
+                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(tz_type_out));
                                 new_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
@@ -10321,6 +10347,7 @@ impl Vm {
                             let ob = obj.borrow();
                             let ts = ob.get_property(b"__timestamp").to_long();
                             let tz = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+                            let src_tz_type = ob.get_property(b"timezone_type").to_long();
                             drop(ob);
                             let new_ts = if let Value::Object(iv) = &interval {
                                 let iv = iv.borrow();
@@ -10363,7 +10390,8 @@ impl Vm {
                                 let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, new_ts);
                                 let date_str = Self::format_utc_datetime(new_ts + offset);
                                 new_obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
+                                let tz_type_out = if src_tz_type != 0 { src_tz_type } else { 3 };
+                                new_obj.set_property(b"timezone_type".to_vec(), Value::Long(tz_type_out));
                                 new_obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
                                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
                             } else {
@@ -19260,7 +19288,22 @@ impl Vm {
                                                 }
                                             }
                                             if call.args.len() > 1 {
-                                                let tz = call.args[1].to_php_string().to_string_lossy();
+                                                // Reject NUL bytes before format validation (PHP behavior).
+                                                let tz_php = call.args[1].to_php_string();
+                                                let tz_bytes = tz_php.as_bytes();
+                                                if tz_bytes.contains(&0u8) {
+                                                    drop(obj_mut);
+                                                    let err_msg = "DateTimeZone::__construct(): Argument #1 ($timezone) must not contain any null bytes".to_string();
+                                                    let exc = self.create_exception(b"ValueError", &err_msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                                        ip = catch_target as usize;
+                                                        continue;
+                                                    } else {
+                                                        return Err(VmError { message: format!("Uncaught ValueError: {}", err_msg), line: op.line });
+                                                    }
+                                                }
+                                                let tz = tz_php.to_string_lossy();
                                                 if !vm_is_valid_timezone(&tz) {
                                                     drop(obj_mut);
                                                     let err_msg = format!("DateTimeZone::__construct(): Argument #1 ($timezone) must be a valid timezone string, \"{}\" given", tz);
