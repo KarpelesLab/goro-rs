@@ -6163,43 +6163,11 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // through include_path entries, then fall back to the script's directory.
     let path = {
         let path_str = path.to_string_lossy();
-        if use_include_path
-            && !path_str.contains("://")
-            && !path_str.starts_with('/')
-            && !path_str.starts_with('.')
-        {
-            let inc = vm.constants.get(b"include_path".as_ref())
-                .map(|v| v.to_php_string().to_string_lossy())
-                .unwrap_or_else(|| ".".to_string());
-            let mut found: Option<String> = None;
-            for entry in inc.split(':') {
-                let candidate = if entry.is_empty() || entry == "." {
-                    path_str.clone()
-                } else {
-                    format!("{}/{}", entry.trim_end_matches('/'), path_str)
-                };
-                if std::fs::metadata(&candidate).is_ok() {
-                    found = Some(candidate);
-                    break;
-                }
-            }
-            // Fall back to the directory of the executing script.
-            if found.is_none() {
-                let script = vm.current_file.clone();
-                if let Some(parent) = std::path::Path::new(&script).parent() {
-                    let candidate = parent.join(&*path_str);
-                    if candidate.exists() {
-                        found = Some(candidate.to_string_lossy().to_string());
-                    }
-                }
-            }
-            if let Some(p) = found {
-                PhpString::from_string(p)
-            } else {
-                path
-            }
-        } else {
+        let resolved = resolve_with_include_path(vm, &path_str, use_include_path);
+        if resolved == path_str {
             path
+        } else {
+            PhpString::from_string(resolved)
         }
     };
 
@@ -9374,7 +9342,11 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .unwrap_or_else(|| ".".to_string());
         let mut found: Option<String> = None;
         for entry in inc.split(':') {
-            let candidate = if entry.is_empty() || entry == "." {
+            // Skip empty entries (PHP does not treat empty as ".").
+            if entry.is_empty() {
+                continue;
+            }
+            let candidate = if entry == "." {
                 filename.to_string()
             } else {
                 format!("{}/{}", entry.trim_end_matches('/'), filename)
@@ -12156,7 +12128,9 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });
     }
-    match read_path_with_wrappers(&path_str) {
+    let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let resolved = resolve_with_include_path(vm, &path_str, use_include_path);
+    match read_path_with_wrappers(&resolved) {
         Ok(data) => {
             let len = data.len();
             vm.write_output(&data);
@@ -12172,6 +12146,43 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
+fn resolve_with_include_path(vm: &Vm, filename: &str, use_include_path: bool) -> String {
+    if !use_include_path
+        || filename.contains("://")
+        || filename.starts_with('/')
+        || filename.starts_with("./")
+        || filename.starts_with("../")
+    {
+        return filename.to_string();
+    }
+    let inc = vm
+        .constants
+        .get(b"include_path".as_ref())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| ".".to_string());
+    for entry in inc.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let candidate = if entry == "." {
+            filename.to_string()
+        } else {
+            format!("{}/{}", entry.trim_end_matches('/'), filename)
+        };
+        if std::fs::metadata(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+    let script = vm.current_file.clone();
+    if let Some(parent) = std::path::Path::new(&script).parent() {
+        let candidate = parent.join(filename);
+        if candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    filename.to_string()
+}
+
 fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
@@ -12185,7 +12196,9 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let ignore_new_lines = flags & 2 != 0; // FILE_IGNORE_NEW_LINES
     let skip_empty = flags & 4 != 0; // FILE_SKIP_EMPTY_LINES
+    let use_inc = flags & 1 != 0; // FILE_USE_INCLUDE_PATH
     let path_str = path.to_string_lossy();
+    let path_str = resolve_with_include_path(vm, &path_str, use_inc);
     match read_path_with_wrappers(&path_str) {
         Ok(content) => {
             let mut result = PhpArray::new();
