@@ -1986,12 +1986,24 @@ impl Vm {
     /// Used by call paths (e.g. call_user_func) that don't go through the main DoFCall site
     /// at vm.rs:18723. `fallback_name` is used when display_name is empty.
     pub fn check_user_function_deprecation(&mut self, op_array: &crate::opcode::OpArray, fallback_name: &str, line: u32) {
+        self.check_user_function_deprecation_named(op_array, fallback_name, line, false);
+    }
+
+    /// Like `check_user_function_deprecation` but always uses `fallback_name` (ignoring op_array.display_name).
+    /// Used by magic __call/__callStatic dispatch which wants to render the *called* method name.
+    pub fn check_user_function_deprecation_named(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        fallback_name: &str,
+        line: u32,
+        force_fallback: bool,
+    ) {
         if op_array.attributes.is_empty() {
             return;
         }
         let attrs = op_array.attributes.clone();
         if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
-            let display = if !op_array.display_name.is_empty() {
+            let display = if !force_fallback && !op_array.display_name.is_empty() {
                 String::from_utf8_lossy(&op_array.display_name).into_owned()
             } else {
                 fallback_name.to_string()
@@ -16571,9 +16583,13 @@ impl Vm {
                             // Register the __invoke method in user_functions so DoFCall can find it
                             if let Some(class) = self.classes.get(&class_lower) {
                                 if let Some(method) = class.get_method(b"__invoke") {
+                                    let mut op_array = method.op_array.clone();
+                                    if op_array.attributes.is_empty() && !method.attributes.is_empty() {
+                                        op_array.attributes = method.attributes.clone();
+                                    }
                                     self.user_functions.insert(
                                         func_name.to_ascii_lowercase(),
-                                        method.op_array.clone(),
+                                        op_array,
                                     );
                                 }
                             }
@@ -18796,11 +18812,28 @@ impl Vm {
                                 });
                             }
                             if let Some(custom_msg) = dep_msg {
-                                let fn_display = if !user_fn.display_name.is_empty() {
+                                let mut fn_display = if !user_fn.display_name.is_empty() {
                                     String::from_utf8_lossy(&user_fn.display_name).into_owned()
                                 } else {
                                     call.name.to_string_lossy()
                                 };
+                                // For magic __call/__callStatic dispatch, the deprecation banner
+                                // should name the originally-invoked method, not __call itself.
+                                // The dispatcher places the requested method name in args[1] (for __call)
+                                // or args[0] (for __callStatic).
+                                if func_name_lower.ends_with(b"::__call") {
+                                    if let Some(Value::String(s)) = call.args.get(1) {
+                                        if let Some(sep) = fn_display.rfind("::") {
+                                            fn_display = format!("{}::{}", &fn_display[..sep], s.to_string_lossy());
+                                        }
+                                    }
+                                } else if func_name_lower.ends_with(b"::__callstatic") {
+                                    if let Some(Value::String(s)) = call.args.get(0) {
+                                        if let Some(sep) = fn_display.rfind("::") {
+                                            fn_display = format!("{}::{}", &fn_display[..sep], s.to_string_lossy());
+                                        }
+                                    }
+                                }
                                 let prefix = if fn_display.contains("::") && !fn_display.starts_with("{closure:") {
                                     format!("Method {}()", fn_display)
                                 } else {
@@ -21270,14 +21303,32 @@ impl Vm {
                                     // Extract magic method op_arrays: prefer current scope's __call over target class's
                                     let magic_call = scope_class_for_call.as_ref()
                                         .and_then(|scope| self.classes.get(scope))
-                                        .and_then(|cd| cd.get_method(b"__call").map(|m| (m.op_array.clone(), m.declaring_class.clone())))
+                                        .and_then(|cd| cd.get_method(b"__call").map(|m| {
+                                            let mut op = m.op_array.clone();
+                                            if op.attributes.is_empty() && !m.attributes.is_empty() {
+                                                op.attributes = m.attributes.clone();
+                                            }
+                                            (op, m.declaring_class.clone())
+                                        }))
                                         .or_else(|| {
                                             self.classes.get(&class_lower).and_then(|cd| {
-                                                cd.get_method(b"__call").map(|m| (m.op_array.clone(), m.declaring_class.clone()))
+                                                cd.get_method(b"__call").map(|m| {
+                                                    let mut op = m.op_array.clone();
+                                                    if op.attributes.is_empty() && !m.attributes.is_empty() {
+                                                        op.attributes = m.attributes.clone();
+                                                    }
+                                                    (op, m.declaring_class.clone())
+                                                })
                                             })
                                         });
                                     let magic_callstatic = self.classes.get(&class_lower).and_then(|cd| {
-                                        cd.get_method(b"__callstatic").map(|m| (m.op_array.clone(), m.declaring_class.clone()))
+                                        cd.get_method(b"__callstatic").map(|m| {
+                                            let mut op = m.op_array.clone();
+                                            if op.attributes.is_empty() && !m.attributes.is_empty() {
+                                                op.attributes = m.attributes.clone();
+                                            }
+                                            (op, m.declaring_class.clone())
+                                        })
                                     });
                                     let class_found = self.classes.contains_key(&class_lower);
                                     if class_found {
@@ -21314,6 +21365,9 @@ impl Vm {
                                             });
                                         if in_instance_context {
                                             if let Some((call_op, declaring_class)) = magic_call {
+                                                // Deprecation message uses the original called method name
+                                                let display_fallback = format!("{}::{}", String::from_utf8_lossy(class_part), String::from_utf8_lossy(method_part));
+                                                self.check_user_function_deprecation_named(&call_op, &display_fallback, op.line, true);
                                                 let mut fn_cvs =
                                                     vec![Value::Undef; call_op.cv_names.len()];
                                                 // __call($name, $arguments): CV[0]=$this, CV[1]=$name, CV[2]=$args
@@ -21351,6 +21405,9 @@ impl Vm {
                                         }
                                         if !handled {
                                             if let Some((call_static_op, declaring_class)) = magic_callstatic {
+                                                // Deprecation message uses the original called method name
+                                                let display_fallback = format!("{}::{}", String::from_utf8_lossy(class_part), String::from_utf8_lossy(method_part));
+                                                self.check_user_function_deprecation_named(&call_static_op, &display_fallback, op.line, true);
                                                 let mut fn_cvs =
                                                     vec![Value::Undef; call_static_op.cv_names.len()];
                                                 // __callStatic($name, $arguments)
@@ -27581,17 +27638,15 @@ impl Vm {
                                         line: op.line,
                                     });
                                 }
-                                // Check for #[Deprecated] attribute on the trait
-                                let has_deprecated = trait_def.attributes.iter().any(|a| {
-                                    a.name.eq_ignore_ascii_case(b"Deprecated")
-                                });
-                                if has_deprecated {
-                                    let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
-                                    let class_display = String::from_utf8_lossy(&class.name).to_string();
-                                    self.emit_deprecated_at(
-                                        &format!("Trait {} used by {} is deprecated", trait_display, class_display),
-                                        op.line,
-                                    );
+                                // Check for #[Deprecated] attribute on the trait — emit with
+                                // message/since suffix when present (handled via format_deprecated_message).
+                                let trait_attrs = trait_def.attributes.clone();
+                                let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
+                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                if let Some(custom_msg) = self.get_deprecated_message(&trait_attrs) {
+                                    let prefix = format!("Trait {} used by {}", trait_display, class_display);
+                                    let msg = self.format_deprecated_message(&prefix, &custom_msg);
+                                    self.emit_user_deprecated_at(&msg, op.line);
                                 }
                             } else {
                                 // PHP 8 raises an Error (catchable) with the format:
@@ -31539,9 +31594,13 @@ impl Vm {
                                     let mut func_name = class_name_orig.clone();
                                     func_name.extend_from_slice(b"::__call");
                                     let call_name = PhpString::from_vec(func_name.clone());
+                                    let mut method_op_array = call_method.op_array.clone();
+                                    if method_op_array.attributes.is_empty() && !call_method.attributes.is_empty() {
+                                        method_op_array.attributes = call_method.attributes.clone();
+                                    }
                                     self.user_functions.insert(
                                         func_name.to_ascii_lowercase(),
-                                        call_method.op_array.clone(),
+                                        method_op_array,
                                     );
 
                                     let method_name_val = Value::String(method_name.clone());
@@ -31580,9 +31639,13 @@ impl Vm {
                                 let mut func_name = class_name_orig.clone();
                                 func_name.extend_from_slice(b"::__call");
                                 let call_name = PhpString::from_vec(func_name.clone());
+                                let mut method_op_array = call_method.op_array.clone();
+                                if method_op_array.attributes.is_empty() && !call_method.attributes.is_empty() {
+                                    method_op_array.attributes = call_method.attributes.clone();
+                                }
                                 self.user_functions.insert(
                                     func_name.to_ascii_lowercase(),
-                                    call_method.op_array.clone(),
+                                    method_op_array,
                                 );
 
                                 // Build args array for __call($name, $args)
