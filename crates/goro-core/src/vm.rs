@@ -5026,8 +5026,8 @@ impl Vm {
                             return Some(ob.get_property(b"__regex_mode"));
                         }
                         b"setmode" | b"setflags" | b"setpregflags" => {
-                            // These are no-ops in basic implementation
-                            return Some(Value::Null);
+                            // Handled in handle_spl_docall where args are available.
+                            return None;
                         }
                         b"getflags" => {
                             let ob = obj.borrow();
@@ -7022,7 +7022,14 @@ impl Vm {
             b"rewind" => {
                 let ob = obj.borrow();
                 let inner = ob.get_property(b"__spl_inner");
+                let flags = ob.get_property(b"__spl_flags").to_long();
                 drop(ob);
+                let full_cache = (flags & 256) != 0;
+                // Reset full-cache storage so iterating twice doesn't pile up.
+                if full_cache {
+                    let mut ob = obj.borrow_mut();
+                    ob.set_property(b"__spl_cache".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                }
                 self.call_object_method(&inner, b"rewind", &[]);
                 // Cache the first value
                 let valid = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
@@ -7032,9 +7039,16 @@ impl Vm {
                     let current = self.call_object_method(&inner, b"current", &[]).unwrap_or(Value::Null);
                     let key = self.call_object_method(&inner, b"key", &[]).unwrap_or(Value::Null);
                     let mut ob = obj.borrow_mut();
-                    ob.set_property(b"__spl_cached_current".to_vec(), current);
-                    ob.set_property(b"__spl_cached_key".to_vec(), key);
+                    ob.set_property(b"__spl_cached_current".to_vec(), current.clone());
+                    ob.set_property(b"__spl_cached_key".to_vec(), key.clone());
                     ob.set_property(b"__spl_has_next".to_vec(), Value::True);
+                    if full_cache {
+                        let cache = ob.get_property(b"__spl_cache");
+                        if let Value::Array(a) = cache {
+                            let k = Self::value_to_array_key(key);
+                            a.borrow_mut().set(k, current);
+                        }
+                    }
                 } else {
                     ob.set_property(b"__spl_has_next".to_vec(), Value::False);
                 }
@@ -7056,16 +7070,25 @@ impl Vm {
             b"next" => {
                 let ob = obj.borrow();
                 let inner = ob.get_property(b"__spl_inner");
+                let flags = ob.get_property(b"__spl_flags").to_long();
                 drop(ob);
+                let full_cache = (flags & 256) != 0;
                 self.call_object_method(&inner, b"next", &[]);
                 let valid = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
                 if valid.is_truthy() {
                     let current = self.call_object_method(&inner, b"current", &[]).unwrap_or(Value::Null);
                     let key = self.call_object_method(&inner, b"key", &[]).unwrap_or(Value::Null);
                     let mut ob = obj.borrow_mut();
-                    ob.set_property(b"__spl_cached_current".to_vec(), current);
-                    ob.set_property(b"__spl_cached_key".to_vec(), key);
+                    ob.set_property(b"__spl_cached_current".to_vec(), current.clone());
+                    ob.set_property(b"__spl_cached_key".to_vec(), key.clone());
                     ob.set_property(b"__spl_has_next".to_vec(), Value::True);
+                    if full_cache {
+                        let cache = ob.get_property(b"__spl_cache");
+                        if let Value::Array(a) = cache {
+                            let k = Self::value_to_array_key(key);
+                            a.borrow_mut().set(k, current);
+                        }
+                    }
                 } else {
                     let mut ob = obj.borrow_mut();
                     ob.set_property(b"__spl_has_next".to_vec(), Value::False);
@@ -7084,11 +7107,34 @@ impl Vm {
             }
             b"count" => {
                 let ob = obj.borrow();
+                let flags = ob.get_property(b"__spl_flags").to_long();
+                if (flags & 256) == 0 {
+                    drop(ob);
+                    let exc = self.create_exception(b"BadMethodCallException", "CachingIterator does not use a full cache (see CachingIterator::__construct)", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let arr = ob.get_property(b"__spl_cache");
                 if let Value::Array(a) = arr {
                     Some(Value::Long(a.borrow().len() as i64))
                 } else {
                     Some(Value::Long(0))
+                }
+            }
+            b"getcache" => {
+                let ob = obj.borrow();
+                let flags = ob.get_property(b"__spl_flags").to_long();
+                if (flags & 256) == 0 {
+                    drop(ob);
+                    let exc = self.create_exception(b"BadMethodCallException", "CachingIterator does not use a full cache (see CachingIterator::__construct)", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                let arr = ob.get_property(b"__spl_cache");
+                if let Value::Array(_) = arr {
+                    Some(arr)
+                } else {
+                    Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
                 }
             }
             b"getflags" => {
@@ -8279,6 +8325,7 @@ impl Vm {
             b"multipleiterator" => matches!(method, b"attachiterator"),
             b"limititerator" => matches!(method, b"seek"),
             b"cachingiterator" | b"recursivecachingiterator" => matches!(method, b"setflags"),
+            b"regexiterator" | b"recursiveregexiterator" => matches!(method, b"setmode" | b"setflags" | b"setpregflags"),
             b"splfileobject" | b"spltempfileobject" => matches!(
                 method,
                 b"seek" | b"setflags" | b"setcsvcontrol" | b"setmaxlinelen"
@@ -10110,6 +10157,33 @@ impl Vm {
                                 new_arr.push(iter);
                                 obj.borrow_mut().set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(new_arr))));
                             }
+                            Some(Value::Null)
+                        }
+                        _ => None,
+                    }
+                }
+                b"regexiterator" | b"recursiveregexiterator" => {
+                    match method {
+                        b"setmode" => {
+                            let mode = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
+                            // 0=MATCH, 1=GET_MATCH, 2=ALL_MATCHES, 3=SPLIT, 4=REPLACE
+                            if !(0..=4).contains(&mode) {
+                                let msg = "RegexIterator::setMode(): Argument #1 ($mode) must be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE";
+                                let exc = self.create_exception(b"ValueError", msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            obj.borrow_mut().set_property(b"__regex_mode".to_vec(), Value::Long(mode));
+                            Some(Value::Null)
+                        }
+                        b"setflags" => {
+                            let flags = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
+                            obj.borrow_mut().set_property(b"__regex_flags".to_vec(), Value::Long(flags));
+                            Some(Value::Null)
+                        }
+                        b"setpregflags" => {
+                            let flags = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
+                            obj.borrow_mut().set_property(b"__regex_preg_flags".to_vec(), Value::Long(flags));
                             Some(Value::Null)
                         }
                         _ => None,

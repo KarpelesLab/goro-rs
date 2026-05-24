@@ -62,16 +62,83 @@ fn register_param_names(vm: &mut Vm) {
 fn spl_autoload_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let callback = args.first().cloned().unwrap_or(Value::Null);
     if matches!(callback, Value::Null) {
-        // Default autoloader (spl_autoload) - not implemented, just return
+        // Default autoloader (spl_autoload) - record and return
+        // Check for duplicate (spl_autoload is unique by string name)
+        let already = vm.autoload_functions.iter().any(|v| match v {
+            Value::String(s) => s.as_bytes() == b"spl_autoload",
+            _ => false,
+        });
+        if !already {
+            vm.autoload_functions.push(Value::String(PhpString::from_bytes(b"spl_autoload")));
+        }
         return Ok(Value::True);
     }
-    // Optional second arg: throw (default true) - ignored for now
+    // Validate callback (string callback must point to an existing function).
+    if let Value::String(s) = &callback {
+        let cb_name = s.as_bytes().to_vec();
+        let cb_lower: Vec<u8> = cb_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        // spl_autoload_call can never be registered as an autoloader.
+        if cb_lower == b"spl_autoload_call" {
+            let msg = "spl_autoload_register(): Argument #1 ($callback) must not be the spl_autoload_call() function";
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"ValueError", msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::False);
+        }
+        let exists = vm.functions.contains_key(cb_lower.as_slice())
+            || vm.user_functions.contains_key(cb_lower.as_slice())
+            || cb_lower == b"spl_autoload";
+        if !exists {
+            let msg = format!(
+                "spl_autoload_register(): Argument #1 ($callback) must be a valid callback or null, function \"{}\" not found or invalid function name",
+                String::from_utf8_lossy(s.as_bytes())
+            );
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::False);
+        }
+    }
+    // Optional second arg: $do_throw (default true). PHP emits a notice
+    // when this is explicitly set to false (the parameter is ignored —
+    // spl_autoload_register() always throws on invalid input).
+    if let Some(v) = args.get(1) {
+        if !v.to_bool() {
+            let line = vm.current_line;
+            vm.emit_notice_at(
+                "spl_autoload_register(): Argument #2 ($do_throw) has been ignored, spl_autoload_register() will always throw",
+                line,
+            );
+        }
+    }
     // Optional third arg: prepend (default false)
     let prepend = args.get(2).map_or(false, |v| v.to_bool());
-    if prepend {
-        vm.autoload_functions.insert(0, callback);
-    } else {
-        vm.autoload_functions.push(callback);
+
+    // Deduplicate: don't register the same callback twice. Compare by
+    // string name (for string callbacks) and by identity for arrays/objects.
+    let is_dup = vm.autoload_functions.iter().any(|existing| {
+        match (existing, &callback) {
+            (Value::String(a), Value::String(b)) => a.as_bytes().eq_ignore_ascii_case(b.as_bytes()),
+            (Value::Array(a), Value::Array(b)) => {
+                let ab = a.borrow();
+                let bb = b.borrow();
+                ab.len() == bb.len()
+                    && ab.iter().zip(bb.iter()).all(|((_, va), (_, vb))| match (va, vb) {
+                        (Value::String(sa), Value::String(sb)) => sa.as_bytes().eq_ignore_ascii_case(sb.as_bytes()),
+                        (Value::Object(oa), Value::Object(ob)) => Rc::ptr_eq(oa, ob),
+                        _ => false,
+                    })
+            }
+            (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    });
+    if !is_dup {
+        if prepend {
+            vm.autoload_functions.insert(0, callback);
+        } else {
+            vm.autoload_functions.push(callback);
+        }
     }
     Ok(Value::True)
 }
@@ -86,15 +153,44 @@ fn spl_autoload_functions_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
 
 fn spl_autoload_unregister_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let callback = args.first().cloned().unwrap_or(Value::Null);
-    // Try to remove by matching the callback
-    // Simple approach: remove first matching entry
-    if let Some(pos) = vm.autoload_functions.iter().position(|f| {
-        // Compare by string representation for simplicity
-        format!("{:?}", f) == format!("{:?}", callback)
-    }) {
-        vm.autoload_functions.remove(pos);
+
+    // Special case: unregistering 'spl_autoload_call' clears the entire
+    // autoload chain (deprecated since PHP 8.0).
+    if let Value::String(s) = &callback {
+        if s.as_bytes().eq_ignore_ascii_case(b"spl_autoload_call") {
+            vm.emit_deprecated_at(
+                "spl_autoload_unregister(): Using spl_autoload_call() as a callback for spl_autoload_unregister() is deprecated, to remove all registered autoloaders, call spl_autoload_unregister() for all values returned from spl_autoload_functions()",
+                vm.current_line,
+            );
+            vm.autoload_functions.clear();
+            return Ok(Value::True);
+        }
     }
-    Ok(Value::True)
+
+    // Find a matching entry.
+    let pos = vm.autoload_functions.iter().position(|existing| {
+        match (existing, &callback) {
+            (Value::String(a), Value::String(b)) => a.as_bytes().eq_ignore_ascii_case(b.as_bytes()),
+            (Value::Array(a), Value::Array(b)) => {
+                let ab = a.borrow();
+                let bb = b.borrow();
+                ab.len() == bb.len()
+                    && ab.iter().zip(bb.iter()).all(|((_, va), (_, vb))| match (va, vb) {
+                        (Value::String(sa), Value::String(sb)) => sa.as_bytes().eq_ignore_ascii_case(sb.as_bytes()),
+                        (Value::Object(oa), Value::Object(ob)) => Rc::ptr_eq(oa, ob),
+                        _ => false,
+                    })
+            }
+            (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    });
+    if let Some(p) = pos {
+        vm.autoload_functions.remove(p);
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
 }
 
 fn spl_autoload_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
