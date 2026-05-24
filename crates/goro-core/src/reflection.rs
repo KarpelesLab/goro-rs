@@ -1417,6 +1417,26 @@ pub fn reflection_class_docall(
                     return Some(Value::Null);
                 }
                 if let Value::Object(obj) = &target {
+                    // PHP: classes with no declared instance properties are never lazy
+                    // — resetAsLazy*() is a no-op (object remains non-lazy).
+                    let decl_prop_count = vm.classes.get(&class_lower)
+                        .map(|ce| ce.properties.iter().filter(|p| !p.is_static).count())
+                        .unwrap_or(0);
+                    if decl_prop_count == 0 {
+                        // Still wipe dynamic properties to match expected behavior
+                        let mut ob = obj.borrow_mut();
+                        let names: Vec<Vec<u8>> = ob.properties.iter()
+                            .filter(|(n, _)| !n.starts_with(b"__lazy_"))
+                            .map(|(n, _)| n.clone())
+                            .collect();
+                        for n in names {
+                            ob.remove_property(&n);
+                        }
+                        ob.remove_property(b"__lazy_state");
+                        ob.remove_property(b"__lazy_initializer");
+                        ob.remove_property(b"__lazy_real");
+                        return Some(Value::Null);
+                    }
                     let mut ob = obj.borrow_mut();
                     // Clear existing state
                     ob.remove_property(b"__lazy_real");
@@ -1451,6 +1471,54 @@ pub fn reflection_class_docall(
                 let initializer = args.get(1).cloned().unwrap_or(Value::Null);
                 let options = args.get(2).map(|v| v.to_long()).unwrap_or(0);
                 let is_proxy = method == b"newlazyproxy";
+                // PHP: internal classes cannot be initialized lazily.
+                // stdClass is whitelisted as it is considered safe.
+                if !vm.classes.contains_key(&class_lower) && class_lower != b"stdclass" {
+                    let canonical = vm.builtin_canonical_name(&class_lower);
+                    let err_msg = format!(
+                        "Cannot make instance of internal class lazy: {} is internal",
+                        canonical
+                    );
+                    let exc = vm.create_exception(b"Error", &err_msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                // PHP: sub-classes of internal classes (other than stdClass) cannot
+                // be initialized lazily either.
+                {
+                    let mut cur = class_lower.clone();
+                    let canonical_self = vm.classes.get(&class_lower)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
+                    let self_disp = String::from_utf8_lossy(&canonical_self).to_string();
+                    let mut bad_internal_ancestor: Option<String> = None;
+                    while let Some(ce) = vm.classes.get(&cur) {
+                        if let Some(parent_lower) = &ce.parent {
+                            let pl: Vec<u8> = parent_lower.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if pl == b"stdclass" {
+                                break;
+                            }
+                            if !vm.classes.contains_key(&pl) {
+                                // Parent is internal
+                                let parent_disp = vm.builtin_canonical_name(&pl);
+                                bad_internal_ancestor = Some(parent_disp);
+                                break;
+                            }
+                            cur = pl;
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(parent_name) = bad_internal_ancestor {
+                        let err_msg = format!(
+                            "Cannot make instance of internal class lazy: {} inherits internal class {}",
+                            self_disp, parent_name
+                        );
+                        let exc = vm.create_exception(b"Error", &err_msg, 0);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
                 // Validate options: only SKIP_INITIALIZATION_ON_SERIALIZE (1)
                 // is allowed for newLazyGhost/newLazyProxy. SKIP_DESTRUCTOR (2)
                 // is only allowed on resetAsLazyProxy.
@@ -1476,6 +1544,14 @@ pub fn reflection_class_docall(
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
                 let mut new_obj = PhpObject::new(canonical, obj_id);
+                // PHP: classes with no declared instance properties are never lazy
+                // — they are returned as already-initialized objects (no initializer).
+                let decl_prop_count = vm.classes.get(&class_lower)
+                    .map(|ce| ce.properties.iter().filter(|p| !p.is_static).count())
+                    .unwrap_or(0);
+                if decl_prop_count == 0 {
+                    return Some(Value::Object(Rc::new(RefCell::new(new_obj))));
+                }
                 // For lazy objects, all declared properties are seeded as Undef
                 // in declaration order so later assignments preserve that order.
                 // Typed properties will render as uninitialized() in var_dump

@@ -1739,6 +1739,32 @@ impl Compiler {
                         });
                     }
                 }
+                // NoDiscard validation: cannot be used on void/never function.
+                {
+                    let has_nodiscard = func_attributes.iter().any(|a| {
+                        let last = a.name.last().map(|s| s.as_slice()).unwrap_or(&[]);
+                        let bare: &[u8] = if last.first() == Some(&b'\\') { &last[1..] } else { last };
+                        bare.eq_ignore_ascii_case(b"NoDiscard")
+                    });
+                    if has_nodiscard {
+                        if let Some(hint) = return_type {
+                            if let TypeHint::Simple(s) = hint {
+                                if s.eq_ignore_ascii_case(b"never") {
+                                    return Err(CompileError {
+                                        message: "A never returning function does not return a value, but #[\\NoDiscard] requires a return value".to_string(),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                                if s.eq_ignore_ascii_case(b"void") {
+                                    return Err(CompileError {
+                                        message: "A void function does not return a value, but #[\\NoDiscard] requires a return value".to_string(),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Check if this function contains yield (making it a generator)
                 let is_generator = stmts_contain_yield(body);
@@ -3459,6 +3485,50 @@ impl Compiler {
                                     message: "Cannot use the final modifier on an abstract method".to_string(),
                                     line: *method_line,
                                 });
+                            }
+                            // NoDiscard validation on special methods.
+                            {
+                                let has_nodiscard = method_attributes.iter().any(|a| {
+                                    let last = a.name.last().map(|s| s.as_slice()).unwrap_or(&[]);
+                                    let bare: &[u8] = if last.first() == Some(&b'\\') { &last[1..] } else { last };
+                                    bare.eq_ignore_ascii_case(b"NoDiscard")
+                                });
+                                if has_nodiscard {
+                                    let mn_lower_v: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let class_display = String::from_utf8_lossy(name).to_string();
+                                    let method_display = String::from_utf8_lossy(method_name).to_string();
+                                    if mn_lower_v == b"__construct" {
+                                        return Err(CompileError {
+                                            message: format!("Method {}::{} cannot be #[\\NoDiscard]",
+                                                class_display, method_display),
+                                            line: *method_line,
+                                        });
+                                    }
+                                    if mn_lower_v == b"__clone" {
+                                        return Err(CompileError {
+                                            message: format!("Method {}::{} cannot be #[\\NoDiscard]",
+                                                class_display, method_display),
+                                            line: *method_line,
+                                        });
+                                    }
+                                    // void/never return type validation
+                                    if let Some(hint) = method_return_type {
+                                        if let goro_parser::ast::TypeHint::Simple(s) = hint {
+                                            if s.eq_ignore_ascii_case(b"never") {
+                                                return Err(CompileError {
+                                                    message: "A never returning function does not return a value, but #[\\NoDiscard] requires a return value".to_string(),
+                                                    line: *method_line,
+                                                });
+                                            }
+                                            if s.eq_ignore_ascii_case(b"void") {
+                                                return Err(CompileError {
+                                                    message: "A void function does not return a value, but #[\\NoDiscard] requires a return value".to_string(),
+                                                    line: *method_line,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             // Check: interface methods must not be final
                             if modifiers.is_interface && *method_is_final {
@@ -7350,13 +7420,48 @@ impl Compiler {
                         chain.reverse(); // now chain[0] is the first index, chain[last] is the last
 
                         // Also check if base_expr is a PropertyAccess - handle isset($obj->prop[$key])
-                        let base_op = self.compile_expr(base_expr)?;
-
+                        // For PropertyAccess we need FETCH_OBJ_IS semantics:
+                        // first call __isset on the prop; if it returns false, the entire
+                        // isset chain is false. Otherwise, fetch the property value via
+                        // PropertyGet (which honors __get) and proceed with the array chain.
                         let result_tmp = self.op_array.alloc_temp();
-                        let false_label = self.op_array.ops.len() as u32 + 9999; // placeholder
-
-                        // We'll collect jump positions that need patching to jump to the false label
                         let mut jmp_patches: Vec<usize> = Vec::new();
+                        let base_op = if let ExprKind::PropertyAccess { object, property, .. } = &base_expr.kind {
+                            let obj_op = self.compile_expr(object)?;
+                            let prop_op = self.compile_property_name(property)?;
+                            let isset_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::PropertyIsset,
+                                op1: obj_op.clone(),
+                                op2: prop_op.clone(),
+                                result: OperandType::Tmp(isset_tmp),
+                                line: expr.span.line,
+                            });
+                            // If isset on the property returned false, the whole chain is false.
+                            let jmp_pos = self.op_array.ops.len();
+                            jmp_patches.push(jmp_pos);
+                            self.op_array.emit(Op {
+                                opcode: OpCode::JmpZ,
+                                op1: OperandType::Tmp(isset_tmp),
+                                op2: OperandType::JmpTarget(0),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                            // Now actually fetch the property value (will invoke __get if needed).
+                            let val_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::PropertyGet,
+                                op1: obj_op,
+                                op2: prop_op,
+                                result: OperandType::Tmp(val_tmp),
+                                line: expr.span.line,
+                            });
+                            OperandType::Tmp(val_tmp)
+                        } else {
+                            self.compile_expr(base_expr)?
+                        };
+
+                        let _false_label = self.op_array.ops.len() as u32 + 9999; // placeholder
 
                         let mut current = base_op;
                         for (i, idx_expr) in chain.iter().enumerate() {
