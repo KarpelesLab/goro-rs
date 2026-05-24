@@ -6213,6 +6213,18 @@ impl Vm {
             b"extract" | b"next" => None, // handled in handle_spl_docall
             b"top" | b"current" => {
                 let ob = obj.borrow();
+                // Top/current both reject on corrupted heap (top throws,
+                // current returns null per PHP).
+                if matches!(ob.get_property(b"__spl_corrupted"), Value::True) {
+                    drop(ob);
+                    if method == b"current" {
+                        return Some(Value::Null);
+                    } else {
+                        let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                        self.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
                 let arr = ob.get_property(b"__spl_array");
                 let priorities = ob.get_property(b"__spl_priorities");
                 let extract_flags = if let Value::Long(f) = ob.get_property(b"__spl_extract_flags") { f } else { 1 };
@@ -6361,6 +6373,10 @@ impl Vm {
                 let ob = obj.borrow();
                 if matches!(ob.get_property(b"__spl_corrupted"), Value::True) {
                     drop(ob);
+                    // current() returns NULL on corrupted heap; top() throws.
+                    if method == b"current" {
+                        return Some(Value::Null);
+                    }
                     let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
                     self.current_exception = Some(exc);
                     return Some(Value::Null);
@@ -9828,6 +9844,12 @@ impl Vm {
                             Some(Value::True)
                         }
                         b"extract" | b"next" => {
+                            // Reject if heap is corrupted.
+                            if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
+                                let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
                             let priorities = ob.get_property(b"__spl_priorities");
@@ -18604,8 +18626,8 @@ impl Vm {
                                         b"recursivecachingiterator",
                                         b"recursivefilteriterator",
                                         b"recursiveregexiterator",
-                                        b"recursiveiteratoriterator",
                                         b"recursivetreeiterator",
+                                        b"recursiveiteratoriterator",
                                         b"callbackfilteriterator",
                                         b"cachingiterator",
                                         b"filteriterator",
@@ -18916,6 +18938,7 @@ impl Vm {
                                             }
                                         }
                                         b"iteratoriterator" | b"recursiveiteratoriterator"
+                                        | b"recursivetreeiterator"
                                         | b"norewinditerator" | b"infiniteiterator"
                                         | b"cachingiterator" | b"recursivecachingiterator"
                                         | b"filteriterator" | b"callbackfilteriterator"
@@ -18943,6 +18966,42 @@ impl Vm {
                                                     message: format!("Uncaught ArgumentCountError: {}", msg),
                                                     line: op.line,
                                                 });
+                                            }
+                                            // Max-argument check per builtin.
+                                            let max_args: Option<usize> = match class_lower.as_slice() {
+                                                b"iteratoriterator" => Some(2),
+                                                b"norewinditerator" | b"infiniteiterator" | b"parentiterator" => Some(1),
+                                                b"filteriterator" | b"recursivefilteriterator" => Some(1),
+                                                b"callbackfilteriterator" | b"recursivecallbackfilteriterator" => Some(2),
+                                                b"cachingiterator" | b"recursivecachingiterator" => Some(2),
+                                                b"recursiveiteratoriterator" | b"recursivetreeiterator" => Some(3),
+                                                b"regexiterator" | b"recursiveregexiterator" => Some(5),
+                                                _ => None,
+                                            };
+                                            if let Some(max) = max_args {
+                                                let user_arg_count = call.args.len().saturating_sub(1);
+                                                if user_arg_count > max {
+                                                    drop(obj_mut);
+                                                    let class_canonical = self.builtin_canonical_name(&class_lower);
+                                                    let msg = format!(
+                                                        "{}::__construct() expects at most {} argument{}, {} given",
+                                                        class_canonical, max,
+                                                        if max == 1 { "" } else { "s" },
+                                                        user_arg_count
+                                                    );
+                                                    let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                        let ct = *catch_target;
+                                                        ip = ct as usize;
+                                                        continue;
+                                                    }
+                                                    return Err(VmError {
+                                                        message: format!("Uncaught ArgumentCountError: {}", msg),
+                                                        line: op.line,
+                                                    });
+                                                }
                                             }
                                             // For RecursiveIteratorIterator, if the inner is an IteratorAggregate,
                                             // validate that getIterator() returns a Traversable, then cache the
