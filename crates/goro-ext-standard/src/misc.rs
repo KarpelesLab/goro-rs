@@ -4240,12 +4240,22 @@ fn array_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arr_borrow = arr.borrow();
     let len = arr_borrow.len();
     if len == 0 {
-        vm.emit_warning("array_rand(): Array is empty");
-        return Ok(Value::Null);
+        let msg = "array_rand(): Argument #1 ($array) must not be empty".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line });
     }
     if num < 1 || num as usize > len {
-        vm.emit_warning("array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)");
-        return Ok(Value::Null);
+        let msg = "array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line });
     }
     let keys: Vec<goro_core::array::ArrayKey> = arr_borrow.iter().map(|(k, _)| k.clone()).collect();
     drop(arr_borrow);
@@ -8571,9 +8581,14 @@ fn array_reduce_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let entries: Vec<Value> = arr.values().cloned().collect();
     drop(arr);
 
-    let mut carry = initial;
+    // Deep-clone the initial value so that modifications inside the callback
+    // do not affect the caller's $initial (PHP value semantics for arrays).
+    // Also deep-clone the carry between iterations to ensure the user's
+    // returned value semantics are preserved.
+    let mut carry = deep_clone_value(&initial);
     for val in entries {
-        carry = vm.call_callback(&callback, &[carry, val])?;
+        let result = vm.call_callback(&callback, &[deep_clone_value(&carry), val])?;
+        carry = result;
     }
 
     Ok(carry)
