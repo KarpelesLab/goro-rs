@@ -6263,14 +6263,106 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
     // Check if it's a constructor
     let ctor_str = if method_name.eq_ignore_ascii_case("__construct") { ", ctor" } else { "" };
 
+    // Walk parent chain (and interfaces) starting from `start_class` to find
+    // the deepest ancestor that visibly declares `method_bytes`. Private
+    // ancestor methods are skipped. Returns the canonical name of the
+    // first overridden class (closest ancestor) and the deepest prototype.
+    fn find_overrides(vm: &Vm, start_class_lower: &[u8], method_bytes: &[u8]) -> (Option<String>, Option<String>) {
+        let mut overwrites: Option<String> = None;
+        let mut prototype: Option<String> = None;
+        let mut visited: Vec<Vec<u8>> = Vec::new();
+        // Walk parent chain first (depth-first)
+        if let Some(ce) = vm.classes.get(start_class_lower) {
+            let mut cur_parent = ce.parent.clone();
+            while let Some(ref p) = cur_parent {
+                let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if visited.contains(&p_lower) { break; }
+                visited.push(p_lower.clone());
+                if let Some(pce) = vm.classes.get(&p_lower) {
+                    if let Some(pm) = pce.get_method(method_bytes) {
+                        if pm.visibility != Visibility::Private {
+                            let canonical = String::from_utf8_lossy(&pce.name).to_string();
+                            if overwrites.is_none() {
+                                overwrites = Some(canonical.clone());
+                            }
+                            prototype = Some(canonical);
+                        }
+                    }
+                    cur_parent = pce.parent.clone();
+                } else {
+                    break;
+                }
+            }
+            // Also walk interfaces of start class and ancestors
+            let mut iface_stack: Vec<Vec<u8>> = ce.interfaces.iter()
+                .map(|i| i.iter().map(|b| b.to_ascii_lowercase()).collect())
+                .collect();
+            // Add interfaces from each ancestor we visited
+            for p_lower in &visited {
+                if let Some(pce) = vm.classes.get(p_lower.as_slice()) {
+                    for i in &pce.interfaces {
+                        let il: Vec<u8> = i.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if !iface_stack.contains(&il) { iface_stack.push(il); }
+                    }
+                }
+            }
+            let mut iface_seen: Vec<Vec<u8>> = Vec::new();
+            while let Some(iface_lower) = iface_stack.pop() {
+                if iface_seen.contains(&iface_lower) { continue; }
+                iface_seen.push(iface_lower.clone());
+                if let Some(ice) = vm.classes.get(&iface_lower) {
+                    if let Some(im) = ice.get_method(method_bytes) {
+                        if im.visibility != Visibility::Private {
+                            let canonical = String::from_utf8_lossy(&ice.name).to_string();
+                            // Interface methods take precedence as prototype.
+                            prototype = Some(canonical);
+                        }
+                    }
+                    for i in &ice.interfaces {
+                        let il: Vec<u8> = i.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if !iface_seen.contains(&il) { iface_stack.push(il); }
+                    }
+                }
+            }
+        }
+        (overwrites, prototype)
+    }
+
     // For inherited methods, PHP renders "<user, inherits Parent>" in
-    // ReflectionClass::__toString output. Determine the declaring class.
+    // ReflectionClass::__toString output. If the declaring class itself
+    // overrode the method from an ancestor, PHP additionally shows
+    // ", prototype <Ancestor>". If the method is declared on this class
+    // and overrides an ancestor, it renders ", overwrites X, prototype Y".
     let inherits_str = if m.declaring_class.as_slice() != owner_lower {
-        vm.classes.get(m.declaring_class.as_slice())
-            .map(|c| format!(", inherits {}", String::from_utf8_lossy(&c.name)))
-            .unwrap_or_default()
+        let decl_name = vm.classes.get(m.declaring_class.as_slice())
+            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+            .unwrap_or_default();
+        // Walk from the declaring class to find a prototype.
+        let (_, prototype_name) = if m.visibility != Visibility::Private {
+            find_overrides(vm, m.declaring_class.as_slice(), m.name.as_slice())
+        } else {
+            (None, None)
+        };
+        if let Some(proto) = prototype_name {
+            format!(", inherits {}, prototype {}", decl_name, proto)
+        } else if !decl_name.is_empty() {
+            format!(", inherits {}", decl_name)
+        } else {
+            String::new()
+        }
     } else {
-        String::new()
+        // Method declared on this class — check whether it overrides an
+        // ancestor (parent chain or implements an interface method).
+        if m.visibility != Visibility::Private {
+            let (ow, pt) = find_overrides(vm, owner_lower, m.name.as_slice());
+            match (ow, pt) {
+                (Some(o), Some(p)) => format!(", overwrites {}, prototype {}", o, p),
+                (None, Some(p)) => format!(", prototype {}", p),
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        }
     };
 
     let mod_vis = if modifiers.is_empty() {
@@ -6304,8 +6396,11 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
     let param_count = if m.op_array.param_count as usize > skip { m.op_array.param_count as usize - skip } else { 0 };
     let required_count = m.op_array.required_param_count as usize;
 
-    // PHP omits the "Parameters" section entirely when there are no parameters.
-    if param_count > 0 {
+    // PHP omits the "Parameters [0]" section for user methods that
+    // also have no return type. When there are parameters, or when
+    // a return type is present, the section is emitted.
+    let has_return = m.op_array.return_type.is_some();
+    if param_count > 0 || has_return {
         s.push_str(&format!("\n      - Parameters [{}] {{\n", param_count));
         for i in 0..param_count {
             let cv_idx = i + skip;
