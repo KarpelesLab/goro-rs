@@ -8987,6 +8987,7 @@ fn dir_handle_resource_id(val: &Value) -> Option<i64> {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpecialStream {
     None,
+    Stdin,
     Stdout,
     Stderr,
     Output,
@@ -9294,6 +9295,7 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let special = match lower.as_str() {
             "stdout" => Some(SpecialStream::Stdout),
             "stderr" => Some(SpecialStream::Stderr),
+            "stdin" => Some(SpecialStream::Stdin),
             "output" => Some(SpecialStream::Output),
             "memory" => Some(SpecialStream::Memory),
             "input" => Some(SpecialStream::Memory), // tests don't rely on stdin
@@ -9508,6 +9510,10 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
         SpecialStream::Stdout | SpecialStream::Output | SpecialStream::Stderr => {
             vm.write_output(bytes);
             bytes.len()
+        }
+        SpecialStream::Stdin => {
+            // Writing to stdin is a no-op; return 0
+            0
         }
         SpecialStream::None | SpecialStream::Memory | SpecialStream::Temp => {
             FILE_HANDLES.with(|h| {
@@ -9914,25 +9920,31 @@ fn fflush_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn fsync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fsync")?;
+    enum Result3 { Ok, Err, NoFsync }
     let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
-            // Special streams (stdout/stderr/memory/temp) can't fsync
-            if !matches!(fh.special, SpecialStream::None) {
-                return Err(());
+            // Memory/Temp/Output have no real backing fd; cannot fsync.
+            if matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp | SpecialStream::Output) {
+                return Result3::NoFsync;
             }
+            // Stdin can't be fsynced (real fd 0 returns EINVAL).
+            if matches!(fh.special, SpecialStream::Stdin) {
+                return Result3::Err;
+            }
+            // Stdout/Stderr are real streams but typically not fsync-able.
             match fh.file.sync_all() {
-                Ok(_) => Ok(true),
-                Err(_) => Ok(false),
+                Ok(_) => Result3::Ok,
+                Err(_) => Result3::Err,
             }
         } else {
-            Err(())
+            Result3::NoFsync
         }
     });
     match result {
-        Ok(true) => Ok(Value::True),
-        Ok(false) => Ok(Value::False),
-        Err(()) => {
+        Result3::Ok => Ok(Value::True),
+        Result3::Err => Ok(Value::False),
+        Result3::NoFsync => {
             vm.emit_warning("fsync(): Can't fsync this stream!");
             Ok(Value::False)
         }
@@ -9942,24 +9954,28 @@ fn fsync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn fdatasync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fdatasync")?;
+    enum Result3 { Ok, Err, NoFsync }
     let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
-            if !matches!(fh.special, SpecialStream::None) {
-                return Err(());
+            if matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp | SpecialStream::Output) {
+                return Result3::NoFsync;
+            }
+            if matches!(fh.special, SpecialStream::Stdin) {
+                return Result3::Err;
             }
             match fh.file.sync_data() {
-                Ok(_) => Ok(true),
-                Err(_) => Ok(false),
+                Ok(_) => Result3::Ok,
+                Err(_) => Result3::Err,
             }
         } else {
-            Err(())
+            Result3::NoFsync
         }
     });
     match result {
-        Ok(true) => Ok(Value::True),
-        Ok(false) => Ok(Value::False),
-        Err(()) => {
+        Result3::Ok => Ok(Value::True),
+        Result3::Err => Ok(Value::False),
+        Result3::NoFsync => {
             vm.emit_warning("fdatasync(): Can't fsync this stream!");
             Ok(Value::False)
         }
