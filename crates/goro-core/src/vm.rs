@@ -238,6 +238,10 @@ pub struct Vm {
     pub constants: HashMap<Vec<u8>, Value>,
     /// Attributes attached to user-defined constants
     pub constant_attributes: HashMap<Vec<u8>, Vec<crate::object::RuntimeAttribute>>,
+    /// Keys currently being evaluated for #[\Deprecated] — used to break
+    /// self-referential cycles where a constant's deprecation message
+    /// references the same constant (GH-17711).
+    pub deprecation_in_progress: std::collections::HashSet<Vec<u8>>,
     /// Current exception being thrown (used during try/catch)
     pub current_exception: Option<Value>,
     /// Error reporting level
@@ -407,6 +411,7 @@ impl Vm {
             is_global_scope: true,
             current_exception: None,
             constant_attributes: HashMap::new(),
+            deprecation_in_progress: std::collections::HashSet::new(),
             error_reporting: 30719, // E_ALL
             exception_string_param_max_len: 15,
             magic_depth: 0,
@@ -24076,12 +24081,26 @@ impl Vm {
                                 .filter(|meta| !meta.attributes.is_empty())
                                 .map(|meta| meta.attributes.clone());
                             if let Some(attrs) = dep_msg {
-                                if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
-                                    let class_display = String::from_utf8_lossy(&resolved_class).to_string();
-                                    let const_display = prop_name.to_string_lossy();
-                                    let prefix = format!("Constant {}::{}", class_display, const_display);
-                                    let msg = self.format_deprecated_message(&prefix, &custom_msg);
-                                    self.emit_user_deprecated_at(&msg, op.line);
+                                // GH-17711: guard against self-referential deprecation
+                                // messages causing infinite recursion (e.g. #[\Deprecated(self::X)] const X).
+                                // Canonicalize through class_aliases so Alias::X and D::X share a key.
+                                let canonical_class_lower = self.classes.get(&class_lower)
+                                    .map(|c| c.name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>())
+                                    .unwrap_or_else(|| class_lower.clone());
+                                let mut guard_key = canonical_class_lower;
+                                guard_key.extend_from_slice(b"::");
+                                guard_key.extend_from_slice(prop_name.as_bytes());
+                                if !self.deprecation_in_progress.contains(&guard_key) {
+                                    self.deprecation_in_progress.insert(guard_key.clone());
+                                    let dep_result = self.get_deprecated_message(&attrs);
+                                    self.deprecation_in_progress.remove(&guard_key);
+                                    if let Some(custom_msg) = dep_result {
+                                        let class_display = String::from_utf8_lossy(&resolved_class).to_string();
+                                        let const_display = prop_name.to_string_lossy();
+                                        let prefix = format!("Constant {}::{}", class_display, const_display);
+                                        let msg = self.format_deprecated_message(&prefix, &custom_msg);
+                                        self.emit_user_deprecated_at(&msg, op.line);
+                                    }
                                 }
                             }
                         }
@@ -24172,8 +24191,11 @@ impl Vm {
                         };
                         if let Some(key) = attr_key {
                             let attrs = self.constant_attributes.get(&key).cloned().unwrap_or_default();
-                            if !attrs.is_empty() {
-                                if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
+                            if !attrs.is_empty() && !self.deprecation_in_progress.contains(&key) {
+                                self.deprecation_in_progress.insert(key.clone());
+                                let dep_result = self.get_deprecated_message(&attrs);
+                                self.deprecation_in_progress.remove(&key);
+                                if let Some(custom_msg) = dep_result {
                                     let display = String::from_utf8_lossy(&key).to_string();
                                     let prefix = format!("Constant {}", display);
                                     let msg = self.format_deprecated_message(&prefix, &custom_msg);

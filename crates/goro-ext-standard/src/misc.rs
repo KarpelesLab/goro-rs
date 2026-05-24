@@ -922,11 +922,22 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 // Check for #[\Deprecated] attribute on class constant
                 if let Some(meta) = class.constants_meta.get(const_name.as_bytes()) {
                     if !meta.attributes.is_empty() {
-                        if let Some(custom_msg) = vm.get_deprecated_message(&meta.attributes) {
-                            let class_display = String::from_utf8_lossy(&class.name).to_string();
-                            let prefix = format!("Constant {}::{}", class_display, const_name);
-                            let msg = vm.format_deprecated_message(&prefix, &custom_msg);
-                            vm.emit_user_deprecated_at(&msg, vm.current_line);
+                        // GH-17711: guard self-referential deprecation messages.
+                        // Canonicalize through class.name so aliases share a key.
+                        let canonical_class_lower: Vec<u8> = class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let mut guard_key = canonical_class_lower;
+                        guard_key.extend_from_slice(b"::");
+                        guard_key.extend_from_slice(const_name.as_bytes());
+                        if !vm.deprecation_in_progress.contains(&guard_key) {
+                            vm.deprecation_in_progress.insert(guard_key.clone());
+                            let dep_result = vm.get_deprecated_message(&meta.attributes);
+                            vm.deprecation_in_progress.remove(&guard_key);
+                            if let Some(custom_msg) = dep_result {
+                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                let prefix = format!("Constant {}::{}", class_display, const_name);
+                                let msg = vm.format_deprecated_message(&prefix, &custom_msg);
+                                vm.emit_user_deprecated_at(&msg, vm.current_line);
+                            }
                         }
                     }
                 }
