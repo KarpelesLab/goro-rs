@@ -8991,8 +8991,33 @@ fn hex_digit_misc(b: u8) -> Option<u8> {
 }
 
 fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let mut filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let mode = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
+
+    // Handle file:// URIs. Per RFC, file://[host]/path. If host is empty or
+    // "localhost", treat as local path. Otherwise emit warnings matching PHP.
+    if let Some(rest) = filename.strip_prefix("file://") {
+        // rest is "[host]/path" (host may be empty). When the leading
+        // character is '/', the host is empty (i.e. file:///path → ///path
+        // becomes "/path" with empty host).
+        let (host, path) = match rest.find('/') {
+            Some(idx) => (&rest[..idx], &rest[idx..]),
+            None => (rest, ""),
+        };
+        if !host.is_empty() && host != "localhost" {
+            vm.emit_warning(&format!(
+                "fopen(): Remote host file access not supported, file://{}",
+                rest
+            ));
+            vm.emit_warning(&format!(
+                "fopen({}): Failed to open stream: no suitable wrapper could be found",
+                filename
+            ));
+            return Ok(Value::False);
+        }
+        // Strip prefix and continue with local path handling.
+        filename = path.to_string();
+    }
 
     // Handle http:// and https:// URLs via the built-in HTTP client. Fetch
     // the body upfront and back the resulting handle with a temp file so
