@@ -1982,6 +1982,30 @@ impl Vm {
         None
     }
 
+    /// Check the OpArray's attributes for #[\Deprecated] and emit a banner if present.
+    /// Used by call paths (e.g. call_user_func) that don't go through the main DoFCall site
+    /// at vm.rs:18723. `fallback_name` is used when display_name is empty.
+    pub fn check_user_function_deprecation(&mut self, op_array: &crate::opcode::OpArray, fallback_name: &str, line: u32) {
+        if op_array.attributes.is_empty() {
+            return;
+        }
+        let attrs = op_array.attributes.clone();
+        if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
+            let display = if !op_array.display_name.is_empty() {
+                String::from_utf8_lossy(&op_array.display_name).into_owned()
+            } else {
+                fallback_name.to_string()
+            };
+            let prefix = if display.contains("::") && !display.starts_with("{closure:") {
+                format!("Method {}()", display)
+            } else {
+                format!("Function {}()", display)
+            };
+            let msg = self.format_deprecated_message(&prefix, &custom_msg);
+            self.emit_user_deprecated_at(&msg, line);
+        }
+    }
+
     /// Compose a deprecation banner with the right separator before the suffix.
     /// PHP renders "X is deprecated" (no suffix), "X is deprecated, msg" (with msg only),
     /// "X is deprecated since V" (with since only), or "X is deprecated since V, msg" (both).
@@ -3237,13 +3261,23 @@ impl Vm {
             if let Value::Object(ref obj_rc) = obj_val {
                 obj_rc.borrow_mut().set_property(b"__destructed".to_vec(), Value::True);
                 let class_lower: Vec<u8> = obj_rc.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if let Some(destruct_op) = self.classes.get(&class_lower)
+                let destruct_info = self.classes.get(&class_lower)
                     .and_then(|c| c.get_method(b"__destruct"))
-                    .map(|m| m.op_array.clone())
-                {
+                    .map(|m| {
+                        let mut op = m.op_array.clone();
+                        if op.attributes.is_empty() && !m.attributes.is_empty() {
+                            op.attributes = m.attributes.clone();
+                        }
+                        (op, m.attributes.clone())
+                    });
+                if let Some((destruct_op, _method_attrs)) = destruct_info {
+                    let class_name_orig = obj_rc.borrow().class_name.clone();
+                    let display_fallback = format!("{}::__destruct", String::from_utf8_lossy(&class_name_orig));
+                    let line = self.current_line;
+                    self.check_user_function_deprecation(&destruct_op, &display_fallback, line);
                     let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
                     if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
-                    self.called_class_stack.push(obj_rc.borrow().class_name.clone());
+                    self.called_class_stack.push(class_name_orig);
                     self.class_scope_stack.push(class_lower.clone());
                     let _ = self.execute_op_array(&destruct_op, fn_cvs);
                     self.class_scope_stack.pop();
@@ -3629,7 +3663,10 @@ impl Vm {
                         if let Some(class_def) = self.classes.get(&class_lower) {
                             let method_lower: Vec<u8> = method_part.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(method_def) = class_def.get_method(&method_lower) {
-                                let op_array = method_def.op_array.clone();
+                                let mut op_array = method_def.op_array.clone();
+                                if op_array.attributes.is_empty() && !method_def.attributes.is_empty() {
+                                    op_array.attributes = method_def.attributes.clone();
+                                }
                                 self.user_functions.insert(func_lower, op_array);
                                 Value::String(PhpString::from_vec(func_name))
                             } else {
@@ -3687,7 +3724,10 @@ impl Vm {
                             if let Some(class_def) = self.classes.get(&class_lower) {
                                 let method_lower: Vec<u8> = method_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if let Some(method_def) = class_def.get_method(&method_lower) {
-                                    let op_array = method_def.op_array.clone();
+                                    let mut op_array = method_def.op_array.clone();
+                                    if op_array.attributes.is_empty() && !method_def.attributes.is_empty() {
+                                        op_array.attributes = method_def.attributes.clone();
+                                    }
                                     self.user_functions.insert(func_lower.clone(), op_array);
                                 }
                             }
@@ -3722,7 +3762,10 @@ impl Vm {
                             if let Some(class_def) = self.classes.get(&class_lower) {
                                 let method_lower: Vec<u8> = method_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if let Some(method_def) = class_def.get_method(&method_lower) {
-                                    let op_array = method_def.op_array.clone();
+                                    let mut op_array = method_def.op_array.clone();
+                                    if op_array.attributes.is_empty() && !method_def.attributes.is_empty() {
+                                        op_array.attributes = method_def.attributes.clone();
+                                    }
                                     self.user_functions.insert(func_lower.clone(), op_array);
                                 }
                             }
@@ -14584,17 +14627,28 @@ impl Vm {
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
-                if let Some(destruct_op) = self
+                let destruct_op = self
                     .classes
                     .get(&class_lower)
                     .and_then(|c| c.get_method(b"__destruct"))
-                    .map(|m| m.op_array.clone())
+                    .map(|m| {
+                        let mut op = m.op_array.clone();
+                        if op.attributes.is_empty() && !m.attributes.is_empty() {
+                            op.attributes = m.attributes.clone();
+                        }
+                        op
+                    });
+                if let Some(destruct_op) = destruct_op
                 {
+                    let class_name_orig = obj_rc.borrow().class_name.clone();
+                    let display_fallback = format!("{}::__destruct", String::from_utf8_lossy(&class_name_orig));
+                    let line = self.current_line;
+                    self.check_user_function_deprecation(&destruct_op, &display_fallback, line);
                     let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
                     if !fn_cvs.is_empty() {
                         fn_cvs[0] = obj_val.clone(); // $this
                     }
-                    self.called_class_stack.push(obj_rc.borrow().class_name.clone());
+                    self.called_class_stack.push(class_name_orig);
                     self.class_scope_stack.push(class_lower.clone());
                     let _ = self.execute_op_array(&destruct_op, fn_cvs);
                     self.class_scope_stack.pop();
@@ -31454,11 +31508,18 @@ impl Vm {
                                     func_name.extend_from_slice(b"::");
                                     func_name.extend_from_slice(&method.name);
 
-                                    // Register the method as a temporary user function
+                                    // Register the method as a temporary user function.
+                                    // MethodDef stores attributes separately from OpArray, but
+                                    // DoFCall's deprecation/nodiscard checks look at
+                                    // user_fn.attributes — propagate them here.
                                     let call_name = PhpString::from_vec(func_name.clone());
+                                    let mut method_op_array = method.op_array.clone();
+                                    if method_op_array.attributes.is_empty() && !method.attributes.is_empty() {
+                                        method_op_array.attributes = method.attributes.clone();
+                                    }
                                     self.user_functions.insert(
                                         func_name.to_ascii_lowercase(),
-                                        method.op_array.clone(),
+                                        method_op_array,
                                     );
 
                                     // Push the pending call with $this as the first implicit arg

@@ -1453,7 +1453,13 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 let real_method = &class_lower[pos + 2..];
                                 if let Some(class) = vm.classes.get(real_class).cloned() {
                                     if let Some(method) = class.methods.get(real_method) {
-                                        let op = method.op_array.clone();
+                                        let mut op = method.op_array.clone();
+                                        if op.attributes.is_empty() && !method.attributes.is_empty() {
+                                            op.attributes = method.attributes.clone();
+                                        }
+                                        let display_fallback = format!("{}::{}", String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&method.name));
+                                        let line = vm.current_line;
+                                        vm.check_user_function_deprecation(&op, &display_fallback, line);
                                         let declaring = method.declaring_class.clone();
                                         let class_name_orig = class.name.clone();
                                         vm.called_class_stack.push(class_name_orig);
@@ -1506,7 +1512,13 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                     }
                                 };
                                 if accessible {
-                                    let op = method.op_array.clone();
+                                    let mut op = method.op_array.clone();
+                                    if op.attributes.is_empty() && !method.attributes.is_empty() {
+                                        op.attributes = method.attributes.clone();
+                                    }
+                                    let display_fallback = format!("{}::{}", String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&method.name));
+                                    let line = vm.current_line;
+                                    vm.check_user_function_deprecation(&op, &display_fallback, line);
                                     let declaring = method.declaring_class.clone();
                                     if is_forwarding {
                                         // Forward: keep current called_class
@@ -1573,7 +1585,13 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 }
                             };
                             if accessible {
-                                let op = method.op_array.clone();
+                                let mut op = method.op_array.clone();
+                                if op.attributes.is_empty() && !method.attributes.is_empty() {
+                                    op.attributes = method.attributes.clone();
+                                }
+                                let display_fallback = format!("{}::{}", String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&method.name));
+                                let line = vm.current_line;
+                                vm.check_user_function_deprecation(&op, &display_fallback, line);
                                 return vm.execute_fn_with_named_args(&op, call_args, named_args, Some(Value::Object(obj.clone())));
                             }
                             // Method exists but not accessible - fall through to __call
@@ -1625,7 +1643,13 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         if let Some(class) = vm.classes.get(&class_lower).cloned() {
             if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
-                let op = method.op_array.clone();
+                let mut op = method.op_array.clone();
+                if op.attributes.is_empty() && !method.attributes.is_empty() {
+                    op.attributes = method.attributes.clone();
+                }
+                let display_fallback = format!("{}::__invoke", String::from_utf8_lossy(&class.name));
+                let line = vm.current_line;
+                vm.check_user_function_deprecation(&op, &display_fallback, line);
                 return vm.execute_fn_with_named_args(&op, call_args, named_args, Some(Value::Object(obj.clone())));
             }
         }
@@ -1650,6 +1674,9 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let looks_like_class_method = func_lower.windows(2).any(|w| w == b"::");
         if !looks_like_class_method {
             if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                let fallback = String::from_utf8_lossy(&func_name).into_owned();
+                let line = vm.current_line;
+                vm.check_user_function_deprecation(&user_fn, &fallback, line);
                 return vm.execute_fn_with_named_args(&user_fn, call_args, named_args, None);
             }
         }
@@ -1680,7 +1707,13 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
                 if let Some(class) = vm.classes.get(&resolved_class_lower).cloned() {
                     if let Some(method) = class.methods.get(method_lower) {
-                        let op = method.op_array.clone();
+                        let mut op = method.op_array.clone();
+                        if op.attributes.is_empty() && !method.attributes.is_empty() {
+                            op.attributes = method.attributes.clone();
+                        }
+                        let display_fallback = format!("{}::{}", String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&method.name));
+                        let line = vm.current_line;
+                        vm.check_user_function_deprecation(&op, &display_fallback, line);
                         let declaring = method.declaring_class.clone();
                         // Push called_class and class_scope for proper LSB
                         if is_forwarding {
