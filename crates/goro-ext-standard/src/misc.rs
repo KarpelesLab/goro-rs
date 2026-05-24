@@ -6502,6 +6502,24 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             for (_, v) in arr.iter() { buf.extend_from_slice(v.to_php_string().as_bytes()); }
             buf
         }
+        Value::Object(obj) => {
+            // PHP attempts __toString. If absent, emit warning and return false.
+            let class_name = obj.borrow().class_name.clone();
+            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let has_tostring = vm.classes.get(&class_lower)
+                .map(|c| c.get_method(b"__tostring").is_some())
+                .unwrap_or(false);
+            if !has_tostring {
+                // PHP's file_put_contents silently returns false rather than
+                // emitting a warning for objects without __toString.
+                let _ = class_name;
+                return Ok(Value::False);
+            }
+            match vm.call_object_method(data_val, b"__tostring", &[]) {
+                Some(result) => result.to_php_string().as_bytes().to_vec(),
+                None => return Ok(Value::False),
+            }
+        }
         _ => data_val.to_php_string().as_bytes().to_vec(),
     };
     let path_str = path.to_string_lossy();
@@ -14947,11 +14965,15 @@ fn stream_filter_remove_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     };
     if crate::stream_filters::remove_filter(fid) { Ok(Value::True) } else { Ok(Value::False) }
 }
-fn stream_context_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    match args.first() {
-        Some(Value::Array(arr)) => Ok(Value::Array(arr.clone())),
-        _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    }
+fn stream_context_create_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Allocate a unique id and register it as a stream-context resource.
+    let fid = NEXT_FILE_ID.with(|id| {
+        let v = id.get();
+        id.set(v + 1);
+        v
+    });
+    goro_core::value::register_resource(fid, b"stream-context");
+    Ok(Value::Resource(fid))
 }
 fn stream_context_set_option_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn stream_context_get_options_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
