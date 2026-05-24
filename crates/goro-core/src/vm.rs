@@ -19020,14 +19020,32 @@ impl Vm {
                                         | b"regexiterator" | b"recursiveregexiterator"
                                         | b"parentiterator" => {
                                             // __construct(Iterator $iterator, ...)
-                                            // Require at least 1 user arg (the iterator)
-                                            if call.args.len() <= 1 {
+                                            // Minimum-argument check per builtin.
+                                            let min_args: usize = match class_lower.as_slice() {
+                                                b"callbackfilteriterator" | b"recursivecallbackfilteriterator" => 2,
+                                                b"regexiterator" | b"recursiveregexiterator" => 2,
+                                                _ => 1,
+                                            };
+                                            let user_arg_count = call.args.len().saturating_sub(1);
+                                            if user_arg_count < min_args {
                                                 drop(obj_mut);
                                                 let class_canonical = self.builtin_canonical_name(&class_lower);
-                                                let msg = format!(
-                                                    "{}::__construct() expects at least 1 argument, 0 given",
-                                                    class_canonical
-                                                );
+                                                let verb = if min_args == user_arg_count + 1 || min_args == 1 {
+                                                    "at least"
+                                                } else {
+                                                    "exactly"
+                                                };
+                                                let msg = if min_args == 1 {
+                                                    format!(
+                                                        "{}::__construct() expects {} 1 argument, {} given",
+                                                        class_canonical, verb, user_arg_count
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "{}::__construct() expects exactly {} arguments, {} given",
+                                                        class_canonical, min_args, user_arg_count
+                                                    )
+                                                };
                                                 let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
@@ -19136,6 +19154,38 @@ impl Vm {
                                                 class_lower.as_slice(),
                                                 b"callbackfilteriterator" | b"recursivecallbackfilteriterator"
                                             ) {
+                                                // Validate callback type. PHP rejects bool/null/int/float/object with a specific message.
+                                                let cb = &call.args[2];
+                                                let cb_error: Option<&'static str> = match cb {
+                                                    Value::Null | Value::True | Value::False
+                                                    | Value::Long(_) | Value::Double(_) => Some("no array or string given"),
+                                                    Value::Array(a) => {
+                                                        if a.borrow().len() != 2 {
+                                                            Some("array callback must have exactly two members")
+                                                        } else { None }
+                                                    }
+                                                    _ => None,
+                                                };
+                                                if let Some(err_detail) = cb_error {
+                                                    drop(obj_mut);
+                                                    let class_canonical = self.builtin_canonical_name(&class_lower);
+                                                    let msg = format!(
+                                                        "{}::__construct(): Argument #2 ($callback) must be a valid callback, {}",
+                                                        class_canonical, err_detail
+                                                    );
+                                                    let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                        let ct = *catch_target;
+                                                        ip = ct as usize;
+                                                        continue;
+                                                    }
+                                                    return Err(VmError {
+                                                        message: format!("Uncaught TypeError: {}", msg),
+                                                        line: op.line,
+                                                    });
+                                                }
                                                 obj_mut.set_property(b"__spl_callback".to_vec(), call.args[2].clone());
                                             }
                                             // RecursiveIteratorIterator mode
