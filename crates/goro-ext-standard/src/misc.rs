@@ -6655,6 +6655,13 @@ fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
+    // PHP 8+: when $atime is an integer but $mtime is null, throw ValueError.
+    if args.len() >= 3 && matches!(args.get(1), Some(Value::Null)) && !matches!(args.get(2), Some(Value::Null)) {
+        let msg = "touch(): Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     // Empty path: silently return false (matches PHP behavior)
     if path_str.is_empty() {
         return Ok(Value::False);
@@ -9532,10 +9539,14 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
 fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fread")?;
-    let length = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
-    if length == 0 {
-        return Ok(Value::String(PhpString::from_bytes(b"")));
+    let length_signed = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if length_signed <= 0 {
+        let msg = "fread(): Argument #2 ($length) must be greater than 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
+    let length = length_signed as usize;
     // If read filters are attached, route through filter chain.
     let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
@@ -11406,7 +11417,31 @@ fn readdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn chmod_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string();
-    let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0o644);
+    let mode_val = args.get(1).cloned().unwrap_or(Value::Null);
+    // chmod() requires permissions to be an int. PHP throws TypeError
+    // on string/array/object/null.
+    let mode = match &mode_val {
+        Value::Long(n) => *n,
+        Value::Double(d) => *d as i64,
+        Value::True => 1,
+        Value::False => 0,
+        _ => {
+            let actual_type = match &mode_val {
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+                Value::Null => "null",
+                _ => "unknown",
+            };
+            let msg = format!(
+                "chmod(): Argument #2 ($permissions) must be of type int, {} given",
+                actual_type
+            );
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
