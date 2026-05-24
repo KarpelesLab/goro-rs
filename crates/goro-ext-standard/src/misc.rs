@@ -50,6 +50,18 @@ fn require_array_arg_variadic(vm: &mut Vm, val: &Value, func_name: &str, param_n
     require_array_arg_inner(vm, val, func_name, None, param_num)
 }
 
+/// Like Vm::value_type_name but returns "resource" for registered resource ids
+/// (since resources are stored as Value::Long internally).
+/// Skip ids 1-3 since those are pre-registered as STDIN/STDOUT/STDERR and
+/// would falsely classify integer literals 1, 2, 3 as resources.
+fn arg_type_name(val: &Value) -> String {
+    match val {
+        Value::Long(n) if *n > 3 && goro_core::value::is_registered_resource(*n) => "resource".to_string(),
+        Value::Reference(r) => arg_type_name(&*r.borrow()),
+        _ => Vm::value_type_name(val),
+    }
+}
+
 fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name: Option<&str>, param_num: u32) -> Result<(), VmError> {
     let make_msg = |type_name: &str| -> String {
         if let Some(name) = param_name {
@@ -65,7 +77,7 @@ fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name
             if matches!(&*inner, Value::Array(_)) {
                 Ok(())
             } else {
-                let type_name = Vm::value_type_name(&*inner);
+                let type_name = arg_type_name(&*inner);
                 let msg = make_msg(&type_name);
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
@@ -73,7 +85,7 @@ fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name
             }
         }
         _ => {
-            let type_name = Vm::value_type_name(val);
+            let type_name = arg_type_name(val);
             let msg = make_msg(&type_name);
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
@@ -8166,7 +8178,7 @@ fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for (i, arg) in args.iter().enumerate() {
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&a);
+            let type_name = arg_type_name(&a);
             let msg = if i == 0 {
                 format!("array_diff_key(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
@@ -8210,7 +8222,7 @@ fn array_diff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for (i, arg) in args.iter().enumerate() {
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&a);
+            let type_name = arg_type_name(&a);
             let msg = if i == 0 {
                 format!("array_diff_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
@@ -8258,7 +8270,7 @@ fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     for (i, arg) in args.iter().enumerate() {
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&a);
+            let type_name = arg_type_name(&a);
             let msg = if i == 0 {
                 format!("array_intersect_key(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
@@ -8299,7 +8311,7 @@ fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     for (i, arg) in args.iter().enumerate() {
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&a);
+            let type_name = arg_type_name(&a);
             let msg = if i == 0 {
                 format!("array_intersect_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
@@ -9203,7 +9215,7 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::False
         })
     } else {
-        let type_name = Vm::value_type_name(arr);
+        let type_name = arg_type_name(arr);
         let msg = format!("array_key_exists(): Argument #2 ($array) must be of type array, {} given", type_name);
         let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
@@ -10183,7 +10195,7 @@ fn array_u_op(
     for i in 0..array_arg_count {
         let val = args[i].deref();
         if !matches!(val, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&val);
+            let type_name = arg_type_name(&val);
             let msg = if i == 0 {
                 format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
             } else {
@@ -10279,7 +10291,7 @@ fn array_udiff_with_key_check(
     for i in 0..array_arg_count {
         let val = args[i].deref();
         if !matches!(val, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&val);
+            let type_name = arg_type_name(&val);
             let msg = if i == 0 {
                 format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
             } else {
@@ -10351,7 +10363,7 @@ fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) -> Resu
     for i in 0..array_arg_count {
         let val = args[i].deref();
         if !matches!(val, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&val);
+            let type_name = arg_type_name(&val);
             let msg = if i == 0 {
                 format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
             } else {
@@ -10436,7 +10448,7 @@ fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) ->
     for i in 0..array_arg_count {
         let val = args[i].deref();
         if !matches!(val, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&val);
+            let type_name = arg_type_name(&val);
             let msg = if i == 0 {
                 format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
             } else {
