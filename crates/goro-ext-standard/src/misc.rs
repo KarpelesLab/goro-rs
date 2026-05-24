@@ -6059,19 +6059,73 @@ fn is_dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn is_readable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
-        Value::True
-    } else {
-        Value::False
-    })
+    #[cfg(unix)]
+    {
+        Ok(if check_access_bit(&path.to_string_lossy(), 0o400, 0o040, 0o004) {
+            Value::True
+        } else {
+            Value::False
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+            Value::True
+        } else {
+            Value::False
+        })
+    }
 }
 fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
-        Value::True
+    #[cfg(unix)]
+    {
+        Ok(if check_access_bit(&path.to_string_lossy(), 0o200, 0o020, 0o002) {
+            Value::True
+        } else {
+            Value::False
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+            Value::True
+        } else {
+            Value::False
+        })
+    }
+}
+
+/// PHP-style file mode access check: returns true if the appropriate
+/// permission bit (owner/group/other) is set for the current process.
+#[cfg(unix)]
+fn check_access_bit(path: &str, owner_bit: u32, group_bit: u32, other_bit: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let m = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    // Root is checked specially: PHP relies on the kernel access(2) syscall.
+    // We approximate: euid 0 → r/w always allowed; x requires any x bit.
+    let euid = unsafe { libc::geteuid() };
+    let egid = unsafe { libc::getegid() };
+    let mode = m.mode();
+    if euid == 0 {
+        // Root: for read/write any access; for execute requires any x bit.
+        if owner_bit == 0o400 || owner_bit == 0o200 {
+            return true;
+        }
+        return mode & 0o111 != 0;
+    }
+    let bit = if m.uid() == euid {
+        owner_bit
+    } else if m.gid() == egid {
+        group_bit
     } else {
-        Value::False
-    })
+        // Could also be in supplementary groups; ignore for now.
+        other_bit
+    };
+    mode & bit != 0
 }
 /// Read a file with optional compress.zlib:// (gzip/zlib decompression) prefix.
 pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>> {
@@ -11978,13 +12032,26 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match read_path_with_wrappers(&path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        let msg = "Path must not be empty".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    match read_path_with_wrappers(&path_str) {
         Ok(data) => {
             let len = data.len();
             vm.write_output(&data);
             Ok(Value::Long(len as i64))
         }
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!(
+                "readfile({}): Failed to open stream: No such file or directory",
+                path_str
+            ));
+            Ok(Value::False)
+        },
     }
 }
 
@@ -12059,15 +12126,11 @@ fn is_executable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
-            Ok(m) => Ok(if m.mode() & 0o111 != 0 {
-                Value::True
-            } else {
-                Value::False
-            }),
-            Err(_) => Ok(Value::False),
-        }
+        Ok(if check_access_bit(&path.to_string_lossy(), 0o100, 0o010, 0o001) {
+            Value::True
+        } else {
+            Value::False
+        })
     }
     #[cfg(not(unix))]
     {
