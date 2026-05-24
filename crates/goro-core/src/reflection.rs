@@ -4584,6 +4584,33 @@ pub fn reflection_attribute_method(
             let call_site_line = vm.current_line;
             // Create a new instance of the attribute class
             let class_lower: Vec<u8> = attr_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Built-in attribute classes: AllowDynamicProperties, Override,
+            // SensitiveParameter, ReturnTypeWillChange, DelayedTargetValidation
+            // are marker attributes that have no constructor body.
+            // Their newInstance() returns an empty object of the right type.
+            let builtin_marker_attrs: &[&[u8]] = &[
+                b"allowdynamicproperties",
+                b"override",
+                b"sensitiveparameter",
+                b"returntypewillchange",
+                b"delayedtargetvalidation",
+            ];
+            if builtin_marker_attrs.contains(&class_lower.as_slice())
+                && !vm.classes.contains_key(&class_lower)
+            {
+                let obj_id = vm.next_object_id();
+                // Preserve canonical PHP class name casing
+                let canonical_name: &[u8] = match class_lower.as_slice() {
+                    b"allowdynamicproperties" => b"AllowDynamicProperties",
+                    b"override" => b"Override",
+                    b"sensitiveparameter" => b"SensitiveParameter",
+                    b"returntypewillchange" => b"ReturnTypeWillChange",
+                    b"delayedtargetvalidation" => b"DelayedTargetValidation",
+                    _ => unreachable!(),
+                };
+                let new_obj = PhpObject::new(canonical_name.to_vec(), obj_id);
+                return Some(Value::Object(Rc::new(RefCell::new(new_obj))));
+            }
             if !vm.classes.contains_key(&class_lower) {
                 let err_msg = format!("Attribute class \"{}\" not found", attr_name);
                 let exc = vm.create_exception(b"Error", &err_msg, call_site_line);

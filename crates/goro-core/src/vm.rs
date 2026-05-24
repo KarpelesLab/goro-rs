@@ -20346,11 +20346,45 @@ impl Vm {
                         }
                     }
                     if let Some((rid, pname)) = &propagate_isset_guard_to_real {
-                        self.magic_prop_guards.insert((*rid, pname.clone(), 1u8));
+                        let key = (*rid, pname.clone(), 1u8);
+                        if self.magic_prop_guards.contains(&key) {
+                            propagate_isset_guard_to_real = None;
+                        } else {
+                            self.magic_prop_guards.insert(key);
+                        }
                     }
                     let obj_val = if let Value::Object(obj) = &obj_val_raw {
                         if !prop_name.as_bytes().starts_with(b"__lazy_") {
-                            Value::Object(self.proxy_redirect(obj))
+                            let keep_proxy_for_magic = {
+                                let ob = obj.borrow();
+                                let state = ob.get_property(b"__lazy_state");
+                                let is_proxy = matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy");
+                                let has_real = ob.has_property(b"__lazy_real");
+                                if is_proxy && has_real {
+                                    let class_name = ob.class_name.clone();
+                                    let pn = prop_name.as_bytes();
+                                    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let obj_id_local = ob.object_id;
+                                    drop(ob);
+                                    let has_isset = self.classes.get(&class_lower)
+                                        .map(|c| c.methods.contains_key(&b"__isset".to_vec()))
+                                        .unwrap_or(false);
+                                    let prop_declared = self.classes.get(&class_lower)
+                                        .map(|c| c.properties.iter().any(|p| p.name == pn && !p.is_static))
+                                        .unwrap_or(false);
+                                    let prop_on_instance = obj.borrow().has_property(pn);
+                                    let guard_active = self.magic_prop_guards
+                                        .contains(&(obj_id_local, pn.to_vec(), 1u8));
+                                    has_isset && !prop_declared && !prop_on_instance && !guard_active
+                                } else {
+                                    false
+                                }
+                            };
+                            if keep_proxy_for_magic {
+                                obj_val_raw.clone()
+                            } else {
+                                Value::Object(self.proxy_redirect(obj))
+                            }
                         } else {
                             obj_val_raw.clone()
                         }
@@ -20621,11 +20655,45 @@ impl Vm {
                         }
                     }
                     if let Some((rid, pname)) = &propagate_unset_guard_to_real {
-                        self.magic_prop_guards.insert((*rid, pname.clone(), 3u8));
+                        let key = (*rid, pname.clone(), 3u8);
+                        if self.magic_prop_guards.contains(&key) {
+                            propagate_unset_guard_to_real = None;
+                        } else {
+                            self.magic_prop_guards.insert(key);
+                        }
                     }
                     let obj_val = if let Value::Object(obj) = &obj_val_raw {
                         if !prop_name.as_bytes().starts_with(b"__lazy_") {
-                            Value::Object(self.proxy_redirect(obj))
+                            let keep_proxy_for_magic = {
+                                let ob = obj.borrow();
+                                let state = ob.get_property(b"__lazy_state");
+                                let is_proxy = matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy");
+                                let has_real = ob.has_property(b"__lazy_real");
+                                if is_proxy && has_real {
+                                    let class_name = ob.class_name.clone();
+                                    let pn = prop_name.as_bytes();
+                                    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let obj_id_local = ob.object_id;
+                                    drop(ob);
+                                    let has_unset = self.classes.get(&class_lower)
+                                        .map(|c| c.methods.contains_key(&b"__unset".to_vec()))
+                                        .unwrap_or(false);
+                                    let prop_declared = self.classes.get(&class_lower)
+                                        .map(|c| c.properties.iter().any(|p| p.name == pn && !p.is_static))
+                                        .unwrap_or(false);
+                                    let prop_on_instance = obj.borrow().has_property(pn);
+                                    let guard_active = self.magic_prop_guards
+                                        .contains(&(obj_id_local, pn.to_vec(), 3u8));
+                                    has_unset && !prop_declared && !prop_on_instance && !guard_active
+                                } else {
+                                    false
+                                }
+                            };
+                            if keep_proxy_for_magic {
+                                obj_val_raw.clone()
+                            } else {
+                                Value::Object(self.proxy_redirect(obj))
+                            }
                         } else {
                             obj_val_raw.clone()
                         }
@@ -23558,9 +23626,16 @@ impl Vm {
                         }
                         // Validate #[Attribute] usage
                         let class_display = String::from_utf8_lossy(&class.name).to_string();
+                        // PHP 8.5 #[DelayedTargetValidation] suppresses runtime
+                        // target-mismatch errors so reflection can introspect
+                        // misapplied attributes.
+                        let has_delayed_validation = class.attributes.iter().any(|a| {
+                            a.name.eq_ignore_ascii_case(b"DelayedTargetValidation")
+                                || a.name.eq_ignore_ascii_case(b"\\DelayedTargetValidation")
+                        });
                         for attr in &class.attributes {
                             let attr_lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if attr_lower == b"attribute" {
+                            if attr_lower == b"attribute" && !has_delayed_validation {
                                 if class.is_abstract {
                                     return Err(VmError { message: format!("Cannot apply #[\\Attribute] to abstract class {}", class_display), line: op.line });
                                 }
@@ -23575,15 +23650,21 @@ impl Vm {
                                 }
                             }
                             if attr_lower == b"allowdynamicproperties" {
-                                if class.is_enum {
-                                    return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to enum {}", class_display), line: op.line });
+                                if !has_delayed_validation {
+                                    if class.is_enum {
+                                        return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to enum {}", class_display), line: op.line });
+                                    }
+                                    if class.is_interface {
+                                        return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to interface {}", class_display), line: op.line });
+                                    }
+                                    if class.is_trait {
+                                        return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to trait {}", class_display), line: op.line });
+                                    }
                                 }
-                                if class.is_interface {
-                                    return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to interface {}", class_display), line: op.line });
-                                }
-                                if class.is_trait {
-                                    return Err(VmError { message: format!("Cannot apply #[\\AllowDynamicProperties] to trait {}", class_display), line: op.line });
-                                }
+                                // Mark the class as allowing dynamic properties only
+                                // if validation passed (or if delayed validation skips
+                                // the error). When delayed, also enable the flag so
+                                // dynamic-prop assignment doesn't warn at runtime.
                                 class.allow_dynamic_properties = true;
                             }
                         }
@@ -24356,14 +24437,54 @@ impl Vm {
                             }
                         }
                     }
+                    // Only insert (and later remove) the propagated guard if
+                    // not already present, to avoid removing an outer guard
+                    // that was already on the real backing.
                     if let Some((rid, pname)) = &propagate_get_guard_to_real {
-                        self.magic_prop_guards.insert((*rid, pname.clone(), 0u8));
+                        let key = (*rid, pname.clone(), 0u8);
+                        if self.magic_prop_guards.contains(&key) {
+                            propagate_get_guard_to_real = None;
+                        } else {
+                            self.magic_prop_guards.insert(key);
+                        }
                     }
 
                     // Proxy redirect: forward property access to the real object
+                    // Keep proxy identity if the proxy class has __get for an
+                    // undeclared property with no active guard, so __get runs
+                    // on the proxy with $this=proxy.
                     let obj_val = if let Value::Object(obj) = &obj_val_raw {
                         if !prop_name.as_bytes().starts_with(b"__lazy_") {
-                            Value::Object(self.proxy_redirect(obj))
+                            let keep_proxy_for_magic = {
+                                let ob = obj.borrow();
+                                let state = ob.get_property(b"__lazy_state");
+                                let is_proxy = matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy");
+                                let has_real = ob.has_property(b"__lazy_real");
+                                if is_proxy && has_real {
+                                    let class_name = ob.class_name.clone();
+                                    let pn = prop_name.as_bytes();
+                                    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let obj_id_local = ob.object_id;
+                                    drop(ob);
+                                    let has_get = self.classes.get(&class_lower)
+                                        .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                        .unwrap_or(false);
+                                    let prop_declared = self.classes.get(&class_lower)
+                                        .map(|c| c.properties.iter().any(|p| p.name == pn && !p.is_static))
+                                        .unwrap_or(false);
+                                    let prop_on_instance = obj.borrow().has_property(pn);
+                                    let guard_active = self.magic_prop_guards
+                                        .contains(&(obj_id_local, pn.to_vec(), 0u8));
+                                    has_get && !prop_declared && !prop_on_instance && !guard_active
+                                } else {
+                                    false
+                                }
+                            };
+                            if keep_proxy_for_magic {
+                                obj_val_raw.clone()
+                            } else {
+                                Value::Object(self.proxy_redirect(obj))
+                            }
                         } else {
                             obj_val_raw.clone()
                         }
@@ -24820,16 +24941,57 @@ impl Vm {
                             }
                         }
                     }
+                    // Only insert (and later remove) the propagated guard if
+                    // not already present, to avoid removing an outer guard
+                    // that was already on the real backing.
                     if let Some((rid, pname)) = &propagate_guard_to_real {
-                        self.magic_prop_guards.insert((*rid, pname.clone(), 2u8));
+                        let key = (*rid, pname.clone(), 2u8);
+                        if self.magic_prop_guards.contains(&key) {
+                            propagate_guard_to_real = None;
+                        } else {
+                            self.magic_prop_guards.insert(key);
+                        }
                     }
 
                     // Proxy redirect: forward property writes to the real object
                     // ONLY if the proxy has been initialized. An uninitialized
                     // proxy keeps its identity so __set runs on it.
+                    // ALSO keep the proxy identity if the proxy class has __set
+                    // and the property is undeclared and there is no active
+                    // __set guard for this proxy/prop pair — this lets the
+                    // proxy's __set run on the proxy (PHP semantics).
                     let obj_val = if let Value::Object(obj) = &obj_val_raw {
                         if !prop_name.as_bytes().starts_with(b"__lazy_") {
-                            Value::Object(self.proxy_redirect(obj))
+                            let keep_proxy_for_magic = {
+                                let ob = obj.borrow();
+                                let state = ob.get_property(b"__lazy_state");
+                                let is_proxy = matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy");
+                                let has_real = ob.has_property(b"__lazy_real");
+                                if is_proxy && has_real {
+                                    let class_name = ob.class_name.clone();
+                                    let pn = prop_name.as_bytes();
+                                    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let obj_id_local = ob.object_id;
+                                    drop(ob);
+                                    let has_set = self.classes.get(&class_lower)
+                                        .map(|c| c.methods.contains_key(&b"__set".to_vec()))
+                                        .unwrap_or(false);
+                                    let prop_declared = self.classes.get(&class_lower)
+                                        .map(|c| c.properties.iter().any(|p| p.name == pn && !p.is_static))
+                                        .unwrap_or(false);
+                                    let prop_on_instance = obj.borrow().has_property(pn);
+                                    let guard_active = self.magic_prop_guards
+                                        .contains(&(obj_id_local, pn.to_vec(), 2u8));
+                                    has_set && !prop_declared && !prop_on_instance && !guard_active
+                                } else {
+                                    false
+                                }
+                            };
+                            if keep_proxy_for_magic {
+                                obj_val_raw.clone()
+                            } else {
+                                Value::Object(self.proxy_redirect(obj))
+                            }
                         } else {
                             obj_val_raw.clone()
                         }
