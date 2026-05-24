@@ -61,6 +61,11 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 vm.write_output(
                     format!("{}resource({}) of type ({})\n", prefix, id, t).as_bytes(),
                 );
+            } else if goro_core::value::is_registered_resource(*id) {
+                // Closed resource: PHP shows "resource(N) of type (Unknown)"
+                vm.write_output(
+                    format!("{}resource({}) of type (Unknown)\n", prefix, id).as_bytes(),
+                );
             } else {
                 vm.write_output(
                     format!("{}resource(Unknown)\n", prefix).as_bytes(),
@@ -904,6 +909,10 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, see
                     .unwrap_or_else(|| "Unknown".to_string());
                 vm.write_output(
                     format!("{}&resource({}) of type ({})\n", prefix, id, t).as_bytes(),
+                );
+            } else if goro_core::value::is_registered_resource(*id) {
+                vm.write_output(
+                    format!("{}&resource({}) of type (Unknown)\n", prefix, id).as_bytes(),
                 );
             } else {
                 vm.write_output(

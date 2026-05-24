@@ -6417,6 +6417,27 @@ fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     }
+    // Determine mtime/atime: if either provided, use them; else "now" so
+    // ctime/mtime get bumped (matches PHP's expected behaviour).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mtime = args.get(1).map(|v| v.to_long()).unwrap_or(now);
+    // PHP: $atime defaults to $mtime if only $mtime given.
+    let atime = args.get(2).map(|v| v.to_long()).unwrap_or(mtime);
+
+    // Use libc::utimes (atime, mtime) to set both.
+    use std::ffi::CString;
+    let c_path = match CString::new(path_str.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return Ok(Value::True),
+    };
+    let times = [
+        libc::timeval { tv_sec: atime, tv_usec: 0 },
+        libc::timeval { tv_sec: mtime, tv_usec: 0 },
+    ];
+    let _ = unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()) };
     Ok(Value::True)
 }
 fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -6586,6 +6607,10 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let levels = levels_raw as usize;
     let mut result = s.to_string();
+    // PHP: dirname("") returns ""
+    if result.is_empty() {
+        return Ok(Value::String(PhpString::from_string(String::new())));
+    }
     for _ in 0..levels {
         // Strip trailing slashes (but not the root /)
         while result.len() > 1 && result.ends_with('/') {
@@ -6597,6 +6622,11 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 result = "/".to_string();
             } else {
                 result.truncate(pos);
+                // Strip trailing slashes from the result, preserving '/' if absolute.
+                while result.len() > 1 && result.ends_with('/') {
+                    result.pop();
+                }
+                if result.is_empty() { result = "/".to_string(); }
             }
         } else {
             result = ".".to_string();
@@ -6632,22 +6662,27 @@ fn pathinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let option = args.get(1).map(|v| v.to_long());
     let s = path.to_string_lossy();
 
-    let dirname = {
-        let trimmed = s.trim_end_matches('/');
-        if let Some(pos) = trimmed.rfind('/') {
-            if pos == 0 { "/".to_string() } else { trimmed[..pos].to_string() }
-        } else {
-            ".".to_string()
+    // PHP's pathinfo() algorithm (effective):
+    //   1. Trim trailing '/'s from the path -> trimmed
+    //   2. Find rightmost '/' in trimmed
+    //   3. basename = everything after that
+    //   4. dirname = everything before that, with trailing '/'s stripped
+    //      (preserving leading '/'s for absolute paths like '//foo' -> '//foo')
+    //   5. If no '/' at all, dirname is "." and basename is the trimmed path.
+    let trimmed = s.trim_end_matches('/');
+    let (dirname, basename) = if let Some(pos) = trimmed.rfind('/') {
+        let mut dn = trimmed[..pos].to_string();
+        // Strip trailing slashes from dirname, but keep root '/' or leading '//'.
+        while dn.len() > 1 && dn.ends_with('/') {
+            dn.pop();
         }
+        if dn.is_empty() { dn = "/".to_string(); }
+        (dn, trimmed[pos + 1..].to_string())
+    } else {
+        (".".to_string(), trimmed.to_string())
     };
-    let basename = {
-        let trimmed = s.trim_end_matches('/');
-        if let Some(pos) = trimmed.rfind('/') {
-            trimmed[pos + 1..].to_string()
-        } else {
-            trimmed.to_string()
-        }
-    };
+    // For basename starting with '.', PHP's extension/filename split is the
+    // SAME as normal: the rightmost '.' separates filename from extension.
     let extension = basename.rfind('.').map(|pos| basename[pos + 1..].to_string());
     let filename = if let Some(pos) = basename.rfind('.') {
         basename[..pos].to_string()
@@ -8626,6 +8661,23 @@ fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
     alloc_file_handle_special(file, mode, SpecialStream::None)
 }
 
+/// Helper used by file functions to validate that the first argument is an
+/// open stream resource. If the value is not a stream resource (or is a closed
+/// stream resource), this throws a TypeError matching PHP's wording.
+///
+/// Returns Ok(fid) for valid streams (FILE_HANDLES contains the id).
+fn require_open_stream(vm: &mut Vm, val: &Value, func_name: &str) -> Result<i64, VmError> {
+    let fid = val.to_long();
+    let has_handle = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
+    if has_handle {
+        return Ok(fid);
+    }
+    let msg = format!("{}(): Argument #1 ($stream) must be an open stream resource", func_name);
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError { message: msg, line: vm.current_line })
+}
+
 fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialStream) -> i64 {
     NEXT_FILE_ID.with(|id| {
         let fid = id.get();
@@ -8885,6 +8937,26 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // Validate mode: first character must be one of r/w/a/x/c, optionally
+    // followed by '+', 'b' and/or 't' in any order.
+    let valid_mode = {
+        let chars: Vec<char> = mode.chars().collect();
+        if chars.is_empty() {
+            false
+        } else {
+            let first = chars[0];
+            let valid_first = matches!(first, 'r' | 'w' | 'a' | 'x' | 'c');
+            let valid_rest = chars[1..].iter().all(|&c| matches!(c, '+' | 'b' | 't' | 'e'));
+            valid_first && valid_rest
+        }
+    };
+    if !valid_mode {
+        vm.emit_warning(&format!(
+            "fopen({}): Failed to open stream: `{}' is not a valid mode for fopen",
+            filename, mode
+        ));
+        return Ok(Value::False);
+    }
     let file = match mode_clean.as_str() {
         "r" => std::fs::File::open(&filename),
         "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&filename),
@@ -8905,7 +8977,11 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             goro_core::value::register_resource(fid, b"stream");
             Ok(Value::Resource(fid))
         }
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("fopen({}): Failed to open stream: {}", filename, msg));
+            Ok(Value::False)
+        }
     }
 }
 
@@ -8961,7 +9037,8 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
 }
 
 fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fread")?;
     let length = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
     if length == 0 {
         return Ok(Value::String(PhpString::from_bytes(b"")));
@@ -9039,12 +9116,31 @@ fn read_filtered(vm: &mut Vm, fid: i64, length: usize) -> Vec<u8> {
 }
 
 fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let arg = args.first().unwrap_or(&Value::Null);
+    // For STDOUT/STDERR (1/2/3) without FILE_HANDLES entry, accept long IDs.
+    let raw_fid = arg.to_long();
+    let is_special_writer = raw_fid == 1 || raw_fid == 2 || raw_fid == 3;
+    let fid = if is_special_writer { raw_fid } else { require_open_stream(vm, arg, "fwrite")? };
     let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let bytes = data.as_bytes();
     let length = args.get(2).map(|v| v.to_long() as usize).unwrap_or(bytes.len());
     let to_write = &bytes[..length.min(bytes.len())];
     let original_len = to_write.len();
+
+    // Check if the underlying stream allows writing.
+    let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
+    if let Some(ref m) = stream_mode {
+        let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
+        // 'r' (read-only) without '+' is not writable.
+        if clean == "r" {
+            let line = vm.current_line;
+            vm.emit_notice_at(&format!(
+                "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
+                original_len
+            ), line);
+            return Ok(Value::False);
+        }
+    }
 
     // Apply write filter chain if any are attached.
     let filtered = crate::stream_filters::apply_write_chain(vm, fid, to_write);
@@ -9058,12 +9154,34 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let max_length = args.get(1).map(|v| v.to_long() as usize);
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fgets")?;
+    // PHP semantics: $length (if provided) must be > 0. fgets reads up to
+    // length-1 bytes (the remaining byte is a virtual null terminator in C).
+    // When omitted, reads until newline (no byte cap — we use a large default).
+    let explicit_length = match args.get(1) {
+        Some(v) if !matches!(v, Value::Null | Value::Undef) => Some(v.to_long()),
+        _ => None,
+    };
+    let limit = if let Some(n) = explicit_length {
+        if n <= 0 {
+            let msg = "fgets(): Argument #2 ($length) must be greater than 0".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        (n as usize).saturating_sub(1)
+    } else {
+        usize::MAX
+    };
+    // Special: $length == 1 means read 0 bytes - PHP returns "" or false.
+    if limit == 0 {
+        // For length=1 (limit=0), PHP returns false (after reading something it would be empty).
+        return Ok(Value::False);
+    }
 
     let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
-        let limit = max_length.unwrap_or(1024);
         let mut out: Vec<u8> = Vec::new();
         let mut hit_newline = false;
         while out.len() < limit {
@@ -9082,7 +9200,6 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             let mut buf = Vec::new();
-            let limit = max_length.unwrap_or(1024);
             let mut byte = [0u8; 1];
             for _ in 0..limit {
                 match fh.file.read(&mut byte) {
@@ -9110,8 +9227,24 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn feof_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = arg.to_long();
+    let has_handle = FILE_HANDLES.with(|handles| handles.borrow().contains_key(&fid));
+    if !has_handle {
+        // If it was a resource (possibly closed) or any other type, throw TypeError
+        let is_closed_resource = matches!(arg, Value::Resource(_))
+            && goro_core::value::is_registered_resource(fid)
+            && !goro_core::value::is_open_resource(fid);
+        let is_resource = matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
+        if is_closed_resource || !is_resource {
+            let msg = "feof(): Argument #1 ($stream) must be an open stream resource".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        return Ok(Value::True);
+    }
     FILE_HANDLES.with(|handles| {
         let handles = handles.borrow();
         if let Some(fh) = handles.get(&fid) {
@@ -9138,8 +9271,9 @@ fn rewind_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn fseek_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fseek")?;
     let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let whence = args.get(2).map(|v| v.to_long()).unwrap_or(0);
 
@@ -9163,8 +9297,23 @@ fn fseek_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn ftell_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = arg.to_long();
+    let has_handle = FILE_HANDLES.with(|handles| handles.borrow().contains_key(&fid));
+    if !has_handle {
+        let is_closed_resource = matches!(arg, Value::Resource(_))
+            && goro_core::value::is_registered_resource(fid)
+            && !goro_core::value::is_open_resource(fid);
+        let is_open_resource = matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
+        if is_closed_resource || !is_open_resource {
+            let msg = "ftell(): Argument #1 ($stream) must be an open stream resource".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        return Ok(Value::False);
+    }
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
@@ -10611,13 +10760,29 @@ fn symlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn readlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn readlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::read_link(&*path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    match std::fs::read_link(&*path_str) {
         Ok(p) => Ok(Value::String(PhpString::from_string(
             p.to_string_lossy().to_string(),
         ))),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            // Strip "(os error N)" trailer and other Rust-isms.
+            let msg = e.to_string();
+            let stripped = strip_os_error(&msg);
+            vm.emit_warning(&format!("readlink(): {}", stripped));
+            Ok(Value::False)
+        }
+    }
+}
+
+/// Strip Rust's "(os error N)" trailer to produce a clean message like PHP's.
+fn strip_os_error(msg: &str) -> String {
+    if let Some(idx) = msg.rfind(" (os error") {
+        msg[..idx].to_string()
+    } else {
+        msg.to_string()
     }
 }
 
@@ -11155,6 +11320,12 @@ fn restore_include_path_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErr
 
 fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    // For closed resources, return "Unknown" (matches PHP behavior).
+    if let Value::Resource(id) = val {
+        if goro_core::value::is_registered_resource(*id) && !goro_core::value::is_open_resource(*id) {
+            return Ok(Value::String(PhpString::from_bytes(b"Unknown")));
+        }
+    }
     if let Some(t) = val.resource_type_name() {
         return Ok(Value::String(PhpString::from_vec(t)));
     }
@@ -12947,8 +13118,9 @@ fn fscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn fgetc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fgetc")?;
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
