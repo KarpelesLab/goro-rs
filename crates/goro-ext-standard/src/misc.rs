@@ -9669,6 +9669,19 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // For length=1 (limit=0), PHP returns false (after reading something it would be empty).
         return Ok(Value::False);
     }
+    // Emit notice and return false if underlying stream is write-only.
+    let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
+    if let Some(m) = stream_mode {
+        let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
+        if matches!(clean.as_str(), "w" | "a" | "x" | "c") {
+            let line = vm.current_line;
+            vm.emit_notice_at(
+                "fgets(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+                line,
+            );
+            return Ok(Value::False);
+        }
+    }
 
     let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
@@ -9745,8 +9758,9 @@ fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn rewind_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn rewind_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "rewind")?;
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
@@ -14206,6 +14220,19 @@ fn fscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fgetc")?;
+    // PHP emits a notice if the underlying mode is write-only.
+    let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
+    if let Some(m) = stream_mode {
+        let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
+        if matches!(clean.as_str(), "w" | "a" | "x" | "c") {
+            let line = vm.current_line;
+            vm.emit_notice_at(
+                "fgetc(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+                line,
+            );
+            return Ok(Value::False);
+        }
+    }
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
