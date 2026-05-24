@@ -50,9 +50,11 @@ pub(crate) fn check_arg_count_range(
             let plural = if min == 1 { "argument" } else { "arguments" };
             format!("{}() expects exactly {} {}, {} given", method_label, min, plural, user_arg_count)
         } else if user_arg_count < min {
-            format!("{}() expects at least {} arguments, {} given", method_label, min, user_arg_count)
+            let plural = if min == 1 { "argument" } else { "arguments" };
+            format!("{}() expects at least {} {}, {} given", method_label, min, plural, user_arg_count)
         } else {
-            format!("{}() expects at most {} arguments, {} given", method_label, max, user_arg_count)
+            let plural = if max == 1 { "argument" } else { "arguments" };
+            format!("{}() expects at most {} {}, {} given", method_label, max, plural, user_arg_count)
         };
         let exc = vm.create_exception(b"ArgumentCountError", &err, vm.current_line);
         vm.current_exception = Some(exc);
@@ -5061,8 +5063,11 @@ pub fn reflection_constant_method(
             Some(Value::String(PhpString::from_string(name)))
         }
         b"getnamespacename" => {
-            if let Some(pos) = name.rfind('\\') {
-                Some(Value::String(PhpString::from_string(name[..pos].to_string())))
+            // Strip a leading backslash so the namespace prefix is reported
+            // in canonical (unprefixed) form, matching PHP.
+            let n = name.strip_prefix('\\').unwrap_or(&name);
+            if let Some(pos) = n.rfind('\\') {
+                Some(Value::String(PhpString::from_string(n[..pos].to_string())))
             } else {
                 Some(Value::String(PhpString::empty()))
             }

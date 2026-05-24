@@ -20300,12 +20300,22 @@ impl Vm {
                                             // ReflectionConstant::__construct(string $name)
                                             if call.args.len() > 1 {
                                                 let const_name = call.args[1].to_php_string().to_string_lossy();
-                                                let normalized = if const_name.starts_with('\\') { const_name[1..].to_string() } else { const_name.clone() };
-                                                // Validate that the constant exists (user or builtin).
-                                                let exists = self.constants.contains_key(normalized.as_bytes());
+                                                // For lookup, strip a single leading backslash and
+                                                // lowercase the namespace prefix (the form used when
+                                                // the constant was registered via define()).
+                                                let stripped = if const_name.starts_with('\\') { &const_name[1..] } else { &const_name[..] };
+                                                let lookup_bytes: Vec<u8> = if let Some(pos) = stripped.as_bytes().iter().rposition(|&b| b == b'\\') {
+                                                    let mut out = Vec::with_capacity(stripped.len());
+                                                    for &b in &stripped.as_bytes()[..pos] { out.push(b.to_ascii_lowercase()); }
+                                                    out.extend_from_slice(&stripped.as_bytes()[pos..]);
+                                                    out
+                                                } else {
+                                                    stripped.as_bytes().to_vec()
+                                                };
+                                                let exists = self.constants.contains_key(&lookup_bytes);
                                                 if !exists {
                                                     drop(obj_mut);
-                                                    let msg = format!("Constant \"{}\" does not exist", normalized);
+                                                    let msg = format!("Constant \"{}\" does not exist", const_name);
                                                     let exc = self.create_exception(b"ReflectionException", &msg, op.line);
                                                     self.current_exception = Some(exc);
                                                     if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
@@ -20318,7 +20328,7 @@ impl Vm {
                                                         });
                                                     }
                                                 }
-                                                obj_mut.set_property(b"name".to_vec(), Value::String(PhpString::from_string(normalized)));
+                                                obj_mut.set_property(b"name".to_vec(), Value::String(PhpString::from_string(const_name)));
                                             }
                                         }
                                         b"reflectionextension" => {
