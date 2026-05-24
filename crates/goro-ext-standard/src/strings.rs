@@ -1830,10 +1830,12 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             continue;
         }
         if bytes[i] == b'<' {
-            // Check if this could be a tag: must be followed by ?, !, /, %, or alpha
+            // Check if this could be a tag: must be followed by ?, !, /, %, alpha,
+            // or NUL (PHP treats `<\0` as the start of a tag, mirroring the C
+            // tokenizer where NUL is skipped before the tag-name read).
             if i + 1 < bytes.len() {
                 let next = bytes[i + 1];
-                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && !next.is_ascii_alphabetic() {
+                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && next != 0 && !next.is_ascii_alphabetic() {
                     // Not a tag, output as literal
                     result.push(bytes[i]);
                     i += 1;
@@ -5003,10 +5005,12 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             continue;
         }
         if bytes[i] == b'<' {
-            // Check if this could be a tag: must be followed by ?, !, /, %, or alpha
+            // Check if this could be a tag: must be followed by ?, !, /, %, alpha,
+            // or NUL (PHP treats `<\0` as the start of a tag, mirroring the C
+            // tokenizer where NUL is skipped before the tag-name read).
             if i + 1 < bytes.len() {
                 let next = bytes[i + 1];
-                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && !next.is_ascii_alphabetic() {
+                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && next != 0 && !next.is_ascii_alphabetic() {
                     // Not a tag, output as literal
                     result.push(bytes[i]);
                     i += 1;
@@ -5167,77 +5171,225 @@ fn nl2br_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 pub fn str_getcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
 
-    // Validate separator must be a single character
+    // Validate separator must be a single character (treat Null as not-provided).
     if let Some(sep_val) = args.get(1) {
-        let sep_str = sep_val.to_php_string();
-        if sep_str.len() != 1 {
-            let msg = "str_getcsv(): Argument #2 ($separator) must be a single character".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+        if !matches!(sep_val, Value::Null) {
+            let sep_str = sep_val.to_php_string();
+            if sep_str.len() != 1 {
+                let msg = "str_getcsv(): Argument #2 ($separator) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
         }
     }
     // Validate enclosure must be a single character
     if let Some(enc_val) = args.get(2) {
-        let enc_str = enc_val.to_php_string();
-        if enc_str.len() != 1 {
-            let msg = "str_getcsv(): Argument #3 ($enclosure) must be a single character".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+        if !matches!(enc_val, Value::Null) {
+            let enc_str = enc_val.to_php_string();
+            if enc_str.len() != 1 {
+                let msg = "str_getcsv(): Argument #3 ($enclosure) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
         }
     }
     // Validate escape must be a single character or empty string
     if let Some(esc_val) = args.get(3) {
-        let esc_str = esc_val.to_php_string();
-        if esc_str.len() > 1 {
-            let msg = "str_getcsv(): Argument #4 ($escape) must be empty or a single character".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
-        }
-    }
-
-    let separator = args.get(1).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b',')).unwrap_or(b',');
-    let enclosure = args.get(2).map(|v| v.to_php_string().as_bytes().first().copied().unwrap_or(b'"')).unwrap_or(b'"');
-
-    let mut result = PhpArray::new();
-    let raw_bytes = s.as_bytes();
-    // Strip trailing newline like PHP does
-    let bytes = if raw_bytes.last() == Some(&b'\n') {
-        let end = if raw_bytes.len() >= 2 && raw_bytes[raw_bytes.len()-2] == b'\r' {
-            raw_bytes.len() - 2
-        } else {
-            raw_bytes.len() - 1
-        };
-        &raw_bytes[..end]
-    } else {
-        raw_bytes
-    };
-    let mut field = Vec::new();
-    let mut in_enclosure = false;
-    let mut i = 0;
-    
-    while i < bytes.len() {
-        if bytes[i] == enclosure {
-            if in_enclosure && i + 1 < bytes.len() && bytes[i + 1] == enclosure {
-                field.push(enclosure);
-                i += 2;
-            } else {
-                in_enclosure = !in_enclosure;
-                i += 1;
+        if !matches!(esc_val, Value::Null) {
+            let esc_str = esc_val.to_php_string();
+            if esc_str.len() > 1 {
+                let msg = "str_getcsv(): Argument #4 ($escape) must be empty or a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
             }
-        } else if bytes[i] == separator && !in_enclosure {
-            result.push(Value::String(PhpString::from_vec(field.clone())));
-            field.clear();
-            i += 1;
-        } else {
-            field.push(bytes[i]);
-            i += 1;
         }
     }
-    result.push(Value::String(PhpString::from_vec(field)));
+
+    let separator = match args.get(1) {
+        Some(v) if !matches!(v, Value::Null) => {
+            v.to_php_string().as_bytes().first().copied().unwrap_or(b',')
+        }
+        _ => b',',
+    };
+    let enclosure = match args.get(2) {
+        Some(v) if !matches!(v, Value::Null) => {
+            v.to_php_string().as_bytes().first().copied().unwrap_or(b'"')
+        }
+        _ => b'"',
+    };
+    // Escape: default is '\\' if not provided; None when explicit empty string passed.
+    let escape: Option<u8> = match args.get(3) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { None } else { Some(b[0]) }
+        }
+        _ => Some(b'\\'),
+    };
+
+    let raw_bytes = s.as_bytes();
+    // Strip trailing CR/LF like PHP's lookup_trailing_spaces.
+    let bytes: &[u8] = {
+        let mut end = raw_bytes.len();
+        if end > 0 && raw_bytes[end - 1] == b'\n' {
+            end -= 1;
+            if end > 0 && raw_bytes[end - 1] == b'\r' { end -= 1; }
+        } else if end > 0 && raw_bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        &raw_bytes[..end]
+    };
+
+    let result = parse_csv_fields(bytes, separator, enclosure, escape);
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// Parse one CSV record into fields. Implements PHP's php_fgetcsv algorithm.
+/// `bytes` should have any trailing CR/LF already stripped.
+pub(crate) fn parse_csv_fields(bytes: &[u8], delimiter: u8, enclosure: u8, escape: Option<u8>) -> PhpArray {
+    parse_csv_fields_ex(bytes, delimiter, enclosure, escape).0
+}
+
+/// Same as parse_csv_fields but also returns true if the parsing ended with
+/// an unterminated enclosed field (so the caller may want to splice in more
+/// data and re-parse).
+pub(crate) fn parse_csv_fields_ex(bytes: &[u8], delimiter: u8, enclosure: u8, escape: Option<u8>) -> (PhpArray, bool) {
+    let mut result = PhpArray::new();
+    let mut unterminated = false;
+    let limit = bytes.len();
+    let mut bptr = 0usize;
+    let mut first_field = true;
+    let mut just_consumed_delim = false;
+
+    loop {
+        let mut temp: Vec<u8> = Vec::new();
+        let mut hunk_begin: usize;
+
+        // Skip leading whitespace before the first non-delim char — if it
+        // points at an enclosure, advance bptr to that enclosure.
+        if bptr < limit {
+            let mut tmp = bptr;
+            while tmp < limit && bytes[tmp] != delimiter && (bytes[tmp] as char).is_ascii_whitespace() {
+                tmp += 1;
+            }
+            if tmp < limit && bytes[tmp] == enclosure {
+                bptr = tmp;
+            }
+        }
+
+        if first_field && bptr >= limit {
+            // empty line: return blank record
+            // PHP returns array(NULL) — caller handles
+            return (result, unterminated);
+        }
+        first_field = false;
+
+        if bptr < limit && bytes[bptr] == enclosure {
+            // 2A. Enclosure-delimited field.
+            bptr += 1;
+            hunk_begin = bptr;
+            let mut state = 0u8;
+            let mut closed_cleanly = false;
+            loop {
+                if bptr >= limit {
+                    // End of data — unterminated enclosure (or limit reached
+                    // exactly after closing enclosure).
+                    match state {
+                        2 => {
+                            // The last byte was the closing enclosure; drop it.
+                            if bptr > hunk_begin {
+                                temp.extend_from_slice(&bytes[hunk_begin..bptr - 1]);
+                            }
+                            // Field ended cleanly with closing enclosure at EOF.
+                            closed_cleanly = true;
+                        }
+                        _ => {
+                            // Unterminated — take everything verbatim.
+                            temp.extend_from_slice(&bytes[hunk_begin..bptr]);
+                            unterminated = true;
+                        }
+                    }
+                    break;
+                }
+                match state {
+                    1 => {
+                        // Previous byte was the escape char; current byte is consumed.
+                        bptr += 1;
+                        state = 0;
+                    }
+                    2 => {
+                        // Previous byte was the enclosure; check if doubled.
+                        if bytes[bptr] != enclosure {
+                            // Real closing enclosure ended at bptr-1.
+                            temp.extend_from_slice(&bytes[hunk_begin..bptr - 1]);
+                            hunk_begin = bptr;
+                            closed_cleanly = true;
+                            break;
+                        }
+                        // Doubled enclosure → emit the run including one enclosure, skip next.
+                        temp.extend_from_slice(&bytes[hunk_begin..bptr]);
+                        bptr += 1;
+                        hunk_begin = bptr;
+                        state = 0;
+                    }
+                    _ => {
+                        let c = bytes[bptr];
+                        if c == enclosure {
+                            state = 2;
+                        } else if let Some(e) = escape {
+                            if c == e { state = 1; }
+                        }
+                        bptr += 1;
+                    }
+                }
+            }
+
+            // 2A.b: scan until delimiter or EOL — characters after closing
+            // enclosure are appended (as-is) into the field. Only applies
+            // when the enclosed field closed cleanly.
+            if closed_cleanly {
+                let scan_begin = bptr;
+                while bptr < limit && bytes[bptr] != delimiter {
+                    bptr += 1;
+                }
+                temp.extend_from_slice(&bytes[scan_begin..bptr]);
+            }
+            just_consumed_delim = bptr < limit && bytes[bptr] == delimiter;
+            if just_consumed_delim {
+                bptr += 1;
+            }
+        } else {
+            // 2B. Non-enclosure field.
+            hunk_begin = bptr;
+            while bptr < limit && bytes[bptr] != delimiter {
+                bptr += 1;
+            }
+            temp.extend_from_slice(&bytes[hunk_begin..bptr]);
+            // Trim trailing whitespace.
+            while let Some(&c) = temp.last() {
+                if (c as char).is_ascii_whitespace() { temp.pop(); } else { break; }
+            }
+            just_consumed_delim = bptr < limit && bytes[bptr] == delimiter;
+            if just_consumed_delim {
+                bptr += 1;
+            }
+        }
+
+        result.push(Value::String(PhpString::from_vec(temp)));
+
+        if bptr >= limit {
+            // If the final separator we consumed was a delimiter, emit one
+            // more empty trailing field (matches PHP behavior).
+            if just_consumed_delim {
+                result.push(Value::String(PhpString::from_bytes(b"")));
+            }
+            break;
+        }
+    }
+    (result, unterminated)
 }
 
 fn str_word_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

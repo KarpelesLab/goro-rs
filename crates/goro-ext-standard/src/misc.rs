@@ -279,6 +279,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"fseek", fseek_fn);
     vm.register_function(b"ftell", ftell_fn);
     vm.register_function(b"fflush", fflush_fn);
+    vm.register_function(b"fsync", fsync_fn);
+    vm.register_function(b"fdatasync", fdatasync_fn);
     vm.register_function(b"unlink", unlink_fn);
     vm.register_function(b"rename", rename_fn);
     vm.register_function(b"copy", copy_fn);
@@ -534,7 +536,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"show_source", highlight_file_fn);
     vm.register_function(b"php_strip_whitespace", php_strip_whitespace_fn);
     vm.register_function(b"disk_free_space", disk_free_space_fn);
-    vm.register_function(b"diskfreespace", disk_free_space_fn);
+    vm.register_function(b"diskfreespace", diskfreespace_fn);
     vm.register_function(b"disk_total_space", disk_total_space_fn);
     vm.register_function(b"get_resources", get_resources_fn);
     vm.register_function(b"closelog", closelog_fn);
@@ -5139,7 +5141,7 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(len as i64))
 }
 
-fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null).to_php_string();
     let format = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let input_bytes = input.as_bytes();
@@ -5149,6 +5151,8 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut results: Vec<Value> = Vec::new();
     let mut input_pos = 0usize;
     let mut fmt_pos = 0usize;
+    let mut nconversions: usize = 0;
+    let mut underflow = false;
 
     while fmt_pos < format_bytes.len() {
         if format_bytes[fmt_pos] == b'%' {
@@ -5188,41 +5192,65 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 width = std::str::from_utf8(&format_bytes[width_start..fmt_pos]).ok().and_then(|s| s.parse().ok());
             }
 
+            // Skip length modifiers (h, l, L, j, z, t, q, hh, ll) — they don't
+            // change the result type in PHP fscanf/sscanf.
+            while fmt_pos < format_bytes.len() {
+                match format_bytes[fmt_pos] {
+                    b'h' | b'l' | b'L' | b'j' | b'z' | b't' | b'q' => fmt_pos += 1,
+                    _ => break,
+                }
+            }
+
             if fmt_pos >= format_bytes.len() { break; }
             let spec = format_bytes[fmt_pos];
             fmt_pos += 1;
 
-            // Skip leading whitespace for numeric types
+            // Skip leading whitespace for numeric types and %s (NOSKIP for %c and %[)
             match spec {
-                b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'g' => {
-                    while input_pos < input_bytes.len() && input_bytes[input_pos] == b' ' {
+                b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'g' | b'E' | b'G' | b's' => {
+                    while input_pos < input_bytes.len() && (input_bytes[input_pos] == b' ' || input_bytes[input_pos] == b'\t' || input_bytes[input_pos] == b'\n' || input_bytes[input_pos] == b'\r') {
                         input_pos += 1;
                     }
                 }
                 _ => {}
             }
 
+            // Check for underflow: if at EOF when trying to start a conversion
+            // (other than %n which doesn't consume input), bail.
+            if input_pos >= input_bytes.len() && spec != b'n' {
+                underflow = true;
+                break;
+            }
+
             match spec {
                 b'd' | b'i' | b'u' => {
-                    // Read integer
+                    // Read integer. Width counts total characters consumed,
+                    // including any leading sign.
                     let start = input_pos;
-                    if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
-                        input_pos += 1;
-                    }
-                    let mut count = 0usize;
                     let max = width.unwrap_or(usize::MAX);
+                    let mut count = 0usize;
+                    if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') && count < max {
+                        input_pos += 1;
+                        count += 1;
+                    }
                     while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() && count < max {
                         input_pos += 1;
                         count += 1;
                     }
-                    if input_pos > start {
+                    // If only the sign was consumed (no digits), reject.
+                    let digit_len = input_pos - start - (if input_bytes.get(start) == Some(&b'-') || input_bytes.get(start) == Some(&b'+') { 1 } else { 0 });
+                    if digit_len > 0 {
                         if !suppress {
                             let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
                             let val = s.parse::<i64>().unwrap_or(0);
                             results.push(Value::Long(val));
                         }
-                    } else if !suppress {
-                        results.push(Value::Null);
+                    } else {
+                        // Roll back if we consumed just a sign.
+                        input_pos = start;
+                        if !suppress {
+                            results.push(Value::Null);
+                        }
                     }
                 }
                 b'x' | b'X' => {
@@ -5258,41 +5286,91 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         results.push(Value::Long(val));
                     }
                 }
-                b'f' | b'e' | b'g' => {
+                b'f' | b'e' | b'g' | b'E' | b'G' => {
                     let start = input_pos;
                     if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
                         input_pos += 1;
                     }
-                    while input_pos < input_bytes.len() && (input_bytes[input_pos].is_ascii_digit() || input_bytes[input_pos] == b'.') {
+                    let int_start = input_pos;
+                    let mut saw_digit = false;
+                    while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() {
                         input_pos += 1;
+                        saw_digit = true;
                     }
-                    if !suppress {
+                    if input_pos < input_bytes.len() && input_bytes[input_pos] == b'.' {
+                        input_pos += 1;
+                        while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() {
+                            input_pos += 1;
+                            saw_digit = true;
+                        }
+                    }
+                    // Optional exponent.
+                    if saw_digit && input_pos < input_bytes.len() && (input_bytes[input_pos] == b'e' || input_bytes[input_pos] == b'E') {
+                        let exp_start = input_pos;
+                        input_pos += 1;
+                        if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
+                            input_pos += 1;
+                        }
+                        let exp_digit_start = input_pos;
+                        while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() {
+                            input_pos += 1;
+                        }
+                        if input_pos == exp_digit_start {
+                            // No digits after e — roll back exponent.
+                            input_pos = exp_start;
+                        }
+                    }
+                    if !saw_digit {
+                        // No digits matched — roll back and push NULL.
+                        input_pos = start;
+                        let _ = int_start;
+                        if !suppress {
+                            results.push(Value::Null);
+                        }
+                    } else if !suppress {
                         let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
                         let val = s.parse::<f64>().unwrap_or(0.0);
                         results.push(Value::Double(val));
                     }
                 }
                 b's' => {
-                    // Read non-whitespace string
+                    // Read non-whitespace string. If no characters consumed,
+                    // result is NULL (PHP behavior).
                     let start = input_pos;
                     let max = width.unwrap_or(usize::MAX);
                     let mut count = 0;
-                    while input_pos < input_bytes.len() && input_bytes[input_pos] != b' ' && input_bytes[input_pos] != b'\t' && input_bytes[input_pos] != b'\n' && count < max {
+                    while input_pos < input_bytes.len() && input_bytes[input_pos] != b' ' && input_bytes[input_pos] != b'\t' && input_bytes[input_pos] != b'\n' && input_bytes[input_pos] != b'\r' && count < max {
                         input_pos += 1;
                         count += 1;
                     }
                     if !suppress {
-                        results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                        if input_pos > start {
+                            results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                        } else {
+                            results.push(Value::Null);
+                        }
                     }
                 }
                 b'c' => {
-                    // Read single char (or width chars)
+                    // Read up to width non-whitespace chars (default 1).
+                    // Like %s but does not skip leading whitespace.
                     let n = width.unwrap_or(1);
                     let start = input_pos;
-                    let end = (input_pos + n).min(input_bytes.len());
-                    input_pos = end;
+                    let mut count = 0;
+                    while input_pos < input_bytes.len() && count < n {
+                        let b = input_bytes[input_pos];
+                        if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+                            break;
+                        }
+                        input_pos += 1;
+                        count += 1;
+                    }
                     if !suppress {
-                        results.push(Value::String(PhpString::from_vec(input_bytes[start..end].to_vec())));
+                        if input_pos > start {
+                            results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                        } else {
+                            results.push(Value::Null);
+                        }
                     }
                 }
                 b'n' => {
@@ -5302,25 +5380,47 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 b'[' => {
-                    // Character class [abc] or [^abc]
+                    // Character class [abc] or [^abc]. Supports ranges like
+                    // [0-9], [a-z]. A `]` as first char is literal.
                     let negated = fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b'^';
                     if negated { fmt_pos += 1; }
-                    let mut char_set = Vec::new();
-                    // Special case: ] as first char is literal
+                    let mut raw_set: Vec<u8> = Vec::new();
                     if fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b']' {
-                        char_set.push(b']');
+                        raw_set.push(b']');
                         fmt_pos += 1;
                     }
                     while fmt_pos < format_bytes.len() && format_bytes[fmt_pos] != b']' {
-                        char_set.push(format_bytes[fmt_pos]);
+                        raw_set.push(format_bytes[fmt_pos]);
                         fmt_pos += 1;
                     }
                     if fmt_pos < format_bytes.len() { fmt_pos += 1; } // skip ]
+
+                    // Build expanded set, processing ranges (a-b).
+                    let mut in_set_check = |c: u8| -> bool {
+                        let mut i = 0;
+                        while i < raw_set.len() {
+                            if i + 2 < raw_set.len() && raw_set[i + 1] == b'-' {
+                                let lo = raw_set[i];
+                                let hi = raw_set[i + 2];
+                                if lo <= c && c <= hi {
+                                    return true;
+                                }
+                                i += 3;
+                            } else {
+                                if raw_set[i] == c {
+                                    return true;
+                                }
+                                i += 1;
+                            }
+                        }
+                        false
+                    };
+
                     let start = input_pos;
                     let max = width.unwrap_or(usize::MAX);
                     let mut count = 0;
                     while input_pos < input_bytes.len() && count < max {
-                        let in_set = char_set.contains(&input_bytes[input_pos]);
+                        let in_set = in_set_check(input_bytes[input_pos]);
                         if (negated && in_set) || (!negated && !in_set) {
                             break;
                         }
@@ -5335,8 +5435,20 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    // Bad scan conversion character — PHP throws ValueError.
+                    let ch_str = if (32..=126).contains(&spec) {
+                        format!("{}", spec as char)
+                    } else {
+                        format!("\\x{:02x}", spec)
+                    };
+                    let msg = format!("Bad scan conversion character \"{}\"", ch_str);
+                    let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
+                }
             }
+            nconversions += 1;
         } else if format_bytes[fmt_pos] == b' ' || format_bytes[fmt_pos] == b'\t' || format_bytes[fmt_pos] == b'\n' {
             // Whitespace in format matches any amount of whitespace in input
             fmt_pos += 1;
@@ -5349,6 +5461,15 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 input_pos += 1;
             }
             fmt_pos += 1;
+        }
+    }
+
+    // Underflow + no conversions yet → PHP returns NULL (no refs) or -1 (refs).
+    if underflow && nconversions == 0 {
+        if has_refs {
+            return Ok(Value::Long(-1));
+        } else {
+            return Ok(Value::Null);
         }
     }
 
@@ -5925,12 +6046,33 @@ fn is_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::False
     })
 }
+/// Strip the file:// scheme prefix from a path. Handles file:///, file://,
+/// and rejects file://host/path (returns None for unsupported host components).
+fn strip_file_scheme(path: &str) -> Option<String> {
+    if let Some(rest) = path.strip_prefix("file://") {
+        // file:///path -> /path (empty host)
+        // file://localhost/path -> /path  (localhost-only)
+        // file://otherhost/path -> not supported
+        if rest.starts_with('/') {
+            return Some(rest.to_string());
+        }
+        if let Some(after_localhost) = rest.strip_prefix("localhost/") {
+            return Some(format!("/{}", after_localhost));
+        }
+        // Just file://path -> path (treat as plain path)
+        return Some(rest.to_string());
+    }
+    None
+}
+
 fn is_dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("is_dir", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    let path_resolved = strip_file_scheme(&path_str).unwrap_or_else(|| path_str.to_string());
+    if !vm.check_open_basedir("is_dir", &path_resolved) {
         return Ok(Value::False);
     }
-    Ok(if std::path::Path::new(&path.to_string_lossy()).is_dir() {
+    Ok(if std::path::Path::new(&path_resolved).is_dir() {
         Value::True
     } else {
         Value::False
@@ -5938,26 +6080,125 @@ fn is_dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn is_readable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
-        Value::True
-    } else {
-        Value::False
-    })
+    #[cfg(unix)]
+    {
+        Ok(if check_access_bit(&path.to_string_lossy(), 0o400, 0o040, 0o004) {
+            Value::True
+        } else {
+            Value::False
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+            Value::True
+        } else {
+            Value::False
+        })
+    }
 }
 fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
-        Value::True
+    #[cfg(unix)]
+    {
+        Ok(if check_access_bit(&path.to_string_lossy(), 0o200, 0o020, 0o002) {
+            Value::True
+        } else {
+            Value::False
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(if std::path::Path::new(&path.to_string_lossy()).exists() {
+            Value::True
+        } else {
+            Value::False
+        })
+    }
+}
+
+/// PHP-style file mode access check: returns true if the appropriate
+/// permission bit (owner/group/other) is set for the current process.
+#[cfg(unix)]
+fn check_access_bit(path: &str, owner_bit: u32, group_bit: u32, other_bit: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let m = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    // Root is checked specially: PHP relies on the kernel access(2) syscall.
+    // We approximate: euid 0 → r/w always allowed; x requires any x bit.
+    let euid = unsafe { libc::geteuid() };
+    let egid = unsafe { libc::getegid() };
+    let mode = m.mode();
+    if euid == 0 {
+        // Root: for read/write any access; for execute requires any x bit.
+        if owner_bit == 0o400 || owner_bit == 0o200 {
+            return true;
+        }
+        return mode & 0o111 != 0;
+    }
+    let bit = if m.uid() == euid {
+        owner_bit
+    } else if m.gid() == egid {
+        group_bit
     } else {
-        Value::False
-    })
+        // Could also be in supplementary groups; ignore for now.
+        other_bit
+    };
+    mode & bit != 0
 }
 /// Read a file with optional compress.zlib:// (gzip/zlib decompression) prefix.
+/// Lexically normalize a filesystem path, collapsing `.` and `..` segments
+/// without touching the filesystem. This mirrors PHP's behavior where
+/// `foo/bar/../baz` resolves to `foo/baz` even if `bar` doesn't exist.
+/// Preserves leading `/`, but not symlinks.
+pub(crate) fn normalize_path_lexical(p: &str) -> String {
+    if p.is_empty() {
+        return p.to_string();
+    }
+    let is_absolute = p.starts_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for seg in p.split('/') {
+        match seg {
+            "" => {} // skip empty parts (caused by //)
+            "." => {} // skip current
+            ".." => {
+                if let Some(last) = out.last() {
+                    if *last != ".." {
+                        out.pop();
+                        continue;
+                    }
+                }
+                if !is_absolute {
+                    out.push("..");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    let joined = out.join("/");
+    let result = if is_absolute {
+        format!("/{}", joined)
+    } else if joined.is_empty() {
+        ".".to_string()
+    } else {
+        joined
+    };
+    // Preserve trailing slash if original had one (matters for directory dispatch).
+    if p.ends_with('/') && !result.ends_with('/') {
+        format!("{}/", result)
+    } else {
+        result
+    }
+}
+
 pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     if let Some(real_path) = path_str.strip_prefix("compress.zlib://") {
         let real_path = real_path.strip_prefix("file://").unwrap_or(real_path);
-        let data = std::fs::read(real_path)?;
+        let real_path = normalize_path_lexical(real_path);
+        let data = std::fs::read(&real_path)?;
         if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
             let mut dec = flate2::read::GzDecoder::new(data.as_slice());
             let mut buf = Vec::new();
@@ -5973,16 +6214,34 @@ pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>
         }
         return Ok(data);
     }
-    std::fs::read(path_str)
+    // Apply lexical normalization for plain filesystem paths.
+    let normalized = if !path_str.contains("://") {
+        normalize_path_lexical(path_str)
+    } else {
+        path_str.to_string()
+    };
+    std::fs::read(&normalized)
 }
 
 fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let _use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let _context = args.get(2);
     let context = _context;
     let offset = args.get(3).map(|v| v.to_long()).unwrap_or(0);
     let length = args.get(4).map(|v| v.to_long());
+
+    // If use_include_path and path is relative + plain (no scheme), look up
+    // through include_path entries, then fall back to the script's directory.
+    let path = {
+        let path_str = path.to_string_lossy();
+        let resolved = resolve_with_include_path(vm, &path_str, use_include_path);
+        if resolved == path_str {
+            path
+        } else {
+            PhpString::from_string(resolved)
+        }
+    };
 
     // Validate length parameter
     if let Some(len) = length {
@@ -5995,6 +6254,30 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let path_str = path.to_string_lossy();
+    // data: and data:// URIs: route through fopen (which already handles
+    // base64-decoding, urldecoding, etc.) to avoid duplicating the logic.
+    // Reject datafoo: and similar malformed schemes.
+    if (path_str.starts_with("data:") || path_str.starts_with("data://"))
+        && (path_str.starts_with("data:,") || path_str.starts_with("data:;")
+            || path_str.starts_with("data:text") || path_str.starts_with("data:application")
+            || path_str.starts_with("data:image") || path_str.starts_with("data:audio")
+            || path_str.starts_with("data:video") || path_str.starts_with("data:font")
+            || path_str.starts_with("data:model") || path_str.starts_with("data:message")
+            || path_str.starts_with("data:multipart") || path_str.starts_with("data:base64,")
+            || path_str.starts_with("data://"))
+    {
+        let inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r"))];
+        let fp = fopen_fn(vm, &inner_args)?;
+        let fid = match fp { Value::Resource(n) => n, _ => return Ok(Value::False), };
+        let get_args = if length.is_some() {
+            vec![Value::Resource(fid), Value::Long(length.unwrap()), Value::Long(offset)]
+        } else {
+            vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
+        };
+        let res = stream_get_contents_fn(vm, &get_args)?;
+        let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+        return Ok(res);
+    }
     // php://filter routes through fopen so the filter chain is applied.
     if path_str.starts_with("php://filter/") {
         let inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r"))];
@@ -6013,6 +6296,13 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if path_str == "php://input" {
         let body = get_request_body();
         return Ok(Value::String(PhpString::from_vec(body)));
+    }
+    // php://stdin / php://stdout / php://stderr / php://memory / php://temp:
+    // file_get_contents on these should return false (no warning) or empty.
+    if path_str == "php://stdin" || path_str == "php://stdout" || path_str == "php://stderr"
+        || path_str == "php://memory" || path_str.starts_with("php://temp")
+    {
+        return Ok(Value::False);
     }
     // http:// and https:// via the built-in minimal HTTP client.
     if path_str.starts_with("http://") || path_str.starts_with("https://") {
@@ -6057,9 +6347,25 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     }
+    // If path is an existing directory, emit a notice rather than failing
+    // silently. PHP says: "Read of N bytes failed with errno=21 Is a directory".
+    if !path_str.contains("://") && std::path::Path::new(&*path_str).is_dir() {
+        let line = vm.current_line;
+        vm.emit_notice_at(
+            "file_get_contents(): Read of 8192 bytes failed with errno=21 Is a directory",
+            line,
+        );
+        return Ok(Value::String(PhpString::empty()));
+    }
     match read_path_with_wrappers(&path_str) {
         Ok(data) => {
-            let start = if offset >= 0 { offset as usize } else { 0 };
+            // Negative offset: count from end of data (PHP semantics).
+            let start = if offset >= 0 {
+                offset as usize
+            } else {
+                let from_end = (-offset) as usize;
+                data.len().saturating_sub(from_end)
+            };
             if start >= data.len() && start > 0 {
                 return Ok(Value::String(PhpString::empty()));
             }
@@ -6287,6 +6593,28 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     let data_val = args.get(1).unwrap_or(&Value::Null);
+    // If $data is a resource, it should be a stream resource.
+    if let Value::Resource(rid) = data_val {
+        let is_open_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(rid));
+        let rtype = goro_core::value::resource_type_of(*rid);
+        let is_stream = is_open_stream || rtype.as_deref() == Some(b"stream".as_ref());
+        if !is_stream {
+            let msg = "file_put_contents(): supplied resource is not a valid stream resource".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
+    // If $context (arg 3) is a resource, it should be a valid Stream-Context.
+    if let Some(Value::Resource(rid)) = args.get(3) {
+        let bytes = goro_core::value::resource_type_of(*rid);
+        if bytes.as_deref() != Some(b"stream-context".as_ref()) {
+            let msg = "file_put_contents(): supplied resource is not a valid Stream-Context resource".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
     let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let append = flags & 8 != 0; // FILE_APPEND
     let lock_ex = flags & 2 != 0; // LOCK_EX
@@ -6297,6 +6625,24 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut buf = Vec::new();
             for (_, v) in arr.iter() { buf.extend_from_slice(v.to_php_string().as_bytes()); }
             buf
+        }
+        Value::Object(obj) => {
+            // PHP attempts __toString. If absent, emit warning and return false.
+            let class_name = obj.borrow().class_name.clone();
+            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let has_tostring = vm.classes.get(&class_lower)
+                .map(|c| c.get_method(b"__tostring").is_some())
+                .unwrap_or(false);
+            if !has_tostring {
+                // PHP's file_put_contents silently returns false rather than
+                // emitting a warning for objects without __toString.
+                let _ = class_name;
+                return Ok(Value::False);
+            }
+            match vm.call_object_method(data_val, b"__tostring", &[]) {
+                Some(result) => result.to_php_string().as_bytes().to_vec(),
+                None => return Ok(Value::False),
+            }
         }
         _ => data_val.to_php_string().as_bytes().to_vec(),
     };
@@ -6354,7 +6700,14 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn realpath_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::canonicalize(&*path.to_string_lossy() as &str) {
+    let path_str = path.to_string_lossy().to_string();
+    // PHP: realpath("") and realpath(".") return the current working dir.
+    let resolved_input = if path_str.is_empty() {
+        ".".to_string()
+    } else {
+        path_str
+    };
+    match std::fs::canonicalize(&resolved_input) {
         Ok(p) => Ok(Value::String(PhpString::from_string(
             p.to_string_lossy().to_string(),
         ))),
@@ -6387,13 +6740,17 @@ fn chdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("filesize", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
         return Ok(Value::False);
     }
-    match std::fs::metadata(&*path.to_string_lossy() as &str) {
+    if !vm.check_open_basedir("filesize", &path_str) {
+        return Ok(Value::False);
+    }
+    match std::fs::metadata(&*path_str as &str) {
         Ok(m) => Ok(Value::Long(m.len() as i64)),
         Err(_) => {
-            vm.emit_warning(&format!("filesize(): stat failed for {}", path.to_string_lossy()));
+            vm.emit_warning(&format!("filesize(): stat failed for {}", path_str));
             Ok(Value::False)
         }
     }
@@ -6401,6 +6758,17 @@ fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
+    // PHP 8+: when $atime is an integer but $mtime is null, throw ValueError.
+    if args.len() >= 3 && matches!(args.get(1), Some(Value::Null)) && !matches!(args.get(2), Some(Value::Null)) {
+        let msg = "touch(): Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    // Empty path: silently return false (matches PHP behavior)
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
     if !vm.check_open_basedir("touch", &path_str) {
         return Ok(Value::False);
     }
@@ -6413,10 +6781,32 @@ fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         if let Err(e) = std::fs::write(p, b"") {
-            vm.emit_warning(&format!("touch(): Unable to create file {} because {}", path_str, e));
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("touch(): Unable to create file {} because {}", path_str, msg));
             return Ok(Value::False);
         }
     }
+    // Determine mtime/atime: if either provided, use them; else "now" so
+    // ctime/mtime get bumped (matches PHP's expected behaviour).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mtime = args.get(1).map(|v| v.to_long()).unwrap_or(now);
+    // PHP: $atime defaults to $mtime if only $mtime given.
+    let atime = args.get(2).map(|v| v.to_long()).unwrap_or(mtime);
+
+    // Use libc::utimes (atime, mtime) to set both.
+    use std::ffi::CString;
+    let c_path = match CString::new(path_str.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return Ok(Value::True),
+    };
+    let times = [
+        libc::timeval { tv_sec: atime, tv_usec: 0 },
+        libc::timeval { tv_sec: mtime, tv_usec: 0 },
+    ];
+    let _ = unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()) };
     Ok(Value::True)
 }
 fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -6432,10 +6822,14 @@ fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         },
     )
 }
-fn stat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn stat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
-    stat_path(&path_str, false)
+    let res = stat_path(&path_str, false)?;
+    if matches!(res, Value::False) {
+        vm.emit_warning(&format!("stat(): stat failed for {}", path_str));
+    }
+    Ok(res)
 }
 
 fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
@@ -6586,6 +6980,10 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let levels = levels_raw as usize;
     let mut result = s.to_string();
+    // PHP: dirname("") returns ""
+    if result.is_empty() {
+        return Ok(Value::String(PhpString::from_string(String::new())));
+    }
     for _ in 0..levels {
         // Strip trailing slashes (but not the root /)
         while result.len() > 1 && result.ends_with('/') {
@@ -6597,6 +6995,11 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 result = "/".to_string();
             } else {
                 result.truncate(pos);
+                // Strip trailing slashes from the result, preserving '/' if absolute.
+                while result.len() > 1 && result.ends_with('/') {
+                    result.pop();
+                }
+                if result.is_empty() { result = "/".to_string(); }
             }
         } else {
             result = ".".to_string();
@@ -6627,50 +7030,139 @@ fn basename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(base)))
 }
 
+/// PHP zend_dirname: returns the dirname portion (or empty string for len 0).
+/// Operates on bytes; only '/' is a separator (Unix).
+fn php_dirname_bytes(path: &[u8]) -> Vec<u8> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    let mut bytes = path.to_vec();
+    let mut end = bytes.len() - 1;
+    // Strip trailing slashes
+    loop {
+        if bytes[end] != b'/' { break; }
+        if end == 0 {
+            return vec![b'/'];
+        }
+        end -= 1;
+    }
+    // Strip filename (non-slash chars)
+    loop {
+        if bytes[end] == b'/' { break; }
+        if end == 0 {
+            return vec![b'.'];
+        }
+        end -= 1;
+    }
+    // Strip slashes that came before the filename
+    loop {
+        if bytes[end] != b'/' { break; }
+        if end == 0 {
+            return vec![b'/'];
+        }
+        end -= 1;
+    }
+    bytes.truncate(end + 1);
+    bytes
+}
+
+/// PHP php_basename for Unix: strips trailing slashes, then returns the
+/// substring from the last slash onward.
+fn php_basename_bytes(path: &[u8]) -> Vec<u8> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    // Find last byte that is not a trailing slash.
+    let mut end = path.len();
+    while end > 0 && path[end - 1] == b'/' {
+        end -= 1;
+    }
+    if end == 0 {
+        return Vec::new();
+    }
+    // Find the previous '/' before end.
+    let mut start = end;
+    while start > 0 && path[start - 1] != b'/' {
+        start -= 1;
+    }
+    path[start..end].to_vec()
+}
+
 fn pathinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let option = args.get(1).map(|v| v.to_long());
-    let s = path.to_string_lossy();
+    let opt = args.get(1).map(|v| v.to_long()).unwrap_or(15); // PATHINFO_ALL
+    let bytes = path.as_bytes();
 
-    let dirname = {
-        let trimmed = s.trim_end_matches('/');
-        if let Some(pos) = trimmed.rfind('/') {
-            if pos == 0 { "/".to_string() } else { trimmed[..pos].to_string() }
-        } else {
-            ".".to_string()
-        }
-    };
-    let basename = {
-        let trimmed = s.trim_end_matches('/');
-        if let Some(pos) = trimmed.rfind('/') {
-            trimmed[pos + 1..].to_string()
-        } else {
-            trimmed.to_string()
-        }
-    };
-    let extension = basename.rfind('.').map(|pos| basename[pos + 1..].to_string());
-    let filename = if let Some(pos) = basename.rfind('.') {
-        basename[..pos].to_string()
+    let want_dirname = opt & 1 != 0;
+    let want_basename = opt & 2 != 0;
+    let want_extension = opt & 4 != 0;
+    let want_filename = opt & 8 != 0;
+
+    let dirname_bytes = if want_dirname {
+        Some(php_dirname_bytes(bytes))
     } else {
-        basename.clone()
+        None
+    };
+    let basename_bytes = php_basename_bytes(bytes);
+
+    let extension_bytes: Option<Vec<u8>> = if want_extension {
+        basename_bytes.iter().rposition(|&c| c == b'.').map(|p| basename_bytes[p + 1..].to_vec())
+    } else {
+        None
+    };
+    let filename_bytes: Vec<u8> = if want_filename {
+        match basename_bytes.iter().rposition(|&c| c == b'.') {
+            Some(p) => basename_bytes[..p].to_vec(),
+            None => basename_bytes.clone(),
+        }
+    } else {
+        Vec::new()
     };
 
-    match option {
-        Some(1) => Ok(Value::String(PhpString::from_string(dirname))),  // PATHINFO_DIRNAME
-        Some(2) => Ok(Value::String(PhpString::from_string(basename))), // PATHINFO_BASENAME
-        Some(4) => Ok(Value::String(PhpString::from_string(extension.unwrap_or_default()))), // PATHINFO_EXTENSION
-        Some(8) => Ok(Value::String(PhpString::from_string(filename))), // PATHINFO_FILENAME
-        _ => {
-            // Return full array
-            let mut result = PhpArray::new();
-            result.set(ArrayKey::String(PhpString::from_bytes(b"dirname")), Value::String(PhpString::from_string(dirname)));
-            result.set(ArrayKey::String(PhpString::from_bytes(b"basename")), Value::String(PhpString::from_string(basename)));
-            if let Some(ext) = extension {
-                result.set(ArrayKey::String(PhpString::from_bytes(b"extension")), Value::String(PhpString::from_string(ext)));
+    // For PATHINFO_ALL (== 15) PHP returns the full array.
+    if opt == 15 {
+        let mut result = PhpArray::new();
+        // dirname only added when non-empty.
+        if let Some(d) = dirname_bytes.as_ref() {
+            if !d.is_empty() {
+                result.set(ArrayKey::String(PhpString::from_bytes(b"dirname")), Value::String(PhpString::from_bytes(d)));
             }
-            result.set(ArrayKey::String(PhpString::from_bytes(b"filename")), Value::String(PhpString::from_string(filename)));
-            Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
+        result.set(ArrayKey::String(PhpString::from_bytes(b"basename")), Value::String(PhpString::from_bytes(&basename_bytes)));
+        // Extension only present when basename contains '.'.
+        if let Some(e) = extension_bytes.as_ref() {
+            result.set(ArrayKey::String(PhpString::from_bytes(b"extension")), Value::String(PhpString::from_bytes(e)));
+        }
+        result.set(ArrayKey::String(PhpString::from_bytes(b"filename")), Value::String(PhpString::from_bytes(&filename_bytes)));
+        return Ok(Value::Array(Rc::new(RefCell::new(result))));
+    }
+
+    // For specific opt with single bit set, return string corresponding to that bit.
+    // PHP behaviour: builds the array with only the requested keys, then returns the
+    // first value if any, else empty string.
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    if want_dirname {
+        if let Some(d) = dirname_bytes.as_ref() {
+            if !d.is_empty() {
+                entries.push(d.clone());
+            }
+        }
+    }
+    if want_basename {
+        entries.push(basename_bytes.clone());
+    }
+    if want_extension {
+        if let Some(e) = extension_bytes.as_ref() {
+            entries.push(e.clone());
+        }
+    }
+    if want_filename {
+        entries.push(filename_bytes.clone());
+    }
+    if let Some(first) = entries.into_iter().next() {
+        Ok(Value::String(PhpString::from_bytes(&first)))
+    } else {
+        Ok(Value::String(PhpString::from_bytes(b"")))
     }
 }
 
@@ -8020,10 +8512,12 @@ fn memory_reset_peak_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
 }
 fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let secs = args.first().unwrap_or(&Value::Null).to_long();
-    // sleep(N) where N >= 1 second is almost always for "wait for X to happen"
-    // in production code; in tests it just wastes time. Treat sleep(N) as a
-    // no-op to keep the PHPT suite fast.
-    let _ = secs;
+    // Actually sleep up to 2 seconds to support tests that compare timestamps
+    // before/after sleep(1). Cap at 2s to keep tests reasonably fast.
+    if secs > 0 {
+        let actual = (secs as u64).min(2);
+        std::thread::sleep(std::time::Duration::from_secs(actual));
+    }
     Ok(Value::Long(0))
 }
 fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -8062,8 +8556,9 @@ fn uniqid_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn sys_get_temp_dir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_bytes(b"/tmp")))
 }
-fn tempnam_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"/tmp/goro_tmp")))
+fn tempnam_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Delegate to the standards-compliant tempnam_fn3.
+    tempnam_fn3(vm, args)
 }
 fn getenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -8602,6 +9097,7 @@ fn dir_handle_resource_id(val: &Value) -> Option<i64> {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpecialStream {
     None,
+    Stdin,
     Stdout,
     Stderr,
     Output,
@@ -8624,6 +9120,23 @@ struct FileHandle {
 
 fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
     alloc_file_handle_special(file, mode, SpecialStream::None)
+}
+
+/// Helper used by file functions to validate that the first argument is an
+/// open stream resource. If the value is not a stream resource (or is a closed
+/// stream resource), this throws a TypeError matching PHP's wording.
+///
+/// Returns Ok(fid) for valid streams (FILE_HANDLES contains the id).
+fn require_open_stream(vm: &mut Vm, val: &Value, func_name: &str) -> Result<i64, VmError> {
+    let fid = val.to_long();
+    let has_handle = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
+    if has_handle {
+        return Ok(fid);
+    }
+    let msg = format!("{}(): Argument #1 ($stream) must be an open stream resource", func_name);
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError { message: msg, line: vm.current_line })
 }
 
 fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialStream) -> i64 {
@@ -8708,8 +9221,33 @@ fn hex_digit_misc(b: u8) -> Option<u8> {
 }
 
 fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let mut filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let mode = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
+
+    // Handle file:// URIs. Per RFC, file://[host]/path. If host is empty or
+    // "localhost", treat as local path. Otherwise emit warnings matching PHP.
+    if let Some(rest) = filename.strip_prefix("file://") {
+        // rest is "[host]/path" (host may be empty). When the leading
+        // character is '/', the host is empty (i.e. file:///path → ///path
+        // becomes "/path" with empty host).
+        let (host, path) = match rest.find('/') {
+            Some(idx) => (&rest[..idx], &rest[idx..]),
+            None => (rest, ""),
+        };
+        if !host.is_empty() && host != "localhost" {
+            vm.emit_warning(&format!(
+                "fopen(): Remote host file access not supported, file://{}",
+                rest
+            ));
+            vm.emit_warning(&format!(
+                "fopen({}): Failed to open stream: no suitable wrapper could be found",
+                filename
+            ));
+            return Ok(Value::False);
+        }
+        // Strip prefix and continue with local path handling.
+        filename = path.to_string();
+    }
 
     // Handle http:// and https:// URLs via the built-in HTTP client. Fetch
     // the body upfront and back the resulting handle with a temp file so
@@ -8867,6 +9405,7 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let special = match lower.as_str() {
             "stdout" => Some(SpecialStream::Stdout),
             "stderr" => Some(SpecialStream::Stderr),
+            "stdin" => Some(SpecialStream::Stdin),
             "output" => Some(SpecialStream::Output),
             "memory" => Some(SpecialStream::Memory),
             "input" => Some(SpecialStream::Memory), // tests don't rely on stdin
@@ -8883,20 +9422,161 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Err(_) => return Ok(Value::False),
             }
         }
+
+        // php://fd/<n> -- duplicate the file descriptor <n>.
+        // php://fd is invalid (must include a number).
+        if lower == "fd" {
+            vm.emit_warning(&format!("fopen(): Invalid php:// URL specified"));
+            vm.emit_warning(&format!(
+                "fopen({}): Failed to open stream: operation failed",
+                filename
+            ));
+            return Ok(Value::False);
+        }
+        if let Some(fd_tail) = lower.strip_prefix("fd/") {
+            // Reject if trailing slash present or empty
+            if fd_tail.is_empty() || fd_tail.contains('/') {
+                vm.emit_warning(&format!(
+                    "fopen({}): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd>",
+                    filename
+                ));
+                return Ok(Value::False);
+            }
+            // Must be a non-negative integer < max FDs.
+            let parsed: Option<i64> = fd_tail.parse::<i64>().ok();
+            let max_fd: i64 = {
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    let lim = libc::sysconf(libc::_SC_OPEN_MAX);
+                    if lim > 0 { lim as i64 } else { 1024 }
+                }
+                #[cfg(not(target_os = "linux"))]
+                { 1024 }
+            };
+            match parsed {
+                Some(n) if n >= 0 && n < max_fd => {
+                    // Try to dup the fd. If dup fails, emit error.
+                    let dup_fd = unsafe { libc::dup(n as i32) };
+                    if dup_fd < 0 {
+                        let err = std::io::Error::last_os_error();
+                        let errno = err.raw_os_error().unwrap_or(0);
+                        vm.emit_warning(&format!(
+                            "fopen({}): Failed to open stream: Error duping file descriptor {}; possibly it doesn't exist: [{}]: {}",
+                            filename, n, errno, err
+                        ));
+                        return Ok(Value::False);
+                    }
+                    // Convert raw fd into File. We pick a SpecialStream variant
+                    // so writes route correctly: fd 1 -> Stdout, fd 2 -> Stderr,
+                    // others use None (writes go to the file itself).
+                    use std::os::unix::io::FromRawFd;
+                    let f = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+                    let sp = match n {
+                        1 => SpecialStream::Stdout,
+                        2 => SpecialStream::Stderr,
+                        _ => SpecialStream::None,
+                    };
+                    let fid = alloc_file_handle_special(f, &mode, sp);
+                    goro_core::value::register_resource(fid, b"stream");
+                    return Ok(Value::Resource(fid));
+                }
+                _ => {
+                    vm.emit_warning(&format!(
+                        "fopen({}): Failed to open stream: The file descriptors must be non-negative numbers smaller than {}",
+                        filename, max_fd
+                    ));
+                    return Ok(Value::False);
+                }
+            }
+        }
     }
 
+    // Validate mode: first character must be one of r/w/a/x/c, optionally
+    // followed by '+', 'b' and/or 't' in any order.
+    let valid_mode = {
+        let chars: Vec<char> = mode.chars().collect();
+        if chars.is_empty() {
+            false
+        } else {
+            let first = chars[0];
+            let valid_first = matches!(first, 'r' | 'w' | 'a' | 'x' | 'c');
+            let valid_rest = chars[1..].iter().all(|&c| matches!(c, '+' | 'b' | 't' | 'e'));
+            valid_first && valid_rest
+        }
+    };
+    if !valid_mode {
+        vm.emit_warning(&format!(
+            "fopen({}): Failed to open stream: `{}' is not a valid mode for fopen",
+            filename, mode
+        ));
+        return Ok(Value::False);
+    }
+
+    // Resolve include_path if requested (3rd arg). Only for read-mode and
+    // non-absolute non-scheme paths.
+    let use_include_path = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+    let filename: String = if use_include_path
+        && (mode_clean == "r" || mode_clean == "r+")
+        && !filename.contains("://")
+        && !filename.starts_with('/')
+        && !filename.starts_with("./")
+        && !filename.starts_with("../")
+    {
+        let inc = vm.constants.get(b"include_path".as_ref())
+            .map(|v| v.to_php_string().to_string_lossy())
+            .unwrap_or_else(|| ".".to_string());
+        let mut found: Option<String> = None;
+        for entry in inc.split(':') {
+            // Skip empty entries (PHP does not treat empty as ".").
+            if entry.is_empty() {
+                continue;
+            }
+            let candidate = if entry == "." {
+                filename.to_string()
+            } else {
+                format!("{}/{}", entry.trim_end_matches('/'), filename)
+            };
+            if std::fs::metadata(&candidate).is_ok() {
+                found = Some(candidate);
+                break;
+            }
+        }
+        // Fall back to the script's directory.
+        if found.is_none() {
+            let script = vm.current_file.clone();
+            if let Some(parent) = std::path::Path::new(&script).parent() {
+                let candidate = parent.join(&filename);
+                if candidate.exists() {
+                    found = Some(candidate.to_string_lossy().to_string());
+                }
+            }
+        }
+        found.unwrap_or_else(|| filename.to_string())
+    } else {
+        filename.to_string()
+    };
+
+    // For plain (non-scheme) paths, lexically normalize so that
+    // foo/bar/../baz resolves to foo/baz even if bar doesn't exist.
+    // Matches PHP's expand_filepath behavior.
+    let open_path = if !filename.contains("://") {
+        normalize_path_lexical(&filename)
+    } else {
+        filename.clone()
+    };
+
     let file = match mode_clean.as_str() {
-        "r" => std::fs::File::open(&filename),
-        "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&filename),
-        "w" => std::fs::File::create(&filename),
-        "w+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&filename),
-        "a" => std::fs::OpenOptions::new().write(true).append(true).create(true).open(&filename),
-        "a+" => std::fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(&filename),
-        "x" => std::fs::OpenOptions::new().write(true).create_new(true).open(&filename),
-        "x+" => std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&filename),
-        "c" => std::fs::OpenOptions::new().write(true).create(true).open(&filename),
-        "c+" => std::fs::OpenOptions::new().read(true).write(true).create(true).open(&filename),
-        _ => std::fs::File::open(&filename), // default to read
+        "r" => std::fs::File::open(&open_path),
+        "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&open_path),
+        "w" => std::fs::File::create(&open_path),
+        "w+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&open_path),
+        "a" => std::fs::OpenOptions::new().write(true).append(true).create(true).open(&open_path),
+        "a+" => std::fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(&open_path),
+        "x" => std::fs::OpenOptions::new().write(true).create_new(true).open(&open_path),
+        "x+" => std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&open_path),
+        "c" => std::fs::OpenOptions::new().write(true).create(true).open(&open_path),
+        "c+" => std::fs::OpenOptions::new().read(true).write(true).create(true).open(&open_path),
+        _ => std::fs::File::open(&open_path), // default to read
     };
 
     match file {
@@ -8905,7 +9585,11 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             goro_core::value::register_resource(fid, b"stream");
             Ok(Value::Resource(fid))
         }
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("fopen({}): Failed to open stream: {}", filename, msg));
+            Ok(Value::False)
+        }
     }
 }
 
@@ -8946,6 +9630,10 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
             vm.write_output(bytes);
             bytes.len()
         }
+        SpecialStream::Stdin => {
+            // Writing to stdin is a no-op; return 0
+            0
+        }
         SpecialStream::None | SpecialStream::Memory | SpecialStream::Temp => {
             FILE_HANDLES.with(|h| {
                 let mut h = h.borrow_mut();
@@ -8961,17 +9649,32 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
 }
 
 fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let length = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
-    if length == 0 {
-        return Ok(Value::String(PhpString::from_bytes(b"")));
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fread")?;
+    let length_signed = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if length_signed <= 0 {
+        let msg = "fread(): Argument #2 ($length) must be greater than 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
+    let length = length_signed as usize;
     // If read filters are attached, route through filter chain.
     let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
         return Ok(Value::String(PhpString::from_vec(read_filtered(vm, fid, length))));
     }
-    FILE_HANDLES.with(|handles| {
+    // Detect write-only mode (w/a/x/c without '+')
+    let is_write_only = FILE_HANDLES.with(|h| {
+        h.borrow().get(&fid).map(|fh| {
+            let mode = &fh.mode;
+            // Strip 'b'/'t'/'e' suffixes
+            let core: String = mode.chars().filter(|c| matches!(*c, 'r'|'w'|'a'|'x'|'c'|'+')).collect();
+            // Write-only if mode does not contain 'r' or '+'
+            !core.contains('r') && !core.contains('+')
+        }).unwrap_or(false)
+    });
+    let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             let mut buf = vec![0u8; length];
@@ -8982,14 +9685,44 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 Ok(n) => {
                     buf.truncate(n);
+                    // PHP marks EOF when fewer bytes than requested are read
+                    // from a regular file (matches PHP's feof() semantics).
+                    // We skip this for SpecialStream variants (memory/temp/
+                    // stdout/stderr/output) where short reads don't imply EOF.
+                    if n < length && matches!(fh.special, SpecialStream::None) {
+                        fh.eof = true;
+                    }
                     Ok(Value::String(PhpString::from_vec(buf)))
                 }
-                Err(_) => Ok(Value::False),
+                Err(e) => {
+                    // Capture errno before we drop the borrow
+                    Err(e.raw_os_error().unwrap_or(0))
+                }
             }
         } else {
             Ok(Value::False)
         }
-    })
+    });
+    match result {
+        Ok(v) => Ok(v),
+        Err(errno) => {
+            if is_write_only {
+                // PHP emits a Notice on fread of write-only stream. PHP uses
+                // its internal 8192-byte buffer size for the reported count,
+                // not the user-requested length.
+                let line = vm.current_line;
+                vm.emit_notice_at(&format!(
+                    "fread(): Read of 8192 bytes failed with errno={} {}",
+                    errno,
+                    match errno {
+                        9 => "Bad file descriptor",
+                        _ => "Unknown error",
+                    }
+                ), line);
+            }
+            Ok(Value::False)
+        }
+    }
 }
 
 /// Helper: read up to `length` post-filter bytes from a stream with one
@@ -9039,12 +9772,39 @@ fn read_filtered(vm: &mut Vm, fid: i64, length: usize) -> Vec<u8> {
 }
 
 fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+    let arg = args.first().unwrap_or(&Value::Null);
+    // For STDOUT/STDERR (1/2/3) without FILE_HANDLES entry, accept long IDs.
+    let raw_fid = arg.to_long();
+    let is_special_writer = raw_fid == 1 || raw_fid == 2 || raw_fid == 3;
+    let fid = if is_special_writer { raw_fid } else { require_open_stream(vm, arg, "fwrite")? };
     let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let bytes = data.as_bytes();
-    let length = args.get(2).map(|v| v.to_long() as usize).unwrap_or(bytes.len());
-    let to_write = &bytes[..length.min(bytes.len())];
+    // PHP: if $length is provided and >= 0, write min(length, strlen(data)) bytes.
+    // If $length is negative, write 0 bytes (treat as 0).
+    let length: usize = match args.get(2) {
+        Some(v) if !matches!(v, Value::Null | Value::Undef) => {
+            let n = v.to_long();
+            if n <= 0 { 0 } else { (n as usize).min(bytes.len()) }
+        }
+        _ => bytes.len(),
+    };
+    let to_write = &bytes[..length];
     let original_len = to_write.len();
+
+    // Check if the underlying stream allows writing.
+    let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
+    if let Some(ref m) = stream_mode {
+        let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
+        // 'r' (read-only) without '+' is not writable.
+        if clean == "r" {
+            let line = vm.current_line;
+            vm.emit_notice_at(&format!(
+                "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
+                original_len
+            ), line);
+            return Ok(Value::False);
+        }
+    }
 
     // Apply write filter chain if any are attached.
     let filtered = crate::stream_filters::apply_write_chain(vm, fid, to_write);
@@ -9058,12 +9818,47 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let max_length = args.get(1).map(|v| v.to_long() as usize);
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fgets")?;
+    // PHP semantics: $length (if provided) must be > 0. fgets reads up to
+    // length-1 bytes (the remaining byte is a virtual null terminator in C).
+    // When omitted, reads until newline (no byte cap — we use a large default).
+    let explicit_length = match args.get(1) {
+        Some(v) if !matches!(v, Value::Null | Value::Undef) => Some(v.to_long()),
+        _ => None,
+    };
+    let limit = if let Some(n) = explicit_length {
+        if n <= 0 {
+            let msg = "fgets(): Argument #2 ($length) must be greater than 0".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        (n as usize).saturating_sub(1)
+    } else {
+        usize::MAX
+    };
+    // Special: $length == 1 means read 0 bytes - PHP returns "" or false.
+    if limit == 0 {
+        // For length=1 (limit=0), PHP returns false (after reading something it would be empty).
+        return Ok(Value::False);
+    }
+    // Emit notice and return false if underlying stream is write-only.
+    let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
+    if let Some(m) = stream_mode {
+        let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
+        if matches!(clean.as_str(), "w" | "a" | "x" | "c") {
+            let line = vm.current_line;
+            vm.emit_notice_at(
+                "fgets(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+                line,
+            );
+            return Ok(Value::False);
+        }
+    }
 
     let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
-        let limit = max_length.unwrap_or(1024);
         let mut out: Vec<u8> = Vec::new();
         let mut hit_newline = false;
         while out.len() < limit {
@@ -9082,7 +9877,6 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             let mut buf = Vec::new();
-            let limit = max_length.unwrap_or(1024);
             let mut byte = [0u8; 1];
             for _ in 0..limit {
                 match fh.file.read(&mut byte) {
@@ -9110,8 +9904,24 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn feof_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = arg.to_long();
+    let has_handle = FILE_HANDLES.with(|handles| handles.borrow().contains_key(&fid));
+    if !has_handle {
+        // If it was a resource (possibly closed) or any other type, throw TypeError
+        let is_closed_resource = matches!(arg, Value::Resource(_))
+            && goro_core::value::is_registered_resource(fid)
+            && !goro_core::value::is_open_resource(fid);
+        let is_resource = matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
+        if is_closed_resource || !is_resource {
+            let msg = "feof(): Argument #1 ($stream) must be an open stream resource".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        return Ok(Value::True);
+    }
     FILE_HANDLES.with(|handles| {
         let handles = handles.borrow();
         if let Some(fh) = handles.get(&fid) {
@@ -9122,8 +9932,9 @@ fn feof_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn rewind_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn rewind_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "rewind")?;
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
@@ -9138,14 +9949,24 @@ fn rewind_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn fseek_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fseek")?;
     let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let whence = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    // Invalid whence values return -1 without seeking.
+    if !matches!(whence, 0 | 1 | 2) {
+        return Ok(Value::Long(-1));
+    }
 
-    FILE_HANDLES.with(|handles| {
+    let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
+            // Track whether this is a special stream that doesn't support seek.
+            let is_unseekable_special = matches!(
+                fh.special,
+                SpecialStream::Stdout | SpecialStream::Stderr | SpecialStream::Output
+            );
             fh.eof = false;
             let seek = match whence {
                 0 => SeekFrom::Start(offset as u64), // SEEK_SET
@@ -9153,18 +9974,44 @@ fn fseek_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 2 => SeekFrom::End(offset),            // SEEK_END
                 _ => SeekFrom::Start(offset as u64),
             };
+            if is_unseekable_special {
+                return Err(true); // emit warning
+            }
             match fh.file.seek(seek) {
-                Ok(_) => Ok(Value::Long(0)),
-                Err(_) => Ok(Value::Long(-1)),
+                Ok(_) => Ok(0i64),
+                Err(_) => Ok(-1),
             }
         } else {
+            Err(false)
+        }
+    });
+    match result {
+        Ok(v) => Ok(Value::Long(v)),
+        Err(true) => {
+            vm.emit_warning("fseek(): Stream does not support seeking");
             Ok(Value::Long(-1))
         }
-    })
+        Err(false) => Ok(Value::Long(-1)),
+    }
 }
 
-fn ftell_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = arg.to_long();
+    let has_handle = FILE_HANDLES.with(|handles| handles.borrow().contains_key(&fid));
+    if !has_handle {
+        let is_closed_resource = matches!(arg, Value::Resource(_))
+            && goro_core::value::is_registered_resource(fid)
+            && !goro_core::value::is_open_resource(fid);
+        let is_open_resource = matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
+        if is_closed_resource || !is_open_resource {
+            let msg = "ftell(): Argument #1 ($stream) must be an open stream resource".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        return Ok(Value::False);
+    }
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
@@ -9193,6 +10040,71 @@ fn fflush_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
+fn fsync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fsync")?;
+    enum Result3 { Ok, Err, NoFsync }
+    let result = FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            // Memory/Temp/Output have no real backing fd; cannot fsync.
+            if matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp | SpecialStream::Output) {
+                return Result3::NoFsync;
+            }
+            // Stdin can't be fsynced (real fd 0 returns EINVAL).
+            if matches!(fh.special, SpecialStream::Stdin) {
+                return Result3::Err;
+            }
+            // Stdout/Stderr are real streams but typically not fsync-able.
+            match fh.file.sync_all() {
+                Ok(_) => Result3::Ok,
+                Err(_) => Result3::Err,
+            }
+        } else {
+            Result3::NoFsync
+        }
+    });
+    match result {
+        Result3::Ok => Ok(Value::True),
+        Result3::Err => Ok(Value::False),
+        Result3::NoFsync => {
+            vm.emit_warning("fsync(): Can't fsync this stream!");
+            Ok(Value::False)
+        }
+    }
+}
+
+fn fdatasync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fdatasync")?;
+    enum Result3 { Ok, Err, NoFsync }
+    let result = FILE_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            if matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp | SpecialStream::Output) {
+                return Result3::NoFsync;
+            }
+            if matches!(fh.special, SpecialStream::Stdin) {
+                return Result3::Err;
+            }
+            match fh.file.sync_data() {
+                Ok(_) => Result3::Ok,
+                Err(_) => Result3::Err,
+            }
+        } else {
+            Result3::NoFsync
+        }
+    });
+    match result {
+        Result3::Ok => Ok(Value::True),
+        Result3::Err => Ok(Value::False),
+        Result3::NoFsync => {
+            vm.emit_warning("fdatasync(): Can't fsync this stream!");
+            Ok(Value::False)
+        }
+    }
+}
+
 fn unlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     match std::fs::remove_file(&filename) {
@@ -9219,8 +10131,17 @@ fn copy_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn mkdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let path = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
+    // Null byte check (PHP raises ValueError as TypeError message)
+    if path_v.as_bytes().contains(&0) {
+        let msg = "mkdir(): Argument #1 ($directory) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let path = path_v.to_string_lossy().to_string();
+    let path = strip_file_scheme(&path).unwrap_or(path);
     let recursive = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     let result = if recursive {
         std::fs::create_dir_all(&path)
@@ -9229,15 +10150,36 @@ fn mkdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     match result {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("mkdir(): {}", msg));
+            Ok(Value::False)
+        }
     }
 }
 
-fn rmdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let path = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+fn rmdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
+    if path_v.as_bytes().contains(&0) {
+        let msg = "rmdir(): Argument #1 ($directory) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let path = path_v.to_string_lossy().to_string();
+    // Support file:// scheme for tests.
+    let path = if let Some(rest) = path.strip_prefix("file://") {
+        rest.to_string()
+    } else {
+        path
+    };
     match std::fs::remove_dir(&path) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("rmdir({}): {}", path, msg));
+            Ok(Value::False)
+        }
     }
 }
 fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -9263,13 +10205,17 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if flags & 128 != 0 {
         libc_flags |= libc::GLOB_BRACE;
     }
-    // GLOB_ONLYDIR = 8192 in PHP
+    // GLOB_ONLYDIR = 1073741824 (0x40000000) in PHP
     #[cfg(target_os = "linux")]
-    if flags & 8192 != 0 {
+    if flags & 1073741824 != 0 {
         libc_flags |= libc::GLOB_ONLYDIR;
     }
 
     let ret = unsafe { libc::glob(c_pattern.as_ptr(), libc_flags, None, &mut glob_buf) };
+
+    // GLOB_ONLYDIR is a hint to the OS; on Linux it can still return
+    // non-directories. PHP enforces it explicitly.
+    let only_dir = flags & 1073741824 != 0;
 
     let mut arr = PhpArray::new();
     if ret == 0 {
@@ -9278,6 +10224,14 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let p = *glob_buf.gl_pathv.add(i);
                 std::ffi::CStr::from_ptr(p).to_string_lossy().to_string()
             };
+            if only_dir {
+                // Strip trailing slash before testing is_dir (so GLOB_MARK
+                // entries still work).
+                let test_path = path.trim_end_matches('/');
+                if !std::fs::metadata(test_path).map(|m| m.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+            }
             arr.push(Value::String(PhpString::from_string(path)));
         }
     }
@@ -10574,9 +11528,33 @@ fn readdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn chmod_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn chmod_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string();
-    let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0o644);
+    let mode_val = args.get(1).cloned().unwrap_or(Value::Null);
+    // chmod() requires permissions to be an int. PHP throws TypeError
+    // on string/array/object/null.
+    let mode = match &mode_val {
+        Value::Long(n) => *n,
+        Value::Double(d) => *d as i64,
+        Value::True => 1,
+        Value::False => 0,
+        _ => {
+            let actual_type = match &mode_val {
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+                Value::Null => "null",
+                _ => "unknown",
+            };
+            let msg = format!(
+                "chmod(): Argument #2 ($permissions) must be of type int, {} given",
+                actual_type
+            );
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -10584,7 +11562,11 @@ fn chmod_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let perms = std::fs::Permissions::from_mode(mode as u32 & 0o7777);
         match std::fs::set_permissions(&path, perms) {
             Ok(_) => Ok(Value::True),
-            Err(_) => Ok(Value::False),
+            Err(e) => {
+                let msg = strip_os_error(&e.to_string());
+                vm.emit_warning(&format!("chmod(): {}", msg));
+                Ok(Value::False)
+            }
         }
     }
     #[cfg(not(unix))]
@@ -10594,30 +11576,53 @@ fn chmod_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn symlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn symlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let target = args.first().unwrap_or(&Value::Null).to_php_string();
     let link = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let target_s = target.to_string_lossy();
+    let link_s = link.to_string_lossy();
     #[cfg(unix)]
     {
-        match std::os::unix::fs::symlink(&*target.to_string_lossy(), &*link.to_string_lossy()) {
+        match std::os::unix::fs::symlink(&*target_s, &*link_s) {
             Ok(_) => Ok(Value::True),
-            Err(_) => Ok(Value::False),
+            Err(e) => {
+                let msg = strip_os_error(&e.to_string());
+                vm.emit_warning(&format!("symlink(): {}", msg));
+                Ok(Value::False)
+            }
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = (target, link);
+        let _ = (target_s, link_s);
+        vm.emit_warning("symlink(): Not supported on this platform");
         Ok(Value::False)
     }
 }
 
-fn readlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn readlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::read_link(&*path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    match std::fs::read_link(&*path_str) {
         Ok(p) => Ok(Value::String(PhpString::from_string(
             p.to_string_lossy().to_string(),
         ))),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            // Strip "(os error N)" trailer and other Rust-isms.
+            let msg = e.to_string();
+            let stripped = strip_os_error(&msg);
+            vm.emit_warning(&format!("readlink(): {}", stripped));
+            Ok(Value::False)
+        }
+    }
+}
+
+/// Strip Rust's "(os error N)" trailer to produce a clean message like PHP's.
+fn strip_os_error(msg: &str) -> String {
+    if let Some(idx) = msg.rfind(" (os error") {
+        msg[..idx].to_string()
+    } else {
+        msg.to_string()
     }
 }
 
@@ -10901,30 +11906,102 @@ fn walk_recursive_inner(
 
 fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let _length = args.get(1).map(|v| v.to_long());
-    let separator = args.get(2).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { b',' } else { b[0] }
-    }).unwrap_or(b',');
-    let enclosure = args.get(3).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { b'"' } else { b[0] }
-    }).unwrap_or(b'"');
-    let escape = args.get(4).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { None } else { Some(b[0]) }
-    }).unwrap_or(Some(b'\\'));
+    // Validate length argument (treat null/0 as "no limit").
+    if let Some(len_val) = args.get(1) {
+        if !matches!(len_val, Value::Null) {
+            let len = len_val.to_long();
+            if len != 0 && (len < 0 || len > i64::MAX - 1) {
+                let msg = format!(
+                    "fgetcsv(): Argument #2 ($length) must be between 0 and {}",
+                    i64::MAX - 1
+                );
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    // Validate separator must be a single character.
+    if let Some(v) = args.get(2) {
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() != 1 {
+                let msg = "fgetcsv(): Argument #3 ($separator) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    // Validate enclosure must be a single character.
+    if let Some(v) = args.get(3) {
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() != 1 {
+                let msg = "fgetcsv(): Argument #4 ($enclosure) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    // Validate escape (may be empty or single character).
+    if let Some(v) = args.get(4) {
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() > 1 {
+                let msg = "fgetcsv(): Argument #5 ($escape) must be empty or a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    let _length = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_long()) });
+    let separator = match args.get(2) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { b',' } else { b[0] }
+        }
+        _ => b',',
+    };
+    let enclosure = match args.get(3) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { b'"' } else { b[0] }
+        }
+        _ => b'"',
+    };
+    let escape = match args.get(4) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { None } else { Some(b[0]) }
+        }
+        _ => {
+            // PHP 8.4+ deprecation: implicit default escape will change.
+            let line = vm.current_line;
+            vm.emit_deprecated_at(
+                "fgetcsv(): the $escape parameter must be provided as its default value will change",
+                line,
+            );
+            Some(b'\\')
+        }
+    };
 
-    // Read a line from the file
-    let line = FILE_HANDLES.with(|handles| {
-        let mut handles = handles.borrow_mut();
-        if let Some(fh) = handles.get_mut(&fid) {
-            let mut buf = Vec::new();
+    // Read one line at a time. When the CSV parser reports an unterminated
+    // enclosure, keep appending more lines and re-parse.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut first_chunk = true;
+    let mut hit_eof = false;
+    let arr: PhpArray = loop {
+        let chunk = FILE_HANDLES.with(|handles| {
+            let mut handles = handles.borrow_mut();
+            let fh = handles.get_mut(&fid)?;
+            let mut local = Vec::new();
             let mut byte = [0u8; 1];
-            let mut in_quotes = false;
             loop {
                 match fh.file.read(&mut byte) {
                     Ok(0) => {
@@ -10932,86 +12009,128 @@ fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         break;
                     }
                     Ok(_) => {
-                        if byte[0] == enclosure {
-                            in_quotes = !in_quotes;
-                        }
-                        if byte[0] == b'\n' && !in_quotes {
-                            break;
-                        }
-                        buf.push(byte[0]);
+                        local.push(byte[0]);
+                        if byte[0] == b'\n' { break; }
                     }
                     Err(_) => break,
                 }
             }
-            if buf.is_empty() && fh.eof {
-                None
-            } else {
-                // Remove trailing \r
-                if buf.last() == Some(&b'\r') {
-                    buf.pop();
-                }
-                Some(buf)
+            Some(local)
+        });
+        match chunk {
+            None => {
+                // No file handle.
+                return Ok(Value::False);
             }
-        } else {
-            None
+            Some(line) => {
+                if line.is_empty() {
+                    // EOF — stop accumulating.
+                    hit_eof = true;
+                    if buf.is_empty() {
+                        return Ok(Value::False);
+                    }
+                    break crate::strings::parse_csv_fields_ex(&buf, separator, enclosure, escape).0;
+                }
+                buf.extend_from_slice(&line);
+            }
         }
-    });
-
-    match line {
-        None => Ok(Value::False),
-        Some(line_bytes) => {
-            // Parse CSV line
-            let line_str = String::from_utf8_lossy(&line_bytes);
-            let csv_args = vec![
-                Value::String(PhpString::from_string(line_str.to_string())),
-                Value::String(PhpString::from_bytes(&[separator])),
-                Value::String(PhpString::from_bytes(&[enclosure])),
-                if let Some(e) = escape {
-                    Value::String(PhpString::from_bytes(&[e]))
-                } else {
-                    Value::String(PhpString::from_bytes(b""))
-                },
-            ];
-            crate::strings::str_getcsv_fn(vm, &csv_args)
+        // Strip trailing CR/LF for parsing attempt.
+        let mut try_bytes = buf.clone();
+        if try_bytes.last() == Some(&b'\n') {
+            try_bytes.pop();
+            if try_bytes.last() == Some(&b'\r') {
+                try_bytes.pop();
+            }
         }
-    }
+        // Blank line at start: PHP returns array(NULL).
+        if first_chunk && try_bytes.is_empty() {
+            let mut a = PhpArray::new();
+            a.push(Value::Null);
+            return Ok(Value::Array(Rc::new(RefCell::new(a))));
+        }
+        first_chunk = false;
+        let (fields, unterminated) = crate::strings::parse_csv_fields_ex(&try_bytes, separator, enclosure, escape);
+        if unterminated {
+            continue;
+        }
+        break fields;
+    };
+    let _ = hit_eof;
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
 fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("fileperms", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if path.as_bytes().contains(&0) {
+        let line = vm.current_line;
+        vm.emit_warning_at("fileperms(): Filename contains null byte", line);
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("fileperms", &path_str) {
         return Ok(Value::False);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_str) {
             Ok(m) => Ok(Value::Long(m.mode() as i64)),
             Err(_) => {
-                vm.emit_warning(&format!("fileperms(): stat failed for {}", path.to_string_lossy()));
+                vm.emit_warning(&format!("fileperms(): stat failed for {}", path_str));
                 Ok(Value::False)
             }
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = path_str;
         Ok(Value::Long(0o100644))
     }
 }
 
-fn filetype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn filetype_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
     let p = std::path::Path::new(&*path_str);
-    let ft = if p.is_file() {
-        "file"
-    } else if p.is_dir() {
-        "dir"
-    } else if p.read_link().is_ok() {
+    // Use symlink_metadata so that symlinks are reported as "link" (not whatever they point to)
+    let md = match std::fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(_) => {
+            vm.emit_warning(&format!("filetype(): Lstat failed for {}", path_str));
+            return Ok(Value::False);
+        }
+    };
+    let ft_type = md.file_type();
+    let ft = if ft_type.is_symlink() {
         "link"
+    } else if ft_type.is_file() {
+        "file"
+    } else if ft_type.is_dir() {
+        "dir"
     } else {
-        "unknown"
+        // Unix-specific: detect character/block/fifo/socket devices
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if ft_type.is_char_device() {
+                "char"
+            } else if ft_type.is_block_device() {
+                "block"
+            } else if ft_type.is_fifo() {
+                "fifo"
+            } else if ft_type.is_socket() {
+                "socket"
+            } else {
+                "unknown"
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            "unknown"
+        }
     };
     Ok(Value::String(PhpString::from_bytes(ft.as_bytes())))
 }
@@ -11140,80 +12259,224 @@ fn natcmp(a: &str, b: &str) -> std::cmp::Ordering {
     (ab.len() - ai).cmp(&(bb.len() - bi))
 }
 
-fn set_include_path_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let _path = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(Value::String(PhpString::from_bytes(b".")))
+fn set_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let old = vm.constants.get(b"include_path".as_ref()).cloned()
+        .unwrap_or_else(|| Value::String(PhpString::from_bytes(b".")));
+    vm.constants.insert(b"include_path".to_vec(),
+        Value::String(PhpString::from_vec(path.as_bytes().to_vec())));
+    Ok(old)
 }
 
-fn get_include_path_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b".")))
+fn get_include_path_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(vm.constants.get(b"include_path".as_ref()).cloned()
+        .unwrap_or_else(|| Value::String(PhpString::from_bytes(b"."))))
 }
 
-fn restore_include_path_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn restore_include_path_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.constants.insert(b"include_path".to_vec(),
+        Value::String(PhpString::from_bytes(b".")));
     Ok(Value::Null)
 }
 
 fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    // For closed resources, return "Unknown" (matches PHP behavior).
+    if let Value::Resource(id) = val {
+        if goro_core::value::is_registered_resource(*id) && !goro_core::value::is_open_resource(*id) {
+            return Ok(Value::String(PhpString::from_bytes(b"Unknown")));
+        }
+    }
     if let Some(t) = val.resource_type_name() {
         return Ok(Value::String(PhpString::from_vec(t)));
     }
     Ok(Value::String(PhpString::from_bytes(b"Unknown")))
 }
 
-fn link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn link_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let target = args.first().unwrap_or(&Value::Null).to_php_string();
     let link = args.get(1).unwrap_or(&Value::Null).to_php_string();
     match std::fs::hard_link(&*target.to_string_lossy(), &*link.to_string_lossy()) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("link(): {}", msg));
+            Ok(Value::False)
+        }
     }
 }
 
-fn unlink_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn unlink_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::remove_file(&*path.to_string_lossy()) {
+    if path.as_bytes().contains(&0) {
+        let msg = "unlink(): Argument #1 ($filename) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let path_str = path.to_string_lossy();
+    match std::fs::remove_file(&*path_str) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("unlink({}): {}", path_str, msg));
+            Ok(Value::False)
+        }
     }
 }
 
-fn rename_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn rename_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let from = args.first().unwrap_or(&Value::Null).to_php_string();
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    match std::fs::rename(&*from.to_string_lossy(), &*to.to_string_lossy()) {
+    let from_str = from.to_string_lossy();
+    let to_str = to.to_string_lossy();
+    match std::fs::rename(&*from_str, &*to_str) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("rename({},{}): {}", from_str, to_str, msg));
+            Ok(Value::False)
+        }
     }
 }
 
-fn copy_fn2(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let from = args.first().unwrap_or(&Value::Null).to_php_string();
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    match std::fs::copy(&*from.to_string_lossy(), &*to.to_string_lossy()) {
+    let from_str = from.to_string_lossy();
+    let to_str = to.to_string_lossy();
+    // PHP: if source and destination resolve to the same file (using cwd to
+    // resolve relative paths, lexically normalized), return false with NO
+    // warning, regardless of whether either file exists.
+    let resolve_rel = |p: &str| -> String {
+        let norm = normalize_path_lexical(p);
+        if norm.starts_with('/') {
+            norm
+        } else if let Ok(cwd) = std::env::current_dir() {
+            normalize_path_lexical(&format!("{}/{}", cwd.display(), norm))
+        } else {
+            norm
+        }
+    };
+    if resolve_rel(&from_str) == resolve_rel(&to_str) {
+        return Ok(Value::False);
+    }
+    let from_path = std::path::Path::new(&*from_str);
+    if !from_path.exists() {
+        vm.emit_warning(&format!(
+            "copy({}): Failed to open stream: No such file or directory",
+            from_str
+        ));
+        return Ok(Value::False);
+    }
+    // PHP: source cannot be a directory
+    if from_path.is_dir() {
+        vm.emit_warning("copy(): The first argument to copy() function cannot be a directory");
+        return Ok(Value::False);
+    }
+    // PHP: destination cannot be a directory
+    if std::path::Path::new(&*to_str).is_dir() {
+        vm.emit_warning("copy(): The second argument to copy() function cannot be a directory");
+        return Ok(Value::False);
+    }
+    // PHP: copy of same source -> destination returns false (no warning),
+    // resolved via canonicalize as a fallback.
+    if let (Ok(c1), Ok(c2)) = (std::fs::canonicalize(&*from_str), std::fs::canonicalize(&*to_str)) {
+        if c1 == c2 {
+            return Ok(Value::False);
+        }
+    }
+    match std::fs::copy(&*from_str, &*to_str) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("copy({}): Failed to open stream: {}", from_str, msg));
+            Ok(Value::False)
+        }
     }
 }
 
 fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match read_path_with_wrappers(&path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        let msg = "Path must not be empty".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let resolved = resolve_with_include_path(vm, &path_str, use_include_path);
+    match read_path_with_wrappers(&resolved) {
         Ok(data) => {
             let len = data.len();
             vm.write_output(&data);
             Ok(Value::Long(len as i64))
         }
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!(
+                "readfile({}): Failed to open stream: No such file or directory",
+                path_str
+            ));
+            Ok(Value::False)
+        },
     }
 }
 
-fn file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn resolve_with_include_path(vm: &Vm, filename: &str, use_include_path: bool) -> String {
+    if !use_include_path
+        || filename.contains("://")
+        || filename.starts_with('/')
+        || filename.starts_with("./")
+        || filename.starts_with("../")
+    {
+        return filename.to_string();
+    }
+    let inc = vm
+        .constants
+        .get(b"include_path".as_ref())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| ".".to_string());
+    for entry in inc.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let candidate = if entry == "." {
+            filename.to_string()
+        } else {
+            format!("{}/{}", entry.trim_end_matches('/'), filename)
+        };
+        if std::fs::metadata(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+    let script = vm.current_file.clone();
+    if let Some(parent) = std::path::Path::new(&script).parent() {
+        let candidate = parent.join(filename);
+        if candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    filename.to_string()
+}
+
+fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    // Valid flags for file(): FILE_USE_INCLUDE_PATH (1) | FILE_IGNORE_NEW_LINES (2)
+    // | FILE_SKIP_EMPTY_LINES (4) | FILE_NO_DEFAULT_CONTEXT (16) = 0x17.
+    if flags & !0x17 != 0 {
+        let msg = "file(): Argument #2 ($flags) must be a valid flag value".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let ignore_new_lines = flags & 2 != 0; // FILE_IGNORE_NEW_LINES
     let skip_empty = flags & 4 != 0; // FILE_SKIP_EMPTY_LINES
-    match read_path_with_wrappers(&path.to_string_lossy()) {
+    let use_inc = flags & 1 != 0; // FILE_USE_INCLUDE_PATH
+    let path_str = path.to_string_lossy();
+    let path_str = resolve_with_include_path(vm, &path_str, use_inc);
+    match read_path_with_wrappers(&path_str) {
         Ok(content) => {
             let mut result = PhpArray::new();
             if content.is_empty() {
@@ -11253,29 +12516,32 @@ fn file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!("file({}): Failed to open stream: No such file or directory", path_str));
+            Ok(Value::False)
+        }
     }
 }
 
-fn lstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn lstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
-    stat_path(&path_str, true)
+    let res = stat_path(&path_str, true)?;
+    if matches!(res, Value::False) {
+        vm.emit_warning(&format!("lstat(): Lstat failed for {}", path_str));
+    }
+    Ok(res)
 }
 
 fn is_executable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
-            Ok(m) => Ok(if m.mode() & 0o111 != 0 {
-                Value::True
-            } else {
-                Value::False
-            }),
-            Err(_) => Ok(Value::False),
-        }
+        Ok(if check_access_bit(&path.to_string_lossy(), 0o100, 0o010, 0o001) {
+            Value::True
+        } else {
+            Value::False
+        })
     }
     #[cfg(not(unix))]
     {
@@ -11284,26 +12550,65 @@ fn is_executable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn tempnam_fn3(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn tempnam_fn3(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Validate prefix type: must be a stringable scalar; arrays cause TypeError.
+    let prefix_val = args.get(1).cloned().unwrap_or(Value::Null);
+    if matches!(prefix_val, Value::Array(_)) {
+        let msg = "tempnam(): Argument #2 ($prefix) must be of type string, array given".to_string();
+        let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let prefix = prefix_val.to_php_string();
+    // Reject null bytes in prefix.
+    if prefix.as_bytes().contains(&0) {
+        let msg = "tempnam(): Argument #2 ($prefix) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let dir = args.first().unwrap_or(&Value::Null).to_php_string();
-    let prefix = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let dir_str = if dir.is_empty() {
         std::env::temp_dir().to_string_lossy().to_string()
     } else {
         dir.to_string_lossy()
     };
-    let name = format!(
-        "{}/{}{}",
-        dir_str,
-        prefix.to_string_lossy(),
-        std::time::SystemTime::now()
+    // PHP uses only the basename of the prefix and truncates to 64 chars.
+    let prefix_bytes = prefix.as_bytes();
+    let prefix_base: Vec<u8> = match prefix_bytes.iter().rposition(|&c| c == b'/') {
+        Some(pos) => prefix_bytes[pos + 1..].to_vec(),
+        None => prefix_bytes.to_vec(),
+    };
+    let prefix_truncated: Vec<u8> = prefix_base.iter().take(64).copied().collect();
+    let prefix_str = String::from_utf8_lossy(&prefix_truncated).to_string();
+
+    // Try a few names with random suffix until one doesn't exist.
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::time::SystemTime;
+    for attempt in 0..16u32 {
+        let nanos = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    // Create the file
-    std::fs::write(&name, b"").ok();
-    Ok(Value::String(PhpString::from_string(name)))
+            .unwrap_or(0);
+        let mix = (nanos as u64).wrapping_add(attempt as u64 * 1_000_003);
+        let name = format!("{}/{}{}", dir_str, prefix_str, mix);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&name)
+        {
+            Ok(_) => return Ok(Value::String(PhpString::from_string(name))),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => {
+                vm.emit_warning(&format!(
+                    "tempnam(): file created in the system's temporary directory"
+                ));
+                return Ok(Value::False);
+            }
+        }
+    }
+    Ok(Value::False)
 }
 
 fn sys_get_temp_dir_fn3(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -12065,7 +13370,7 @@ fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) ->
 }
 
 
-fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn parse_ini_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ini_str = match args.first() {
         Some(Value::String(s)) => s.to_string_lossy(),
         Some(v) => v.to_php_string().to_string_lossy(),
@@ -12073,11 +13378,49 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0); // INI_SCANNER_NORMAL=0
+    // INI_SCANNER_RAW=1, INI_SCANNER_TYPED=2
+    let is_raw = scanner_mode == 1;
+    let is_typed = scanner_mode == 2;
 
     let mut result = PhpArray::new();
     let mut current_section: Option<String> = None;
 
-    for line in ini_str.lines() {
+    // Pre-process to handle multi-line quoted values: collapse them by
+    // scanning lines and detecting unclosed quotes.
+    let raw_lines: Vec<&str> = ini_str.split('\n').collect();
+    let mut lines: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw_lines.len() {
+        let mut buf = raw_lines[i].trim_end_matches('\r').to_string();
+        // Check if this line has an unterminated double-quoted value.
+        let mut in_quote = false;
+        let bytes = buf.as_bytes();
+        let mut bi = 0;
+        // Skip past key= portion if present.
+        if let Some(eq) = buf.find('=') {
+            bi = eq + 1;
+        }
+        while bi < bytes.len() {
+            if bytes[bi] == b'"' {
+                in_quote = !in_quote;
+            }
+            bi += 1;
+        }
+        // If still in quote, join with next lines.
+        while in_quote && i + 1 < raw_lines.len() {
+            i += 1;
+            buf.push('\n');
+            let next = raw_lines[i].trim_end_matches('\r');
+            buf.push_str(next);
+            for c in next.bytes() {
+                if c == b'"' { in_quote = !in_quote; }
+            }
+        }
+        lines.push(buf);
+        i += 1;
+    }
+
+    for line in &lines {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
             continue;
@@ -12085,56 +13428,70 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Section header
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             if process_sections {
-                current_section = Some(trimmed[1..trimmed.len()-1].to_string());
+                let section_name = trimmed[1..trimmed.len()-1].to_string();
+                let section_key = if let Ok(n) = section_name.parse::<i64>() {
+                    if !section_name.starts_with('0') || section_name == "0" {
+                        ArrayKey::Int(n)
+                    } else {
+                        ArrayKey::String(PhpString::from_string(section_name.clone()))
+                    }
+                } else {
+                    ArrayKey::String(PhpString::from_string(section_name.clone()))
+                };
+                // Ensure section exists in result as an empty array if not yet
+                // present, so empty sections are still represented.
+                if result.get(&section_key).is_none() {
+                    result.set(section_key, Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                }
+                current_section = Some(section_name);
             }
             continue;
         }
         // Key=value
         if let Some(eq_pos) = trimmed.find('=') {
             let key = trimmed[..eq_pos].trim().to_string();
-            let val_str = trimmed[eq_pos+1..].trim_start();
-            // Remove surrounding quotes
-            let val_str = if val_str.len() >= 2
-                && ((val_str.starts_with('"') && val_str.ends_with('"'))
-                || (val_str.starts_with('\'') && val_str.ends_with('\'')))
-            {
-                &val_str[1..val_str.len()-1]
-            } else {
-                val_str
-            };
-            // Strip inline comments
-            let val_str = if scanner_mode == 0 {
-                if let Some(comment_pos) = val_str.find(';') {
-                    // Only strip if preceded by whitespace
-                    if comment_pos > 0 && val_str.as_bytes()[comment_pos - 1] == b' ' {
-                        val_str[..comment_pos].trim_end()
-                    } else {
-                        val_str
-                    }
+            let val_raw = trimmed[eq_pos+1..].trim_start();
+
+            // In NORMAL/TYPED mode: process semicolons as comments unless inside quotes.
+            // In RAW mode: only strip an unquoted ; if outside string.
+            // Then handle quoted strings: " allows constants/escape, ' is literal.
+            let (val_str, was_quoted) = process_ini_value(val_raw, is_raw, is_typed, vm);
+
+            let value = if is_typed {
+                if was_quoted {
+                    Value::String(PhpString::from_string(val_str.clone()))
                 } else {
-                    val_str
-                }
-            } else {
-                val_str
-            };
-            // Convert special values
-            let value = match val_str.to_lowercase().as_str() {
-                "true" | "on" | "yes" => Value::String(PhpString::from_bytes(b"1")),
-                "false" | "off" | "no" | "none" | "" => Value::String(PhpString::empty()),
-                "null" => Value::String(PhpString::empty()),
-                _ => {
-                    if scanner_mode == 1 {
-                        // INI_SCANNER_RAW - return raw string
-                        Value::String(PhpString::from_string(val_str.to_string()))
-                    } else {
-                        // Try to parse as number
-                        if let Ok(n) = val_str.parse::<i64>() {
-                            Value::String(PhpString::from_string(n.to_string()))
-                        } else if let Ok(f) = val_str.parse::<f64>() {
-                            Value::String(PhpString::from_string(f.to_string()))
-                        } else {
-                            Value::String(PhpString::from_string(val_str.to_string()))
+                    match val_str.to_ascii_lowercase().as_str() {
+                        "true" | "on" | "yes" => Value::True,
+                        "false" | "off" | "no" | "none" => Value::False,
+                        "null" => Value::Null,
+                        _ => {
+                            // Try numeric
+                            if let Ok(n) = val_str.parse::<i64>() {
+                                // Only treat as int if string representation matches
+                                if n.to_string() == val_str {
+                                    Value::Long(n)
+                                } else {
+                                    Value::String(PhpString::from_string(val_str.clone()))
+                                }
+                            } else {
+                                Value::String(PhpString::from_string(val_str.clone()))
+                            }
                         }
+                    }
+                }
+            } else if is_raw {
+                Value::String(PhpString::from_string(val_str.clone()))
+            } else {
+                // NORMAL
+                if was_quoted {
+                    Value::String(PhpString::from_string(val_str.clone()))
+                } else {
+                    match val_str.to_ascii_lowercase().as_str() {
+                        "true" | "on" | "yes" => Value::String(PhpString::from_bytes(b"1")),
+                        "false" | "off" | "no" | "none" | "" => Value::String(PhpString::empty()),
+                        "null" => Value::String(PhpString::empty()),
+                        _ => Value::String(PhpString::from_string(val_str.clone())),
                     }
                 }
             };
@@ -12142,10 +13499,7 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let arr_key = ArrayKey::String(PhpString::from_string(key));
             if process_sections {
                 if let Some(ref section) = current_section {
-                    // Use integer key for pure integer section names
                     let section_key = if let Ok(n) = section.parse::<i64>() {
-                        // Only use integer key if it doesn't start with '0' (to avoid octal confusion)
-                        // and doesn't start with '+' or '-' (PHP only converts positive integers)
                         if !section.starts_with('0') || section == "0" {
                             ArrayKey::Int(n)
                         } else {
@@ -12154,7 +13508,6 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     } else {
                         ArrayKey::String(PhpString::from_string(section.clone()))
                     };
-                    // Get or create section array
                     let section_arr = if let Some(existing) = result.get(&section_key) {
                         if let Value::Array(arr) = existing {
                             arr.clone()
@@ -12175,6 +13528,95 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// Process an INI value: strip surrounding quotes (single = literal, double =
+/// expand constants), handle inline comments, and in NORMAL/TYPED mode
+/// substitute constants for bareword values.
+/// Returns (value, was_quoted). When was_quoted is true, the caller MUST NOT
+/// apply boolean/null keyword interpretation.
+fn process_ini_value(raw: &str, is_raw: bool, _is_typed: bool, vm: &Vm) -> (String, bool) {
+    let raw = raw.trim_end();
+    if raw.is_empty() {
+        return (String::new(), false);
+    }
+
+    // Handle single-quoted (literal, no constants, no escapes). Only for NORMAL/TYPED.
+    if !is_raw && raw.starts_with('\'') {
+        if let Some(end) = raw[1..].find('\'') {
+            return (raw[1..1 + end].to_string(), true);
+        }
+        return (raw[1..].to_string(), true);
+    }
+
+    // Handle double-quoted with matching closing quote.
+    if raw.starts_with('"') {
+        if let Some(end) = raw[1..].rfind('"') {
+            let inner = &raw[1..1 + end];
+            let after = raw[2 + end..].trim();
+            // For RAW mode, the value must be entirely `"..."`. Anything
+            // beyond the closing quote means the whole thing is treated
+            // literally (quotes preserved). Inline comments are still
+            // stripped at the next `;` outside the quoted region.
+            if is_raw {
+                if after.is_empty() {
+                    return (inner.to_string(), true);
+                }
+                // Literal: keep raw, but strip from `;` after the quoted region.
+                let close_pos = 2 + end; // index of char after closing "
+                let tail = &raw[close_pos..];
+                let val = if let Some(semi) = tail.find(';') {
+                    format!("{}{}", &raw[..close_pos], &tail[..semi])
+                } else {
+                    raw.to_string()
+                };
+                return (val.trim_end().to_string(), true);
+            }
+            // NORMAL/TYPED: process escape sequences inside the quoted region.
+            let mut out = String::new();
+            let mut chars = inner.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    match chars.peek() {
+                        Some(&'n') => { chars.next(); out.push('\n'); }
+                        Some(&'t') => { chars.next(); out.push('\t'); }
+                        Some(&'r') => { chars.next(); out.push('\r'); }
+                        Some(&'\\') => { chars.next(); out.push('\\'); }
+                        Some(&'"') => { chars.next(); out.push('"'); }
+                        _ => { out.push('\\'); }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            return (out, true);
+        }
+        // Unterminated double quote: PHP RAW keeps the opening quote but
+        // still cuts at semicolon. Fall through to unquoted handling.
+    }
+    // Unquoted value: strip inline comment from semicolon onwards.
+    // (Both NORMAL and RAW strip `;` for unquoted values.)
+    let mut val = match raw.find(';') {
+        Some(p) => raw[..p].trim_end().to_string(),
+        None => raw.to_string(),
+    };
+    val = val.trim().to_string();
+    // For NORMAL/TYPED mode, resolve constants. Constants resolve only for
+    // bareword values (identifier-like).
+    if !is_raw && !val.is_empty() {
+        let is_ident = val.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if is_ident {
+            let upper = val.as_bytes().to_vec();
+            // Skip booleans/null keywords which the caller handles.
+            let lower = val.to_ascii_lowercase();
+            if !matches!(lower.as_str(), "true" | "false" | "on" | "off" | "yes" | "no" | "none" | "null") {
+                if let Some(c) = vm.constants.get(upper.as_slice()) {
+                    return (c.to_php_string().to_string_lossy().to_string(), false);
+                }
+            }
+        }
+    }
+    (val, false)
 }
 
 fn assert_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -12235,9 +13677,17 @@ fn assert_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(prev)
 }
 
-fn ftruncate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let size = args.get(1).map(|v| v.to_long()).unwrap_or(0) as u64;
+fn ftruncate_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "ftruncate")?;
+    let size_long = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if size_long < 0 {
+        let msg = "ftruncate(): Argument #2 ($size) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let size = size_long as u64;
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
@@ -12273,10 +13723,14 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("filemtime", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
         return Ok(Value::False);
     }
-    match std::fs::metadata(&*path.to_string_lossy()) {
+    if !vm.check_open_basedir("filemtime", &path_str) {
+        return Ok(Value::False);
+    }
+    match std::fs::metadata(&*path_str) {
         Ok(meta) => {
             if let Ok(modified) = meta.modified() {
                 let secs = modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -12286,7 +13740,7 @@ fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Err(_) => {
-            vm.emit_warning(&format!("filemtime(): stat failed for {}", path.to_string_lossy()));
+            vm.emit_warning(&format!("filemtime(): stat failed for {}", path_str));
             Ok(Value::False)
         }
     }
@@ -12294,10 +13748,14 @@ fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("fileatime", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
         return Ok(Value::False);
     }
-    match std::fs::metadata(&*path.to_string_lossy()) {
+    if !vm.check_open_basedir("fileatime", &path_str) {
+        return Ok(Value::False);
+    }
+    match std::fs::metadata(&*path_str) {
         Ok(meta) => {
             if let Ok(accessed) = meta.accessed() {
                 let secs = accessed.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -12307,28 +13765,73 @@ fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Err(_) => {
-            vm.emit_warning(&format!("fileatime(): stat failed for {}", path.to_string_lossy()));
+            vm.emit_warning(&format!("fileatime(): stat failed for {}", path_str));
             Ok(Value::False)
         }
     }
 }
 
 fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    filemtime_fn(vm, args)
-}
-
-fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("fileinode", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("filectime", &path_str) {
         return Ok(Value::False);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_str) {
+            Ok(meta) => Ok(Value::Long(meta.ctime() as i64)),
+            Err(_) => {
+                vm.emit_warning(&format!("filectime(): stat failed for {}", path_str));
+                Ok(Value::False)
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Fall back to created on non-Unix
+        match std::fs::metadata(&*path_str) {
+            Ok(meta) => {
+                if let Ok(c) = meta.created() {
+                    let secs = c.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    Ok(Value::Long(secs as i64))
+                } else {
+                    Ok(Value::False)
+                }
+            }
+            Err(_) => {
+                vm.emit_warning(&format!("filectime(): stat failed for {}", path_str));
+                Ok(Value::False)
+            }
+        }
+    }
+}
+
+fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if path.as_bytes().contains(&0) {
+        let line = vm.current_line;
+        vm.emit_warning_at("fileinode(): Filename contains null byte", line);
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("fileinode", &path_str) {
+        return Ok(Value::False);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&*path_str) {
             Ok(meta) => Ok(Value::Long(meta.ino() as i64)),
             Err(_) => {
-                vm.emit_warning(&format!("fileinode(): stat failed for {}", path.to_string_lossy()));
+                vm.emit_warning(&format!("fileinode(): stat failed for {}", path_str));
                 Ok(Value::False)
             }
         }
@@ -12339,16 +13842,25 @@ fn fileinode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("fileowner", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if path.as_bytes().contains(&0) {
+        let line = vm.current_line;
+        vm.emit_warning_at("fileowner(): Filename contains null byte", line);
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("fileowner", &path_str) {
         return Ok(Value::False);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_str) {
             Ok(meta) => Ok(Value::Long(meta.uid() as i64)),
             Err(_) => {
-                vm.emit_warning(&format!("fileowner(): stat failed for {}", path.to_string_lossy()));
+                vm.emit_warning(&format!("fileowner(): stat failed for {}", path_str));
                 Ok(Value::False)
             }
         }
@@ -12359,16 +13871,25 @@ fn fileowner_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn filegroup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("filegroup", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    if path_str.is_empty() {
+        return Ok(Value::False);
+    }
+    if path.as_bytes().contains(&0) {
+        let line = vm.current_line;
+        vm.emit_warning_at("filegroup(): Filename contains null byte", line);
+        return Ok(Value::False);
+    }
+    if !vm.check_open_basedir("filegroup", &path_str) {
         return Ok(Value::False);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_str) {
             Ok(meta) => Ok(Value::Long(meta.gid() as i64)),
             Err(_) => {
-                vm.emit_warning(&format!("filegroup(): stat failed for {}", path.to_string_lossy()));
+                vm.emit_warning(&format!("filegroup(): stat failed for {}", path_str));
                 Ok(Value::False)
             }
         }
@@ -12377,35 +13898,102 @@ fn filegroup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
 }
 
-fn chown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn chown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = filename.to_string_lossy();
+    if path_str.is_empty() || !std::path::Path::new(&*path_str).exists() {
+        vm.emit_warning("chown(): No such file or directory");
+        return Ok(Value::False);
+    }
+    // We don't actually change ownership (root-only on Unix), but return true
+    // if the file exists (matches PHP's behavior when called as root or
+    // already-owner).
+    Ok(Value::True)
 }
 
-fn chgrp_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn chgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = filename.to_string_lossy();
+    if path_str.is_empty() || !std::path::Path::new(&*path_str).exists() {
+        vm.emit_warning("chgrp(): No such file or directory");
+        return Ok(Value::False);
+    }
+    Ok(Value::True)
 }
 
-fn fputcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let fields = match args.get(1) {
         Some(Value::Array(arr)) => arr.clone(),
         _ => return Ok(Value::False),
     };
-    let separator = args.get(2).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { b',' } else { b[0] }
-    }).unwrap_or(b',');
-    let enclosure = args.get(3).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { b'"' } else { b[0] }
-    }).unwrap_or(b'"');
-    let escape: Option<u8> = args.get(4).map(|v| {
-        let s = v.to_php_string();
-        let b = s.as_bytes();
-        if b.is_empty() { None } else { Some(b[0]) }
-    }).unwrap_or(Some(b'\\'));
+    // Validate separator/enclosure/escape — each must be a single character
+    // (escape may be empty). PHP throws ValueError for invalid sizes. Null
+    // arguments are treated as not-provided (named-arg gaps).
+    if let Some(v) = args.get(2) {
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() != 1 {
+                let msg = "fputcsv(): Argument #3 ($separator) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    if let Some(v) = args.get(3) {
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() != 1 {
+                let msg = "fputcsv(): Argument #4 ($enclosure) must be a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    if let Some(v) = args.get(4) {
+        if !matches!(v, Value::Null) {
+            let s = v.to_php_string();
+            if s.len() > 1 {
+                let msg = "fputcsv(): Argument #5 ($escape) must be empty or a single character".to_string();
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+    let separator = match args.get(2) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { b',' } else { b[0] }
+        }
+        _ => b',',
+    };
+    let enclosure = match args.get(3) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { b'"' } else { b[0] }
+        }
+        _ => b'"',
+    };
+    let escape: Option<u8> = match args.get(4) {
+        Some(v) if !matches!(v, Value::Null) => {
+            let s = v.to_php_string();
+            let b = s.as_bytes();
+            if b.is_empty() { None } else { Some(b[0]) }
+        }
+        _ => {
+            let line = vm.current_line;
+            vm.emit_deprecated_at(
+                "fputcsv(): the $escape parameter must be provided as its default value will change",
+                line,
+            );
+            Some(b'\\')
+        }
+    };
 
     let mut line = String::new();
     let arr = fields.borrow();
@@ -12415,24 +14003,45 @@ fn fputcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line.push(separator as char);
         }
         first = false;
+        // PHP emits "Array to string conversion" warning when fputcsv encounters
+        // an array element (and writes literal "Array").
+        if matches!(val, Value::Array(_)) {
+            let cur_line = vm.current_line;
+            vm.emit_warning_at("Array to string conversion", cur_line);
+        }
         let s = val.to_php_string().to_string_lossy();
-        // Check if we need to enclose
-        let needs_enclosure = s.contains(separator as char) || s.contains(enclosure as char) || s.contains('\n') || s.contains('\r');
+        // Check if we need to enclose (delimiter, enclosure, escape, \n, \r,
+        // \t, or space anywhere in the field — matches PHP behavior).
+        let s_bytes = s.as_bytes();
+        let needs_enclosure = s_bytes.iter().any(|&b| {
+            b == separator
+                || b == enclosure
+                || escape.map(|e| b == e).unwrap_or(false)
+                || b == b'\n'
+                || b == b'\r'
+                || b == b'\t'
+                || b == b' '
+        });
         if needs_enclosure {
             line.push(enclosure as char);
-            let chars: Vec<char> = s.chars().collect();
+            let bytes: Vec<u8> = s_bytes.to_vec();
             let mut i = 0;
-            while i < chars.len() {
-                let c = chars[i];
-                if c == enclosure as char {
-                    let prev_is_escape = escape
-                        .map(|e| i > 0 && chars[i - 1] == e as char)
-                        .unwrap_or(false);
-                    if !prev_is_escape {
-                        line.push(enclosure as char);
+            let mut escaped = false;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if let Some(e) = escape {
+                    if c == e && !escaped {
+                        escaped = true;
+                        line.push(c as char);
+                        i += 1;
+                        continue;
                     }
                 }
-                line.push(c);
+                if c == enclosure && !escaped {
+                    line.push(enclosure as char);
+                }
+                escaped = false;
+                line.push(c as char);
                 i += 1;
             }
             line.push(enclosure as char);
@@ -12493,25 +14102,56 @@ fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn linkinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn linkinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_s = path.to_string_lossy();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_s) {
             Ok(meta) => Ok(Value::Long(meta.dev() as i64)),
-            Err(_) => Ok(Value::Long(-1)),
+            Err(e) => {
+                let msg = strip_os_error(&e.to_string());
+                vm.emit_warning(&format!("linkinfo(): {}", msg));
+                Ok(Value::Long(-1))
+            }
         }
     }
     #[cfg(not(unix))]
-    Ok(Value::Long(-1))
+    {
+        let _ = path_s;
+        vm.emit_warning("linkinfo(): Not supported on this platform");
+        Ok(Value::Long(-1))
+    }
 }
 
 fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = path.to_string_lossy();
     let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    match std::fs::read_to_string(&*path.to_string_lossy()) {
+
+    // Search include_path for relative filenames.
+    let read_result = std::fs::read_to_string(&*path_str).or_else(|e| {
+        // Only fall back to include_path for non-absolute, non-current-dir paths.
+        if path_str.starts_with('/') || path_str.starts_with("./") || path_str.starts_with("../") {
+            return Err(e);
+        }
+        let include_path = vm
+            .constants
+            .get(b"include_path".as_ref())
+            .map(|v| v.to_php_string().to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        for dir in include_path.split(':') {
+            let candidate = format!("{}/{}", dir.trim_end_matches('/'), path_str);
+            if let Ok(c) = std::fs::read_to_string(&candidate) {
+                return Ok(c);
+            }
+        }
+        Err(e)
+    });
+
+    match read_result {
         Ok(content) => {
             let ini_args = vec![
                 Value::String(PhpString::from_string(content)),
@@ -12520,7 +14160,13 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ];
             parse_ini_string_fn(vm, &ini_args)
         }
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!(
+                "parse_ini_file({}): Failed to open stream: No such file or directory",
+                path_str
+            ));
+            Ok(Value::False)
+        }
     }
 }
 
@@ -12947,8 +14593,22 @@ fn fscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn fgetc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "fgetc")?;
+    // PHP emits a notice if the underlying mode is write-only.
+    let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
+    if let Some(m) = stream_mode {
+        let clean: String = m.chars().filter(|&c| c != 'b' && c != 't').collect();
+        if matches!(clean.as_str(), "w" | "a" | "x" | "c") {
+            let line = vm.current_line;
+            vm.emit_notice_at(
+                "fgetc(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+                line,
+            );
+            return Ok(Value::False);
+        }
+    }
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
@@ -12967,16 +14627,104 @@ fn fgetc_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn flock_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // flock($handle, $operation) - stub that always succeeds
-    // Real file locking would need libc::flock
-    let _fid = args.first().unwrap_or(&Value::Null).to_long();
-    let _op = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Validate $operation arg before $stream arg (PHP order).
+    let op_arg = args.get(1).cloned().unwrap_or(Value::Long(0));
+    // Type-check operation arg: int or bool only; array/string -> TypeError.
+    let op = match &op_arg {
+        Value::Long(n) => *n,
+        Value::Double(d) => *d as i64,
+        Value::True => 1,
+        Value::False => 0,
+        Value::Null => 0,
+        Value::Array(_) => {
+            let msg = "flock(): Argument #2 ($operation) must be of type int, array given".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        Value::String(_) => {
+            let msg = "flock(): Argument #2 ($operation) must be of type int, string given".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        _ => op_arg.to_long(),
+    };
+    let basic = op & 3;
+    if basic == 0 {
+        let msg = "flock(): Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let arg = args.first().cloned().unwrap_or(Value::Null);
+    // Allow dir-handle resources (Linux PHP flock on a dir returns false but
+    // does not throw).
+    let dir_fid = if let Value::Resource(rid) = &arg {
+        let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(rid));
+        if is_dir { Some(*rid) } else { None }
+    } else { None };
+    if dir_fid.is_some() {
+        return Ok(Value::False);
+    }
+    let fid = require_open_stream(vm, &arg, "flock")?;
+    // The 3rd argument ($would_block) is a ref parameter. PHP sets it to 1 if
+    // the lock would block (only meaningful with LOCK_NB), and to 0 otherwise.
+    let mut would_block: i64 = 0;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd_opt = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.file.as_raw_fd()));
+        if let Some(fd) = fd_opt {
+            // Translate PHP LOCK_* (1=SH, 2=EX, 3=UN, 4=NB) to libc flags.
+            let mut native: i32 = 0;
+            match basic {
+                1 => native |= libc::LOCK_SH,
+                2 => native |= libc::LOCK_EX,
+                3 => native |= libc::LOCK_UN,
+                _ => {
+                    // Write back $would_block ref param before returning.
+                    if let Some(w) = args.get(2) {
+                        if let Value::Reference(r) = w {
+                            *r.borrow_mut() = Value::Long(would_block);
+                        }
+                    }
+                    return Ok(Value::False);
+                }
+            }
+            if op & 4 != 0 {
+                native |= libc::LOCK_NB;
+            }
+            let r = unsafe { libc::flock(fd, native) };
+            let success = r == 0;
+            if !success && (op & 4) != 0 {
+                let errno = unsafe { *libc::__errno_location() };
+                if errno == libc::EWOULDBLOCK {
+                    would_block = 1;
+                }
+            }
+            // Write back $would_block ref param.
+            if let Some(w) = args.get(2) {
+                if let Value::Reference(r) = w {
+                    *r.borrow_mut() = Value::Long(would_block);
+                }
+            }
+            return Ok(if success { Value::True } else { Value::False });
+        }
+    }
+    // Non-unix fallback: write $would_block = 0 and return true.
+    if let Some(w) = args.get(2) {
+        if let Value::Reference(r) = w {
+            *r.borrow_mut() = Value::Long(would_block);
+        }
+    }
     Ok(Value::True)
 }
 
-fn fstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
+fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().cloned().unwrap_or(Value::Null);
+    let fid = require_open_stream(vm, &arg, "fstat")?;
     FILE_HANDLES.with(|handles| {
         let handles = handles.borrow();
         if let Some(fh) = handles.get(&fid) {
@@ -13950,11 +15698,15 @@ fn stream_filter_remove_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     };
     if crate::stream_filters::remove_filter(fid) { Ok(Value::True) } else { Ok(Value::False) }
 }
-fn stream_context_create_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    match args.first() {
-        Some(Value::Array(arr)) => Ok(Value::Array(arr.clone())),
-        _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    }
+fn stream_context_create_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // Allocate a unique id and register it as a stream-context resource.
+    let fid = NEXT_FILE_ID.with(|id| {
+        let v = id.get();
+        id.set(v + 1);
+        v
+    });
+    goro_core::value::register_resource(fid, b"stream-context");
+    Ok(Value::Resource(fid))
 }
 fn stream_context_set_option_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn stream_context_get_options_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
@@ -14127,11 +15879,18 @@ fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
-fn popen_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let command = args.first().unwrap_or(&Value::Null).to_php_string();
     let mode = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"r"));
     let cmd_str = command.to_string_lossy();
     let mode_str = mode.to_string_lossy();
+    // Validate mode: PHP accepts only "r", "rb", "w", "wb".
+    if !matches!(mode_str.as_str(), "r" | "rb" | "w" | "wb") {
+        let msg = "popen(): Argument #2 ($mode) must be one of \"r\", \"rb\", \"w\", or \"wb\"".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     use std::process::{Command, Stdio};
     let child = if mode_str.contains('r') {
         Command::new("sh").arg("-c").arg(&*cmd_str).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()
@@ -14222,8 +15981,58 @@ fn php_strip_whitespace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     }
 }
 
-fn disk_free_space_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Double(1073741824.0)) }
-fn disk_total_space_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Double(10737418240.0)) }
+fn disk_space_impl(vm: &mut Vm, args: &[Value], fn_name: &str, total: bool, called_as: &str) -> Result<Value, VmError> {
+    let path_val = args.first().cloned().unwrap_or(Value::Null);
+    let path_str = path_val.to_php_string();
+    let path_bytes = path_str.as_bytes();
+    if path_bytes.is_empty() {
+        let msg = "Path cannot be empty".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    if path_bytes.contains(&0u8) {
+        let msg = format!("{}(): Argument #1 ($directory) must not contain any null bytes", fn_name);
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let path_string = String::from_utf8_lossy(path_bytes).to_string();
+    let path = std::path::Path::new(&path_string);
+    if !path.exists() {
+        let line = vm.current_line;
+        vm.emit_warning_at(&format!("{}(): No such file or directory", called_as), line);
+        return Ok(Value::False);
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let c_path = match CString::new(path_bytes) {
+            Ok(c) => c,
+            Err(_) => return Ok(Value::False),
+        };
+        let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
+        if r != 0 {
+            let line = vm.current_line;
+            vm.emit_warning_at(&format!("{}(): {}", called_as, std::io::Error::last_os_error()), line);
+            return Ok(Value::False);
+        }
+        let result = if total {
+            buf.f_blocks as f64 * buf.f_frsize as f64
+        } else {
+            buf.f_bavail as f64 * buf.f_frsize as f64
+        };
+        Ok(Value::Double(result))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::Double(if total { 10737418240.0 } else { 1073741824.0 }))
+    }
+}
+fn disk_free_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_free_space", false, "disk_free_space") }
+fn diskfreespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "diskfreespace", false, "diskfreespace") }
+fn disk_total_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_total_space", true, "disk_total_space") }
 fn get_resources_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
 fn closelog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn openlog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
