@@ -16484,22 +16484,44 @@ impl Vm {
                             .duration_since(std::time::SystemTime::UNIX_EPOCH)
                             .map(|d| d.as_secs() as i64)
                             .unwrap_or(0);
-                        // Use a simple format-based parser
-                        let ts = vm_parse_with_format(&format, &datetime_str, now_secs);
-                        let tz_name = self.constants.get(b"__default_timezone".as_ref())
-                            .map(|v| v.to_php_string().to_string_lossy())
-                            .unwrap_or_else(|| "UTC".to_string());
-                        let result = match ts {
-                            Some(timestamp) => {
+                        // Optional $timezone arg becomes the default if no tz token in input.
+                        let arg_tz_name: Option<(String, i64)> = match call.args.get(2) {
+                            Some(Value::Object(tz_obj)) => {
+                                let tz_b = tz_obj.borrow();
+                                let tz = tz_b.get_property(b"timezone").to_php_string().to_string_lossy();
+                                let tt = tz_b.get_property(b"timezone_type").to_long();
+                                if tz.is_empty() { None } else { Some((tz, if tt != 0 { tt } else { 3 })) }
+                            }
+                            _ => None,
+                        };
+                        let default_tz_name = arg_tz_name.clone().map(|(n, _)| n).unwrap_or_else(|| {
+                            self.constants.get(b"__default_timezone".as_ref())
+                                .map(|v| v.to_php_string().to_string_lossy())
+                                .unwrap_or_else(|| "UTC".to_string())
+                        });
+                        let parsed = vm_parse_with_format_ex(&format, &datetime_str, now_secs);
+                        let result = match parsed {
+                            Some((local_ts, tz_opt)) => {
+                                // Determine effective timezone: parsed > arg > default
+                                let (effective_tz, effective_tz_type) = if let Some((n, t)) = tz_opt {
+                                    (n, t)
+                                } else if let Some((n, t)) = arg_tz_name.clone() {
+                                    (n, t)
+                                } else {
+                                    (default_tz_name.clone(), 3)
+                                };
+                                // Convert naive local to UTC using the effective tz
+                                let (off, _) = vm_timezone_offset_and_abbrev(&effective_tz, local_ts);
+                                let ts = local_ts - off;
                                 let obj_id = self.next_object_id();
                                 let class_name = if is_immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() };
                                 let mut obj = PhpObject::new(class_name, obj_id);
-                                obj.set_property(b"__timestamp".to_vec(), Value::Long(timestamp));
-                                let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, timestamp);
-                                let date_str = Self::format_utc_datetime(timestamp + offset);
+                                obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
+                                let (display_off, _) = vm_timezone_offset_and_abbrev(&effective_tz, ts);
+                                let date_str = Self::format_utc_datetime(ts + display_off);
                                 obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
-                                obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
-                                obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(tz_name)));
+                                obj.set_property(b"timezone_type".to_vec(), Value::Long(effective_tz_type));
+                                obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(effective_tz)));
                                 Value::Object(Rc::new(RefCell::new(obj)))
                             }
                             None => Value::False,
@@ -32193,6 +32215,12 @@ fn vm_calc_calendar_diff(sy: i64, sm: i64, sd: i64, sh: i64, si: i64, ss: i64,
 
 /// Parse a datetime string using a PHP-style format string
 fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
+    vm_parse_with_format_ex(format, datetime, now).map(|(ts, _)| ts)
+}
+
+/// Like `vm_parse_with_format` but also returns a parsed (tz_name, tz_type) pair
+/// when the format includes a recognised timezone token (O/P/p/e/T).
+fn vm_parse_with_format_ex(format: &str, datetime: &str, now: i64) -> Option<(i64, Option<(String, i64)>)> {
     let now_days = now / 86400;
     let (now_year, now_month, now_day) = vm_days_to_ymd(now_days);
     let now_tod = ((now % 86400) + 86400) % 86400;
@@ -32206,6 +32234,7 @@ fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
     let mut hour = now_hour;
     let mut minute = now_minute;
     let mut second = now_second;
+    let mut parsed_tz: Option<(String, i64)> = None;
 
     let fmt_bytes = format.as_bytes();
     let dt_bytes = datetime.as_bytes();
@@ -32314,7 +32343,8 @@ fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
                 let start = di;
                 if di < dt_bytes.len() && dt_bytes[di] == b'-' { di += 1; }
                 while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() { di += 1; }
-                return std::str::from_utf8(&dt_bytes[start..di]).ok()?.parse().ok();
+                let ts: i64 = std::str::from_utf8(&dt_bytes[start..di]).ok()?.parse().ok()?;
+                return Some((ts, Some(("+00:00".to_string(), 1))));
             }
             b'A' | b'a' => {
                 if di + 2 <= dt_bytes.len() {
@@ -32327,8 +32357,75 @@ fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
             b'u' | b'v' => {
                 while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() { di += 1; }
             }
-            b'e' | b'T' | b'O' | b'P' | b'p' => {
-                while di < dt_bytes.len() && !dt_bytes[di].is_ascii_whitespace() { di += 1; }
+            b'O' | b'P' | b'p' => {
+                // Optional GMT/UTC prefix before the offset
+                if di + 3 <= dt_bytes.len() {
+                    let prefix = std::str::from_utf8(&dt_bytes[di..di+3]).unwrap_or("");
+                    if prefix.eq_ignore_ascii_case("GMT") || prefix.eq_ignore_ascii_case("UTC") {
+                        di += 3;
+                    }
+                }
+                if di < dt_bytes.len() && (dt_bytes[di] == b'Z' || dt_bytes[di] == b'z') {
+                    parsed_tz = Some(("+00:00".to_string(), 1));
+                    di += 1;
+                } else if di + 5 <= dt_bytes.len()
+                    && (dt_bytes[di] == b'+' || dt_bytes[di] == b'-')
+                    && dt_bytes[di+1].is_ascii_digit()
+                    && dt_bytes[di+2].is_ascii_digit()
+                {
+                    let sign = dt_bytes[di] as char;
+                    // Try +HH:MM form
+                    if di + 6 <= dt_bytes.len() && dt_bytes[di + 3] == b':'
+                        && dt_bytes[di+4].is_ascii_digit() && dt_bytes[di+5].is_ascii_digit()
+                    {
+                        let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
+                        let mm = std::str::from_utf8(&dt_bytes[di+4..di+6]).ok()?;
+                        parsed_tz = Some((format!("{}{}:{}", sign, hh, mm), 1));
+                        di += 6;
+                    } else if dt_bytes[di+3].is_ascii_digit() && dt_bytes[di+4].is_ascii_digit() {
+                        // +HHMM
+                        let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
+                        let mm = std::str::from_utf8(&dt_bytes[di+3..di+5]).ok()?;
+                        parsed_tz = Some((format!("{}{}:{}", sign, hh, mm), 1));
+                        di += 5;
+                    } else {
+                        // +HH only - treat as +HH:00
+                        let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
+                        parsed_tz = Some((format!("{}{}:00", sign, hh), 1));
+                        di += 3;
+                    }
+                } else {
+                    // Invalid offset: fail parse
+                    return None;
+                }
+            }
+            b'e' | b'T' => {
+                let start = di;
+                while di < dt_bytes.len() {
+                    let b = dt_bytes[di];
+                    if b == b' ' || b == b'\t' || b == b',' || b == b';' { break; }
+                    di += 1;
+                }
+                if di > start {
+                    if let Ok(tok) = std::str::from_utf8(&dt_bytes[start..di]) {
+                        if tok.len() >= 8
+                            && (tok[..3].eq_ignore_ascii_case("GMT") || tok[..3].eq_ignore_ascii_case("UTC"))
+                            && (tok.as_bytes()[3] == b'+' || tok.as_bytes()[3] == b'-')
+                        {
+                            let sign = tok.as_bytes()[3] as char;
+                            let rest = &tok[4..];
+                            if rest.len() == 4 {
+                                parsed_tz = Some((format!("{}{}:{}", sign, &rest[..2], &rest[2..]), 1));
+                            } else if rest.len() == 5 && rest.as_bytes()[2] == b':' {
+                                parsed_tz = Some((format!("{}{}", sign, rest), 1));
+                            }
+                        } else if tok.contains('/') {
+                            parsed_tz = Some((tok.to_string(), 3));
+                        } else if !tok.is_empty() {
+                            parsed_tz = Some((tok.to_string(), 2));
+                        }
+                    }
+                }
             }
             b'\\' => {
                 fi += 1;
@@ -32352,7 +32449,7 @@ fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
     }
 
     let days = vm_ymd_to_days(year, month, day);
-    Some(days * 86400 + hour * 3600 + minute * 60 + second)
+    Some((days * 86400 + hour * 3600 + minute * 60 + second, parsed_tz))
 }
 
 fn vm_parse_num(bytes: &[u8], max_digits: usize) -> Option<(i64, usize)> {

@@ -3534,27 +3534,41 @@ fn parse_with_format_ex(format: &str, datetime: &str, now: i64) -> Option<(i64, 
                 }
             }
             b'O' | b'P' | b'p' => {
-                // Numeric tz offset, +HHMM or +HH:MM or "Z"
+                // Optional GMT/UTC prefix.
+                if di + 3 <= dt_bytes.len() {
+                    let prefix = std::str::from_utf8(&dt_bytes[di..di+3]).unwrap_or("");
+                    if prefix.eq_ignore_ascii_case("GMT") || prefix.eq_ignore_ascii_case("UTC") {
+                        di += 3;
+                    }
+                }
                 if di < dt_bytes.len() && (dt_bytes[di] == b'Z' || dt_bytes[di] == b'z') {
                     parsed_tz = Some(("+00:00".to_string(), 1));
                     di += 1;
                 } else if di + 5 <= dt_bytes.len()
                     && (dt_bytes[di] == b'+' || dt_bytes[di] == b'-')
+                    && dt_bytes[di+1].is_ascii_digit()
+                    && dt_bytes[di+2].is_ascii_digit()
                 {
                     let sign = dt_bytes[di] as char;
-                    // Try +HH:MM
-                    if di + 6 <= dt_bytes.len() && dt_bytes[di + 3] == b':' {
+                    if di + 6 <= dt_bytes.len() && dt_bytes[di + 3] == b':'
+                        && dt_bytes[di+4].is_ascii_digit() && dt_bytes[di+5].is_ascii_digit()
+                    {
                         let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
                         let mm = std::str::from_utf8(&dt_bytes[di+4..di+6]).ok()?;
                         parsed_tz = Some((format!("{}{}:{}", sign, hh, mm), 1));
                         di += 6;
-                    } else {
-                        // +HHMM
+                    } else if dt_bytes[di+3].is_ascii_digit() && dt_bytes[di+4].is_ascii_digit() {
                         let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
                         let mm = std::str::from_utf8(&dt_bytes[di+3..di+5]).ok()?;
                         parsed_tz = Some((format!("{}{}:{}", sign, hh, mm), 1));
                         di += 5;
+                    } else {
+                        let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
+                        parsed_tz = Some((format!("{}{}:00", sign, hh), 1));
+                        di += 3;
                     }
+                } else {
+                    return None;
                 }
             }
             b'e' | b'T' => {
