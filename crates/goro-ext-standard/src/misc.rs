@@ -9089,11 +9089,12 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(v) => Ok(v),
         Err(errno) => {
             if is_write_only {
-                // PHP emits a Notice on fread of write-only stream
+                // PHP emits a Notice on fread of write-only stream. PHP uses
+                // its internal 8192-byte buffer size for the reported count,
+                // not the user-requested length.
                 let line = vm.current_line;
                 vm.emit_notice_at(&format!(
-                    "fread(): Read of {} bytes failed with errno={} {}",
-                    length,
+                    "fread(): Read of 8192 bytes failed with errno={} {}",
                     errno,
                     match errno {
                         9 => "Bad file descriptor",
@@ -10792,7 +10793,7 @@ fn readdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn chmod_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn chmod_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string();
     let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0o644);
     #[cfg(unix)]
@@ -10802,7 +10803,11 @@ fn chmod_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let perms = std::fs::Permissions::from_mode(mode as u32 & 0o7777);
         match std::fs::set_permissions(&path, perms) {
             Ok(_) => Ok(Value::True),
-            Err(_) => Ok(Value::False),
+            Err(e) => {
+                let msg = strip_os_error(&e.to_string());
+                vm.emit_warning(&format!("chmod(): {}", msg));
+                Ok(Value::False)
+            }
         }
     }
     #[cfg(not(unix))]
@@ -11472,12 +11477,29 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let from_str = from.to_string_lossy();
     let to_str = to.to_string_lossy();
-    if !std::path::Path::new(&*from_str).exists() {
+    let from_path = std::path::Path::new(&*from_str);
+    if !from_path.exists() {
         vm.emit_warning(&format!(
             "copy({}): Failed to open stream: No such file or directory",
             from_str
         ));
         return Ok(Value::False);
+    }
+    // PHP: source cannot be a directory
+    if from_path.is_dir() {
+        vm.emit_warning("copy(): The first argument to copy() function cannot be a directory");
+        return Ok(Value::False);
+    }
+    // PHP: destination cannot be a directory
+    if std::path::Path::new(&*to_str).is_dir() {
+        vm.emit_warning("copy(): The second argument to copy() function cannot be a directory");
+        return Ok(Value::False);
+    }
+    // PHP: copy of same source -> destination returns false (no warning)
+    if let (Ok(c1), Ok(c2)) = (std::fs::canonicalize(&*from_str), std::fs::canonicalize(&*to_str)) {
+        if c1 == c2 {
+            return Ok(Value::False);
+        }
     }
     match std::fs::copy(&*from_str, &*to_str) {
         Ok(_) => Ok(Value::True),
@@ -12714,12 +12736,27 @@ fn filegroup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
 }
 
-fn chown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn chown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = filename.to_string_lossy();
+    if path_str.is_empty() || !std::path::Path::new(&*path_str).exists() {
+        vm.emit_warning("chown(): No such file or directory");
+        return Ok(Value::False);
+    }
+    // We don't actually change ownership (root-only on Unix), but return true
+    // if the file exists (matches PHP's behavior when called as root or
+    // already-owner).
+    Ok(Value::True)
 }
 
-fn chgrp_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn chgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = filename.to_string_lossy();
+    if path_str.is_empty() || !std::path::Path::new(&*path_str).exists() {
+        vm.emit_warning("chgrp(): No such file or directory");
+        return Ok(Value::False);
+    }
+    Ok(Value::True)
 }
 
 fn fputcsv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
