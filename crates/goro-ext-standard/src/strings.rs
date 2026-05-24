@@ -1663,10 +1663,12 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             continue;
         }
         if bytes[i] == b'<' {
-            // Check if this could be a tag: must be followed by ?, !, /, %, or alpha
+            // Check if this could be a tag: must be followed by ?, !, /, %, alpha,
+            // or NUL (PHP treats `<\0` as the start of a tag, mirroring the C
+            // tokenizer where NUL is skipped before the tag-name read).
             if i + 1 < bytes.len() {
                 let next = bytes[i + 1];
-                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && !next.is_ascii_alphabetic() {
+                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && next != 0 && !next.is_ascii_alphabetic() {
                     // Not a tag, output as literal
                     result.push(bytes[i]);
                     i += 1;
@@ -4745,10 +4747,12 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             continue;
         }
         if bytes[i] == b'<' {
-            // Check if this could be a tag: must be followed by ?, !, /, %, or alpha
+            // Check if this could be a tag: must be followed by ?, !, /, %, alpha,
+            // or NUL (PHP treats `<\0` as the start of a tag, mirroring the C
+            // tokenizer where NUL is skipped before the tag-name read).
             if i + 1 < bytes.len() {
                 let next = bytes[i + 1];
-                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && !next.is_ascii_alphabetic() {
+                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && next != 0 && !next.is_ascii_alphabetic() {
                     // Not a tag, output as literal
                     result.push(bytes[i]);
                     i += 1;

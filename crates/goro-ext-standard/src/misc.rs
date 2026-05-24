@@ -6263,7 +6263,13 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     match read_path_with_wrappers(&path_str) {
         Ok(data) => {
-            let start = if offset >= 0 { offset as usize } else { 0 };
+            // Negative offset: count from end of data (PHP semantics).
+            let start = if offset >= 0 {
+                offset as usize
+            } else {
+                let from_end = (-offset) as usize;
+                data.len().saturating_sub(from_end)
+            };
             if start >= data.len() && start > 0 {
                 return Ok(Value::String(PhpString::empty()));
             }
@@ -11327,19 +11333,26 @@ fn chmod_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn symlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn symlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let target = args.first().unwrap_or(&Value::Null).to_php_string();
     let link = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let target_s = target.to_string_lossy();
+    let link_s = link.to_string_lossy();
     #[cfg(unix)]
     {
-        match std::os::unix::fs::symlink(&*target.to_string_lossy(), &*link.to_string_lossy()) {
+        match std::os::unix::fs::symlink(&*target_s, &*link_s) {
             Ok(_) => Ok(Value::True),
-            Err(_) => Ok(Value::False),
+            Err(e) => {
+                let msg = strip_os_error(&e.to_string());
+                vm.emit_warning(&format!("symlink(): {}", msg));
+                Ok(Value::False)
+            }
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = (target, link);
+        let _ = (target_s, link_s);
+        vm.emit_warning("symlink(): Not supported on this platform");
         Ok(Value::False)
     }
 }
@@ -12037,12 +12050,16 @@ fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::String(PhpString::from_bytes(b"Unknown")))
 }
 
-fn link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn link_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let target = args.first().unwrap_or(&Value::Null).to_php_string();
     let link = args.get(1).unwrap_or(&Value::Null).to_php_string();
     match std::fs::hard_link(&*target.to_string_lossy(), &*link.to_string_lossy()) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!("link(): {}", msg));
+            Ok(Value::False)
+        }
     }
 }
 
@@ -13825,18 +13842,27 @@ fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn linkinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn linkinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_s = path.to_string_lossy();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path.to_string_lossy()) {
+        match std::fs::metadata(&*path_s) {
             Ok(meta) => Ok(Value::Long(meta.dev() as i64)),
-            Err(_) => Ok(Value::Long(-1)),
+            Err(e) => {
+                let msg = strip_os_error(&e.to_string());
+                vm.emit_warning(&format!("linkinfo(): {}", msg));
+                Ok(Value::Long(-1))
+            }
         }
     }
     #[cfg(not(unix))]
-    Ok(Value::Long(-1))
+    {
+        let _ = path_s;
+        vm.emit_warning("linkinfo(): Not supported on this platform");
+        Ok(Value::Long(-1))
+    }
 }
 
 fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
