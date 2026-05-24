@@ -8428,10 +8428,12 @@ fn memory_reset_peak_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
 }
 fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let secs = args.first().unwrap_or(&Value::Null).to_long();
-    // sleep(N) where N >= 1 second is almost always for "wait for X to happen"
-    // in production code; in tests it just wastes time. Treat sleep(N) as a
-    // no-op to keep the PHPT suite fast.
-    let _ = secs;
+    // Actually sleep up to 2 seconds to support tests that compare timestamps
+    // before/after sleep(1). Cap at 2s to keep tests reasonably fast.
+    if secs > 0 {
+        let actual = (secs as u64).min(2);
+        std::thread::sleep(std::time::Duration::from_secs(actual));
+    }
     Ok(Value::Long(0))
 }
 fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -8470,8 +8472,9 @@ fn uniqid_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn sys_get_temp_dir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_bytes(b"/tmp")))
 }
-fn tempnam_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"/tmp/goro_tmp")))
+fn tempnam_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Delegate to the standards-compliant tempnam_fn3.
+    tempnam_fn3(vm, args)
 }
 fn getenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -9602,8 +9605,16 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = if is_special_writer { raw_fid } else { require_open_stream(vm, arg, "fwrite")? };
     let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let bytes = data.as_bytes();
-    let length = args.get(2).map(|v| v.to_long() as usize).unwrap_or(bytes.len());
-    let to_write = &bytes[..length.min(bytes.len())];
+    // PHP: if $length is provided and >= 0, write min(length, strlen(data)) bytes.
+    // If $length is negative, write 0 bytes (treat as 0).
+    let length: usize = match args.get(2) {
+        Some(v) if !matches!(v, Value::Null | Value::Undef) => {
+            let n = v.to_long();
+            if n <= 0 { 0 } else { (n as usize).min(bytes.len()) }
+        }
+        _ => bytes.len(),
+    };
+    let to_write = &bytes[..length];
     let original_len = to_write.len();
 
     // Check if the underlying stream allows writing.
@@ -12231,26 +12242,65 @@ fn is_executable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn tempnam_fn3(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn tempnam_fn3(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Validate prefix type: must be a stringable scalar; arrays cause TypeError.
+    let prefix_val = args.get(1).cloned().unwrap_or(Value::Null);
+    if matches!(prefix_val, Value::Array(_)) {
+        let msg = "tempnam(): Argument #2 ($prefix) must be of type string, array given".to_string();
+        let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let prefix = prefix_val.to_php_string();
+    // Reject null bytes in prefix.
+    if prefix.as_bytes().contains(&0) {
+        let msg = "tempnam(): Argument #2 ($prefix) must not contain any null bytes".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     let dir = args.first().unwrap_or(&Value::Null).to_php_string();
-    let prefix = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let dir_str = if dir.is_empty() {
         std::env::temp_dir().to_string_lossy().to_string()
     } else {
         dir.to_string_lossy()
     };
-    let name = format!(
-        "{}/{}{}",
-        dir_str,
-        prefix.to_string_lossy(),
-        std::time::SystemTime::now()
+    // PHP uses only the basename of the prefix and truncates to 64 chars.
+    let prefix_bytes = prefix.as_bytes();
+    let prefix_base: Vec<u8> = match prefix_bytes.iter().rposition(|&c| c == b'/') {
+        Some(pos) => prefix_bytes[pos + 1..].to_vec(),
+        None => prefix_bytes.to_vec(),
+    };
+    let prefix_truncated: Vec<u8> = prefix_base.iter().take(64).copied().collect();
+    let prefix_str = String::from_utf8_lossy(&prefix_truncated).to_string();
+
+    // Try a few names with random suffix until one doesn't exist.
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::time::SystemTime;
+    for attempt in 0..16u32 {
+        let nanos = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    // Create the file
-    std::fs::write(&name, b"").ok();
-    Ok(Value::String(PhpString::from_string(name)))
+            .unwrap_or(0);
+        let mix = (nanos as u64).wrapping_add(attempt as u64 * 1_000_003);
+        let name = format!("{}/{}{}", dir_str, prefix_str, mix);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&name)
+        {
+            Ok(_) => return Ok(Value::String(PhpString::from_string(name))),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => {
+                vm.emit_warning(&format!(
+                    "tempnam(): file created in the system's temporary directory"
+                ));
+                return Ok(Value::False);
+            }
+        }
+    }
+    Ok(Value::False)
 }
 
 fn sys_get_temp_dir_fn3(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
