@@ -899,6 +899,24 @@ impl Compiler {
                 line,
             });
         }
+        // Pre-pass: detect a top-level `declare(strict_types=1)` so that hoisted
+        // function/class attributes (and parameter typing) see strict mode. PHP
+        // requires the strict_types declare to be the very first statement of
+        // the file, so we only look at the leading Declare statements.
+        for stmt in &program.statements {
+            if let StmtKind::Declare { directives, .. } = &stmt.kind {
+                for (name, value) in directives {
+                    let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if name_lower == b"strict_types" {
+                        if let ExprKind::Int(1) = &value.kind {
+                            self.op_array.strict_types = true;
+                        }
+                    }
+                }
+            } else {
+                break;
+            }
+        }
         // First pass: process namespace/use declarations and compile function/class declarations
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
         self.compile_hoisting_pass(&program.statements)?;

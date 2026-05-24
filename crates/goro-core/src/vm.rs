@@ -1916,10 +1916,16 @@ impl Vm {
                         .or_else(|| arr.get(&crate::array::ArrayKey::Int(1)))
                         .cloned();
                     drop(arr);
-                    // Validate each ?string argument
+                    // Validate each ?string argument. Under strict_types, any non-?string is a
+                    // TypeError. Under weak typing, scalars (int/float/bool) are coerced to
+                    // string; arrays and non-stringable objects still TypeError.
+                    let strict = attr.args_op_array.strict_types;
                     for (idx, name, val) in [(1u32, "message", &msg_val), (2u32, "since", &since_val)] {
                         if let Some(v) = val {
-                            if !matches!(v, Value::Null | Value::String(_)) {
+                            let is_string_like = matches!(v, Value::Null | Value::String(_));
+                            let is_coercible = !strict && matches!(v,
+                                Value::True | Value::False | Value::Long(_) | Value::Double(_));
+                            if !is_string_like && !is_coercible {
                                 let type_name = self.format_arg_type(v);
                                 let display = self.format_arg_display(v);
                                 let msg = format!(
@@ -1953,14 +1959,14 @@ impl Vm {
                     // - only since:      "since X.Y"
                     // - only msg:        "msg"
                     // - neither:         ""
-                    let msg_str = match &msg_val {
-                        Some(Value::String(s)) => s.to_string_lossy(),
-                        _ => String::new(),
+                    let to_str = |v: &Value| -> String {
+                        match v {
+                            Value::Null => String::new(),
+                            _ => v.to_php_string().to_string_lossy(),
+                        }
                     };
-                    let since_str = match &since_val {
-                        Some(Value::String(s)) => s.to_string_lossy(),
-                        _ => String::new(),
-                    };
+                    let msg_str = msg_val.as_ref().map(to_str).unwrap_or_default();
+                    let since_str = since_val.as_ref().map(to_str).unwrap_or_default();
                     let combined = if !since_str.is_empty() && !msg_str.is_empty() {
                         format!("since {}, {}", since_str, msg_str)
                     } else if !since_str.is_empty() {
@@ -28738,6 +28744,24 @@ impl Vm {
                                 // the error). When delayed, also enable the flag so
                                 // dynamic-prop assignment doesn't warn at runtime.
                                 class.allow_dynamic_properties = true;
+                            }
+                            // #[\Deprecated] is only allowed on functions/methods,
+                            // class constants, top-level constants, and traits.
+                            // Applying it directly to a class, enum, or interface
+                            // is a fatal error.
+                            if (attr_lower == b"deprecated" || attr_lower == b"\\deprecated")
+                                && !has_delayed_validation
+                            {
+                                if class.is_enum {
+                                    return Err(VmError { message: format!("Cannot apply #[\\Deprecated] to enum {}", class_display), line: op.line });
+                                }
+                                if class.is_interface {
+                                    return Err(VmError { message: format!("Cannot apply #[\\Deprecated] to interface {}", class_display), line: op.line });
+                                }
+                                // Plain classes (non-trait, non-enum, non-interface) reject Deprecated.
+                                if !class.is_trait {
+                                    return Err(VmError { message: format!("Cannot apply #[\\Deprecated] to class {}", class_display), line: op.line });
+                                }
                             }
                         }
                         // Validate #[\Override] attribute on methods
