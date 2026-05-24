@@ -9780,6 +9780,10 @@ fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = require_open_stream(vm, arg, "fseek")?;
     let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let whence = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    // Invalid whence values return -1 without seeking.
+    if !matches!(whence, 0 | 1 | 2) {
+        return Ok(Value::Long(-1));
+    }
 
     let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
@@ -13339,9 +13343,17 @@ fn assert_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(prev)
 }
 
-fn ftruncate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let size = args.get(1).map(|v| v.to_long()).unwrap_or(0) as u64;
+fn ftruncate_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "ftruncate")?;
+    let size_long = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if size_long < 0 {
+        let msg = "ftruncate(): Argument #2 ($size) must be greater than or equal to 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let size = size_long as u64;
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
