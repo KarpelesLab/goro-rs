@@ -661,7 +661,13 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -
                 _ => Vec::new(),
             };
             let method_name = items[1].to_php_string().as_bytes().to_vec();
-            if !class_name.is_empty() {
+            // Detect closure (either as an object or as the internal string
+            // representation used by goro-rs for closures stored in arrays).
+            let is_closure_obj = class_name.starts_with(b"__closure_")
+                || class_name.starts_with(b"__arrow_")
+                || class_name.starts_with(b"__bound_closure_")
+                || class_name.eq_ignore_ascii_case(b"Closure");
+            if !class_name.is_empty() && !is_closure_obj {
                 let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 let method_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 let class_str = String::from_utf8_lossy(&class_name).to_string();
@@ -947,12 +953,15 @@ pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u3
     let unwrapped = const_val.unwrap();
 
     // ReflectionEnumUnitCase / ReflectionEnumBackedCase: validate the
-    // referenced constant is actually an enum case (and backed for the
-    // BackedCase variant).
+    // referenced constant is actually declared as an enum case (regular
+    // constants whose value happens to be an enum case are not cases).
     if reflector_name.eq_ignore_ascii_case("ReflectionEnumUnitCase")
         || reflector_name.eq_ignore_ascii_case("ReflectionEnumBackedCase")
     {
-        if !Vm::is_enum_case(&unwrapped) {
+        let is_declared_case = vm.classes.get(&class_lower)
+            .map(|c| c.enum_cases.iter().any(|(n, _)| n.eq_ignore_ascii_case(const_name.as_bytes())))
+            .unwrap_or(false);
+        if !is_declared_case {
             let err_msg = format!("Constant {}::{} is not a case", canonical_class, const_name);
             let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
             vm.current_exception = Some(exc);
@@ -1228,11 +1237,19 @@ pub fn reflection_class_method(
                 }
             }
 
-            // Static properties pass (child first, inherited non-private)
+            // Static properties pass (child first, inherited non-private).
+            // Skip props whose declaring_class is an ancestor *and* are private —
+            // those are not visible to subclasses.
             for (idx, link) in chain.iter().enumerate() {
                 if let Some(lce) = vm.classes.get(link) {
                     for prop in &lce.properties {
                         if !prop.is_static { continue; }
+                        // For the runtime class entry, properties[] also includes
+                        // inherited slots — filter out inherited privates by
+                        // comparing declaring_class to the current link.
+                        if prop.visibility == Visibility::Private && prop.declaring_class.as_slice() != link.as_slice() {
+                            continue;
+                        }
                         if idx > 0 && prop.visibility == Visibility::Private { continue; }
                         let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
                         if result.get(&key).is_none() {
@@ -1252,6 +1269,10 @@ pub fn reflection_class_method(
                 if let Some(lce) = vm.classes.get(link) {
                     for prop in &lce.properties {
                         if prop.is_static { continue; }
+                        // Skip inherited private props (declaring_class != link).
+                        if prop.visibility == Visibility::Private && prop.declaring_class.as_slice() != link.as_slice() {
+                            continue;
+                        }
                         if idx > 0 && prop.visibility == Visibility::Private { continue; }
                         let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
                         if result.get(&key).is_none() {
@@ -1436,6 +1457,12 @@ pub fn reflection_class_method(
             // Detect which reflector this is: ReflectionClass, ReflectionObject,
             // or ReflectionEnum. Each has a slightly different header line.
             let reflector_class: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let wrapped = if reflector_class == b"reflectionobject" {
+                match ob.get_property(b"__reflection_object") {
+                    Value::Object(o) => Some(o.clone()),
+                    _ => None,
+                }
+            } else { None };
             drop(ob);
             let kind = if reflector_class == b"reflectionobject" {
                 ReflectionStringKind::Object
@@ -1445,7 +1472,7 @@ pub fn reflection_class_method(
                 ReflectionStringKind::Class
             };
             Some(Value::String(PhpString::from_string(
-                reflection_class_to_string(vm, &name, &class_lower, kind)
+                reflection_class_to_string(vm, &name, &class_lower, kind, wrapped.as_ref())
             )))
         }
         _ => None,
@@ -1890,8 +1917,13 @@ pub fn reflection_class_docall(
                 let parent_name = match parent_arg {
                     Value::Object(o) => {
                         let ob = o.borrow();
-                        // If it's a ReflectionClass, use its name
-                        if ob.class_name.eq_ignore_ascii_case(b"ReflectionClass") {
+                        // ReflectionClass/ReflectionObject (and other reflectors
+                        // that subclass them) carry the target class in `name`.
+                        let cn = &ob.class_name;
+                        if cn.eq_ignore_ascii_case(b"ReflectionClass")
+                            || cn.eq_ignore_ascii_case(b"ReflectionObject")
+                            || cn.eq_ignore_ascii_case(b"ReflectionEnum")
+                        {
                             ob.get_property(b"name").to_php_string().to_string_lossy()
                         } else {
                             String::from_utf8_lossy(&ob.class_name).to_string()
@@ -2949,8 +2981,38 @@ pub fn reflection_method_method(
                 } else {
                     None
                 };
+                // Find prototype: walk parent chain looking for a method with
+                // the same name. The first ancestor that has it is the
+                // "overwrites" target, the deepest one is the "prototype".
+                let mut overwrites_name: Option<String> = None;
+                let mut prototype_name: Option<String> = None;
+                if owner_display.is_none() {
+                    // Only inspect overrides when the method was declared on
+                    // this class itself (not inherited as-is).
+                    if let Some(ce) = vm.classes.get(&class_lower) {
+                        let method_bytes = method_lower.as_bytes();
+                        let mut cur_parent = ce.parent.clone();
+                        while let Some(ref p) = cur_parent {
+                            let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(pce) = vm.classes.get(&p_lower) {
+                                if pce.get_method(method_bytes).is_some() {
+                                    let canonical = String::from_utf8_lossy(&pce.name).to_string();
+                                    if overwrites_name.is_none() {
+                                        overwrites_name = Some(canonical.clone());
+                                    }
+                                    prototype_name = Some(canonical);
+                                }
+                                cur_parent = pce.parent.clone();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
                 let scope_str = if let Some(owner) = &owner_display {
                     format!("<user, inherits {}>", owner)
+                } else if let (Some(ow), Some(pt)) = (&overwrites_name, &prototype_name) {
+                    format!("<user, overwrites {}, prototype {}>", ow, pt)
                 } else {
                     "<user>".to_string()
                 };
@@ -3026,17 +3088,6 @@ pub fn reflection_method_docall(
                     return Some(Value::Null);
                 }
                 let target_obj = args.get(1)?.clone();
-                // Type-check the first arg: must be ?object (null or object).
-                if !matches!(&target_obj, Value::Object(_) | Value::Null) {
-                    let type_name = Vm::value_type_name(&target_obj);
-                    let msg = format!(
-                        "ReflectionMethod::invoke(): Argument #1 ($object) must be of type ?object, {} given",
-                        type_name
-                    );
-                    let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
                 let invoke_args: Vec<Value> = args.iter().skip(2).cloned().collect();
 
                 let method_def = vm.classes.get(&class_lower)
@@ -3044,12 +3095,24 @@ pub fn reflection_method_docall(
                     .cloned();
 
                 if let Some(m) = method_def {
-                    // Abstract methods cannot be invoked.
+                    // Abstract methods cannot be invoked. Check this before
+                    // the ?object type validation to match PHP's ordering.
                     if m.is_abstract {
                         let canonical = vm.classes.get(&class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
                         let method_disp = String::from_utf8_lossy(&m.name).to_string();
                         let msg = format!("Trying to invoke abstract method {}::{}()", canonical, method_disp);
                         let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                    // Type-check the first arg: must be ?object (null or object).
+                    if !matches!(&target_obj, Value::Object(_) | Value::Null) {
+                        let type_name = Vm::value_type_name(&target_obj);
+                        let msg = format!(
+                            "ReflectionMethod::invoke(): Argument #1 ($object) must be of type ?object, {} given",
+                            type_name
+                        );
+                        let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
                         vm.current_exception = Some(exc);
                         return Some(Value::Null);
                     }
@@ -3281,8 +3344,12 @@ pub fn reflection_function_method(
             Some(if is_user { Value::True } else { Value::False })
         }
         b"getfilename" => {
-            if vm.user_functions.contains_key(func_lower.as_slice()) {
-                Some(Value::String(PhpString::from_string(vm.current_file.clone())))
+            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
+                if !op_array.filename.is_empty() {
+                    Some(Value::String(PhpString::from_vec(op_array.filename.clone())))
+                } else {
+                    Some(Value::String(PhpString::from_string(vm.current_file.clone())))
+                }
             } else {
                 Some(Value::False)
             }
@@ -3314,15 +3381,58 @@ pub fn reflection_function_method(
             }
         }
         b"getstaticvariables" => {
-            // Return static variables of the function
+            // Return static variables of the function. PHP returns them even
+            // when the function hasn't yet been called, in which case the
+            // values are the compile-time defaults. Walk the op_array looking
+            // for `StaticVarInit` opcodes and merge with any runtime values.
             let mut result = PhpArray::new();
-            // Look up static vars with the function name prefix
+            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()).cloned() {
+                let func_prefix = {
+                    let mut p = op_array.name.clone();
+                    p.extend_from_slice(b"::");
+                    p
+                };
+                for op in &op_array.ops {
+                    if !matches!(op.opcode, crate::opcode::OpCode::StaticVarInit) {
+                        continue;
+                    }
+                    let key_bytes = match op.result {
+                        crate::opcode::OperandType::Const(idx) => {
+                            match op_array.literals.get(idx as usize) {
+                                Some(Value::String(s)) => s.as_bytes().to_vec(),
+                                _ => continue,
+                            }
+                        }
+                        _ => continue,
+                    };
+                    // Pull the variable name (after the "name::" prefix).
+                    let var_name: Vec<u8> = if key_bytes.starts_with(&func_prefix) {
+                        key_bytes[func_prefix.len()..].to_vec()
+                    } else { continue; };
+                    // Prefer runtime value; fall back to the literal default.
+                    let val = if let Some(v) = vm.static_vars().get(&key_bytes) {
+                        v.clone()
+                    } else {
+                        match op.op2 {
+                            crate::opcode::OperandType::Const(idx) => {
+                                op_array.literals.get(idx as usize).cloned().unwrap_or(Value::Null)
+                            }
+                            _ => Value::Null,
+                        }
+                    };
+                    result.set(ArrayKey::String(PhpString::from_vec(var_name)), val);
+                }
+            }
+            // Also include any runtime statics created later that we missed.
             let prefix = format!("{}::", String::from_utf8_lossy(&func_lower));
             for (key, val) in vm.static_vars() {
                 let key_str = String::from_utf8_lossy(key);
                 if key_str.starts_with(&prefix) {
                     let var_name = &key_str[prefix.len()..];
-                    result.set(ArrayKey::String(PhpString::from_string(var_name.to_string())), val.clone());
+                    let key = ArrayKey::String(PhpString::from_string(var_name.to_string()));
+                    if result.get(&key).is_none() {
+                        result.set(key, val.clone());
+                    }
                 }
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
@@ -3431,7 +3541,16 @@ pub fn reflection_function_method(
         b"isanonymous" => {
             let ob = obj.borrow();
             let is_closure = ob.has_property(b"__reflection_is_closure");
-            Some(if is_closure { Value::True } else { Value::False })
+            // FCC closures (`strlen(...)`) wrap a named function — they are
+            // NOT anonymous, even though the closure carries an internal
+            // `__closure_fcc_*` name. Detect via the underlying op_array's
+            // fcc_target_name.
+            let is_fcc = if is_closure {
+                vm.user_functions.get(func_lower.as_slice())
+                    .map(|op| op.fcc_target_name.is_some())
+                    .unwrap_or(false)
+            } else { false };
+            Some(if is_closure && !is_fcc { Value::True } else { Value::False })
         }
         b"isstatic" => {
             // Closures declared `static function()` carry is_static_closure on
@@ -5890,7 +6009,13 @@ pub enum ReflectionStringKind {
 }
 
 /// Build the complete __toString representation for a ReflectionClass
-fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8], kind: ReflectionStringKind) -> String {
+fn reflection_class_to_string(
+    vm: &Vm,
+    name: &str,
+    class_lower: &[u8],
+    kind: ReflectionStringKind,
+    wrapped_obj: Option<&std::rc::Rc<std::cell::RefCell<PhpObject>>>,
+) -> String {
     let mut s = String::new();
 
     let is_interface = vm.classes.get(class_lower).map(|c| c.is_interface).unwrap_or(false);
@@ -6059,6 +6184,33 @@ fn reflection_class_to_string(vm: &Vm, name: &str, class_lower: &[u8], kind: Ref
         s.push_str("  }\n");
     } else {
         s.push_str("\n  - Properties [0] {\n  }\n");
+    }
+
+    // For ReflectionObject, render dynamic instance properties (those not
+    // declared on the class) in a separate "Dynamic properties" section.
+    if kind == ReflectionStringKind::Object {
+        if let Some(inst_rc) = wrapped_obj {
+            let visible_declared_names: Vec<Vec<u8>> = if let Some(ce) = vm.classes.get(class_lower) {
+                ce.properties.iter()
+                    .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
+                    .map(|p| p.name.clone())
+                    .collect()
+            } else { Vec::new() };
+            let dyn_props: Vec<(Vec<u8>, Value)> = {
+                let io = inst_rc.borrow();
+                io.properties.iter()
+                    .filter(|(name, _)| !name.starts_with(b"__"))
+                    .filter(|(name, _)| !visible_declared_names.iter().any(|n| n == name))
+                    .map(|(n, v)| (n.clone(), v.clone()))
+                    .collect()
+            };
+            s.push_str(&format!("\n  - Dynamic properties [{}] {{\n", dyn_props.len()));
+            for (pname, _pval) in &dyn_props {
+                let prop_name_str = String::from_utf8_lossy(pname);
+                s.push_str(&format!("    Property [ <dynamic> public ${} ]\n", prop_name_str));
+            }
+            s.push_str("  }\n");
+        }
     }
 
     // Methods (non-static). Hide property hook synthetic methods and
