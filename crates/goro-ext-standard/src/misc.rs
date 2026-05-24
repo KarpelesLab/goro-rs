@@ -13570,9 +13570,19 @@ fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg, line: vm.current_line });
     }
     let arg = args.first().cloned().unwrap_or(Value::Null);
+    // Allow dir-handle resources (Linux PHP flock on a dir returns false but
+    // does not throw).
+    let dir_fid = if let Value::Resource(rid) = &arg {
+        let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(rid));
+        if is_dir { Some(*rid) } else { None }
+    } else { None };
+    if dir_fid.is_some() {
+        return Ok(Value::False);
+    }
     let fid = require_open_stream(vm, &arg, "flock")?;
-    // The 3rd argument (wouldblock) is a ref parameter; we don't bother
-    // tracking it for now.
+    // The 3rd argument ($would_block) is a ref parameter. PHP sets it to 1 if
+    // the lock would block (only meaningful with LOCK_NB), and to 0 otherwise.
+    let mut would_block: i64 = 0;
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -13584,13 +13594,40 @@ fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 1 => native |= libc::LOCK_SH,
                 2 => native |= libc::LOCK_EX,
                 3 => native |= libc::LOCK_UN,
-                _ => return Ok(Value::False),
+                _ => {
+                    // Write back $would_block ref param before returning.
+                    if let Some(w) = args.get(2) {
+                        if let Value::Reference(r) = w {
+                            *r.borrow_mut() = Value::Long(would_block);
+                        }
+                    }
+                    return Ok(Value::False);
+                }
             }
             if op & 4 != 0 {
                 native |= libc::LOCK_NB;
             }
             let r = unsafe { libc::flock(fd, native) };
-            return Ok(if r == 0 { Value::True } else { Value::False });
+            let success = r == 0;
+            if !success && (op & 4) != 0 {
+                let errno = unsafe { *libc::__errno_location() };
+                if errno == libc::EWOULDBLOCK {
+                    would_block = 1;
+                }
+            }
+            // Write back $would_block ref param.
+            if let Some(w) = args.get(2) {
+                if let Value::Reference(r) = w {
+                    *r.borrow_mut() = Value::Long(would_block);
+                }
+            }
+            return Ok(if success { Value::True } else { Value::False });
+        }
+    }
+    // Non-unix fallback: write $would_block = 0 and return true.
+    if let Some(w) = args.get(2) {
+        if let Value::Reference(r) = w {
+            *r.borrow_mut() = Value::Long(would_block);
         }
     }
     Ok(Value::True)
