@@ -6046,12 +6046,33 @@ fn is_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::False
     })
 }
+/// Strip the file:// scheme prefix from a path. Handles file:///, file://,
+/// and rejects file://host/path (returns None for unsupported host components).
+fn strip_file_scheme(path: &str) -> Option<String> {
+    if let Some(rest) = path.strip_prefix("file://") {
+        // file:///path -> /path (empty host)
+        // file://localhost/path -> /path  (localhost-only)
+        // file://otherhost/path -> not supported
+        if rest.starts_with('/') {
+            return Some(rest.to_string());
+        }
+        if let Some(after_localhost) = rest.strip_prefix("localhost/") {
+            return Some(format!("/{}", after_localhost));
+        }
+        // Just file://path -> path (treat as plain path)
+        return Some(rest.to_string());
+    }
+    None
+}
+
 fn is_dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    if !vm.check_open_basedir("is_dir", &path.to_string_lossy()) {
+    let path_str = path.to_string_lossy();
+    let path_resolved = strip_file_scheme(&path_str).unwrap_or_else(|| path_str.to_string());
+    if !vm.check_open_basedir("is_dir", &path_resolved) {
         return Ok(Value::False);
     }
-    Ok(if std::path::Path::new(&path.to_string_lossy()).is_dir() {
+    Ok(if std::path::Path::new(&path_resolved).is_dir() {
         Value::True
     } else {
         Value::False
@@ -6233,6 +6254,30 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let path_str = path.to_string_lossy();
+    // data: and data:// URIs: route through fopen (which already handles
+    // base64-decoding, urldecoding, etc.) to avoid duplicating the logic.
+    // Reject datafoo: and similar malformed schemes.
+    if (path_str.starts_with("data:") || path_str.starts_with("data://"))
+        && (path_str.starts_with("data:,") || path_str.starts_with("data:;")
+            || path_str.starts_with("data:text") || path_str.starts_with("data:application")
+            || path_str.starts_with("data:image") || path_str.starts_with("data:audio")
+            || path_str.starts_with("data:video") || path_str.starts_with("data:font")
+            || path_str.starts_with("data:model") || path_str.starts_with("data:message")
+            || path_str.starts_with("data:multipart") || path_str.starts_with("data:base64,")
+            || path_str.starts_with("data://"))
+    {
+        let inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r"))];
+        let fp = fopen_fn(vm, &inner_args)?;
+        let fid = match fp { Value::Resource(n) => n, _ => return Ok(Value::False), };
+        let get_args = if length.is_some() {
+            vec![Value::Resource(fid), Value::Long(length.unwrap()), Value::Long(offset)]
+        } else {
+            vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
+        };
+        let res = stream_get_contents_fn(vm, &get_args)?;
+        let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+        return Ok(res);
+    }
     // php://filter routes through fopen so the filter chain is applied.
     if path_str.starts_with("php://filter/") {
         let inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r"))];
@@ -10096,6 +10141,7 @@ fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg, line: vm.current_line });
     }
     let path = path_v.to_string_lossy().to_string();
+    let path = strip_file_scheme(&path).unwrap_or(path);
     let recursive = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
     let result = if recursive {
         std::fs::create_dir_all(&path)
@@ -12299,6 +12345,22 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let from_str = from.to_string_lossy();
     let to_str = to.to_string_lossy();
+    // PHP: if source and destination resolve to the same file (using cwd to
+    // resolve relative paths, lexically normalized), return false with NO
+    // warning, regardless of whether either file exists.
+    let resolve_rel = |p: &str| -> String {
+        let norm = normalize_path_lexical(p);
+        if norm.starts_with('/') {
+            norm
+        } else if let Ok(cwd) = std::env::current_dir() {
+            normalize_path_lexical(&format!("{}/{}", cwd.display(), norm))
+        } else {
+            norm
+        }
+    };
+    if resolve_rel(&from_str) == resolve_rel(&to_str) {
+        return Ok(Value::False);
+    }
     let from_path = std::path::Path::new(&*from_str);
     if !from_path.exists() {
         vm.emit_warning(&format!(
@@ -12317,7 +12379,8 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.emit_warning("copy(): The second argument to copy() function cannot be a directory");
         return Ok(Value::False);
     }
-    // PHP: copy of same source -> destination returns false (no warning)
+    // PHP: copy of same source -> destination returns false (no warning),
+    // resolved via canonicalize as a fallback.
     if let (Ok(c1), Ok(c2)) = (std::fs::canonicalize(&*from_str), std::fs::canonicalize(&*to_str)) {
         if c1 == c2 {
             return Ok(Value::False);
