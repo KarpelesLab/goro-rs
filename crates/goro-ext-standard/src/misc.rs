@@ -3262,11 +3262,16 @@ fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
             for (key, val) in arr.iter() {
                 match key {
                     goro_core::array::ArrayKey::Int(_) => {
-                        result.push(val.clone());
+                        if let Err(msg) = result.try_push(val.clone()) {
+                            // PHP throws an Error when next int key overflows.
+                            let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                            vm.current_exception = Some(exc);
+                            return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                        }
                     }
                     goro_core::array::ArrayKey::String(s) => {
                         if let Some(existing) = result.get_str(s.as_bytes()) {
-                            let merged = merge_recursive_values(&existing, val, 0);
+                            let merged = merge_recursive_values(vm, &existing, val, 0)?;
                             result.set(key.clone(), merged);
                         } else {
                             result.set(key.clone(), val.clone());
@@ -3279,18 +3284,24 @@ fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn merge_recursive_values(existing: &Value, new_val: &Value, depth: usize) -> Value {
-    if depth > 256 { return new_val.clone(); }
+fn merge_recursive_values(vm: &mut Vm, existing: &Value, new_val: &Value, depth: usize) -> Result<Value, VmError> {
+    if depth > 256 { return Ok(new_val.clone()); }
     match (existing, new_val) {
         (Value::Array(a), Value::Array(b)) => {
             let mut merged_arr = a.borrow().clone();
             let b_ref = b.borrow();
             for (k, v) in b_ref.iter() {
                 match k {
-                    goro_core::array::ArrayKey::Int(_) => { merged_arr.push(v.clone()); }
+                    goro_core::array::ArrayKey::Int(_) => {
+                        if let Err(msg) = merged_arr.try_push(v.clone()) {
+                            let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                            vm.current_exception = Some(exc);
+                            return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                        }
+                    }
                     goro_core::array::ArrayKey::String(s) => {
                         if let Some(ex) = merged_arr.get_str(s.as_bytes()) {
-                            let merged = merge_recursive_values(&ex, v, depth + 1);
+                            let merged = merge_recursive_values(vm, &ex, v, depth + 1)?;
                             merged_arr.set(k.clone(), merged);
                         } else {
                             merged_arr.set(k.clone(), v.clone());
@@ -3298,17 +3309,33 @@ fn merge_recursive_values(existing: &Value, new_val: &Value, depth: usize) -> Va
                     }
                 }
             }
-            Value::Array(Rc::new(RefCell::new(merged_arr)))
+            Ok(Value::Array(Rc::new(RefCell::new(merged_arr))))
         }
         (existing_val, new_v) => {
             let mut arr = PhpArray::new();
             if let Value::Array(a) = existing_val {
-                for (_, v) in a.borrow().iter() { arr.push(v.clone()); }
-            } else { arr.push(existing_val.clone()); }
+                for (_, v) in a.borrow().iter() {
+                    if let Err(msg) = arr.try_push(v.clone()) {
+                        let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                    }
+                }
+            } else {
+                let _ = arr.try_push(existing_val.clone());
+            }
             if let Value::Array(b) = new_v {
-                for (_, v) in b.borrow().iter() { arr.push(v.clone()); }
-            } else { arr.push(new_v.clone()); }
-            Value::Array(Rc::new(RefCell::new(arr)))
+                for (_, v) in b.borrow().iter() {
+                    if let Err(msg) = arr.try_push(v.clone()) {
+                        let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                    }
+                }
+            } else {
+                let _ = arr.try_push(new_v.clone());
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(arr))))
         }
     }
 }
