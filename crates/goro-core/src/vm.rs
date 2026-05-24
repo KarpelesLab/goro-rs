@@ -9985,9 +9985,20 @@ impl Vm {
                             }
                         }
                         b"setextractflags" => {
-                            let flags = args.get(1).cloned().unwrap_or(Value::Long(1));
+                            let flags_v = args.get(1).cloned().unwrap_or(Value::Long(1));
+                            let flags = flags_v.to_long();
+                            if flags == 0 {
+                                let line = self.current_line;
+                                let exc = self.create_exception(
+                                    b"RuntimeException",
+                                    "Must specify at least one extract flag",
+                                    line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_extract_flags".to_vec(), flags);
+                            ob.set_property(b"__spl_extract_flags".to_vec(), Value::Long(flags));
                             Some(Value::Null)
                         }
                         b"compare" => {
