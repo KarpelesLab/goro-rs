@@ -165,10 +165,8 @@ fn date_default_timezone_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
 }
 
 fn date_default_timezone_get(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let tz = vm.constants.get(b"__default_timezone".as_ref())
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::from_bytes(b"UTC"));
-    Ok(Value::String(tz))
+    let tz = get_default_tz(vm);
+    Ok(Value::String(PhpString::from_string(tz)))
 }
 
 fn time_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -1311,9 +1309,17 @@ fn date_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn get_default_tz(vm: &Vm) -> String {
-    vm.constants.get(b"__default_timezone".as_ref())
-        .map(|v| v.to_php_string().to_string_lossy())
-        .unwrap_or_else(|| "UTC".to_string())
+    // Prefer the value set by date_default_timezone_set, fall back to the
+    // 'date.timezone' INI value, finally default to UTC.
+    if let Some(v) = vm.constants.get(b"__default_timezone".as_ref()) {
+        let s = v.to_php_string().to_string_lossy();
+        if !s.is_empty() { return s; }
+    }
+    if let Some(v) = vm.constants.get(b"date.timezone".as_ref()) {
+        let s = v.to_php_string().to_string_lossy();
+        if !s.is_empty() { return s; }
+    }
+    "UTC".to_string()
 }
 
 /// Check if a UTC timestamp falls in US DST (2nd Sunday March 2am to 1st Sunday November 2am local)
@@ -4256,39 +4262,74 @@ fn timezone_abbreviations_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value
 /// timezone_name_from_abbr($abbr, $utcOffset = -1, $isDST = -1)
 fn timezone_name_from_abbr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let abbr = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_lowercase();
-    let _utc_offset = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
-    let _is_dst = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+    let utc_offset = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+    let is_dst = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
 
-    let tz = match abbr.as_str() {
-        "est" => "America/New_York",
-        "edt" => "America/New_York",
-        "cst" => "America/Chicago",
-        "cdt" => "America/Chicago",
-        "mst" => "America/Denver",
-        "mdt" => "America/Denver",
-        "pst" => "America/Los_Angeles",
-        "pdt" => "America/Los_Angeles",
-        "gmt" => "Europe/London",
-        "utc" => "UTC",
-        "cet" => "Europe/Berlin",
-        "cest" => "Europe/Berlin",
-        "eet" => "Europe/Helsinki",
-        "eest" => "Europe/Helsinki",
-        "msk" => "Europe/Moscow",
-        "jst" => "Asia/Tokyo",
-        "kst" => "Asia/Seoul",
-        "ist" => "Asia/Kolkata",
-        "aest" => "Australia/Sydney",
-        "acst" => "Australia/Adelaide",
-        "nzst" => "Pacific/Auckland",
-        "nzdt" => "Pacific/Auckland",
-        "hst" => "Pacific/Honolulu",
-        "akst" => "America/Anchorage",
-        "brt" => "America/Sao_Paulo",
-        "sast" => "Africa/Johannesburg",
-        "eat" => "Africa/Nairobi",
-        "wat" => "Africa/Lagos",
-        "wet" => "Europe/London",
+    if !abbr.is_empty() {
+        let tz = match abbr.as_str() {
+            "est" => "America/New_York",
+            "edt" => "America/New_York",
+            "cst" => "America/Chicago",
+            "cdt" => "America/Chicago",
+            "mst" => "America/Denver",
+            "mdt" => "America/Denver",
+            "pst" => "America/Los_Angeles",
+            "pdt" => "America/Los_Angeles",
+            "gmt" => "Europe/London",
+            "utc" => "UTC",
+            "cet" => "Europe/Berlin",
+            "cest" => "Europe/Berlin",
+            "eet" => "Europe/Helsinki",
+            "eest" => "Europe/Helsinki",
+            "msk" => "Europe/Moscow",
+            "jst" => "Asia/Tokyo",
+            "kst" => "Asia/Seoul",
+            "ist" => "Asia/Kolkata",
+            "aest" => "Australia/Sydney",
+            "acst" => "Australia/Adelaide",
+            "nzst" => "Pacific/Auckland",
+            "nzdt" => "Pacific/Auckland",
+            "hst" => "Pacific/Honolulu",
+            "akst" => "America/Anchorage",
+            "brt" => "America/Sao_Paulo",
+            "sast" => "Africa/Johannesburg",
+            "eat" => "Africa/Nairobi",
+            "wat" => "Africa/Lagos",
+            "wet" => "Europe/London",
+            _ => return Ok(Value::False),
+        };
+        return Ok(Value::String(PhpString::from_string(tz.to_string())));
+    }
+
+    // When abbr is empty, look up by UTC offset and DST flag.
+    // PHP requires both arguments for the canonical-zone lookup;
+    // calling with only the offset returns false.
+    if utc_offset < 0 || is_dst < 0 { return Ok(Value::False); }
+    let secs = utc_offset;
+    let tz = match (secs, is_dst) {
+        (0, _) => "UTC",
+        (3600, 0) => "Europe/Paris",
+        (3600, 1) => "Europe/London",
+        (7200, 0) => "Europe/Helsinki",
+        (7200, 1) => "Europe/Berlin",
+        (10800, 0) => "Europe/Moscow",
+        (10800, 1) => "Europe/Helsinki",
+        (14400, _) => "Asia/Dubai",
+        (18000, _) => "Asia/Karachi",
+        (19800, _) => "Asia/Kolkata",
+        (21600, _) => "Asia/Dhaka",
+        (25200, _) => "Asia/Bangkok",
+        (28800, _) => "Asia/Shanghai",
+        (32400, _) => "Asia/Tokyo",
+        (34200, _) => "Australia/Adelaide",
+        (36000, _) => "Australia/Sydney",
+        (43200, _) => "Pacific/Auckland",
+        (-18000, _) => "America/New_York",
+        (-21600, _) => "America/Chicago",
+        (-25200, _) => "America/Denver",
+        (-28800, _) => "America/Los_Angeles",
+        (-32400, _) => "America/Anchorage",
+        (-36000, _) => "Pacific/Honolulu",
         _ => return Ok(Value::False),
     };
     Ok(Value::String(PhpString::from_string(tz.to_string())))

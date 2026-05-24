@@ -16497,6 +16497,10 @@ impl Vm {
                         let default_tz_name = arg_tz_name.clone().map(|(n, _)| n).unwrap_or_else(|| {
                             self.constants.get(b"__default_timezone".as_ref())
                                 .map(|v| v.to_php_string().to_string_lossy())
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| self.constants.get(b"date.timezone".as_ref())
+                                    .map(|v| v.to_php_string().to_string_lossy())
+                                    .filter(|s| !s.is_empty()))
                                 .unwrap_or_else(|| "UTC".to_string())
                         });
                         let parsed = vm_parse_with_format_ex(&format, &datetime_str, now_secs);
@@ -16537,6 +16541,10 @@ impl Vm {
                         obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
                         let tz_name = self.constants.get(b"__default_timezone".as_ref())
                             .map(|v| v.to_php_string().to_string_lossy())
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| self.constants.get(b"date.timezone".as_ref())
+                                .map(|v| v.to_php_string().to_string_lossy())
+                                .filter(|s| !s.is_empty()))
                             .unwrap_or_else(|| "UTC".to_string());
                         let (offset, _) = vm_timezone_offset_and_abbrev(&tz_name, ts);
                         let date_str = Self::format_utc_datetime(ts + offset);
@@ -16550,6 +16558,37 @@ impl Vm {
                         || func_name_lower == b"datetimeimmutable::createfrommutable"
                         || func_name_lower == b"datetimeimmutable::createfrominterface" {
                         let is_immutable = func_name_lower.starts_with(b"datetimeimmutable");
+                        // Validate argument class
+                        let expects_immutable = func_name_lower.ends_with(b"::createfromimmutable");
+                        let expects_mutable = func_name_lower.ends_with(b"::createfrommutable");
+                        if let Some(Value::Object(o)) = call.args.first() {
+                            let ob = o.borrow();
+                            let cls = String::from_utf8_lossy(&ob.class_name).to_string();
+                            let cls_lower: Vec<u8> = cls.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                            let inherits_immutable = cls_lower == b"datetimeimmutable" || self.class_is_subclass_of(&cls_lower, b"datetimeimmutable");
+                            let inherits_mutable = cls_lower == b"datetime" || self.class_is_subclass_of(&cls_lower, b"datetime");
+                            let mismatch = (expects_immutable && !inherits_immutable)
+                                || (expects_mutable && !inherits_mutable);
+                            if mismatch {
+                                let method_name = if expects_immutable {
+                                    if is_immutable { "DateTimeImmutable::createFromImmutable" } else { "DateTime::createFromImmutable" }
+                                } else {
+                                    "DateTimeImmutable::createFromMutable"
+                                };
+                                let required = if expects_immutable { "DateTimeImmutable" } else { "DateTime" };
+                                let err_msg = format!("{}(): Argument #1 ($object) must be of type {}, {} given", method_name, required, cls);
+                                drop(ob);
+                                let exc = self.create_exception(b"TypeError", &err_msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                } else {
+                                    return Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: op.line });
+                                }
+                            }
+                        }
                         let (ts, src_tz, src_tz_type) = if let Some(Value::Object(o)) = call.args.first() {
                             let ob = o.borrow();
                             let t = ob.get_property(b"__timestamp").to_long();
@@ -16673,6 +16712,14 @@ impl Vm {
                         }
                         let result = Value::Array(Rc::new(RefCell::new(arr)));
                         self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower == b"datetimezone::listabbreviations" {
+                        // Delegate to the procedural timezone_abbreviations_list.
+                        if let Some(f) = self.functions.get(b"timezone_abbreviations_list".as_ref()).copied() {
+                            let result = f(self, &[])?;
+                            self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                        } else {
+                            self.write_operand(&op.result, Value::Array(Rc::new(RefCell::new(PhpArray::new()))), &mut cvs, &mut tmps, &static_cv_keys);
+                        }
                     } else if func_name_lower == b"datetime::getlasterrors"
                         || func_name_lower == b"datetimeimmutable::getlasterrors" {
                         // Return false (no errors)
@@ -19138,20 +19185,23 @@ impl Vm {
                                                 String::new()
                                             };
                                             // Get timezone: from arg2 (DateTimeZone), or from default
+                                            let default_tz_lookup = || self.constants.get(b"__default_timezone".as_ref())
+                                                .map(|v| v.to_php_string().to_string_lossy())
+                                                .filter(|s| !s.is_empty())
+                                                .or_else(|| self.constants.get(b"date.timezone".as_ref())
+                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .filter(|s| !s.is_empty()))
+                                                .unwrap_or_else(|| "UTC".to_string());
                                             let tz_name = if call.args.len() > 2 {
                                                 if let Value::Object(tz_obj) = &call.args[2] {
                                                     let tz_borrow = tz_obj.borrow();
                                                     let tz = tz_borrow.get_property(b"timezone").to_php_string().to_string_lossy();
                                                     if tz.is_empty() { "UTC".to_string() } else { tz }
                                                 } else {
-                                                    self.constants.get(b"__default_timezone".as_ref())
-                                                        .map(|v| v.to_php_string().to_string_lossy())
-                                                        .unwrap_or_else(|| "UTC".to_string())
+                                                    default_tz_lookup()
                                                 }
                                             } else {
-                                                self.constants.get(b"__default_timezone".as_ref())
-                                                    .map(|v| v.to_php_string().to_string_lossy())
-                                                    .unwrap_or_else(|| "UTC".to_string())
+                                                default_tz_lookup()
                                             };
                                             let now_secs = std::time::SystemTime::now()
                                                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
