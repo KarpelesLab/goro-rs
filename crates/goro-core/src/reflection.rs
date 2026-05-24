@@ -3104,7 +3104,16 @@ pub fn reflection_method_method(
                             let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
                             let required = i < rcount;
                             let default_suffix = if !required {
-                                if let Some(v) = extract_param_default(&m.op_array, cv_idx as u32) {
+                                if let Some(const_ref) = extract_param_default_constant(&m.op_array, cv_idx as u32) {
+                                    let display = if let Some(rest) = const_ref.strip_prefix("global:") {
+                                        rest.trim_start_matches('\\').to_string()
+                                    } else if let Some(rest) = const_ref.strip_prefix("class:") {
+                                        rest.to_string()
+                                    } else {
+                                        const_ref
+                                    };
+                                    format!(" = {}", display)
+                                } else if let Some(v) = extract_param_default(&m.op_array, cv_idx as u32) {
                                     format!(" = {}", format_reflection_default(&v))
                                 } else {
                                     String::new()
@@ -3776,7 +3785,16 @@ pub fn reflection_function_method(
                             let pname = String::from_utf8_lossy(&op_array.cv_names[i]);
                             let required = i < op_array.required_param_count as usize;
                             let default_suffix = if !required {
-                                if let Some(v) = extract_param_default(&op_array, i as u32) {
+                                if let Some(const_ref) = extract_param_default_constant(&op_array, i as u32) {
+                                    let display = if let Some(rest) = const_ref.strip_prefix("global:") {
+                                        rest.trim_start_matches('\\').to_string()
+                                    } else if let Some(rest) = const_ref.strip_prefix("class:") {
+                                        rest.to_string()
+                                    } else {
+                                        const_ref
+                                    };
+                                    format!(" = {}", display)
+                                } else if let Some(v) = extract_param_default(&op_array, i as u32) {
                                     format!(" = {}", format_reflection_default(&v))
                                 } else {
                                     String::new()
@@ -4603,6 +4621,64 @@ pub fn reflection_parameter_method(
                     if let Some(v) = extract_param_default(op_array, type_idx as u32) {
                         return Some(v);
                     }
+                    // If the default is a constant reference, try to resolve it.
+                    if let Some(name) = extract_param_default_constant(op_array, type_idx as u32) {
+                        if let Some(rest) = name.strip_prefix("class:") {
+                            // class:<ClassName>::<CONST>
+                            if let Some(idx) = rest.find("::") {
+                                let cls = &rest[..idx];
+                                let const_name = &rest[idx + 2..];
+                                // Handle self/static/parent
+                                let resolved_class: Vec<u8> = match cls {
+                                    "self" | "static" => {
+                                        // Use declaring class of the param if known
+                                        let ob = obj.borrow();
+                                        let pc = ob.get_property(b"__reflection_param_class").to_php_string();
+                                        drop(ob);
+                                        if pc.as_bytes().is_empty() {
+                                            cls.as_bytes().to_vec()
+                                        } else {
+                                            pc.as_bytes().to_vec()
+                                        }
+                                    }
+                                    "parent" => {
+                                        let ob = obj.borrow();
+                                        let pc = ob.get_property(b"__reflection_param_class").to_php_string();
+                                        drop(ob);
+                                        let pcl: Vec<u8> = pc.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        vm.classes.get(&pcl).and_then(|c| c.parent.clone()).unwrap_or_else(|| cls.as_bytes().to_vec())
+                                    }
+                                    _ => cls.as_bytes().to_vec(),
+                                };
+                                let cl: Vec<u8> = resolved_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                // Walk class hierarchy for constant
+                                let mut current = Some(cl);
+                                while let Some(cl) = current {
+                                    if let Some(ce) = vm.classes.get(&cl) {
+                                        if let Some(c) = ce.constants.get(const_name.as_bytes()) {
+                                            return Some(c.clone());
+                                        }
+                                        current = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        } else if let Some(rest) = name.strip_prefix("global:") {
+                            let const_name = rest.trim_start_matches('\\');
+                            if let Some(v) = vm.constants.get(const_name.as_bytes()) {
+                                return Some(v.clone());
+                            }
+                            // Case-insensitive built-ins
+                            let lower: Vec<u8> = const_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                            match lower.as_slice() {
+                                b"true" => return Some(Value::True),
+                                b"false" => return Some(Value::False),
+                                b"null" => return Some(Value::Null),
+                                _ => {}
+                            }
+                        }
+                    }
                 }
             }
             Some(Value::Null)
@@ -4664,8 +4740,22 @@ pub fn reflection_parameter_method(
                         None
                     }
                 });
+            // Derive a scope class for self/parent resolution from the
+            // parameter's declaring class (set when reflecting a method).
+            let scope: Option<Vec<u8>> = {
+                let ob = obj.borrow();
+                let class_lower = ob.get_property(b"__reflection_param_class").to_php_string();
+                drop(ob);
+                let cb = class_lower.as_bytes();
+                if cb.is_empty() {
+                    None
+                } else {
+                    let cl: Vec<u8> = cb.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    Some(vm.classes.get(&cl).map(|c| c.name.clone()).unwrap_or_else(|| cb.to_vec()))
+                }
+            };
             if let Some(pt) = param_type {
-                Some(create_reflection_type(vm, &pt))
+                Some(create_reflection_type_scoped(vm, &pt, scope.as_deref()))
             } else {
                 Some(Value::Null)
             }
@@ -4754,16 +4844,28 @@ pub fn reflection_parameter_method(
                     unwrap_simple(&pt)
                 });
             if let Some(name) = class_name_opt {
-                // Exclude built-in / pseudo types
                 let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 let is_scalar = matches!(lower.as_slice(),
                     b"int" | b"integer" | b"long" | b"float" | b"double" | b"real" |
                     b"string" | b"bool" | b"boolean" | b"array" | b"object" | b"void" |
                     b"null" | b"mixed" | b"iterable" | b"callable" | b"false" | b"true" |
-                    b"never" | b"self" | b"parent" | b"static"
+                    b"never"
                 );
-                if !is_scalar && vm.classes.contains_key(&lower) {
-                    let name_str = String::from_utf8_lossy(&vm.classes.get(&lower).map(|c| c.name.clone()).unwrap_or_else(|| name.clone())).to_string();
+                if is_scalar {
+                    return Some(Value::Null);
+                }
+                // Resolve self/parent/static against the parameter's declaring class
+                let ob = obj.borrow();
+                let decl_class_bytes = ob.get_property(b"__reflection_param_class").to_php_string();
+                drop(ob);
+                let decl_lower: Vec<u8> = decl_class_bytes.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                let resolved_lower: Vec<u8> = match lower.as_slice() {
+                    b"self" | b"static" => decl_lower.clone(),
+                    b"parent" => vm.classes.get(&decl_lower).and_then(|c| c.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())).unwrap_or_default(),
+                    _ => lower,
+                };
+                if vm.classes.contains_key(&resolved_lower) {
+                    let name_str = String::from_utf8_lossy(&vm.classes.get(&resolved_lower).map(|c| c.name.clone()).unwrap_or_else(|| resolved_lower.clone())).to_string();
                     return Some(create_reflection_class(vm, &name_str));
                 }
             }
@@ -4858,7 +4960,17 @@ pub fn reflection_parameter_method(
             let kind = if is_optional { "optional" } else { "required" };
             let default_suffix = if is_optional {
                 if let Some(op_array) = resolved_op_array.as_ref() {
-                    if let Some(v) = extract_param_default(op_array, type_idx as u32) {
+                    // Prefer constant reference rendering when available
+                    if let Some(const_ref) = extract_param_default_constant(op_array, type_idx as u32) {
+                        let display = if let Some(rest) = const_ref.strip_prefix("global:") {
+                            rest.trim_start_matches('\\').to_string()
+                        } else if let Some(rest) = const_ref.strip_prefix("class:") {
+                            rest.to_string()
+                        } else {
+                            const_ref
+                        };
+                        format!(" = {}", display)
+                    } else if let Some(v) = extract_param_default(op_array, type_idx as u32) {
                         format!(" = {}", format_reflection_default(&v))
                     } else { String::new() }
                 } else { String::new() }
@@ -6010,18 +6122,35 @@ pub fn create_reflection_type(vm: &mut Vm, param_type: &ParamType) -> Value {
 /// resolve `self` references in PHP types. `static` is left as the literal
 /// string "static" (it's a late-bound type).
 pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_class: Option<&[u8]>) -> Value {
-    // Helper: resolve a simple type name with `self` substitution.
-    fn resolve_name(name: &[u8], scope: Option<&[u8]>) -> Vec<u8> {
+    // Helper: resolve a simple type name with `self`/`parent` substitution.
+    // `self` resolves to the declaring class; `parent` resolves to that class's
+    // direct parent (canonical name preserved). `static` is left literal.
+    fn resolve_name(vm: &Vm, name: &[u8], scope: Option<&[u8]>) -> Vec<u8> {
         if name == b"self" {
             if let Some(s) = scope {
                 return s.to_vec();
+            }
+        }
+        if name == b"parent" {
+            if let Some(s) = scope {
+                let scope_lower: Vec<u8> = s.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(ce) = vm.classes.get(&scope_lower) {
+                    if let Some(parent) = ce.parent.as_ref() {
+                        // Try canonical name from class entry
+                        let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if let Some(parent_ce) = vm.classes.get(&parent_lower) {
+                            return parent_ce.name.clone();
+                        }
+                        return parent.clone();
+                    }
+                }
             }
         }
         name.to_vec()
     }
     match param_type {
         ParamType::Simple(name) => {
-            let resolved = resolve_name(name, scope_class);
+            let resolved = resolve_name(vm, name, scope_class);
             let type_name = String::from_utf8_lossy(&resolved).to_string();
             let obj_id = vm.next_object_id();
             let mut obj = PhpObject::new(b"ReflectionNamedType".to_vec(), obj_id);
@@ -6041,7 +6170,7 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
         ParamType::Nullable(inner) => {
             match inner.as_ref() {
                 ParamType::Simple(name) => {
-                    let resolved = resolve_name(name, scope_class);
+                    let resolved = resolve_name(vm, name, scope_class);
                     let type_name = String::from_utf8_lossy(&resolved).to_string();
                     let obj_id = vm.next_object_id();
                     let mut obj = PhpObject::new(b"ReflectionNamedType".to_vec(), obj_id);
@@ -6090,7 +6219,7 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
             let has_null = types.iter().any(|t| matches!(t, ParamType::Simple(n) if n == b"null"));
             if has_null && non_null.len() == 1 {
                 if let ParamType::Simple(name) = non_null[0] {
-                    let resolved = resolve_name(name, scope_class);
+                    let resolved = resolve_name(vm, name, scope_class);
                     let type_name = String::from_utf8_lossy(&resolved).to_string();
                     let obj_id = vm.next_object_id();
                     let mut obj = PhpObject::new(b"ReflectionNamedType".to_vec(), obj_id);
@@ -6719,8 +6848,26 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
                 } else {
                     String::new()
                 };
-                s.push_str(&format!("        Parameter #{} [ <{}> {}${} ]\n", i,
-                    if required { "required" } else { "optional" }, type_str, pname));
+                let default_suffix = if !required {
+                    if let Some(const_ref) = extract_param_default_constant(&m.op_array, cv_idx as u32) {
+                        let display = if let Some(rest) = const_ref.strip_prefix("global:") {
+                            rest.trim_start_matches('\\').to_string()
+                        } else if let Some(rest) = const_ref.strip_prefix("class:") {
+                            rest.to_string()
+                        } else {
+                            const_ref
+                        };
+                        format!(" = {}", display)
+                    } else if let Some(v) = extract_param_default(&m.op_array, cv_idx as u32) {
+                        format!(" = {}", format_reflection_default(&v))
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                s.push_str(&format!("        Parameter #{} [ <{}> {}${}{} ]\n", i,
+                    if required { "required" } else { "optional" }, type_str, pname, default_suffix));
             }
         }
         s.push_str("      }\n");
