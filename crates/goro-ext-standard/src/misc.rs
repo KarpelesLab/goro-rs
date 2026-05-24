@@ -13062,7 +13062,7 @@ fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) ->
 }
 
 
-fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn parse_ini_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ini_str = match args.first() {
         Some(Value::String(s)) => s.to_string_lossy(),
         Some(v) => v.to_php_string().to_string_lossy(),
@@ -13070,11 +13070,49 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0); // INI_SCANNER_NORMAL=0
+    // INI_SCANNER_RAW=1, INI_SCANNER_TYPED=2
+    let is_raw = scanner_mode == 1;
+    let is_typed = scanner_mode == 2;
 
     let mut result = PhpArray::new();
     let mut current_section: Option<String> = None;
 
-    for line in ini_str.lines() {
+    // Pre-process to handle multi-line quoted values: collapse them by
+    // scanning lines and detecting unclosed quotes.
+    let raw_lines: Vec<&str> = ini_str.split('\n').collect();
+    let mut lines: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw_lines.len() {
+        let mut buf = raw_lines[i].trim_end_matches('\r').to_string();
+        // Check if this line has an unterminated double-quoted value.
+        let mut in_quote = false;
+        let bytes = buf.as_bytes();
+        let mut bi = 0;
+        // Skip past key= portion if present.
+        if let Some(eq) = buf.find('=') {
+            bi = eq + 1;
+        }
+        while bi < bytes.len() {
+            if bytes[bi] == b'"' {
+                in_quote = !in_quote;
+            }
+            bi += 1;
+        }
+        // If still in quote, join with next lines.
+        while in_quote && i + 1 < raw_lines.len() {
+            i += 1;
+            buf.push('\n');
+            let next = raw_lines[i].trim_end_matches('\r');
+            buf.push_str(next);
+            for c in next.bytes() {
+                if c == b'"' { in_quote = !in_quote; }
+            }
+        }
+        lines.push(buf);
+        i += 1;
+    }
+
+    for line in &lines {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
             continue;
@@ -13089,60 +13127,48 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Key=value
         if let Some(eq_pos) = trimmed.find('=') {
             let key = trimmed[..eq_pos].trim().to_string();
-            let val_str = trimmed[eq_pos+1..].trim_start();
-            // Remove surrounding quotes
-            let val_str = if val_str.len() >= 2
-                && ((val_str.starts_with('"') && val_str.ends_with('"'))
-                || (val_str.starts_with('\'') && val_str.ends_with('\'')))
-            {
-                &val_str[1..val_str.len()-1]
-            } else {
-                val_str
-            };
-            // Strip inline comments
-            let val_str = if scanner_mode == 0 {
-                if let Some(comment_pos) = val_str.find(';') {
-                    // Only strip if preceded by whitespace
-                    if comment_pos > 0 && val_str.as_bytes()[comment_pos - 1] == b' ' {
-                        val_str[..comment_pos].trim_end()
-                    } else {
-                        val_str
-                    }
-                } else {
-                    val_str
-                }
-            } else {
-                val_str
-            };
-            // Convert special values
-            let value = match val_str.to_lowercase().as_str() {
-                "true" | "on" | "yes" => Value::String(PhpString::from_bytes(b"1")),
-                "false" | "off" | "no" | "none" | "" => Value::String(PhpString::empty()),
-                "null" => Value::String(PhpString::empty()),
-                _ => {
-                    if scanner_mode == 1 {
-                        // INI_SCANNER_RAW - return raw string
-                        Value::String(PhpString::from_string(val_str.to_string()))
-                    } else {
-                        // Try to parse as number
+            let val_raw = trimmed[eq_pos+1..].trim_start();
+
+            // In NORMAL/TYPED mode: process semicolons as comments unless inside quotes.
+            // In RAW mode: only strip an unquoted ; if outside string.
+            // Then handle quoted strings: " allows constants/escape, ' is literal.
+            let val_str = process_ini_value(val_raw, is_raw, is_typed, vm);
+
+            let value = if is_typed {
+                match val_str.to_ascii_lowercase().as_str() {
+                    "true" | "on" | "yes" => Value::True,
+                    "false" | "off" | "no" | "none" => Value::False,
+                    "null" => Value::Null,
+                    _ => {
+                        // Try numeric
                         if let Ok(n) = val_str.parse::<i64>() {
-                            Value::String(PhpString::from_string(n.to_string()))
-                        } else if let Ok(f) = val_str.parse::<f64>() {
-                            Value::String(PhpString::from_string(f.to_string()))
+                            // Only treat as int if string representation matches
+                            if n.to_string() == val_str {
+                                Value::Long(n)
+                            } else {
+                                Value::String(PhpString::from_string(val_str.clone()))
+                            }
                         } else {
-                            Value::String(PhpString::from_string(val_str.to_string()))
+                            Value::String(PhpString::from_string(val_str.clone()))
                         }
                     }
+                }
+            } else if is_raw {
+                Value::String(PhpString::from_string(val_str.clone()))
+            } else {
+                // NORMAL
+                match val_str.to_ascii_lowercase().as_str() {
+                    "true" | "on" | "yes" => Value::String(PhpString::from_bytes(b"1")),
+                    "false" | "off" | "no" | "none" | "" => Value::String(PhpString::empty()),
+                    "null" => Value::String(PhpString::empty()),
+                    _ => Value::String(PhpString::from_string(val_str.clone())),
                 }
             };
 
             let arr_key = ArrayKey::String(PhpString::from_string(key));
             if process_sections {
                 if let Some(ref section) = current_section {
-                    // Use integer key for pure integer section names
                     let section_key = if let Ok(n) = section.parse::<i64>() {
-                        // Only use integer key if it doesn't start with '0' (to avoid octal confusion)
-                        // and doesn't start with '+' or '-' (PHP only converts positive integers)
                         if !section.starts_with('0') || section == "0" {
                             ArrayKey::Int(n)
                         } else {
@@ -13151,7 +13177,6 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     } else {
                         ArrayKey::String(PhpString::from_string(section.clone()))
                     };
-                    // Get or create section array
                     let section_arr = if let Some(existing) = result.get(&section_key) {
                         if let Value::Array(arr) = existing {
                             arr.clone()
@@ -13172,6 +13197,74 @@ fn parse_ini_string_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// Process an INI value: strip surrounding quotes (single = literal, double =
+/// expand constants), handle inline comments, and in NORMAL/TYPED mode
+/// substitute constants for bareword values.
+fn process_ini_value(raw: &str, is_raw: bool, _is_typed: bool, vm: &Vm) -> String {
+    let raw = raw.trim_end();
+    if raw.is_empty() {
+        return String::new();
+    }
+    // Handle single-quoted (literal, no constants, no escapes).
+    if raw.starts_with('\'') {
+        if let Some(end) = raw[1..].find('\'') {
+            return raw[1..1 + end].to_string();
+        }
+        return raw[1..].to_string();
+    }
+    // Handle double-quoted.
+    if raw.starts_with('"') {
+        if let Some(end) = raw[1..].rfind('"') {
+            let inner = &raw[1..1 + end];
+            // Process escape sequences: \n, \t, \r, \\, \"
+            let mut out = String::new();
+            let mut chars = inner.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    match chars.peek() {
+                        Some(&'n') => { chars.next(); out.push('\n'); }
+                        Some(&'t') => { chars.next(); out.push('\t'); }
+                        Some(&'r') => { chars.next(); out.push('\r'); }
+                        Some(&'\\') => { chars.next(); out.push('\\'); }
+                        Some(&'"') => { chars.next(); out.push('"'); }
+                        _ => { out.push('\\'); }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            return out;
+        }
+        return raw[1..].to_string();
+    }
+    // Unquoted value: strip inline comment from semicolon onwards.
+    let mut val = if !is_raw {
+        match raw.find(';') {
+            Some(p) => raw[..p].trim_end().to_string(),
+            None => raw.to_string(),
+        }
+    } else {
+        raw.to_string()
+    };
+    val = val.trim().to_string();
+    // For NORMAL/TYPED mode, resolve constants. Constants resolve only for
+    // bareword values (identifier-like).
+    if !is_raw && !val.is_empty() {
+        let is_ident = val.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if is_ident {
+            let upper = val.as_bytes().to_vec();
+            // Skip booleans/null keywords which the caller handles.
+            let lower = val.to_ascii_lowercase();
+            if !matches!(lower.as_str(), "true" | "false" | "on" | "off" | "yes" | "no" | "none" | "null") {
+                if let Some(c) = vm.constants.get(upper.as_slice()) {
+                    return c.to_php_string().to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+    val
 }
 
 fn assert_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -13665,9 +13758,10 @@ fn linkinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = path.to_string_lossy();
     let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    match std::fs::read_to_string(&*path.to_string_lossy()) {
+    match std::fs::read_to_string(&*path_str) {
         Ok(content) => {
             let ini_args = vec![
                 Value::String(PhpString::from_string(content)),
@@ -13676,7 +13770,13 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ];
             parse_ini_string_fn(vm, &ini_args)
         }
-        Err(_) => Ok(Value::False),
+        Err(_) => {
+            vm.emit_warning(&format!(
+                "parse_ini_file({}): Failed to open stream: No such file or directory",
+                path_str
+            ));
+            Ok(Value::False)
+        }
     }
 }
 
