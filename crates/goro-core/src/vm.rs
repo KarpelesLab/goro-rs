@@ -6214,6 +6214,8 @@ impl Vm {
             b"top" | b"current" => {
                 let ob = obj.borrow();
                 let arr = ob.get_property(b"__spl_array");
+                let priorities = ob.get_property(b"__spl_priorities");
+                let extract_flags = if let Value::Long(f) = ob.get_property(b"__spl_extract_flags") { f } else { 1 };
                 if let Value::Array(a) = arr {
                     let a = a.borrow();
                     if a.len() == 0 {
@@ -6223,8 +6225,22 @@ impl Vm {
                         self.current_exception = Some(exc);
                         Some(Value::Null)
                     } else {
-                        // Return the value part of the first entry (highest priority)
-                        Some(a.values().next().cloned().unwrap_or(Value::Null))
+                        // Return data/priority/both per extract flags.
+                        let val = a.values().next().cloned().unwrap_or(Value::Null);
+                        let pri = if let Value::Array(ref p) = priorities {
+                            p.borrow().values().next().cloned().unwrap_or(Value::Null)
+                        } else { Value::Null };
+                        Some(match extract_flags {
+                            2 => pri, // EXTR_PRIORITY
+                            3 => {
+                                // EXTR_BOTH: return array with data + priority
+                                let mut both = PhpArray::new();
+                                both.set(ArrayKey::String(PhpString::from_bytes(b"data")), val);
+                                both.set(ArrayKey::String(PhpString::from_bytes(b"priority")), pri);
+                                Value::Array(Rc::new(RefCell::new(both)))
+                            }
+                            _ => val, // EXTR_DATA (1) or anything else
+                        })
                     }
                 } else {
                     let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
@@ -8088,7 +8104,7 @@ impl Vm {
                 b"attach" | b"detach" | b"contains" | b"offsetget" | b"offsetset" | b"offsetexists" | b"offsetunset" | b"seek"
                     | b"unserialize" | b"__unserialize" | b"setinfo" | b"removeall" | b"removeallexcept" | b"addall" | b"gethash"
             ),
-            b"splpriorityqueue" => matches!(method, b"insert" | b"extract" | b"next" | b"setextractflags" | b"__unserialize"),
+            b"splpriorityqueue" => matches!(method, b"insert" | b"extract" | b"next" | b"setextractflags" | b"__unserialize" | b"compare"),
             b"splheap" | b"splminheap" | b"splmaxheap" => matches!(
                 method,
                 b"insert" | b"extract" | b"next" | b"__unserialize" | b"compare"
@@ -9625,15 +9641,26 @@ impl Vm {
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
                             let priorities = ob.get_property(b"__spl_priorities");
+                            let extract_flags = if let Value::Long(f) = ob.get_property(b"__spl_extract_flags") { f } else { 1 };
                             if let Value::Array(a) = arr {
                                 let mut a = a.borrow_mut();
                                 if a.len() > 0 {
                                     let val = a.shift().unwrap_or(Value::Null);
-                                    if let Value::Array(p) = priorities {
-                                        p.borrow_mut().shift();
-                                    }
+                                    let pri = if let Value::Array(p) = priorities {
+                                        p.borrow_mut().shift().unwrap_or(Value::Null)
+                                    } else { Value::Null };
                                     if method == b"extract" {
-                                        Some(val)
+                                        Some(match extract_flags {
+                                            2 => pri, // EXTR_PRIORITY
+                                            3 => {
+                                                // EXTR_BOTH
+                                                let mut both = PhpArray::new();
+                                                both.set(ArrayKey::String(PhpString::from_bytes(b"data")), val);
+                                                both.set(ArrayKey::String(PhpString::from_bytes(b"priority")), pri);
+                                                Value::Array(Rc::new(RefCell::new(both)))
+                                            }
+                                            _ => val, // EXTR_DATA (1)
+                                        })
                                     } else {
                                         Some(Value::Null) // next() returns void
                                     }
@@ -9656,6 +9683,18 @@ impl Vm {
                             let mut ob = obj.borrow_mut();
                             ob.set_property(b"__spl_extract_flags".to_vec(), flags);
                             Some(Value::Null)
+                        }
+                        b"compare" => {
+                            // Default SplPriorityQueue::compare(): higher priority first.
+                            let a_val = args.get(1).cloned().unwrap_or(Value::Null);
+                            let b_val = args.get(2).cloned().unwrap_or(Value::Null);
+                            let ord = Self::php_compare_values(&a_val, &b_val);
+                            let n: i64 = match ord {
+                                std::cmp::Ordering::Less => -1,
+                                std::cmp::Ordering::Equal => 0,
+                                std::cmp::Ordering::Greater => 1,
+                            };
+                            Some(Value::Long(n))
                         }
                         _ => None,
                     }
@@ -18659,7 +18698,7 @@ impl Vm {
                                             }
                                             if count < -1 {
                                                 drop(obj_mut);
-                                                let msg = "LimitIterator::__construct(): Argument #3 ($count) must be greater than or equal to -1";
+                                                let msg = "LimitIterator::__construct(): Argument #3 ($limit) must be greater than or equal to -1";
                                                 let exc = self.create_exception(b"ValueError", msg, op.line);
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
@@ -27282,10 +27321,20 @@ impl Vm {
                             );
                             obj.set_property(b"__spl_size".to_vec(), Value::Long(0));
                         }
-                        b"spldoublylinkedlist" | b"splstack" | b"splqueue" | b"splpriorityqueue"
+                        b"spldoublylinkedlist" | b"splstack" | b"splqueue"
                         | b"splmaxheap" | b"splminheap" => {
                             obj.set_property(
                                 b"__spl_array".to_vec(),
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            );
+                        }
+                        b"splpriorityqueue" => {
+                            obj.set_property(
+                                b"__spl_array".to_vec(),
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            );
+                            obj.set_property(
+                                b"__spl_priorities".to_vec(),
                                 Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
                             );
                         }
