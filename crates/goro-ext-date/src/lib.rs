@@ -3388,17 +3388,243 @@ fn date_create_from_format_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let timestamp = parse_with_format(&format, &datetime_str, now_secs);
+    // Honour the optional $timezone argument as the default.
+    let tz_arg = args.get(2);
+    let default_tz_name = if let Some(Value::Object(tz_obj)) = tz_arg {
+        let tz_borrow = tz_obj.borrow();
+        let tz = tz_borrow.get_property(b"timezone").to_php_string().to_string_lossy();
+        if tz.is_empty() { get_default_tz(_vm) } else { tz }
+    } else {
+        get_default_tz(_vm)
+    };
 
-    match timestamp {
-        Some(ts) => {
+    let parsed = parse_with_format_ex(&format, &datetime_str, now_secs);
+
+    match parsed {
+        Some((local_ts, tz_opt)) => {
+            // Determine the effective timezone (parsed > arg > default)
+            let (effective_tz, effective_tz_type): (String, i64) = if let Some((tz, ty)) = tz_opt {
+                (tz, ty)
+            } else {
+                let ty = if parse_tz_offset(&default_tz_name).is_some() {
+                    1
+                } else if !default_tz_name.contains('/') && is_known_tz_abbrev_or_name(&default_tz_name)
+                    && !default_tz_name.eq_ignore_ascii_case("UTC")
+                    && !default_tz_name.eq_ignore_ascii_case("GMT")
+                {
+                    2
+                } else {
+                    3
+                };
+                (default_tz_name.clone(), ty)
+            };
+            // The parsed timestamp is naively local; convert to UTC via the timezone.
+            let (offset, _) = timezone_offset_and_abbrev(&effective_tz, local_ts);
+            let ts = local_ts - offset;
+
             let obj_id = _vm.next_object_id();
             let mut obj = PhpObject::new(b"DateTime".to_vec(), obj_id);
             obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
+            // For var_dump-style display.
+            let (display_off, _) = timezone_offset_and_abbrev(&effective_tz, ts);
+            let date_str = format_timestamp("Y-m-d H:i:s", ts + display_off) + ".000000";
+            obj.set_property(b"date".to_vec(), Value::String(PhpString::from_string(date_str)));
+            obj.set_property(b"timezone_type".to_vec(), Value::Long(effective_tz_type));
+            obj.set_property(b"timezone".to_vec(), Value::String(PhpString::from_string(effective_tz)));
             Ok(Value::Object(Rc::new(RefCell::new(obj))))
         }
         None => Ok(Value::False),
     }
+}
+
+/// Like `parse_with_format` but also returns any timezone parsed from the
+/// input (as (name, type) where type is 1=offset, 2=abbreviation, 3=identifier).
+fn parse_with_format_ex(format: &str, datetime: &str, now: i64) -> Option<(i64, Option<(String, i64)>)> {
+    let now_days = now / 86400;
+    let _ = now_days;
+    let (now_year, now_month, now_day) = days_to_ymd(now / 86400);
+
+    let mut year = now_year;
+    let mut month = now_month;
+    let mut day = now_day;
+    let mut hour = 0i64;
+    let mut minute = 0i64;
+    let mut second = 0i64;
+    let mut has_time = false;
+    let mut parsed_tz: Option<(String, i64)> = None;
+
+    let fmt_bytes = format.as_bytes();
+    let dt_bytes = datetime.as_bytes();
+    let mut fi = 0;
+    let mut di = 0;
+
+    while fi < fmt_bytes.len() && di <= dt_bytes.len() {
+        let fc = fmt_bytes[fi];
+        match fc {
+            b'Y' => {
+                let end = (di + 4).min(dt_bytes.len());
+                let s = std::str::from_utf8(&dt_bytes[di..end]).ok()?;
+                year = s.parse().ok()?;
+                di = end;
+            }
+            b'y' => {
+                let end = (di + 2).min(dt_bytes.len());
+                let s = std::str::from_utf8(&dt_bytes[di..end]).ok()?;
+                let y: i64 = s.parse().ok()?;
+                year = if y >= 70 { 1900 + y } else { 2000 + y };
+                di = end;
+            }
+            b'm' | b'n' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], if fc == b'm' { 2 } else { 2 })?;
+                month = val as u32;
+                di += consumed;
+            }
+            b'd' | b'j' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], if fc == b'd' { 2 } else { 2 })?;
+                day = val as u32;
+                di += consumed;
+            }
+            b'H' | b'G' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                hour = val;
+                has_time = true;
+                di += consumed;
+            }
+            b'h' | b'g' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                hour = val;
+                has_time = true;
+                di += consumed;
+            }
+            b'i' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                minute = val;
+                di += consumed;
+            }
+            b's' => {
+                let (val, consumed) = parse_num(&dt_bytes[di..], 2)?;
+                second = val;
+                di += consumed;
+            }
+            b'U' => {
+                let start = di;
+                let neg = di < dt_bytes.len() && dt_bytes[di] == b'-';
+                if neg { di += 1; }
+                while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() {
+                    di += 1;
+                }
+                let s = std::str::from_utf8(&dt_bytes[start..di]).ok()?;
+                let ts: i64 = s.parse().ok()?;
+                return Some((ts, Some(("+00:00".to_string(), 1))));
+            }
+            b'A' | b'a' => {
+                if di + 2 <= dt_bytes.len() {
+                    let ampm = std::str::from_utf8(&dt_bytes[di..di+2]).ok()?.to_lowercase();
+                    if ampm == "pm" && hour < 12 {
+                        hour += 12;
+                    } else if ampm == "am" && hour == 12 {
+                        hour = 0;
+                    }
+                    di += 2;
+                }
+            }
+            b'u' | b'v' => {
+                while di < dt_bytes.len() && dt_bytes[di].is_ascii_digit() {
+                    di += 1;
+                }
+            }
+            b'O' | b'P' | b'p' => {
+                // Numeric tz offset, +HHMM or +HH:MM or "Z"
+                if di < dt_bytes.len() && (dt_bytes[di] == b'Z' || dt_bytes[di] == b'z') {
+                    parsed_tz = Some(("+00:00".to_string(), 1));
+                    di += 1;
+                } else if di + 5 <= dt_bytes.len()
+                    && (dt_bytes[di] == b'+' || dt_bytes[di] == b'-')
+                {
+                    let sign = dt_bytes[di] as char;
+                    // Try +HH:MM
+                    if di + 6 <= dt_bytes.len() && dt_bytes[di + 3] == b':' {
+                        let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
+                        let mm = std::str::from_utf8(&dt_bytes[di+4..di+6]).ok()?;
+                        parsed_tz = Some((format!("{}{}:{}", sign, hh, mm), 1));
+                        di += 6;
+                    } else {
+                        // +HHMM
+                        let hh = std::str::from_utf8(&dt_bytes[di+1..di+3]).ok()?;
+                        let mm = std::str::from_utf8(&dt_bytes[di+3..di+5]).ok()?;
+                        parsed_tz = Some((format!("{}{}:{}", sign, hh, mm), 1));
+                        di += 5;
+                    }
+                }
+            }
+            b'e' | b'T' => {
+                // Timezone abbreviation or identifier.
+                let start = di;
+                while di < dt_bytes.len() {
+                    let b = dt_bytes[di];
+                    if b == b' ' || b == b'\t' || b == b',' || b == b';' {
+                        break;
+                    }
+                    di += 1;
+                }
+                if di > start {
+                    let tok = &datetime[start..di];
+                    // Treat GMT+0200 / UTC+0200 etc.
+                    if tok.len() >= 8 && tok[..3].eq_ignore_ascii_case("GMT")
+                        && (tok.as_bytes()[3] == b'+' || tok.as_bytes()[3] == b'-')
+                    {
+                        let sign = tok.as_bytes()[3] as char;
+                        let rest = &tok[4..];
+                        if rest.len() == 4 {
+                            parsed_tz = Some((format!("{}{}:{}", sign, &rest[..2], &rest[2..]), 1));
+                        } else if rest.len() == 5 && rest.as_bytes()[2] == b':' {
+                            parsed_tz = Some((format!("{}{}", sign, rest), 1));
+                        }
+                    } else if is_known_tz_identifier(tok) && tok.contains('/') {
+                        parsed_tz = Some((tok.to_string(), 3));
+                    } else if is_known_tz_abbrev_or_name(tok) {
+                        parsed_tz = Some((tok.to_string(), 2));
+                    }
+                }
+            }
+            b'\\' => {
+                fi += 1;
+                if fi < fmt_bytes.len() && di < dt_bytes.len() {
+                    di += 1;
+                }
+            }
+            b' ' | b'-' | b'/' | b':' | b'.' => {
+                if di < dt_bytes.len() {
+                    di += 1;
+                }
+            }
+            b'!' => {
+                year = 1970;
+                month = 1;
+                day = 1;
+                hour = 0;
+                minute = 0;
+                second = 0;
+            }
+            b'|' => {
+                if !has_time {
+                    hour = 0;
+                    minute = 0;
+                    second = 0;
+                }
+            }
+            _ => {
+                if di < dt_bytes.len() {
+                    di += 1;
+                }
+            }
+        }
+        fi += 1;
+    }
+
+    let _ = now_day;
+    let days = ymd_to_days(year, month, day);
+    Some((days * 86400 + hour * 3600 + minute * 60 + second, parsed_tz))
 }
 
 /// Parse a datetime string using a format string (like PHP's DateTime::createFromFormat)
