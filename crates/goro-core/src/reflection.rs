@@ -3249,6 +3249,28 @@ pub fn reflection_method_docall(
                             }
                         }
                     }
+                    // Check that enough args were provided (ArgumentCountError).
+                    // `required_param_count` is the user-declared count
+                    // (no $this), so it works for both static and non-static.
+                    let req = m.op_array.required_param_count as usize;
+                    if invoke_args.len() < req {
+                        let canonical = vm.classes.get(&class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
+                        let method_disp = String::from_utf8_lossy(&m.name).to_string();
+                        // Determine `exactly` vs `at least`.
+                        let skip = if !m.is_static { 1usize } else { 0usize };
+                        let total = (m.op_array.param_count as usize).saturating_sub(skip);
+                        let descriptor = if total == req { "exactly" } else { "at least" };
+                        let plural = if req == 1 { "" } else { "s" };
+                        let msg = format!(
+                            "Too few arguments to function {}::{}(), {} passed and {} {} expected",
+                            canonical, method_disp, invoke_args.len(), descriptor, req
+                        );
+                        let _ = plural;
+                        let line = m.op_array.decl_line;
+                        let exc = vm.create_exception(b"ArgumentCountError", &msg, line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
                     let mut cvs = vec![Value::Undef; m.op_array.cv_names.len()];
                     if !m.is_static {
                         if !cvs.is_empty() {
