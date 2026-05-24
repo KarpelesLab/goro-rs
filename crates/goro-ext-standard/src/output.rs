@@ -652,7 +652,28 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                                 vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
                             }
                             goro_core::array::ArrayKey::String(s) => {
-                                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                                // Mangled property names from __debugInfo:
+                                //   "\0ClassName\0propname" -> private declared by ClassName
+                                //   "\0*\0propname"          -> protected
+                                //   "propname"                -> public
+                                let bytes = s.as_bytes();
+                                if bytes.first() == Some(&0u8) {
+                                    if let Some(end) = bytes[1..].iter().position(|&b| b == 0u8) {
+                                        let cls = &bytes[1..1 + end];
+                                        let name = &bytes[2 + end..];
+                                        let name_str = String::from_utf8_lossy(name);
+                                        if cls == b"*" {
+                                            vm.write_output(format!("{}  [\"{}\":protected]=>\n", prefix, name_str).as_bytes());
+                                        } else {
+                                            let cls_str = String::from_utf8_lossy(cls);
+                                            vm.write_output(format!("{}  [\"{}\":\"{}\":private]=>\n", prefix, name_str, cls_str).as_bytes());
+                                        }
+                                    } else {
+                                        vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                                    }
+                                } else {
+                                    vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                                }
                             }
                         }
                         var_dump_value(vm, value, indent + 2, seen);

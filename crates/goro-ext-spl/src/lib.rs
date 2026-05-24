@@ -62,16 +62,83 @@ fn register_param_names(vm: &mut Vm) {
 fn spl_autoload_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let callback = args.first().cloned().unwrap_or(Value::Null);
     if matches!(callback, Value::Null) {
-        // Default autoloader (spl_autoload) - not implemented, just return
+        // Default autoloader (spl_autoload) - record and return
+        // Check for duplicate (spl_autoload is unique by string name)
+        let already = vm.autoload_functions.iter().any(|v| match v {
+            Value::String(s) => s.as_bytes() == b"spl_autoload",
+            _ => false,
+        });
+        if !already {
+            vm.autoload_functions.push(Value::String(PhpString::from_bytes(b"spl_autoload")));
+        }
         return Ok(Value::True);
     }
-    // Optional second arg: throw (default true) - ignored for now
+    // Validate callback (string callback must point to an existing function).
+    if let Value::String(s) = &callback {
+        let cb_name = s.as_bytes().to_vec();
+        let cb_lower: Vec<u8> = cb_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        // spl_autoload_call can never be registered as an autoloader.
+        if cb_lower == b"spl_autoload_call" {
+            let msg = "spl_autoload_register(): Argument #1 ($callback) must not be the spl_autoload_call() function";
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"ValueError", msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::False);
+        }
+        let exists = vm.functions.contains_key(cb_lower.as_slice())
+            || vm.user_functions.contains_key(cb_lower.as_slice())
+            || cb_lower == b"spl_autoload";
+        if !exists {
+            let msg = format!(
+                "spl_autoload_register(): Argument #1 ($callback) must be a valid callback or null, function \"{}\" not found or invalid function name",
+                String::from_utf8_lossy(s.as_bytes())
+            );
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::False);
+        }
+    }
+    // Optional second arg: $do_throw (default true). PHP emits a notice
+    // when this is explicitly set to false (the parameter is ignored —
+    // spl_autoload_register() always throws on invalid input).
+    if let Some(v) = args.get(1) {
+        if !v.to_bool() {
+            let line = vm.current_line;
+            vm.emit_notice_at(
+                "spl_autoload_register(): Argument #2 ($do_throw) has been ignored, spl_autoload_register() will always throw",
+                line,
+            );
+        }
+    }
     // Optional third arg: prepend (default false)
     let prepend = args.get(2).map_or(false, |v| v.to_bool());
-    if prepend {
-        vm.autoload_functions.insert(0, callback);
-    } else {
-        vm.autoload_functions.push(callback);
+
+    // Deduplicate: don't register the same callback twice. Compare by
+    // string name (for string callbacks) and by identity for arrays/objects.
+    let is_dup = vm.autoload_functions.iter().any(|existing| {
+        match (existing, &callback) {
+            (Value::String(a), Value::String(b)) => a.as_bytes().eq_ignore_ascii_case(b.as_bytes()),
+            (Value::Array(a), Value::Array(b)) => {
+                let ab = a.borrow();
+                let bb = b.borrow();
+                ab.len() == bb.len()
+                    && ab.iter().zip(bb.iter()).all(|((_, va), (_, vb))| match (va, vb) {
+                        (Value::String(sa), Value::String(sb)) => sa.as_bytes().eq_ignore_ascii_case(sb.as_bytes()),
+                        (Value::Object(oa), Value::Object(ob)) => Rc::ptr_eq(oa, ob),
+                        _ => false,
+                    })
+            }
+            (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    });
+    if !is_dup {
+        if prepend {
+            vm.autoload_functions.insert(0, callback);
+        } else {
+            vm.autoload_functions.push(callback);
+        }
     }
     Ok(Value::True)
 }
@@ -86,15 +153,44 @@ fn spl_autoload_functions_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
 
 fn spl_autoload_unregister_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let callback = args.first().cloned().unwrap_or(Value::Null);
-    // Try to remove by matching the callback
-    // Simple approach: remove first matching entry
-    if let Some(pos) = vm.autoload_functions.iter().position(|f| {
-        // Compare by string representation for simplicity
-        format!("{:?}", f) == format!("{:?}", callback)
-    }) {
-        vm.autoload_functions.remove(pos);
+
+    // Special case: unregistering 'spl_autoload_call' clears the entire
+    // autoload chain (deprecated since PHP 8.0).
+    if let Value::String(s) = &callback {
+        if s.as_bytes().eq_ignore_ascii_case(b"spl_autoload_call") {
+            vm.emit_deprecated_at(
+                "spl_autoload_unregister(): Using spl_autoload_call() as a callback for spl_autoload_unregister() is deprecated, to remove all registered autoloaders, call spl_autoload_unregister() for all values returned from spl_autoload_functions()",
+                vm.current_line,
+            );
+            vm.autoload_functions.clear();
+            return Ok(Value::True);
+        }
     }
-    Ok(Value::True)
+
+    // Find a matching entry.
+    let pos = vm.autoload_functions.iter().position(|existing| {
+        match (existing, &callback) {
+            (Value::String(a), Value::String(b)) => a.as_bytes().eq_ignore_ascii_case(b.as_bytes()),
+            (Value::Array(a), Value::Array(b)) => {
+                let ab = a.borrow();
+                let bb = b.borrow();
+                ab.len() == bb.len()
+                    && ab.iter().zip(bb.iter()).all(|((_, va), (_, vb))| match (va, vb) {
+                        (Value::String(sa), Value::String(sb)) => sa.as_bytes().eq_ignore_ascii_case(sb.as_bytes()),
+                        (Value::Object(oa), Value::Object(ob)) => Rc::ptr_eq(oa, ob),
+                        _ => false,
+                    })
+            }
+            (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    });
+    if let Some(p) = pos {
+        vm.autoload_functions.remove(p);
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
 }
 
 fn spl_autoload_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -220,12 +316,11 @@ fn spl_object_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Push a call-stack frame so any exception thrown while iterating the
     // generator/iterator captures `iterator_to_array(...)` in its backtrace.
-    let trace_arg = args.first().cloned().unwrap_or(Value::Null);
     vm.call_stack.push((
         "iterator_to_array".to_string(),
         vm.current_file.clone(),
         vm.current_line,
-        vec![trace_arg],
+        args.to_vec(),
         false,
     ));
     let r = iterator_to_array_impl(vm, args);
@@ -235,6 +330,25 @@ fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
+    // Type check first argument
+    if let Some(first) = args.first() {
+        let type_name = match first {
+            Value::Array(_) | Value::Object(_) | Value::Generator(_) => None,
+            Value::String(_) => Some("string"),
+            Value::Long(_) => Some("int"),
+            Value::Double(_) => Some("float"),
+            Value::True | Value::False => Some("bool"),
+            Value::Null => Some("null"),
+            _ => Some("unknown"),
+        };
+        if let Some(tn) = type_name {
+            let msg = format!("iterator_to_array(): Argument #1 ($iterator) must be of type Traversable|array, {} given", tn);
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::Null);
+        }
+    }
     match args.first() {
         Some(Value::Array(arr)) => {
             if use_keys {
@@ -310,7 +424,57 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                 if use_keys {
                     match key {
                         Value::Long(n) => result.set(ArrayKey::Int(n), value),
-                        Value::String(s) => result.set(ArrayKey::String(s), value),
+                        Value::String(s) => {
+                            // PHP coerces numeric strings to int keys in array
+                            // context. Match the engine's behaviour.
+                            let key_bytes = s.as_bytes();
+                            let trimmed = std::str::from_utf8(key_bytes).ok().and_then(|t| t.parse::<i64>().ok());
+                            match trimmed {
+                                Some(n) if n.to_string().as_bytes() == key_bytes => {
+                                    result.set(ArrayKey::Int(n), value)
+                                }
+                                _ => result.set(ArrayKey::String(s), value),
+                            }
+                        }
+                        Value::Double(f) => {
+                            // PHP emits a deprecation notice for non-integer
+                            // float keys and truncates toward zero.
+                            if f.fract() != 0.0 {
+                                vm.emit_deprecated(&format!(
+                                    "Implicit conversion from float {} to int loses precision",
+                                    f
+                                ));
+                            }
+                            result.set(ArrayKey::Int(f as i64), value);
+                        }
+                        Value::True => result.set(ArrayKey::Int(1), value),
+                        Value::False => result.set(ArrayKey::Int(0), value),
+                        Value::Null => {
+                            vm.emit_deprecated("Using null as an array offset is deprecated, use an empty string instead");
+                            result.set(ArrayKey::String(PhpString::from_bytes(b"")), value);
+                        }
+                        Value::Array(_) => {
+                            // PHP throws TypeError "Cannot access offset of
+                            // type array on array".
+                            let line = vm.current_line;
+                            let exc = vm.create_exception(
+                                b"TypeError",
+                                "Cannot access offset of type array on array",
+                                line,
+                            );
+                            vm.current_exception = Some(exc);
+                            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                        }
+                        Value::Object(_) => {
+                            let line = vm.current_line;
+                            let exc = vm.create_exception(
+                                b"TypeError",
+                                "Cannot access offset of type object on array",
+                                line,
+                            );
+                            vm.current_exception = Some(exc);
+                            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                        }
                         _ => result.push(value),
                     }
                 } else {
@@ -327,6 +491,41 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
 }
 
 fn iterator_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Push a call-stack frame so any exception thrown while iterating the
+    // iterator (or by the type-check below) captures `iterator_count(...)` in
+    // its backtrace.
+    vm.call_stack.push((
+        "iterator_count".to_string(),
+        vm.current_file.clone(),
+        vm.current_line,
+        args.to_vec(),
+        false,
+    ));
+    let r = iterator_count_impl(vm, args);
+    vm.call_stack.pop();
+    r
+}
+
+fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Type check first argument
+    if let Some(first) = args.first() {
+        let type_name = match first {
+            Value::Array(_) | Value::Object(_) | Value::Generator(_) => None,
+            Value::String(_) => Some("string"),
+            Value::Long(_) => Some("int"),
+            Value::Double(_) => Some("float"),
+            Value::True | Value::False => Some("bool"),
+            Value::Null => Some("null"),
+            _ => Some("unknown"),
+        };
+        if let Some(tn) = type_name {
+            let msg = format!("iterator_count(): Argument #1 ($iterator) must be of type Traversable|array, {} given", tn);
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::Null);
+        }
+    }
     match args.first() {
         Some(Value::Array(arr)) => Ok(Value::Long(arr.borrow().len() as i64)),
         Some(val @ Value::Object(_)) => {
@@ -364,9 +563,58 @@ fn iterator_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Arg count: max 3 user args.
+    if args.len() > 3 {
+        let msg = format!("iterator_apply() expects at most 3 arguments, {} given", args.len());
+        let line = vm.current_line;
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, line);
+        vm.current_exception = Some(exc);
+        return Ok(Value::Null);
+    }
+
     let iterator = args.first().unwrap_or(&Value::Null).clone();
     let callback = args.get(1).unwrap_or(&Value::Null).clone();
-    let cb_args = args.get(2).cloned();
+    // Validate $args is array|null
+    let cb_args = match args.get(2) {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => Some(Value::Array(a.clone())),
+        Some(other) => {
+            let type_name = match other {
+                Value::String(_) => "string",
+                Value::Long(_) => "int",
+                Value::Double(_) => "float",
+                Value::True | Value::False => "bool",
+                Value::Object(_) => "object",
+                _ => "unknown",
+            };
+            let msg = format!(
+                "iterator_apply(): Argument #3 ($args) must be of type ?array, {} given",
+                type_name
+            );
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::Null);
+        }
+    };
+
+    // Validate callback before iterating.
+    if let Value::String(s) = &callback {
+        let cb_name = s.as_bytes().to_vec();
+        let cb_lower: Vec<u8> = cb_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let exists = vm.functions.contains_key(cb_lower.as_slice())
+            || vm.user_functions.contains_key(cb_lower.as_slice());
+        if !exists {
+            let msg = format!(
+                "iterator_apply(): Argument #2 ($callback) must be a valid callback, function \"{}\" not found or invalid function name",
+                String::from_utf8_lossy(s.as_bytes())
+            );
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::Null);
+        }
+    }
 
     // Iterate over the iterator and call the callback for each element
     if let Value::Object(_) = &iterator {
@@ -429,12 +677,30 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 // --- Class introspection functions ---
 
 fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_name = match args.first().unwrap_or(&Value::Null) {
-        Value::String(s) => s.as_bytes().to_vec(),
-        Value::Object(obj) => obj.borrow().class_name.clone(),
+    let (class_name, from_string) = match args.first().unwrap_or(&Value::Null) {
+        Value::String(s) => (s.as_bytes().to_vec(), true),
+        Value::Object(obj) => (obj.borrow().class_name.clone(), false),
         _ => return Ok(Value::False),
     };
+    let autoload = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    if from_string {
+        let exists = vm.classes.contains_key(&class_lower)
+            || vm.is_known_builtin_class(&class_lower);
+        if !exists {
+            if autoload {
+                vm.try_autoload_class(&class_name);
+            }
+            let still_exists = vm.classes.contains_key(&class_lower)
+                || vm.is_known_builtin_class(&class_lower);
+            if !still_exists {
+                let suffix = if autoload { " and could not be loaded" } else { "" };
+                let class_str = String::from_utf8_lossy(&class_name);
+                vm.emit_warning(&format!("class_implements(): Class {} does not exist{}", class_str, suffix));
+                return Ok(Value::False);
+            }
+        }
+    }
     let mut result = PhpArray::new();
 
     // Get interfaces from the class definition
@@ -491,12 +757,32 @@ fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn class_parents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_name = match args.first().unwrap_or(&Value::Null) {
-        Value::String(s) => s.as_bytes().to_vec(),
-        Value::Object(obj) => obj.borrow().class_name.clone(),
+    let (class_name, from_string) = match args.first().unwrap_or(&Value::Null) {
+        Value::String(s) => (s.as_bytes().to_vec(), true),
+        Value::Object(obj) => (obj.borrow().class_name.clone(), false),
         _ => return Ok(Value::False),
     };
+    let autoload = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    // If the class came from a string argument, it must exist (or be
+    // loadable). PHP emits a warning and returns false otherwise.
+    if from_string {
+        let exists = vm.classes.contains_key(&class_lower)
+            || vm.is_known_builtin_class(&class_lower);
+        if !exists {
+            if autoload {
+                vm.try_autoload_class(&class_name);
+            }
+            let still_exists = vm.classes.contains_key(&class_lower)
+                || vm.is_known_builtin_class(&class_lower);
+            if !still_exists {
+                let suffix = if autoload { " and could not be loaded" } else { "" };
+                let class_str = String::from_utf8_lossy(&class_name);
+                vm.emit_warning(&format!("class_parents(): Class {} does not exist{}", class_str, suffix));
+                return Ok(Value::False);
+            }
+        }
+    }
     let mut result = PhpArray::new();
 
     let mut current = class_lower;

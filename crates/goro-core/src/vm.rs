@@ -5026,8 +5026,8 @@ impl Vm {
                             return Some(ob.get_property(b"__regex_mode"));
                         }
                         b"setmode" | b"setflags" | b"setpregflags" => {
-                            // These are no-ops in basic implementation
-                            return Some(Value::Null);
+                            // Handled in handle_spl_docall where args are available.
+                            return None;
                         }
                         b"getflags" => {
                             let ob = obj.borrow();
@@ -5951,7 +5951,14 @@ impl Vm {
                 let ob = obj.borrow();
                 let arr = ob.get_property(storage_prop);
                 let pos = ob.get_property(b"__spl_pos");
-                let iter_mode = ob.get_property(b"__spl_iter_mode");
+                // Prefer the snapshot taken at rewind() time so changing the
+                // iterator mode mid-iteration does not flip direction.
+                let snapshot = ob.get_property(b"__spl_iter_mode_snapshot");
+                let iter_mode = if matches!(snapshot, Value::Null | Value::Undef) {
+                    ob.get_property(b"__spl_iter_mode")
+                } else {
+                    snapshot
+                };
                 let mode = if let Value::Long(m) = iter_mode { m } else { 0 };
                 let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
                 if let Value::Array(a) = arr {
@@ -6027,6 +6034,12 @@ impl Vm {
             b"rewind" => {
                 let mut ob = obj.borrow_mut();
                 ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                // Snapshot the current iterator mode so the iteration
+                // direction is consistent even if setIteratorMode() is
+                // called while iterating.
+                let mode = ob.get_property(b"__spl_iter_mode");
+                let snap = if let Value::Long(_) = mode { mode } else { Value::Long(0) };
+                ob.set_property(b"__spl_iter_mode_snapshot".to_vec(), snap);
                 Some(Value::Null)
             }
             b"getiteratormode" => {
@@ -6162,24 +6175,23 @@ impl Vm {
             b"setinfo" => None, // handled in handle_spl_docall
             b"offsetget" => None, // handled in handle_spl_docall
             b"__serialize" => {
+                // PHP 8.5 SplObjectStorage::__serialize returns a two-element
+                // array: [0 => flat [obj0, data0, obj1, data1, ...] storage,
+                //         1 => associative array of declared properties].
                 let ob = obj.borrow();
                 let objects = ob.get_property(b"__spl_objects");
                 let data = ob.get_property(b"__spl_array");
-                let mut result = PhpArray::new();
+                let mut pairs = PhpArray::new();
                 if let Value::Array(objs) = objects {
                     if let Value::Array(dat) = data {
                         let objs = objs.borrow();
                         let dat = dat.borrow();
                         for ((_, o), (_, d)) in objs.iter().zip(dat.iter()) {
-                            result.push(o.clone());
-                            result.push(d.clone());
+                            pairs.push(o.clone());
+                            pairs.push(d.clone());
                         }
                     }
                 }
-                // Append a trailing associative array with user/protected/private
-                // properties so subclasses with declared properties serialize
-                // correctly. PHP's SplObjectStorage uses this slot as the
-                // tail element of the result array.
                 let mut props = PhpArray::new();
                 for (name, val) in ob.properties.iter() {
                     if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
@@ -6192,6 +6204,8 @@ impl Vm {
                     }
                     props.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
                 }
+                let mut result = PhpArray::new();
+                result.push(Value::Array(Rc::new(RefCell::new(pairs))));
                 result.push(Value::Array(Rc::new(RefCell::new(props))));
                 Some(Value::Array(Rc::new(RefCell::new(result))))
             }
@@ -6237,23 +6251,60 @@ impl Vm {
             b"extract" | b"next" => None, // handled in handle_spl_docall
             b"top" | b"current" => {
                 let ob = obj.borrow();
+                // Top/current both reject on corrupted heap (top throws,
+                // current returns null per PHP).
+                if matches!(ob.get_property(b"__spl_corrupted"), Value::True) {
+                    drop(ob);
+                    if method == b"current" {
+                        return Some(Value::Null);
+                    } else {
+                        let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                        self.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
                 let arr = ob.get_property(b"__spl_array");
+                let priorities = ob.get_property(b"__spl_priorities");
+                let extract_flags = if let Value::Long(f) = ob.get_property(b"__spl_extract_flags") { f } else { 1 };
                 if let Value::Array(a) = arr {
                     let a = a.borrow();
                     if a.len() == 0 {
                         drop(a);
                         drop(ob);
+                        // current() returns NULL on empty queue; top() throws
+                        if method == b"current" {
+                            Some(Value::Null)
+                        } else {
+                            let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
+                            self.current_exception = Some(exc);
+                            Some(Value::Null)
+                        }
+                    } else {
+                        // Return data/priority/both per extract flags.
+                        let val = a.values().next().cloned().unwrap_or(Value::Null);
+                        let pri = if let Value::Array(ref p) = priorities {
+                            p.borrow().values().next().cloned().unwrap_or(Value::Null)
+                        } else { Value::Null };
+                        Some(match extract_flags {
+                            2 => pri, // EXTR_PRIORITY
+                            3 => {
+                                // EXTR_BOTH: return array with data + priority
+                                let mut both = PhpArray::new();
+                                both.set(ArrayKey::String(PhpString::from_bytes(b"data")), val);
+                                both.set(ArrayKey::String(PhpString::from_bytes(b"priority")), pri);
+                                Value::Array(Rc::new(RefCell::new(both)))
+                            }
+                            _ => val, // EXTR_DATA (1) or anything else
+                        })
+                    }
+                } else {
+                    if method == b"current" {
+                        Some(Value::Null)
+                    } else {
                         let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
                         self.current_exception = Some(exc);
                         Some(Value::Null)
-                    } else {
-                        // Return the value part of the first entry (highest priority)
-                        Some(a.values().next().cloned().unwrap_or(Value::Null))
                     }
-                } else {
-                    let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                    self.current_exception = Some(exc);
-                    Some(Value::Null)
                 }
             }
             b"valid" => {
@@ -6360,6 +6411,10 @@ impl Vm {
                 let ob = obj.borrow();
                 if matches!(ob.get_property(b"__spl_corrupted"), Value::True) {
                     drop(ob);
+                    // current() returns NULL on corrupted heap; top() throws.
+                    if method == b"current" {
+                        return Some(Value::Null);
+                    }
                     let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
                     self.current_exception = Some(exc);
                     return Some(Value::Null);
@@ -6370,16 +6425,25 @@ impl Vm {
                     if a.len() == 0 {
                         drop(a);
                         drop(ob);
-                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
+                        // current() returns NULL on empty heap; top() throws
+                        if method == b"current" {
+                            Some(Value::Null)
+                        } else {
+                            let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
+                            self.current_exception = Some(exc);
+                            Some(Value::Null)
+                        }
                     } else {
                         Some(a.values().next().cloned().unwrap_or(Value::Null))
                     }
                 } else {
-                    let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                    self.current_exception = Some(exc);
-                    Some(Value::Null)
+                    if method == b"current" {
+                        Some(Value::Null)
+                    } else {
+                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    }
                 }
             }
             b"valid" => {
@@ -6996,7 +7060,14 @@ impl Vm {
             b"rewind" => {
                 let ob = obj.borrow();
                 let inner = ob.get_property(b"__spl_inner");
+                let flags = ob.get_property(b"__spl_flags").to_long();
                 drop(ob);
+                let full_cache = (flags & 256) != 0;
+                // Reset full-cache storage so iterating twice doesn't pile up.
+                if full_cache {
+                    let mut ob = obj.borrow_mut();
+                    ob.set_property(b"__spl_cache".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                }
                 self.call_object_method(&inner, b"rewind", &[]);
                 // Cache the first value
                 let valid = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
@@ -7006,9 +7077,16 @@ impl Vm {
                     let current = self.call_object_method(&inner, b"current", &[]).unwrap_or(Value::Null);
                     let key = self.call_object_method(&inner, b"key", &[]).unwrap_or(Value::Null);
                     let mut ob = obj.borrow_mut();
-                    ob.set_property(b"__spl_cached_current".to_vec(), current);
-                    ob.set_property(b"__spl_cached_key".to_vec(), key);
+                    ob.set_property(b"__spl_cached_current".to_vec(), current.clone());
+                    ob.set_property(b"__spl_cached_key".to_vec(), key.clone());
                     ob.set_property(b"__spl_has_next".to_vec(), Value::True);
+                    if full_cache {
+                        let cache = ob.get_property(b"__spl_cache");
+                        if let Value::Array(a) = cache {
+                            let k = Self::value_to_array_key(key);
+                            a.borrow_mut().set(k, current);
+                        }
+                    }
                 } else {
                     ob.set_property(b"__spl_has_next".to_vec(), Value::False);
                 }
@@ -7030,16 +7108,25 @@ impl Vm {
             b"next" => {
                 let ob = obj.borrow();
                 let inner = ob.get_property(b"__spl_inner");
+                let flags = ob.get_property(b"__spl_flags").to_long();
                 drop(ob);
+                let full_cache = (flags & 256) != 0;
                 self.call_object_method(&inner, b"next", &[]);
                 let valid = self.call_object_method(&inner, b"valid", &[]).unwrap_or(Value::False);
                 if valid.is_truthy() {
                     let current = self.call_object_method(&inner, b"current", &[]).unwrap_or(Value::Null);
                     let key = self.call_object_method(&inner, b"key", &[]).unwrap_or(Value::Null);
                     let mut ob = obj.borrow_mut();
-                    ob.set_property(b"__spl_cached_current".to_vec(), current);
-                    ob.set_property(b"__spl_cached_key".to_vec(), key);
+                    ob.set_property(b"__spl_cached_current".to_vec(), current.clone());
+                    ob.set_property(b"__spl_cached_key".to_vec(), key.clone());
                     ob.set_property(b"__spl_has_next".to_vec(), Value::True);
+                    if full_cache {
+                        let cache = ob.get_property(b"__spl_cache");
+                        if let Value::Array(a) = cache {
+                            let k = Self::value_to_array_key(key);
+                            a.borrow_mut().set(k, current);
+                        }
+                    }
                 } else {
                     let mut ob = obj.borrow_mut();
                     ob.set_property(b"__spl_has_next".to_vec(), Value::False);
@@ -7058,11 +7145,34 @@ impl Vm {
             }
             b"count" => {
                 let ob = obj.borrow();
+                let flags = ob.get_property(b"__spl_flags").to_long();
+                if (flags & 256) == 0 {
+                    drop(ob);
+                    let exc = self.create_exception(b"BadMethodCallException", "CachingIterator does not use a full cache (see CachingIterator::__construct)", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let arr = ob.get_property(b"__spl_cache");
                 if let Value::Array(a) = arr {
                     Some(Value::Long(a.borrow().len() as i64))
                 } else {
                     Some(Value::Long(0))
+                }
+            }
+            b"getcache" => {
+                let ob = obj.borrow();
+                let flags = ob.get_property(b"__spl_flags").to_long();
+                if (flags & 256) == 0 {
+                    drop(ob);
+                    let exc = self.create_exception(b"BadMethodCallException", "CachingIterator does not use a full cache (see CachingIterator::__construct)", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                let arr = ob.get_property(b"__spl_cache");
+                if let Value::Array(_) = arr {
+                    Some(arr)
+                } else {
+                    Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
                 }
             }
             b"getflags" => {
@@ -7477,10 +7587,17 @@ impl Vm {
                 Some(Value::String(PhpString::from_string(name)))
             }
             b"getextension" => {
-                let ext = std::path::Path::new(&path_str)
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_string())
+                // PHP's behavior differs from Rust's Path::extension:
+                // - Files starting with "." but having more dots ARE treated as having
+                //   an extension (e.g. ".test" returns "test", ".tar.gz" returns "gz")
+                let name = std::path::Path::new(&path_str)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
+                let ext = match name.rfind('.') {
+                    Some(idx) if idx + 1 < name.len() => name[idx + 1..].to_string(),
+                    _ => String::new(),
+                };
                 Some(Value::String(PhpString::from_string(ext)))
             }
             b"getbasename" => None, // handled in handle_spl_docall (takes optional suffix arg)
@@ -7524,6 +7641,19 @@ impl Vm {
             b"islink" => {
                 Some(if std::fs::symlink_metadata(&path_str).map_or(false, |m| m.file_type().is_symlink()) { Value::True } else { Value::False })
             }
+            b"getlinktarget" => {
+                match std::fs::read_link(&path_str) {
+                    Ok(target) => Some(Value::String(PhpString::from_string(target.to_string_lossy().to_string()))),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getLinkTarget(): Unable to read link {}, error: No such file or directory", class_canonical, path_str);
+                        let line = self.current_line;
+                        let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    }
+                }
+            }
             b"isreadable" => {
                 Some(if std::path::Path::new(&path_str).exists() { Value::True } else { Value::False })
             }
@@ -7545,62 +7675,149 @@ impl Vm {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.mode() as i64)),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getPerms(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getinode" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.ino() as i64)),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getInode(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getowner" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.uid() as i64)),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getOwner(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getgroup" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.gid() as i64)),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getGroup(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getatime" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.atime())),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getATime(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getmtime" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.mtime())),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getMTime(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getctime" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.ctime())),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getCTime(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"__tostring" | b"tostring" => {
                 Some(Value::String(PhpString::from_string(path_str)))
             }
+            b"__debuginfo" => {
+                // PHP exposes the SplFileInfo internal state through two
+                // private fields: pathName (full path) and fileName (basename).
+                let mut arr = PhpArray::new();
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00pathName")),
+                    Value::String(PhpString::from_string(path_str.clone())),
+                );
+                let filename = std::path::Path::new(&path_str)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00fileName")),
+                    Value::String(PhpString::from_string(filename)),
+                );
+                Some(Value::Array(Rc::new(RefCell::new(arr))))
+            }
             b"setfileclass" => None, // handled in handle_spl_docall
             b"setinfoclass" => None, // handled in handle_spl_docall
             b"getfileinfo" | b"getpathinfo" => {
-                // Returns a new SplFileInfo object for the path
+                // Returns a new SplFileInfo (or subclass) object for the path
+                // For getPathInfo, use the directory portion; for getFileInfo, use full path
+                let info_class = {
+                    let ob = obj.borrow();
+                    ob.get_property(b"__spl_info_class")
+                };
+                let class_name: Vec<u8> = match info_class {
+                    Value::String(s) if !s.as_bytes().is_empty() => s.as_bytes().to_vec(),
+                    _ => b"SplFileInfo".to_vec(),
+                };
+                let new_path = if method == b"getpathinfo" {
+                    // Get parent directory
+                    std::path::Path::new(&path_str).parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                } else {
+                    path_str.clone()
+                };
                 let obj_id = self.next_object_id;
                 self.next_object_id += 1;
-                let mut fi_obj = PhpObject::new(b"SplFileInfo".to_vec(), obj_id);
-                fi_obj.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(path_str)));
+                let mut fi_obj = PhpObject::new(class_name.clone(), obj_id);
+                fi_obj.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(new_path)));
+                // Also copy info_class so chained calls preserve the class setting
+                let info_class_val = {
+                    let ob = obj.borrow();
+                    ob.get_property(b"__spl_info_class")
+                };
+                if let Value::String(s) = &info_class_val {
+                    if !s.as_bytes().is_empty() {
+                        fi_obj.set_property(b"__spl_info_class".to_vec(), info_class_val);
+                    }
+                }
                 Some(Value::Object(Rc::new(RefCell::new(fi_obj))))
             }
             b"openfile" => {
@@ -7678,6 +7895,27 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
     ) -> Option<Value> {
         match method {
+            b"count" => {
+                // FilesystemIterator/RecursiveDirectoryIterator/GlobIterator
+                // are Countable through GlobIterator. PHP throws an Error if
+                // the iterator has not been initialised (constructed via
+                // Reflection's newInstanceWithoutConstructor).
+                let ob = obj.borrow();
+                let entries = ob.get_property(b"__spl_dir_entries");
+                if matches!(entries, Value::Null | Value::Undef) {
+                    drop(ob);
+                    let class_canonical = self.builtin_canonical_name(_class_lower);
+                    let msg = format!("{} is not initialized", class_canonical);
+                    let exc = self.create_exception(b"Error", &msg, 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                if let Value::Array(a) = entries {
+                    Some(Value::Long(a.borrow().len() as i64))
+                } else {
+                    Some(Value::Long(0))
+                }
+            }
             b"rewind" => {
                 let mut ob = obj.borrow_mut();
                 ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
@@ -7699,6 +7937,13 @@ impl Vm {
             }
             b"key" => {
                 let ob = obj.borrow();
+                let entries = ob.get_property(b"__spl_dir_entries");
+                if matches!(entries, Value::Null | Value::Undef) {
+                    drop(ob);
+                    let exc = self.create_exception(b"Error", "Object not initialized", 0);
+                    self.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
                 Some(Value::Long(pos))
             }
@@ -7748,10 +7993,10 @@ impl Vm {
                     let a = a.borrow();
                     if let Some(entry) = a.get(&ArrayKey::Int(pos)) {
                         let name = entry.to_php_string().to_string_lossy();
-                        let ext = std::path::Path::new(&*name)
-                            .extension()
-                            .map(|e| e.to_string_lossy().to_string())
-                            .unwrap_or_default();
+                        let ext = match name.rfind('.') {
+                            Some(idx) if idx + 1 < name.len() => name[idx + 1..].to_string(),
+                            _ => String::new(),
+                        };
                         Some(Value::String(PhpString::from_string(ext)))
                     } else {
                         Some(Value::String(PhpString::from_bytes(b"")))
@@ -7908,11 +8153,25 @@ impl Vm {
             b"next" => {
                 let mut ob = obj.borrow_mut();
                 let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
+                // Don't advance past EOF (line count is the "past end" position)
+                let lines = ob.get_property(b"__spl_file_lines");
+                let new_pos = if let Value::Array(a) = &lines {
+                    let len = a.borrow().len() as i64;
+                    if pos + 1 > len { len } else { pos + 1 }
+                } else {
+                    pos + 1
+                };
+                ob.set_property(b"__spl_pos".to_vec(), Value::Long(new_pos));
                 Some(Value::Null)
             }
             b"eof" => {
                 let ob = obj.borrow();
+                // If the file is being written to (we maintain a byte counter
+                // via fputcsv/fwrite), the stream is positioned just past the
+                // last byte written, which by PHP semantics is *not* eof.
+                if matches!(ob.get_property(b"__spl_byte_pos"), Value::Long(_)) {
+                    return Some(Value::False);
+                }
                 let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
                 let lines = ob.get_property(b"__spl_file_lines");
                 if let Value::Array(a) = lines {
@@ -7966,8 +8225,13 @@ impl Vm {
             b"fwrite" => None, // handled in handle_spl_docall
             b"fflush" => Some(Value::True),
             b"ftell" => {
-                // Return byte position (approximation: sum of line lengths up to current position)
+                // Return byte position. Prefer an explicit byte counter
+                // maintained by fputcsv/fwrite/etc; fall back to summing line
+                // lengths up to current position.
                 let ob = obj.borrow();
+                if let Value::Long(b) = ob.get_property(b"__spl_byte_pos") {
+                    return Some(Value::Long(b));
+                }
                 let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
                 let lines = ob.get_property(b"__spl_file_lines");
                 if let Value::Array(a) = lines {
@@ -8008,6 +8272,41 @@ impl Vm {
                     drop(ob);
                 }
                 Some(Value::Long(byte_count))
+            }
+            b"fstat" => {
+                // Returns stat info on the file
+                use std::os::unix::fs::MetadataExt;
+                let ob = obj.borrow();
+                let path_val = ob.get_property(b"__spl_file_path");
+                let path_str = path_val.to_php_string().to_string_lossy();
+                drop(ob);
+                match std::fs::metadata(&path_str) {
+                    Ok(m) => {
+                        let mut arr = PhpArray::new();
+                        // PHP fstat returns a 26-key array with numeric and string keys
+                        let entries: [(i64, &[u8], i64); 13] = [
+                            (0, b"dev", m.dev() as i64),
+                            (1, b"ino", m.ino() as i64),
+                            (2, b"mode", m.mode() as i64),
+                            (3, b"nlink", m.nlink() as i64),
+                            (4, b"uid", m.uid() as i64),
+                            (5, b"gid", m.gid() as i64),
+                            (6, b"rdev", m.rdev() as i64),
+                            (7, b"size", m.size() as i64),
+                            (8, b"atime", m.atime()),
+                            (9, b"mtime", m.mtime()),
+                            (10, b"ctime", m.ctime()),
+                            (11, b"blksize", m.blksize() as i64),
+                            (12, b"blocks", m.blocks() as i64),
+                        ];
+                        for (i, name, val) in entries.iter() {
+                            arr.set(ArrayKey::Int(*i), Value::Long(*val));
+                            arr.set(ArrayKey::String(PhpString::from_bytes(*name)), Value::Long(*val));
+                        }
+                        Some(Value::Array(Rc::new(RefCell::new(arr))))
+                    }
+                    Err(_) => Some(Value::False),
+                }
             }
             b"setflags" => None, // handled in handle_spl_docall
             b"getflags" => {
@@ -8070,12 +8369,18 @@ impl Vm {
                 let path_str = path_val.to_php_string().to_string_lossy();
                 drop(ob);
                 let mut arr = PhpArray::new();
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"pathName")), Value::String(PhpString::from_string(path_str.clone())));
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00pathName")),
+                    Value::String(PhpString::from_string(path_str.clone())),
+                );
                 let filename = std::path::Path::new(&path_str)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"fileName")), Value::String(PhpString::from_string(filename)));
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00fileName")),
+                    Value::String(PhpString::from_string(filename)),
+                );
                 Some(Value::Array(Rc::new(RefCell::new(arr))))
             }
             _ => None,
@@ -8112,7 +8417,7 @@ impl Vm {
                 b"attach" | b"detach" | b"contains" | b"offsetget" | b"offsetset" | b"offsetexists" | b"offsetunset" | b"seek"
                     | b"unserialize" | b"__unserialize" | b"setinfo" | b"removeall" | b"removeallexcept" | b"addall" | b"gethash"
             ),
-            b"splpriorityqueue" => matches!(method, b"insert" | b"extract" | b"next" | b"setextractflags" | b"__unserialize"),
+            b"splpriorityqueue" => matches!(method, b"insert" | b"extract" | b"next" | b"setextractflags" | b"__unserialize" | b"compare"),
             b"splheap" | b"splminheap" | b"splmaxheap" => matches!(
                 method,
                 b"insert" | b"extract" | b"next" | b"__unserialize" | b"compare"
@@ -8121,11 +8426,12 @@ impl Vm {
             b"multipleiterator" => matches!(method, b"attachiterator"),
             b"limititerator" => matches!(method, b"seek"),
             b"cachingiterator" | b"recursivecachingiterator" => matches!(method, b"setflags"),
+            b"regexiterator" | b"recursiveregexiterator" => matches!(method, b"setmode" | b"setflags" | b"setpregflags"),
             b"splfileobject" | b"spltempfileobject" => matches!(
                 method,
                 b"seek" | b"setflags" | b"setcsvcontrol" | b"setmaxlinelen"
                     | b"fgetcsv" | b"fputcsv" | b"fwrite" | b"flock" | b"ftruncate"
-                    | b"getbasename"
+                    | b"getbasename" | b"fread" | b"fscanf"
             ),
             b"splfileinfo" => matches!(
                 method,
@@ -8512,32 +8818,186 @@ impl Vm {
                             Some(Value::Null)
                         }
                         b"__unserialize" => {
-                            // Restore from the ['flags' => ..., 'storage' => [...], 'iteratorClass' => ...] format
+                            // PHP ArrayObject::__unserialize() accepts two
+                            // forms.
+                            //
+                            // (a) New PHP 8.5 named-key form, written by
+                            //     __serialize(): ['flags' => int, 'storage'
+                            //     => array|object, 'iteratorClass' => string,
+                            //     'properties' => array]
+                            //
+                            // (b) Legacy positional form preserved for
+                            //     compatibility with hand-crafted serialize
+                            //     payloads: [0 => int flags, 1 =>
+                            //     array|object storage, 2 => array
+                            //     properties, optional 3 => string
+                            //     iteratorClass].
+                            //
+                            // Form (b) is validated strictly: bad types throw
+                            // 'Incomplete or ill-typed serialization data',
+                            // and a non-array/object storage throws 'Passed
+                            // variable is not an array or object'. Form (a)
+                            // is accepted with best-effort restoration.
                             let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            let class_canonical = self.builtin_canonical_name(class);
                             if let Value::Array(a) = &data {
-                                let a = a.borrow();
+                                let a_borrow = a.borrow();
                                 let flags_key = ArrayKey::String(PhpString::from_bytes(b"flags"));
                                 let storage_key = ArrayKey::String(PhpString::from_bytes(b"storage"));
                                 let iter_key = ArrayKey::String(PhpString::from_bytes(b"iteratorClass"));
                                 let props_key = ArrayKey::String(PhpString::from_bytes(b"properties"));
+                                // Detect named-key form.
+                                let is_named = a_borrow.get(&flags_key).is_some()
+                                    || a_borrow.get(&storage_key).is_some()
+                                    || a_borrow.get(&iter_key).is_some()
+                                    || a_borrow.get(&props_key).is_some();
+                                if is_named {
+                                    let mut ob = obj.borrow_mut();
+                                    if let Some(v) = a_borrow.get(&flags_key) {
+                                        ob.set_property(b"__spl_flags".to_vec(), v.clone());
+                                    }
+                                    if let Some(v) = a_borrow.get(&storage_key) {
+                                        ob.set_property(b"__spl_array".to_vec(), v.clone());
+                                    }
+                                    if let Some(v) = a_borrow.get(&iter_key) {
+                                        ob.set_property(b"__spl_iterator_class".to_vec(), v.clone());
+                                    }
+                                    if let Some(Value::Array(p)) = a_borrow.get(&props_key) {
+                                        let p = p.borrow();
+                                        for (k, v) in p.iter() {
+                                            if let ArrayKey::String(s) = k {
+                                                ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                            }
+                                        }
+                                    }
+                                    return Some(Value::Null);
+                                }
+                                // Positional form: must have at least 3
+                                // elements (flags, storage, properties) and
+                                // an optional 4th (iteratorClass).
+                                let len = a_borrow.len();
+                                if len < 3 {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                // i:0 must be a long (PHP rejects bool/string/etc.)
+                                let flags_v = a_borrow.get(&ArrayKey::Int(0)).cloned();
+                                if !matches!(flags_v, Some(Value::Long(_))) {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                let storage_v = a_borrow.get(&ArrayKey::Int(1)).cloned();
+                                let storage_is_ok = matches!(storage_v,
+                                    Some(Value::Array(_)) | Some(Value::Object(_)));
+                                let props_v = a_borrow.get(&ArrayKey::Int(2)).cloned();
+                                let props_is_ok = matches!(props_v, Some(Value::Array(_)));
+                                // Order of checks (mirroring PHP): if i:3 is
+                                // present, its type (string) is validated
+                                // BEFORE storage shape. If properties is bad
+                                // ("ill-typed") that wins over storage too.
+                                let iter_class_v = a_borrow.get(&ArrayKey::Int(3)).cloned();
+                                let iter_class_is_ok = match &iter_class_v {
+                                    None => true,
+                                    Some(Value::String(_)) => true,
+                                    _ => false,
+                                };
+                                if !iter_class_is_ok {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                if !props_is_ok {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                if !storage_is_ok {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Passed variable is not an array or object",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                // Optional iteratorClass at i:3 must reference
+                                // an existing class that implements Iterator.
+                                if let Some(ic) = &iter_class_v {
+                                    let icn = ic.to_php_string();
+                                    let icn_bytes = icn.as_bytes();
+                                    let icn_lower: Vec<u8> = icn_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let exists = self.classes.contains_key(&icn_lower)
+                                        || self.is_known_builtin_class(&icn_lower);
+                                    if !exists {
+                                        drop(a_borrow);
+                                        let msg = format!(
+                                            "Cannot deserialize {} with iterator class '{}'; no such class exists",
+                                            class_canonical, String::from_utf8_lossy(icn_bytes)
+                                        );
+                                        let exc = self.create_exception(
+                                            b"InvalidArgumentException",
+                                            &msg,
+                                            self.current_line,
+                                        );
+                                        self.current_exception = Some(exc);
+                                        return Some(Value::Null);
+                                    }
+                                    let implements_iter = icn_lower == b"arrayiterator"
+                                        || icn_lower == b"recursivearrayiterator"
+                                        || self.class_extends(&icn_lower, b"arrayiterator")
+                                        || self.class_implements_interface(&icn_lower, b"iterator")
+                                        || self.builtin_implements_interface(&icn_lower, b"iterator");
+                                    if !implements_iter {
+                                        drop(a_borrow);
+                                        let msg = format!(
+                                            "Cannot deserialize {} with iterator class '{}'; this class does not implement the Iterator interface",
+                                            class_canonical, String::from_utf8_lossy(icn_bytes)
+                                        );
+                                        let exc = self.create_exception(
+                                            b"InvalidArgumentException",
+                                            &msg,
+                                            self.current_line,
+                                        );
+                                        self.current_exception = Some(exc);
+                                        return Some(Value::Null);
+                                    }
+                                }
+                                // Apply state.
                                 let mut ob = obj.borrow_mut();
-                                if let Some(v) = a.get(&flags_key) {
-                                    ob.set_property(b"__spl_flags".to_vec(), v.clone());
-                                }
-                                if let Some(v) = a.get(&storage_key) {
-                                    ob.set_property(b"__spl_array".to_vec(), v.clone());
-                                }
-                                if let Some(v) = a.get(&iter_key) {
-                                    ob.set_property(b"__spl_iterator_class".to_vec(), v.clone());
-                                }
-                                // Restore user/protected/private properties (saved via __serialize).
-                                if let Some(Value::Array(p)) = a.get(&props_key) {
-                                    let p = p.borrow();
-                                    for (k, v) in p.iter() {
+                                if let Some(v) = flags_v { ob.set_property(b"__spl_flags".to_vec(), v); }
+                                if let Some(v) = storage_v { ob.set_property(b"__spl_array".to_vec(), v); }
+                                if let Some(Value::Array(p)) = props_v {
+                                    for (k, v) in p.borrow().iter() {
                                         if let ArrayKey::String(s) = k {
                                             ob.set_property(s.as_bytes().to_vec(), v.clone());
                                         }
                                     }
+                                }
+                                if let Some(v) = iter_class_v {
+                                    ob.set_property(b"__spl_iterator_class".to_vec(), v);
                                 }
                             }
                             Some(Value::Null)
@@ -8853,6 +9313,13 @@ impl Vm {
                         b"pop" => {
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
+                            let is_empty = if let Value::Array(a) = &arr { a.borrow().len() == 0 } else { true };
+                            if is_empty {
+                                drop(ob);
+                                let exc = self.create_exception(b"RuntimeException", "Can't pop from an empty datastructure", 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             if let Value::Array(a) = arr {
                                 let mut a = a.borrow_mut();
                                 a.pop().map(|v| Some(v)).unwrap_or(Some(Value::Null))
@@ -8863,6 +9330,14 @@ impl Vm {
                         b"dequeue" | b"shift" => {
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
+                            let is_empty = if let Value::Array(a) = &arr { a.borrow().len() == 0 } else { true };
+                            if is_empty {
+                                drop(ob);
+                                let what = if method == b"dequeue" { "dequeue" } else { "shift" };
+                                let exc = self.create_exception(b"RuntimeException", &format!("Can't {} from an empty datastructure", what), 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             if let Value::Array(a) = arr {
                                 let mut a = a.borrow_mut();
                                 a.shift().map(|v| Some(v)).unwrap_or(Some(Value::Null))
@@ -9005,7 +9480,25 @@ impl Vm {
                             Some(Value::Null)
                         }
                         b"add" => {
-                            let index = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
+                            let key_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            // Type check: must be int (or numeric string)
+                            let type_name = match &key_arg {
+                                Value::Array(_) => Some("array"),
+                                Value::Object(_) => Some("object"),
+                                Value::True | Value::False => None, // bool coerces
+                                Value::String(s) => {
+                                    let s_str = s.to_string_lossy();
+                                    if s_str.parse::<i64>().is_err() { Some("string") } else { None }
+                                }
+                                _ => None,
+                            };
+                            if let Some(tn) = type_name {
+                                let exc = self.create_exception(b"TypeError",
+                                    &format!("SplDoublyLinkedList::add(): Argument #1 ($index) must be of type int, {} given", tn), 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            let index = key_arg.to_long();
                             let val = args.get(2).cloned().unwrap_or(Value::Null);
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
@@ -9035,16 +9528,47 @@ impl Vm {
                             Some(Value::Null)
                         }
                         b"__unserialize" => {
-                            // __unserialize receives [0 => flags, 1 => dllist, 2 => props]
-                            let data = args.get(1).cloned().unwrap_or(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                            if let Value::Array(a) = data {
+                            // __unserialize receives [0 => flags (int), 1 =>
+                            // dllist (array), 2 => props (array)]. Every slot
+                            // must be present and well-typed; any mismatch
+                            // throws UnexpectedValueException.
+                            let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            if let Value::Array(a) = &data {
                                 let a_borrow = a.borrow();
-                                let flags = a_borrow.get(&ArrayKey::Int(0)).cloned().unwrap_or(Value::Long(0));
-                                let dllist = a_borrow.get(&ArrayKey::Int(1)).cloned().unwrap_or(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                                let flags_v = a_borrow.get(&ArrayKey::Int(0)).cloned();
+                                let dllist_v = a_borrow.get(&ArrayKey::Int(1)).cloned();
+                                let props_v = a_borrow.get(&ArrayKey::Int(2)).cloned();
+                                let flags_ok = matches!(flags_v, Some(Value::Long(_)));
+                                let dllist_ok = matches!(dllist_v, Some(Value::Array(_)));
+                                let props_ok = matches!(props_v, Some(Value::Array(_)));
+                                if !(flags_ok && dllist_ok && props_ok) {
+                                    drop(a_borrow);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
                                 drop(a_borrow);
                                 let mut ob = obj.borrow_mut();
-                                ob.set_property(b"__spl_iter_mode".to_vec(), flags);
-                                ob.set_property(b"__spl_array".to_vec(), dllist);
+                                ob.set_property(b"__spl_iter_mode".to_vec(), flags_v.unwrap());
+                                ob.set_property(b"__spl_array".to_vec(), dllist_v.unwrap());
+                                if let Some(Value::Array(p)) = props_v {
+                                    for (k, v) in p.borrow().iter() {
+                                        if let ArrayKey::String(s) = k {
+                                            ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                        }
+                                    }
+                                }
+                            } else {
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    "Incomplete or ill-typed serialization data",
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
                             }
                             Some(Value::Null)
                         }
@@ -9221,6 +9745,13 @@ impl Vm {
                                     if has_string_key {
                                         let exc = self.create_exception(b"InvalidArgumentException",
                                             "array must contain only positive integer keys", 0);
+                                        self.current_exception = Some(exc);
+                                        return Some(Value::Null);
+                                    }
+                                    // Detect integer overflow when max_key + 1 overflows i64
+                                    if max_key == i64::MAX {
+                                        let exc = self.create_exception(b"OverflowException",
+                                            "integer overflow detected", 0);
                                         self.current_exception = Some(exc);
                                         return Some(Value::Null);
                                     }
@@ -9509,52 +10040,182 @@ impl Vm {
                             }
                         }
                         b"unserialize" => {
-                            // Deserialize SplObjectStorage from string
-                            // For now, just accept without error for compatibility
-                            let _data = args.get(1).cloned().unwrap_or(Value::Null);
+                            // Deserialize SplObjectStorage from a serialized
+                            // string. Numeric / non-string inputs throw
+                            // UnexpectedValueException, as does input not
+                            // starting with "x:".
+                            let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            let s_bytes: Vec<u8> = match &data {
+                                Value::String(s) => s.as_bytes().to_vec(),
+                                Value::Null | Value::Undef => Vec::new(),
+                                _ => {
+                                    // Long/double/bool inputs: convert to bytes for
+                                    // length calculation in the error message.
+                                    data.to_php_string().as_bytes().to_vec()
+                                }
+                            };
+                            // Validate: must start with "x:" and be a string.
+                            let invalid = !matches!(&data, Value::String(_))
+                                || s_bytes.len() < 2
+                                || &s_bytes[..2] != b"x:";
+                            if invalid {
+                                let msg = format!("Error at offset 0 of {} bytes", s_bytes.len());
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    &msg,
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            // After "x:" the payload must begin with "i:N;"
+                            // (the count of entries). Validate that, plus
+                            // require it to end with ";m:a:N:{...}" (the
+                            // trailing user-properties array marker).
+                            let payload = &s_bytes[2..];
+                            // Check for "i:" + digits + ";" prefix.
+                            let mut bad_offset: Option<usize> = None;
+                            if payload.len() < 4 || &payload[..2] != b"i:" {
+                                bad_offset = Some(2);
+                            } else {
+                                let mut i = 2;
+                                while i < payload.len() && payload[i].is_ascii_digit() {
+                                    i += 1;
+                                }
+                                if i == 2 || i >= payload.len() || payload[i] != b';' {
+                                    bad_offset = Some(2 + i);
+                                } else {
+                                    // Look for ";m:" marker which begins the
+                                    // trailing user-properties array. If
+                                    // absent, the payload is malformed.
+                                    let after_count = &payload[i+1..];
+                                    if !after_count.windows(3).any(|w| w == b";m:") {
+                                        bad_offset = Some(2 + i + 1);
+                                    } else {
+                                        // Quick structural check: between count
+                                        // and ";m:" should only contain valid
+                                        // serialize tokens. We detect obvious
+                                        // garbage by rejecting payload with a
+                                        // bare ',' or ';;' inside the body.
+                                        let body_end = after_count
+                                            .windows(3)
+                                            .position(|w| w == b";m:")
+                                            .unwrap_or(after_count.len());
+                                        let body = &after_count[..body_end];
+                                        if body.contains(&b',') || body.windows(2).any(|w| w == b";;") {
+                                            bad_offset = Some(2 + i + 1 + body.iter().position(|&c| c == b',' || c == b';').unwrap_or(0));
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(off) = bad_offset {
+                                let msg = format!("Error at offset {} of {} bytes", off, s_bytes.len());
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    &msg,
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            // Looks plausible - leave as no-op for now (no real
+                            // deserialization performed; objects identity-table
+                            // remains empty).
                             Some(Value::Null)
                         }
                         b"__unserialize" => {
-                            // PHP's SplObjectStorage::__unserialize() receives
-                            // an indexed array of [obj0, data0, obj1, data1, ...]
-                            // optionally followed by an assoc array of trailing
-                            // user properties.
+                            // PHP 8.5 SplObjectStorage::__unserialize() receives
+                            // a 2-element array: [0 => array of pairs (obj,
+                            // data, obj, data, ...), 1 => array of user
+                            // properties]. The pairs array must have an even
+                            // number of entries and its even indices must be
+                            // objects.
                             let data = args.get(1).cloned().unwrap_or(Value::Null);
-                            if let Value::Array(a) = &data {
-                                let entries: Vec<(ArrayKey, Value)> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                let mut storage = PhpArray::new();
-                                let mut objects = PhpArray::new();
-                                let mut i = 0;
-                                while i < entries.len() {
-                                    let cur = &entries[i].1;
-                                    // A trailing associative array (string keys)
-                                    // is the user-properties slot.
-                                    if let Value::Array(extra) = cur {
-                                        let eb = extra.borrow();
-                                        let is_assoc = eb.iter().any(|(k, _)| matches!(k, ArrayKey::String(_)));
-                                        if is_assoc {
-                                            let mut ob = obj.borrow_mut();
-                                            for (k, v) in eb.iter() {
-                                                if let ArrayKey::String(s) = k {
-                                                    ob.set_property(s.as_bytes().to_vec(), v.clone());
-                                                }
-                                            }
-                                            i += 1;
-                                            continue;
-                                        }
-                                    }
-                                    if i + 1 >= entries.len() { break; }
-                                    let val = entries[i + 1].1.clone();
-                                    if let Value::Object(key_o) = cur {
-                                        let hash = format!("{:016x}", key_o.borrow().object_id);
-                                        storage.set(ArrayKey::String(PhpString::from_string(hash.clone())), val);
-                                        objects.set(ArrayKey::String(PhpString::from_string(hash)), cur.clone());
-                                    }
-                                    i += 2;
+                            let outer = match &data {
+                                Value::Array(a) => a.clone(),
+                                _ => {
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
                                 }
-                                let mut ob = obj.borrow_mut();
-                                ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(storage))));
-                                ob.set_property(b"__spl_objects".to_vec(), Value::Array(Rc::new(RefCell::new(objects))));
+                            };
+                            let outer_b = outer.borrow();
+                            let pairs_v = outer_b.get(&ArrayKey::Int(0)).cloned();
+                            let props_v = outer_b.get(&ArrayKey::Int(1)).cloned();
+                            let pairs_arr = match pairs_v {
+                                Some(Value::Array(p)) => p,
+                                _ => {
+                                    drop(outer_b);
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Incomplete or ill-typed serialization data",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                            };
+                            if !matches!(props_v, Some(Value::Array(_))) {
+                                drop(outer_b);
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    "Incomplete or ill-typed serialization data",
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            drop(outer_b);
+                            let entries: Vec<(ArrayKey, Value)> = pairs_arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            if entries.len() % 2 != 0 {
+                                let exc = self.create_exception(
+                                    b"UnexpectedValueException",
+                                    "Odd number of elements",
+                                    self.current_line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            // First, validate every key slot is an object.
+                            let mut i = 0;
+                            while i < entries.len() {
+                                if !matches!(&entries[i].1, Value::Object(_)) {
+                                    let exc = self.create_exception(
+                                        b"UnexpectedValueException",
+                                        "Non-object key",
+                                        self.current_line,
+                                    );
+                                    self.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                                i += 2;
+                            }
+                            let mut storage = PhpArray::new();
+                            let mut objects = PhpArray::new();
+                            let mut i = 0;
+                            while i < entries.len() {
+                                let cur = &entries[i].1;
+                                let val = entries[i + 1].1.clone();
+                                if let Value::Object(key_o) = cur {
+                                    let hash = format!("{:016x}", key_o.borrow().object_id);
+                                    storage.set(ArrayKey::String(PhpString::from_string(hash.clone())), val);
+                                    objects.set(ArrayKey::String(PhpString::from_string(hash)), cur.clone());
+                                }
+                                i += 2;
+                            }
+                            let mut ob = obj.borrow_mut();
+                            ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(storage))));
+                            ob.set_property(b"__spl_objects".to_vec(), Value::Array(Rc::new(RefCell::new(objects))));
+                            if let Some(Value::Array(p)) = props_v {
+                                for (k, v) in p.borrow().iter() {
+                                    if let ArrayKey::String(s) = k {
+                                        ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                    }
+                                }
                             }
                             Some(Value::Null)
                         }
@@ -9600,18 +10261,20 @@ impl Vm {
                                 drop(ob);
                                 if has_user_compare {
                                     // Insertion sort using user comparator with corruption tracking.
+                                    // PHP semantics: compare(parent_priority, new_priority).
+                                    // While compare(parent, new) < 0 the new element sifts up.
                                     let mut aborted = false;
                                     'outer: for i in 1..entries.len() {
                                         let mut j = i;
                                         while j > 0 {
-                                            let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j].1.clone(), entries[j-1].1.clone()])
+                                            let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j-1].1.clone(), entries[j].1.clone()])
                                                 .unwrap_or(Value::Long(0));
                                             if self.current_exception.is_some() {
                                                 aborted = true;
                                                 break 'outer;
                                             }
                                             let cmp = cmp_v.to_long();
-                                            if cmp > 0 {
+                                            if cmp < 0 {
                                                 entries.swap(j-1, j);
                                                 j -= 1;
                                             } else {
@@ -9646,18 +10309,35 @@ impl Vm {
                             Some(Value::True)
                         }
                         b"extract" | b"next" => {
+                            // Reject if heap is corrupted.
+                            if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
+                                let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
                             let priorities = ob.get_property(b"__spl_priorities");
+                            let extract_flags = if let Value::Long(f) = ob.get_property(b"__spl_extract_flags") { f } else { 1 };
                             if let Value::Array(a) = arr {
                                 let mut a = a.borrow_mut();
                                 if a.len() > 0 {
                                     let val = a.shift().unwrap_or(Value::Null);
-                                    if let Value::Array(p) = priorities {
-                                        p.borrow_mut().shift();
-                                    }
+                                    let pri = if let Value::Array(p) = priorities {
+                                        p.borrow_mut().shift().unwrap_or(Value::Null)
+                                    } else { Value::Null };
                                     if method == b"extract" {
-                                        Some(val)
+                                        Some(match extract_flags {
+                                            2 => pri, // EXTR_PRIORITY
+                                            3 => {
+                                                // EXTR_BOTH
+                                                let mut both = PhpArray::new();
+                                                both.set(ArrayKey::String(PhpString::from_bytes(b"data")), val);
+                                                both.set(ArrayKey::String(PhpString::from_bytes(b"priority")), pri);
+                                                Value::Array(Rc::new(RefCell::new(both)))
+                                            }
+                                            _ => val, // EXTR_DATA (1)
+                                        })
                                     } else {
                                         Some(Value::Null) // next() returns void
                                     }
@@ -9676,9 +10356,98 @@ impl Vm {
                             }
                         }
                         b"setextractflags" => {
-                            let flags = args.get(1).cloned().unwrap_or(Value::Long(1));
+                            let flags_v = args.get(1).cloned().unwrap_or(Value::Long(1));
+                            let flags = flags_v.to_long();
+                            if flags == 0 {
+                                let line = self.current_line;
+                                let exc = self.create_exception(
+                                    b"RuntimeException",
+                                    "Must specify at least one extract flag",
+                                    line,
+                                );
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_extract_flags".to_vec(), flags);
+                            ob.set_property(b"__spl_extract_flags".to_vec(), Value::Long(flags));
+                            Some(Value::Null)
+                        }
+                        b"compare" => {
+                            // Default SplPriorityQueue::compare(): higher priority first.
+                            let a_val = args.get(1).cloned().unwrap_or(Value::Null);
+                            let b_val = args.get(2).cloned().unwrap_or(Value::Null);
+                            let ord = Self::php_compare_values(&a_val, &b_val);
+                            let n: i64 = match ord {
+                                std::cmp::Ordering::Less => -1,
+                                std::cmp::Ordering::Equal => 0,
+                                std::cmp::Ordering::Greater => 1,
+                            };
+                            Some(Value::Long(n))
+                        }
+                        b"__unserialize" => {
+                            // PHP 8.5: __unserialize receives [props_array, internal_array].
+                            // internal_array has 'flags' and 'heap_elements' keys.
+                            // Flags are validated: (flags & EXTR_BOTH) must be non-zero,
+                            // and excess bits are masked.
+                            let data = args.get(1).cloned().unwrap_or(Value::Null);
+                            if let Value::Array(top) = &data {
+                                let top_b = top.borrow();
+                                let internal = top_b.get(&ArrayKey::Int(1)).cloned();
+                                drop(top_b);
+                                if let Some(Value::Array(internal_arr)) = internal {
+                                    let internal_b = internal_arr.borrow();
+                                    let flags_v = internal_b
+                                        .get(&ArrayKey::String(PhpString::from_bytes(b"flags")))
+                                        .cloned()
+                                        .unwrap_or(Value::Long(1));
+                                    let flags = flags_v.to_long();
+                                    // EXTR_BOTH = 3. Mask flags & 3; if result is 0, fail.
+                                    let masked = flags & 3;
+                                    if masked == 0 {
+                                        drop(internal_b);
+                                        let class_canonical = self.builtin_canonical_name(class);
+                                        let msg = format!(
+                                            "Invalid serialization data for {} object",
+                                            class_canonical
+                                        );
+                                        let exc = self.create_exception(
+                                            b"Exception",
+                                            &msg,
+                                            self.current_line,
+                                        );
+                                        self.current_exception = Some(exc);
+                                        return Some(Value::Null);
+                                    }
+                                    let elements = internal_b
+                                        .get(&ArrayKey::String(PhpString::from_bytes(b"heap_elements")))
+                                        .cloned();
+                                    drop(internal_b);
+                                    let mut ob = obj.borrow_mut();
+                                    ob.set_property(b"__spl_extract_flags".to_vec(), Value::Long(masked));
+                                    // heap_elements is an indexed array of {data, priority} pairs.
+                                    let mut new_arr = PhpArray::new();
+                                    let mut new_pri = PhpArray::new();
+                                    if let Some(Value::Array(elems)) = elements {
+                                        for (_k, v) in elems.borrow().iter() {
+                                            if let Value::Array(pair) = v {
+                                                let p = pair.borrow();
+                                                let d = p
+                                                    .get(&ArrayKey::String(PhpString::from_bytes(b"data")))
+                                                    .cloned()
+                                                    .unwrap_or(Value::Null);
+                                                let pr = p
+                                                    .get(&ArrayKey::String(PhpString::from_bytes(b"priority")))
+                                                    .cloned()
+                                                    .unwrap_or(Value::Null);
+                                                new_arr.push(d);
+                                                new_pri.push(pr);
+                                            }
+                                        }
+                                    }
+                                    ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(new_arr))));
+                                    ob.set_property(b"__spl_priorities".to_vec(), Value::Array(Rc::new(RefCell::new(new_pri))));
+                                }
+                            }
                             Some(Value::Null)
                         }
                         _ => None,
@@ -9729,22 +10498,24 @@ impl Vm {
                                 let len = entries.len();
                                 if len > 1 {
                                     if has_user_compare {
-                                        // Use insertion sort with user compare. If the
-                                        // user comparator throws, mark the heap corrupted
-                                        // and bail out — the in-progress entry has
-                                        // already been pushed but cannot be ordered.
+                                        // Use insertion sort with user compare. PHP calls
+                                        // compare(parent, new); while result < 0 the new
+                                        // element sifts up. If the user comparator throws,
+                                        // mark the heap corrupted and bail out — the
+                                        // in-progress entry has already been pushed but
+                                        // cannot be ordered.
                                         let mut aborted = false;
                                         'outer: for i in 1..len {
                                             let mut j = i;
                                             while j > 0 {
-                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j].clone(), entries[j-1].clone()])
+                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j-1].clone(), entries[j].clone()])
                                                     .unwrap_or(Value::Null);
                                                 if self.current_exception.is_some() {
                                                     aborted = true;
                                                     break 'outer;
                                                 }
                                                 let cmp = cmp_v.to_long();
-                                                if cmp > 0 {
+                                                if cmp < 0 {
                                                     entries.swap(j-1, j);
                                                     j -= 1;
                                                 } else {
@@ -9815,23 +10586,24 @@ impl Vm {
                                     drop(ob);
                                     if has_user_compare && entries.len() >= 2 {
                                         let this_val = this.clone();
-                                        // Run one compare() to flush any potential throw.
+                                        // Run one compare(parent, child) to flush any potential throw.
                                         let _ = self.call_object_method(&this_val, b"compare", &[entries[0].clone(), entries[1].clone()]);
                                         if self.current_exception.is_some() {
                                             obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
                                             return Some(Value::Null);
                                         }
                                         // Insertion-sort with user compare to restore order.
+                                        // PHP semantics: compare(parent, new); sift up while < 0.
                                         for i in 1..entries.len() {
                                             let mut j = i;
                                             while j > 0 {
-                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j].clone(), entries[j-1].clone()]);
+                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j-1].clone(), entries[j].clone()]);
                                                 if self.current_exception.is_some() {
                                                     obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
                                                     return Some(Value::Null);
                                                 }
                                                 let cmp = cmp_v.unwrap_or(Value::Long(0)).to_long();
-                                                if cmp > 0 {
+                                                if cmp < 0 {
                                                     entries.swap(j-1, j);
                                                     j -= 1;
                                                 } else {
@@ -9883,6 +10655,33 @@ impl Vm {
                                 new_arr.push(iter);
                                 obj.borrow_mut().set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(new_arr))));
                             }
+                            Some(Value::Null)
+                        }
+                        _ => None,
+                    }
+                }
+                b"regexiterator" | b"recursiveregexiterator" => {
+                    match method {
+                        b"setmode" => {
+                            let mode = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
+                            // 0=MATCH, 1=GET_MATCH, 2=ALL_MATCHES, 3=SPLIT, 4=REPLACE
+                            if !(0..=4).contains(&mode) {
+                                let msg = "RegexIterator::setMode(): Argument #1 ($mode) must be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE";
+                                let exc = self.create_exception(b"ValueError", msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            obj.borrow_mut().set_property(b"__regex_mode".to_vec(), Value::Long(mode));
+                            Some(Value::Null)
+                        }
+                        b"setflags" => {
+                            let flags = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
+                            obj.borrow_mut().set_property(b"__regex_flags".to_vec(), Value::Long(flags));
+                            Some(Value::Null)
+                        }
+                        b"setpregflags" => {
+                            let flags = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
+                            obj.borrow_mut().set_property(b"__regex_preg_flags".to_vec(), Value::Long(flags));
                             Some(Value::Null)
                         }
                         _ => None,
@@ -10658,7 +11457,16 @@ impl Vm {
                         b"seek" => {
                             let pos = args.get(1).map(|v| v.to_long()).unwrap_or(0);
                             let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos));
+                            // PHP clamps seek to last line index when past EOF.
+                            // After seek past EOF, key() returns line_count.
+                            let lines = ob.get_property(b"__spl_file_lines");
+                            let clamped_pos = if let Value::Array(a) = &lines {
+                                let len = a.borrow().len() as i64;
+                                if pos < 0 { 0 } else if pos >= len { len } else { pos }
+                            } else {
+                                if pos < 0 { 0 } else { pos }
+                            };
+                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(clamped_pos));
                             Some(Value::Null)
                         }
                         b"setflags" => {
@@ -10778,10 +11586,11 @@ impl Vm {
                             let fields = args.get(1).cloned().unwrap_or(Value::Null);
                             let separator = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| ",".to_string());
                             let enclosure = args.get(3).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\"".to_string());
-                            let _escape = args.get(4).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\\".to_string());
+                            let escape = args.get(4).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\\".to_string());
                             let eol = args.get(5).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\n".to_string());
                             let sep_char = separator.chars().next().unwrap_or(',');
                             let encl_char = enclosure.chars().next().unwrap_or('"');
+                            let esc_char: Option<char> = escape.chars().next();
 
                             // Build CSV line
                             let mut csv_line = String::new();
@@ -10796,11 +11605,24 @@ impl Vm {
                                     let needs_quote = s.contains(sep_char) || s.contains(encl_char) || s.contains('\n') || s.contains('\r') || s.contains(' ');
                                     if needs_quote {
                                         csv_line.push(encl_char);
-                                        for c in s.chars() {
+                                        let chars: Vec<char> = s.chars().collect();
+                                        let mut i = 0;
+                                        while i < chars.len() {
+                                            let c = chars[i];
+                                            // PHP: if escape char precedes the
+                                            // enclosure, do not double the
+                                            // enclosure (the escape char takes
+                                            // care of it).
                                             if c == encl_char {
-                                                csv_line.push(encl_char);
+                                                let prev_is_escape = esc_char.is_some()
+                                                    && i > 0
+                                                    && chars[i - 1] == esc_char.unwrap();
+                                                if !prev_is_escape {
+                                                    csv_line.push(encl_char);
+                                                }
                                             }
                                             csv_line.push(c);
+                                            i += 1;
                                         }
                                         csv_line.push(encl_char);
                                     } else {
@@ -10830,6 +11652,11 @@ impl Vm {
                                     let _ = f.write_all(csv_bytes);
                                 }
                             }
+                            // Maintain an explicit byte counter so ftell()
+                            // returns the post-write file position.
+                            let mut ob = obj.borrow_mut();
+                            let prev = if let Value::Long(b) = ob.get_property(b"__spl_byte_pos") { b } else { 0 };
+                            ob.set_property(b"__spl_byte_pos".to_vec(), Value::Long(prev + bytes_written));
                             Some(Value::Long(bytes_written))
                         }
                         b"fwrite" => {
@@ -10854,11 +11681,34 @@ impl Vm {
                                 let ob = obj.borrow();
                                 let lines = ob.get_property(b"__spl_file_lines");
                                 if let Value::Array(a) = lines {
-                                    // Append data as new line(s)
+                                    // Split data into proper lines (each ending in \n except possibly last)
                                     let content = data.to_string_lossy();
                                     let mut a_mut = a.borrow_mut();
-                                    for line in content.split('\n') {
-                                        a_mut.push(Value::String(PhpString::from_string(format!("{}\n", line))));
+                                    let mut pieces: Vec<String> = Vec::new();
+                                    let mut current = String::new();
+                                    for ch in content.chars() {
+                                        current.push(ch);
+                                        if ch == '\n' {
+                                            pieces.push(std::mem::take(&mut current));
+                                        }
+                                    }
+                                    if !current.is_empty() {
+                                        pieces.push(current);
+                                    }
+                                    // If the storage already has a partial last line (no trailing \n),
+                                    // merge with the first new piece.
+                                    let len = a_mut.len() as i64;
+                                    if len > 0 {
+                                        if let Some(last) = a_mut.get(&ArrayKey::Int(len - 1)) {
+                                            let last_str = last.to_php_string().to_string_lossy();
+                                            if !last_str.ends_with('\n') && !pieces.is_empty() {
+                                                let merged = format!("{}{}", last_str, pieces.remove(0));
+                                                a_mut.set(ArrayKey::Int(len - 1), Value::String(PhpString::from_string(merged)));
+                                            }
+                                        }
+                                    }
+                                    for p in pieces {
+                                        a_mut.push(Value::String(PhpString::from_string(p)));
                                     }
                                 } else {
                                     drop(ob);
@@ -10872,7 +11722,12 @@ impl Vm {
                                 use std::io::Write;
                                 if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path_str) {
                                     match f.write(data.as_bytes()) {
-                                        Ok(n) => Some(Value::Long(n as i64)),
+                                        Ok(n) => {
+                                            let mut ob = obj.borrow_mut();
+                                            let prev = if let Value::Long(b) = ob.get_property(b"__spl_byte_pos") { b } else { 0 };
+                                            ob.set_property(b"__spl_byte_pos".to_vec(), Value::Long(prev + n as i64));
+                                            Some(Value::Long(n as i64))
+                                        }
                                         Err(_) => Some(Value::False),
                                     }
                                 } else {
@@ -10889,7 +11744,9 @@ impl Vm {
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_default();
-                            let result = if !suffix.is_empty() && name.ends_with(&suffix) {
+                            // PHP basename() does not strip the suffix if it
+                            // equals the entire basename (avoid empty result).
+                            let result = if !suffix.is_empty() && name.ends_with(&suffix) && name.len() > suffix.len() {
                                 name[..name.len() - suffix.len()].to_string()
                             } else {
                                 name
@@ -10945,6 +11802,81 @@ impl Vm {
                             // Stub: pretend the lock was acquired.
                             Some(Value::True)
                         }
+                        b"fread" => {
+                            // SplFileObject::fread(int $length): string|false
+                            let length = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                            if length <= 0 {
+                                let msg = "SplFileObject::fread(): Argument #1 ($length) must be greater than 0";
+                                let line = self.current_line;
+                                let exc = self.create_exception(b"ValueError", msg, line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            let ob = obj.borrow();
+                            let path_val = ob.get_property(b"__spl_file_path");
+                            let path_str = path_val.to_php_string().to_string_lossy();
+                            let char_pos = if let Value::Long(p) = ob.get_property(b"__spl_char_pos") { p } else {
+                                // Initialize from line position
+                                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
+                                let lines = ob.get_property(b"__spl_file_lines");
+                                if let Value::Array(a) = lines {
+                                    let a = a.borrow();
+                                    let mut total = 0i64;
+                                    for i in 0..pos {
+                                        if let Some(line) = a.get(&ArrayKey::Int(i)) {
+                                            total += line.to_php_string().as_bytes().len() as i64;
+                                        }
+                                    }
+                                    total
+                                } else { 0 }
+                            };
+                            drop(ob);
+                            // Read from file at char_pos
+                            if let Ok(content) = std::fs::read(&*path_str) {
+                                if (char_pos as usize) < content.len() {
+                                    let end = std::cmp::min(content.len(), (char_pos + length) as usize);
+                                    let data: Vec<u8> = content[char_pos as usize..end].to_vec();
+                                    let mut ob = obj.borrow_mut();
+                                    ob.set_property(b"__spl_char_pos".to_vec(), Value::Long(end as i64));
+                                    Some(Value::String(PhpString::from_vec(data)))
+                                } else {
+                                    // EOF returns empty string in PHP fread (and false for very-low-level)
+                                    Some(Value::String(PhpString::from_bytes(b"")))
+                                }
+                            } else {
+                                Some(Value::False)
+                            }
+                        }
+                        b"fscanf" => {
+                            // SplFileObject::fscanf(string $format, mixed &...$vars)
+                            // Read a line, then sscanf it.
+                            let format_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            // Get current line
+                            let mut ob = obj.borrow_mut();
+                            let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
+                            let lines = ob.get_property(b"__spl_file_lines");
+                            let line_value = if let Value::Array(a) = lines {
+                                let a_b = a.borrow();
+                                a_b.get(&ArrayKey::Int(pos)).cloned()
+                            } else { None };
+                            if line_value.is_none() {
+                                return Some(Value::Long(-1));
+                            }
+                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
+                            drop(ob);
+                            let line = line_value.unwrap();
+                            // Call sscanf with the line
+                            let sscanf_fn = self.functions.get(b"sscanf".as_slice()).copied();
+                            if let Some(sscanf) = sscanf_fn {
+                                let mut sscanf_args = vec![line, format_arg];
+                                for a in args.iter().skip(2) {
+                                    sscanf_args.push(a.clone());
+                                }
+                                sscanf(self, &sscanf_args).ok()
+                            } else {
+                                Some(Value::Null)
+                            }
+                        }
                         _ => None,
                     }
                 }
@@ -10959,7 +11891,9 @@ impl Vm {
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_default();
-                            let result = if !suffix.is_empty() && name.ends_with(&suffix) {
+                            // PHP basename() does not strip the suffix if it
+                            // equals the entire basename (avoid empty result).
+                            let result = if !suffix.is_empty() && name.ends_with(&suffix) && name.len() > suffix.len() {
                                 name[..name.len() - suffix.len()].to_string()
                             } else {
                                 name
@@ -10968,6 +11902,28 @@ impl Vm {
                         }
                         b"setfileclass" | b"setinfoclass" => {
                             let class_name = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"SplFileInfo")));
+                            // Validate the class is derived from SplFileObject (setFileClass)
+                            // or SplFileInfo (setInfoClass)
+                            let class_str = class_name.to_php_string().to_string_lossy();
+                            let class_lower: Vec<u8> = class_str.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                            let (required, method_name) = if method == b"setfileclass" {
+                                (b"splfileobject".as_slice(), "SplFileInfo::setFileClass")
+                            } else {
+                                (b"splfileinfo".as_slice(), "SplFileInfo::setInfoClass")
+                            };
+                            let required_display = if method == b"setfileclass" { "SplFileObject" } else { "SplFileInfo" };
+                            // The class must be the required class itself or extend it
+                            let ok = class_lower == required || self.class_extends(&class_lower, required);
+                            if !ok {
+                                let line = self.current_line;
+                                let msg = format!(
+                                    "{}(): Argument #1 ($class) must be a class name derived from {}, {} given",
+                                    method_name, required_display, class_str
+                                );
+                                let exc = self.create_exception(b"TypeError", &msg, line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
                             let prop_name = if method == b"setfileclass" { b"__spl_file_class" } else { b"__spl_info_class" };
                             ob.set_property(prop_name.to_vec(), class_name);
@@ -10993,7 +11949,9 @@ impl Vm {
                             } else {
                                 String::new()
                             };
-                            let result = if !suffix.is_empty() && name.ends_with(&suffix) {
+                            // PHP basename() does not strip the suffix if it
+                            // equals the entire basename (avoid empty result).
+                            let result = if !suffix.is_empty() && name.ends_with(&suffix) && name.len() > suffix.len() {
                                 name[..name.len() - suffix.len()].to_string()
                             } else {
                                 name
@@ -11002,12 +11960,49 @@ impl Vm {
                         }
                         b"seek" => {
                             let pos = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                            let ob = obj.borrow();
+                            let entries = ob.get_property(b"__spl_dir_entries");
+                            let len = if let Value::Array(a) = entries {
+                                a.borrow().len() as i64
+                            } else {
+                                0
+                            };
+                            drop(ob);
+                            if pos < 0 || pos >= len {
+                                // Set pos past end so valid() returns false
+                                let mut ob = obj.borrow_mut();
+                                ob.set_property(b"__spl_pos".to_vec(), Value::Long(len));
+                                drop(ob);
+                                let msg = format!("Seek position {} is out of range", pos);
+                                let exc = self.create_exception(b"OutOfBoundsException", &msg, 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
                             ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos));
                             Some(Value::Null)
                         }
                         b"setfileclass" | b"setinfoclass" => {
                             let class_name = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"SplFileInfo")));
+                            let class_str = class_name.to_php_string().to_string_lossy();
+                            let class_lower: Vec<u8> = class_str.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                            let (required, method_name) = if method == b"setfileclass" {
+                                (b"splfileobject".as_slice(), "SplFileInfo::setFileClass")
+                            } else {
+                                (b"splfileinfo".as_slice(), "SplFileInfo::setInfoClass")
+                            };
+                            let required_display = if method == b"setfileclass" { "SplFileObject" } else { "SplFileInfo" };
+                            let ok = class_lower == required || self.class_extends(&class_lower, required);
+                            if !ok {
+                                let line = self.current_line;
+                                let msg = format!(
+                                    "{}(): Argument #1 ($class) must be a class name derived from {}, {} given",
+                                    method_name, required_display, class_str
+                                );
+                                let exc = self.create_exception(b"TypeError", &msg, line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             let mut ob = obj.borrow_mut();
                             let prop_name = if method == b"setfileclass" { b"__spl_file_class" } else { b"__spl_info_class" };
                             ob.set_property(prop_name.to_vec(), class_name);
@@ -18412,8 +19407,8 @@ impl Vm {
                                         b"recursivecachingiterator",
                                         b"recursivefilteriterator",
                                         b"recursiveregexiterator",
-                                        b"recursiveiteratoriterator",
                                         b"recursivetreeiterator",
+                                        b"recursiveiteratoriterator",
                                         b"callbackfilteriterator",
                                         b"cachingiterator",
                                         b"filteriterator",
@@ -18724,6 +19719,7 @@ impl Vm {
                                             }
                                         }
                                         b"iteratoriterator" | b"recursiveiteratoriterator"
+                                        | b"recursivetreeiterator"
                                         | b"norewinditerator" | b"infiniteiterator"
                                         | b"cachingiterator" | b"recursivecachingiterator"
                                         | b"filteriterator" | b"callbackfilteriterator"
@@ -18731,14 +19727,32 @@ impl Vm {
                                         | b"regexiterator" | b"recursiveregexiterator"
                                         | b"parentiterator" => {
                                             // __construct(Iterator $iterator, ...)
-                                            // Require at least 1 user arg (the iterator)
-                                            if call.args.len() <= 1 {
+                                            // Minimum-argument check per builtin.
+                                            let min_args: usize = match class_lower.as_slice() {
+                                                b"callbackfilteriterator" | b"recursivecallbackfilteriterator" => 2,
+                                                b"regexiterator" | b"recursiveregexiterator" => 2,
+                                                _ => 1,
+                                            };
+                                            let user_arg_count = call.args.len().saturating_sub(1);
+                                            if user_arg_count < min_args {
                                                 drop(obj_mut);
                                                 let class_canonical = self.builtin_canonical_name(&class_lower);
-                                                let msg = format!(
-                                                    "{}::__construct() expects at least 1 argument, 0 given",
-                                                    class_canonical
-                                                );
+                                                let verb = if min_args == user_arg_count + 1 || min_args == 1 {
+                                                    "at least"
+                                                } else {
+                                                    "exactly"
+                                                };
+                                                let msg = if min_args == 1 {
+                                                    format!(
+                                                        "{}::__construct() expects {} 1 argument, {} given",
+                                                        class_canonical, verb, user_arg_count
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "{}::__construct() expects exactly {} arguments, {} given",
+                                                        class_canonical, min_args, user_arg_count
+                                                    )
+                                                };
                                                 let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
@@ -18751,6 +19765,42 @@ impl Vm {
                                                     message: format!("Uncaught ArgumentCountError: {}", msg),
                                                     line: op.line,
                                                 });
+                                            }
+                                            // Max-argument check per builtin.
+                                            let max_args: Option<usize> = match class_lower.as_slice() {
+                                                b"iteratoriterator" => Some(2),
+                                                b"norewinditerator" | b"infiniteiterator" | b"parentiterator" => Some(1),
+                                                b"filteriterator" | b"recursivefilteriterator" => Some(1),
+                                                b"callbackfilteriterator" | b"recursivecallbackfilteriterator" => Some(2),
+                                                b"cachingiterator" | b"recursivecachingiterator" => Some(2),
+                                                b"recursiveiteratoriterator" | b"recursivetreeiterator" => Some(3),
+                                                b"regexiterator" | b"recursiveregexiterator" => Some(5),
+                                                _ => None,
+                                            };
+                                            if let Some(max) = max_args {
+                                                let user_arg_count = call.args.len().saturating_sub(1);
+                                                if user_arg_count > max {
+                                                    drop(obj_mut);
+                                                    let class_canonical = self.builtin_canonical_name(&class_lower);
+                                                    let msg = format!(
+                                                        "{}::__construct() expects at most {} argument{}, {} given",
+                                                        class_canonical, max,
+                                                        if max == 1 { "" } else { "s" },
+                                                        user_arg_count
+                                                    );
+                                                    let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                        let ct = *catch_target;
+                                                        ip = ct as usize;
+                                                        continue;
+                                                    }
+                                                    return Err(VmError {
+                                                        message: format!("Uncaught ArgumentCountError: {}", msg),
+                                                        line: op.line,
+                                                    });
+                                                }
                                             }
                                             // For RecursiveIteratorIterator, if the inner is an IteratorAggregate,
                                             // validate that getIterator() returns a Traversable, then cache the
@@ -18811,6 +19861,38 @@ impl Vm {
                                                 class_lower.as_slice(),
                                                 b"callbackfilteriterator" | b"recursivecallbackfilteriterator"
                                             ) {
+                                                // Validate callback type. PHP rejects bool/null/int/float/object with a specific message.
+                                                let cb = &call.args[2];
+                                                let cb_error: Option<&'static str> = match cb {
+                                                    Value::Null | Value::True | Value::False
+                                                    | Value::Long(_) | Value::Double(_) => Some("no array or string given"),
+                                                    Value::Array(a) => {
+                                                        if a.borrow().len() != 2 {
+                                                            Some("array callback must have exactly two members")
+                                                        } else { None }
+                                                    }
+                                                    _ => None,
+                                                };
+                                                if let Some(err_detail) = cb_error {
+                                                    drop(obj_mut);
+                                                    let class_canonical = self.builtin_canonical_name(&class_lower);
+                                                    let msg = format!(
+                                                        "{}::__construct(): Argument #2 ($callback) must be a valid callback, {}",
+                                                        class_canonical, err_detail
+                                                    );
+                                                    let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                        let ct = *catch_target;
+                                                        ip = ct as usize;
+                                                        continue;
+                                                    }
+                                                    return Err(VmError {
+                                                        message: format!("Uncaught TypeError: {}", msg),
+                                                        line: op.line,
+                                                    });
+                                                }
                                                 obj_mut.set_property(b"__spl_callback".to_vec(), call.args[2].clone());
                                             }
                                             // RecursiveIteratorIterator mode
@@ -18862,7 +19944,7 @@ impl Vm {
                                             }
                                             if count < -1 {
                                                 drop(obj_mut);
-                                                let msg = "LimitIterator::__construct(): Argument #3 ($count) must be greater than or equal to -1";
+                                                let msg = "LimitIterator::__construct(): Argument #3 ($limit) must be greater than or equal to -1";
                                                 let exc = self.create_exception(b"ValueError", msg, op.line);
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
@@ -18892,7 +19974,17 @@ impl Vm {
                                                     "AppendIterator::__construct() expects exactly 0 arguments, {} given",
                                                     given
                                                 );
+                                                // Push a stack frame for AppendIterator->__construct
+                                                let ctor_trace_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+                                                self.call_stack.push((
+                                                    "AppendIterator->__construct".to_string(),
+                                                    self.current_file.clone(),
+                                                    op.line,
+                                                    ctor_trace_args,
+                                                    true,
+                                                ));
                                                 let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                self.call_stack.pop();
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
                                                     pending_calls_catch_depth = Some(*eh_pc_depth);
@@ -19025,6 +20117,21 @@ impl Vm {
                                             // __construct(string $directory)
                                             if call.args.len() > 1 {
                                                 let path = call.args[1].to_php_string().to_string_lossy();
+                                                // Empty path is a ValueError
+                                                if path.is_empty() {
+                                                    drop(obj_mut);
+                                                    let class_canonical = self.builtin_canonical_name(&class_lower);
+                                                    let msg = format!("{}::__construct(): Argument #1 ($directory) must not be empty", class_canonical);
+                                                    let exc = self.create_exception(b"ValueError", &msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                        let ct = *catch_target;
+                                                        ip = ct as usize;
+                                                        continue;
+                                                    }
+                                                    return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: op.line });
+                                                }
                                                 obj_mut.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(path.clone())));
                                                 // Read directory entries
                                                 if let Ok(entries) = std::fs::read_dir(&path) {
@@ -27529,10 +28636,20 @@ impl Vm {
                             );
                             obj.set_property(b"__spl_size".to_vec(), Value::Long(0));
                         }
-                        b"spldoublylinkedlist" | b"splstack" | b"splqueue" | b"splpriorityqueue"
+                        b"spldoublylinkedlist" | b"splstack" | b"splqueue"
                         | b"splmaxheap" | b"splminheap" => {
                             obj.set_property(
                                 b"__spl_array".to_vec(),
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            );
+                        }
+                        b"splpriorityqueue" => {
+                            obj.set_property(
+                                b"__spl_array".to_vec(),
+                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                            );
+                            obj.set_property(
+                                b"__spl_priorities".to_vec(),
                                 Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
                             );
                         }
