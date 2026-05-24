@@ -24240,7 +24240,16 @@ impl Vm {
                                     if let Some(custom_msg) = dep_result {
                                         let class_display = String::from_utf8_lossy(&resolved_class).to_string();
                                         let const_display = prop_name.to_string_lossy();
-                                        let prefix = format!("Constant {}::{}", class_display, const_display);
+                                        // Enum cases use "Enum case" instead of "Constant" in PHP's banner.
+                                        let is_enum_case = self.classes.get(&class_lower)
+                                            .map(|c| c.is_enum
+                                                && c.enum_cases.iter().any(|(n, _)| n == prop_name.as_bytes()))
+                                            .unwrap_or(false);
+                                        let prefix = if is_enum_case {
+                                            format!("Enum case {}::{}", class_display, const_display)
+                                        } else {
+                                            format!("Constant {}::{}", class_display, const_display)
+                                        };
                                         let msg = self.format_deprecated_message(&prefix, &custom_msg);
                                         self.emit_user_deprecated_at(&msg, op.line);
                                     }

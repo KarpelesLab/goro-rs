@@ -5117,7 +5117,7 @@ impl Compiler {
                                 });
                             }
                         }
-                        ClassMember::EnumCase { name: case_name, value, doc_comment: case_doc_comment, .. } => {
+                        ClassMember::EnumCase { name: case_name, value, attributes: case_attributes, doc_comment: case_doc_comment } => {
                             // 'case' can only be used in enums
                             if !modifiers.is_enum {
                                 return Err(CompileError {
@@ -5249,11 +5249,12 @@ impl Compiler {
                             // ReflectionClassConstant / ReflectionEnumUnitCase / BackedCase.
                             let declaring_class_lower_ec: Vec<u8> = qualified_name
                                 .iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let case_attrs_compiled = self.compile_attributes_target(case_attributes, "constant");
                             class.constants_meta.insert(case_name.clone(), crate::object::ConstantMeta {
                                 visibility: crate::object::Visibility::Public,
                                 is_final: false,
                                 declaring_class: declaring_class_lower_ec,
-                                attributes: Vec::new(),
+                                attributes: case_attrs_compiled,
                                 declared_type: None,
                                 doc_comment: case_doc_comment.as_ref()
                                     .map(|d| String::from_utf8_lossy(d).into_owned()),
