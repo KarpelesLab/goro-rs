@@ -135,8 +135,20 @@ fn is_array(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn is_numeric(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
+fn is_numeric(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        let msg = "is_numeric() expects exactly 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
+    }
+    if args.len() > 1 {
+        let msg = format!("is_numeric() expects exactly 1 argument, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let val = &args[0];
     Ok(match val {
         Value::Long(_) | Value::Double(_) => Value::True,
         Value::String(s) => {

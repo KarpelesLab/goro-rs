@@ -2503,6 +2503,33 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let cb = callback.unwrap().clone();
             validate_callback_generic(vm, &cb, "array_filter", "Argument #2 ($callback)")?;
 
+            // Pre-validate arg count for known string-named user functions / builtins.
+            // array_filter calls the callback with `n_args`:
+            //   mode 0: 1 arg (value)
+            //   mode 1: 2 args (value, key)
+            //   mode 2: 1 arg (key)
+            let n_args: u32 = if mode == 1 { 2 } else { 1 };
+            if let Value::String(s) = &cb {
+                let func_name = s.as_bytes().to_vec();
+                let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                    let required = user_fn.required_param_count;
+                    if n_args < required {
+                        let display_name = String::from_utf8_lossy(&func_name).into_owned();
+                        let total_params = user_fn.param_count;
+                        let has_optional = total_params > required;
+                        let qualifier = if has_optional { "at least" } else { "exactly" };
+                        let msg = format!(
+                            "Too few arguments to function {}(), {} passed and {} {} expected",
+                            display_name, n_args, qualifier, required
+                        );
+                        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: vm.current_line });
+                    }
+                }
+            }
+
             for (key, val) in &arr_data {
                 let key_val = match key {
                     ArrayKey::Int(n) => Value::Long(*n),
@@ -6111,8 +6138,20 @@ fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
         }
     }
 }
-fn is_numeric_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
+fn is_numeric_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        let msg = "is_numeric() expects exactly 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
+    }
+    if args.len() > 1 {
+        let msg = format!("is_numeric() expects exactly 1 argument, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let val = &args[0];
     Ok(match val {
         Value::Long(_) | Value::Double(_) => Value::True,
         Value::String(s) => {
