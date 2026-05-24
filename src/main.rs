@@ -31,23 +31,17 @@ fn main() {
         run_builtin_server(&args[1..]);
     }
 
+    // Terminal subcommands that own the whole arg list.
     match args[1].as_str() {
-        "-r" => {
-            // Run PHP code from command line
-            if args.len() < 3 {
-                eprintln!("Error: -r requires a code argument");
-                process::exit(1);
-            }
-            let code = format!("<?php {}", args[2]);
-            run_code(code.as_bytes(), "Command line code");
-        }
         "-v" | "--version" => {
             println!("goro-rs 0.1.0 (PHP 8.5.4 compatible)");
             println!("Copyright (c) goro-rs contributors");
             println!("Built with Rust");
+            return;
         }
         "-h" | "--help" => {
             print_usage(&args[0]);
+            return;
         }
         "--test" => {
             // Run PHPT tests
@@ -66,21 +60,81 @@ fn main() {
             if fail > 0 || error > 0 {
                 process::exit(1);
             }
+            return;
         }
-        file_path => {
-            // Run a PHP file
-            let path = Path::new(file_path);
-            if !path.exists() {
-                eprintln!("Error: file not found: {}", file_path);
-                process::exit(1);
-            }
-            match std::fs::read(path) {
-                Ok(source) => run_code(&source, file_path),
-                Err(e) => {
-                    eprintln!("Error reading file: {}", e);
+        _ => {}
+    }
+
+    // PHP-CLI-compatible flag scan: skip leading options (-n, -d <dir>, -C, -q,
+    // -f <file>, -r <code>) to find the script path. This matters because the
+    // PHPT harness shells out to this binary as `goro -n script.php` and many
+    // tests run `$php -d ini=val ...`. Without this, the first flag would be
+    // mistaken for a filename ("file not found: -n").
+    let mut i = 1;
+    let mut script: Option<String> = None;
+    let mut inline_code: Option<String> = None;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "-r" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: -r requires a code argument");
                     process::exit(1);
                 }
+                inline_code = Some(args[i + 1].clone());
+                break;
             }
+            "-f" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: -f requires a file argument");
+                    process::exit(1);
+                }
+                script = Some(args[i + 1].clone());
+                break;
+            }
+            // INI / behavior flags that take a following argument.
+            "-d" => { i += 2; continue; }
+            // Switches with no argument; ignore.
+            "-n" | "-C" | "-q" | "-z" => { i += 1; continue; }
+            "--" => { i += 1; break; }
+            _ => {
+                if a.starts_with('-') && a.len() > 1 {
+                    // Unknown option: ignore rather than treat as a file, to
+                    // mirror PHP's lenient CLI for flags we don't model.
+                    i += 1;
+                    continue;
+                }
+                // First bare argument is the script path.
+                script = Some(args[i].clone());
+                break;
+            }
+        }
+    }
+
+    if let Some(code) = inline_code {
+        let code = format!("<?php {}", code);
+        run_code(code.as_bytes(), "Command line code");
+        return;
+    }
+
+    let file_path = match script {
+        Some(s) => s,
+        None => {
+            print_usage(&args[0]);
+            process::exit(1);
+        }
+    };
+
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        eprintln!("Error: file not found: {}", file_path);
+        process::exit(1);
+    }
+    match std::fs::read(path) {
+        Ok(source) => run_code(&source, &file_path),
+        Err(e) => {
+            eprintln!("Error reading file: {}", e);
+            process::exit(1);
         }
     }
 }
