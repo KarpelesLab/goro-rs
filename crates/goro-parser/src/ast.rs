@@ -17,7 +17,7 @@ pub enum StmtKind {
     ClassDecl { name: Vec<u8>, modifiers: ClassModifiers, extends: Option<Vec<u8>>, implements: Vec<Vec<u8>>, body: Vec<ClassMember>, enum_backing_type: Option<Vec<u8>>, attributes: Vec<Attribute> },
     TryCatch { try_body: Vec<Statement>, catches: Vec<CatchClause>, finally_body: Option<Vec<Statement>> },
     Throw(Expr), Global(Vec<Vec<u8>>), StaticVar(Vec<(Vec<u8>, Option<Expr>)>), Unset(Vec<Expr>),
-    Declare { directives: Vec<(Vec<u8>, Expr)>, body: Option<Vec<Statement>> },
+    Declare { directives: Vec<(Vec<u8>, Expr)>, body: Option<Vec<Statement>>, attributes: Vec<Attribute> },
     NamespaceDecl { name: Option<Vec<Vec<u8>>>, body: Option<Vec<Statement>> },
     UseDecl(Vec<UseItem>), Label(Vec<u8>), Goto(Vec<u8>), Nop,
 }

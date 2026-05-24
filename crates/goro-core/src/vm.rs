@@ -215,6 +215,8 @@ pub struct Vm {
     is_global_scope: bool,
     /// User-defined constants (from define())
     pub constants: HashMap<Vec<u8>, Value>,
+    /// Attributes attached to user-defined constants
+    pub constant_attributes: HashMap<Vec<u8>, Vec<crate::object::RuntimeAttribute>>,
     /// Current exception being thrown (used during try/catch)
     pub current_exception: Option<Value>,
     /// Error reporting level
@@ -349,6 +351,7 @@ impl Vm {
             pending_classes: Vec::new(),
             is_global_scope: true,
             current_exception: None,
+            constant_attributes: HashMap::new(),
             error_reporting: 30719, // E_ALL
             magic_depth: 0,
             destructible_objects: Vec::new(),
@@ -9028,6 +9031,9 @@ impl Vm {
                 }
                 b"reflectionclassconstant" | b"reflectionenumunitcase" | b"reflectionenumbackedcase" => {
                     crate::reflection::reflection_class_constant_docall(self, method, args)
+                }
+                b"reflectionconstant" => {
+                    crate::reflection::reflection_constant_docall(self, method, args)
                 }
                 b"reflectionattribute" => {
                     crate::reflection::reflection_attribute_docall(self, method, args)
@@ -18681,6 +18687,22 @@ impl Vm {
                             }
                         }
                         static_cv_keys.insert(idx, key);
+                    }
+                }
+
+                OpCode::RegisterConstAttrs => {
+                    let idx_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let idx = idx_val.to_long() as usize;
+                    if let Some((name, attrs)) = op_array.const_attribute_table.get(idx) {
+                        let key = name.clone();
+                        // Redefinition behavior: PHP keeps the original
+                        // attributes on a constant — even if a redefinition
+                        // has different attributes (or none at all).
+                        if !self.constants.contains_key(&key)
+                            && !self.constant_attributes.contains_key(&key)
+                        {
+                            self.constant_attributes.insert(key, attrs.clone());
+                        }
                     }
                 }
 

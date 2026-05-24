@@ -307,7 +307,7 @@ impl Parser {
                     span,
                 })
             }
-            TokenKind::AttributeOpen => { let attributes = self.parse_attributes()?; match self.peek() { TokenKind::Function => self.parse_function_decl_with_attrs(attributes), TokenKind::Class | TokenKind::Abstract | TokenKind::Final | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => self.parse_class_decl_with_attrs(attributes), TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface | TokenKind::Readonly) => self.parse_class_decl_with_attrs(attributes), _ => self.parse_statement(), } }
+            TokenKind::AttributeOpen => { let attributes = self.parse_attributes()?; match self.peek() { TokenKind::Function => self.parse_function_decl_with_attrs(attributes), TokenKind::Class | TokenKind::Abstract | TokenKind::Final | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => self.parse_class_decl_with_attrs(attributes), TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface | TokenKind::Readonly) => self.parse_class_decl_with_attrs(attributes), TokenKind::Const => self.parse_const_with_attrs(attributes), _ => self.parse_statement(), } }
             TokenKind::Function => self.parse_function_decl_with_attrs(Vec::new()),
             TokenKind::Class
             | TokenKind::Abstract
@@ -396,6 +396,7 @@ impl Parser {
                     kind: StmtKind::Declare {
                         directives: vec![(name, value)],
                         body: None,
+                        attributes: Vec::new(),
                     },
                     span,
                 })
@@ -1113,6 +1114,49 @@ impl Parser {
         }
         Ok(Statement {
             kind: StmtKind::Switch { expr, cases },
+            span,
+        })
+    }
+
+    fn parse_const_with_attrs(&mut self, attributes: Vec<Attribute>) -> ParseResult<Statement> {
+        let span = self.span();
+        self.advance(); // const
+        // Parse one or more name=value pairs separated by commas
+        let mut directives: Vec<(Vec<u8>, Expr)> = Vec::new();
+        let has_attrs = !attributes.is_empty();
+        loop {
+            let name = match self.peek().clone() {
+                TokenKind::Identifier(name) => {
+                    self.advance();
+                    name
+                }
+                _ if self.is_semi_reserved_keyword() => {
+                    let kw = self.keyword_to_identifier();
+                    self.advance();
+                    kw
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "expected constant name".into(),
+                        span: self.span(),
+                    });
+                }
+            };
+            self.expect(&TokenKind::Assign)?;
+            let value = self.parse_expression()?;
+            directives.push((name, value));
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        let _ = has_attrs; // for future use
+        self.expect_semicolon()?;
+        Ok(Statement {
+            kind: StmtKind::Declare {
+                directives,
+                body: None,
+                attributes,
+            },
             span,
         })
     }
@@ -2760,7 +2804,7 @@ impl Parser {
         };
 
         Ok(Statement {
-            kind: StmtKind::Declare { directives, body },
+            kind: StmtKind::Declare { directives, body, attributes: Vec::new() },
             span,
         })
     }
@@ -4413,7 +4457,7 @@ impl Parser {
             }
             TokenKind::New => {
                 self.advance();
-                let _anon_attrs = if matches!(self.peek(), TokenKind::AttributeOpen) { self.parse_attributes()? } else { Vec::new() };
+                let anon_attrs = if matches!(self.peek(), TokenKind::AttributeOpen) { self.parse_attributes()? } else { Vec::new() };
                 // Check for class modifiers before anonymous class: new readonly class, new abstract class, etc.
                 let mut anon_modifiers = ClassModifiers::default();
                 let mut has_anon_modifiers = false;
@@ -4638,7 +4682,7 @@ impl Parser {
                                 implements,
                                 body,
                                 enum_backing_type: None,
-                                attributes: Vec::new(),
+                                attributes: anon_attrs,
                             },
                             span,
                         };

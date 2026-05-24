@@ -149,6 +149,9 @@ pub enum OpCode {
     Return,
     /// Declare a user function: op1 = name (const), op2 = function OpArray index (const)
     DeclareFunction,
+    /// Register attributes for a top-level constant. op1 = index into the
+    /// current OpArray's `const_attribute_table` (const literal of type Long).
+    RegisterConstAttrs,
 
     // ---- Variables ----
     /// Load a constant value into a temporary
@@ -351,6 +354,9 @@ pub struct OpArray {
     pub filename: Vec<u8>,
     /// For FCC closures: the original function/method name (e.g. "strrev", "Foo::bar")
     pub fcc_target_name: Option<Vec<u8>>,
+    /// Attribute payloads for top-level constants, keyed by FQN. Indexed via
+    /// `OpCode::RegisterConstAttrs` instructions emitted by the compiler.
+    pub const_attribute_table: Vec<(Vec<u8>, Vec<crate::object::RuntimeAttribute>)>,
 }
 
 impl OpArray {
@@ -379,6 +385,7 @@ impl OpArray {
             fcc_target_name: None,
             param_attributes: Vec::new(),
             filename: Vec::new(),
+            const_attribute_table: Vec::new(),
         }
     }
 

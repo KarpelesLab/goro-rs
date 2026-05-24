@@ -93,6 +93,9 @@ pub struct Compiler {
     pub warnings: Vec<(String, u32)>,
     /// Whether the current expression's result will be discarded (for #[\NoDiscard])
     is_discarding_result: bool,
+    /// Compile-time fatal errors collected during attribute validation that
+    /// should be raised before the script executes. The first one wins.
+    pub deferred_fatal_errors: Vec<String>,
 }
 
 impl Default for Compiler {
@@ -204,6 +207,7 @@ impl Compiler {
             is_in_trait: false,
             warnings: Vec::new(),
             is_discarding_result: false,
+            deferred_fatal_errors: Vec::new(),
         }
     }
 
@@ -342,7 +346,90 @@ impl Compiler {
         }
     }
 
+    /// Validate built-in attributes against the placement target. Returns
+    /// an error message if the attribute cannot be placed in this context.
+    /// `target` is one of: "class", "function", "method", "parameter",
+    /// "property", "class constant", "constant".
+    fn validate_internal_attr(name: &[u8], target: &str) -> Option<String> {
+        // Strip leading backslash for fully-qualified names
+        let bare: &[u8] = if name.first() == Some(&b'\\') { &name[1..] } else { name };
+        // "Attribute" is only allowed on classes.
+        if bare.eq_ignore_ascii_case(b"Attribute") && target != "class" {
+            return Some(format!(
+                "Attribute \"Attribute\" cannot target {} (allowed targets: class)",
+                target
+            ));
+        }
+        // "AllowDynamicProperties" is only allowed on classes.
+        if bare.eq_ignore_ascii_case(b"AllowDynamicProperties") && target != "class" {
+            return Some(format!(
+                "Attribute \"AllowDynamicProperties\" cannot target {} (allowed targets: class)",
+                target
+            ));
+        }
+        // "SensitiveParameter" is only allowed on parameters.
+        if bare.eq_ignore_ascii_case(b"SensitiveParameter") && target != "parameter" {
+            return Some(format!(
+                "Attribute \"SensitiveParameter\" cannot target {} (allowed targets: parameter)",
+                target
+            ));
+        }
+        // "NoDiscard" is allowed on function and method
+        if bare.eq_ignore_ascii_case(b"NoDiscard")
+            && target != "function" && target != "method" {
+            return Some(format!(
+                "Attribute \"NoDiscard\" cannot target {} (allowed targets: function, method)",
+                target
+            ));
+        }
+        // Note: We intentionally skip Override and Deprecated here, because:
+        //   - Override target validation is part of runtime inheritance
+        //     checks (we already pass those tests today).
+        //   - Deprecated allows class (for traits), function, method, and
+        //     constants; the runtime validates trait usage separately.
+        None
+    }
+
     fn compile_attributes(&mut self, attrs: &[goro_parser::ast::Attribute]) -> Vec<crate::object::RuntimeAttribute> {
+        self.compile_attributes_target(attrs, "")
+    }
+
+    /// Same as `compile_attributes`, but additionally validates built-in
+    /// attributes against the placement target. If validation fails the
+    /// error is queued on the compiler so the executor can raise a fatal
+    /// before running the surrounding code.
+    fn compile_attributes_target(&mut self, attrs: &[goro_parser::ast::Attribute], target: &str) -> Vec<crate::object::RuntimeAttribute> {
+        // If #[DelayedTargetValidation] is present, skip compile-time target
+        // validation for built-in attributes (PHP 8.5).
+        let has_delayed = attrs.iter().any(|a| {
+            let last = a.name.last().map(|s| s.as_slice()).unwrap_or(&[]);
+            last.eq_ignore_ascii_case(b"DelayedTargetValidation")
+        });
+        let effective_target = if has_delayed { "" } else { target };
+        // Check for repeated internal/non-repeatable attributes at compile time.
+        // Internal attributes (Attribute, AllowDynamicProperties, SensitiveParameter,
+        // NoDiscard, Override, Deprecated, ReturnTypeWillChange, DelayedTargetValidation)
+        // are NOT repeatable. The `#[\DelayedTargetValidation]` bypass does NOT apply
+        // to repetition errors (per repetition_errors.phpt).
+        let internal_non_repeatable: &[&[u8]] = &[
+            b"Attribute", b"AllowDynamicProperties", b"SensitiveParameter",
+            b"NoDiscard", b"Override", b"Deprecated", b"ReturnTypeWillChange",
+            b"DelayedTargetValidation",
+        ];
+        for builtin in internal_non_repeatable {
+            let occurrences: Vec<_> = attrs.iter().filter(|a| {
+                let last = a.name.last().map(|s| s.as_slice()).unwrap_or(&[]);
+                // Strip leading backslash
+                let bare: &[u8] = if last.first() == Some(&b'\\') { &last[1..] } else { last };
+                bare.eq_ignore_ascii_case(builtin)
+            }).collect();
+            if occurrences.len() > 1 {
+                let display = std::str::from_utf8(builtin).unwrap_or("");
+                self.deferred_fatal_errors.push(format!(
+                    "Attribute \"{}\" must not be repeated", display
+                ));
+            }
+        }
         attrs.iter().map(|attr| {
             let name = if attr.name.len() == 1 {
                 self.resolve_class_name(&attr.name[0])
@@ -354,6 +441,27 @@ impl Compiler {
                 }
                 self.resolve_class_name(&f)
             };
+            if !effective_target.is_empty() {
+                if let Some(msg) = Self::validate_internal_attr(&name, effective_target) {
+                    self.deferred_fatal_errors.push(msg);
+                }
+            }
+            // Attribute argument lists cannot use unpacking (...) per PHP.
+            for arg in &attr.args {
+                if arg.unpack {
+                    self.deferred_fatal_errors.push("Cannot use unpacking in attribute argument list".to_string());
+                    break;
+                }
+            }
+            // Attribute argument expressions must be constant expressions.
+            for arg in &attr.args {
+                if !Self::is_const_attr_expr(&arg.value) {
+                    self.deferred_fatal_errors.push(
+                        "Constant expression contains invalid operations".to_string(),
+                    );
+                    break;
+                }
+            }
             let mut ac = Compiler::new();
             ac.current_namespace = self.current_namespace.clone();
             ac.use_map = self.use_map.clone();
@@ -744,6 +852,11 @@ impl Compiler {
             result: OperandType::Unused,
             line: 0,
         });
+        // If any deferred fatal errors were collected (e.g. internal attribute
+        // target violations), surface the first one as a compile error.
+        if let Some(msg) = self.deferred_fatal_errors.into_iter().next() {
+            return Err(CompileError { message: msg, line: 0 });
+        }
         Ok((self.op_array, self.compiled_classes, self.warnings))
     }
 
@@ -1643,7 +1756,7 @@ impl Compiler {
                 func_compiler.op_array.is_generator = is_generator;
                 func_compiler.op_array.decl_line = stmt.span.line;
                 func_compiler.op_array.strict_types = self.op_array.strict_types;
-                func_compiler.op_array.attributes = self.compile_attributes(func_attributes);
+                func_compiler.op_array.attributes = self.compile_attributes_target(func_attributes, "function");
                 func_compiler.source_file = self.source_file.clone();
                 func_compiler.anon_class_name_map = self.anon_class_name_map.clone();
 
@@ -1752,7 +1865,7 @@ impl Compiler {
                     .filter(|p| p.default.is_none() && !p.variadic)
                     .count() as u32;
                 // Compile parameter attributes
-                func_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
+                func_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes_target(&p.attributes, "parameter")).collect();
                 // Record which parameters are by-reference
                 func_compiler.op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
                 // Record which parameters have default values
@@ -1851,7 +1964,15 @@ impl Compiler {
                 Ok(())
             }
 
-            StmtKind::Declare { directives, body } => {
+            StmtKind::Declare { directives, body, attributes } => {
+                // If attributes are present and there's more than one directive,
+                // this is `#[Attr] const A=1, B=2;` which is a fatal error.
+                if !attributes.is_empty() && directives.len() > 1 {
+                    self.deferred_fatal_errors.push(
+                        "Cannot apply attributes to multiple constants at once".to_string(),
+                    );
+                }
+
                 // Handle const declarations (parsed as Declare directives)
                 for (name, value) in directives {
                     let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -1938,6 +2059,20 @@ impl Compiler {
                     // Emit it as a define() call
                     // Build the fully-qualified constant name
                     let fqn = self.prefix_with_namespace(name);
+                    // Register any attributes for this constant (PHP 8.5+)
+                    if !attributes.is_empty() {
+                        let compiled_attrs = self.compile_attributes_target(attributes, "constant");
+                        let idx = self.op_array.const_attribute_table.len() as i64;
+                        self.op_array.const_attribute_table.push((fqn.clone(), compiled_attrs));
+                        let idx_lit = self.op_array.add_literal(Value::Long(idx));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::RegisterConstAttrs,
+                            op1: OperandType::Const(idx_lit),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    }
                     let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(fqn)));
                     let define_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(b"define")));
                     let arg_count_idx = self.op_array.add_literal(Value::Long(2));
@@ -2501,7 +2636,7 @@ impl Compiler {
                 if let Some(ext) = extends {
                     self.current_parent_class = Some(self.resolve_class_name(ext));
                 }
-                class.attributes = self.compile_attributes(class_attributes);
+                class.attributes = self.compile_attributes_target(class_attributes, "class");
 
                 // Enums automatically implement UnitEnum (and BackedEnum if backed)
                 if modifiers.is_enum {
@@ -3190,7 +3325,7 @@ impl Compiler {
                                 is_virtual: prop_is_virtual,
                                 is_abstract: *prop_is_abstract,
                                 is_final: *prop_is_final,
-                                attributes: self.compile_attributes(attributes),
+                                attributes: self.compile_attributes_target(attributes, "property"),
                             });
 
                             // Compile property get hook as a method: __property_get_$propname
@@ -3647,7 +3782,7 @@ impl Compiler {
                                                     line: *method_line,
                                                 });
                                             }
-                                            let pa = self.compile_attributes(&param.attributes);
+                                            let pa = self.compile_attributes_target(&param.attributes, "parameter");
                                             // Promoted typed properties start as Undef (constructor sets the value)
                                             // Promoted untyped properties get Null as default
                                             let promoted_default = if promoted_prop_type.is_some() {
@@ -3902,7 +4037,7 @@ impl Compiler {
                                     method_compiler.op_array.param_has_default = has_default;
                                 }
                                 // Compile parameter attributes
-                                method_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
+                                method_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes_target(&p.attributes, "parameter")).collect();
 
                                 for param in params {
                                     // Check for $this as parameter name
@@ -4088,7 +4223,7 @@ impl Compiler {
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
                                         doc_comment: None,
-                                        attributes: self.compile_attributes(method_attributes),
+                                        attributes: self.compile_attributes_target(method_attributes, "method"),
                                     },
                                 );
                             } else {
@@ -4136,7 +4271,7 @@ impl Compiler {
                                     has_default.extend(params.iter().map(|p| p.default.is_some()));
                                     abstract_op_array.param_has_default = has_default;
                                 }
-                                abstract_op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
+                                abstract_op_array.param_attributes = params.iter().map(|p| self.compile_attributes_target(&p.attributes, "parameter")).collect();
                                 for param in params {
                                     let cv = abstract_op_array.get_or_create_cv(&param.name);
                                     if param.variadic {
@@ -4180,7 +4315,7 @@ impl Compiler {
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
                                         doc_comment: None,
-                                        attributes: self.compile_attributes(method_attributes),
+                                        attributes: self.compile_attributes_target(method_attributes, "method"),
                                     },
                                 );
                             }
@@ -9244,6 +9379,55 @@ impl Compiler {
                 Ok(false)
             }
             _ => Ok(false),
+        }
+    }
+
+    /// Check whether an expression is allowed inside an attribute argument.
+    /// PHP requires these to be constant expressions; function calls,
+    /// method calls, dynamic ops, and similar runtime constructs are
+    /// rejected at compile time with "Constant expression contains
+    /// invalid operations".
+    fn is_const_attr_expr(expr: &Expr) -> bool {
+        use goro_parser::ast::ExprKind as E;
+        match &expr.kind {
+            E::Int(_) | E::Float(_) | E::String(_) | E::True | E::False | E::Null
+            | E::ConstantAccess(_) | E::Identifier(_) | E::ClassConstAccess { .. } => true,
+            E::InterpolatedString(_) => false, // variables inside
+            E::BinaryOp { left, right, .. } => Self::is_const_attr_expr(left) && Self::is_const_attr_expr(right),
+            E::UnaryOp { operand, op, .. } => {
+                use goro_parser::ast::UnaryOp as U;
+                if matches!(op, U::PreIncrement | U::PreDecrement | U::PostIncrement | U::PostDecrement) {
+                    return false;
+                }
+                Self::is_const_attr_expr(operand)
+            }
+            E::Ternary { condition, if_true, if_false } => {
+                Self::is_const_attr_expr(condition)
+                    && if_true.as_ref().map(|e| Self::is_const_attr_expr(e)).unwrap_or(true)
+                    && Self::is_const_attr_expr(if_false)
+            }
+            E::NullCoalesce { left, right } => Self::is_const_attr_expr(left) && Self::is_const_attr_expr(right),
+            E::Array(elements) => elements.iter().all(|e| {
+                e.key.as_ref().map(|k| Self::is_const_attr_expr(k)).unwrap_or(true)
+                    && Self::is_const_attr_expr(&e.value)
+            }),
+            E::New { class: _, args } => {
+                // Object literal new C(...) is allowed as long as args are const
+                args.iter().all(|a| Self::is_const_attr_expr(&a.value))
+            }
+            // These are non-const:
+            E::Variable(_) | E::DynamicVariable(_)
+            | E::Assign { .. } | E::CompoundAssign { .. } | E::AssignRef { .. }
+            | E::PropertyAccess { .. } | E::DynamicStaticPropertyAccess { .. }
+            | E::StaticPropertyAccess { .. }
+            | E::MethodCall { .. } | E::StaticMethodCall { .. } | E::DynamicStaticMethodCall { .. }
+            | E::ArrayAccess { .. } | E::FunctionCall { .. }
+            | E::Match { .. } | E::Closure { .. } | E::ArrowFunction { .. }
+            | E::Instanceof { .. } | E::Cast(_, _) | E::Print(_) | E::Exit(_)
+            | E::Empty(_) | E::Isset(_) | E::Eval(_) | E::Include { .. }
+            | E::Yield(_, _) | E::YieldFrom(_) | E::Clone(_) | E::CloneWith { .. }
+            | E::Spread(_) | E::Pipe { .. } | E::DynamicClassConstAccess { .. }
+            | E::ThrowExpr(_) | E::Suppress(_) | E::FirstClassCallable(_) => false,
         }
     }
 
