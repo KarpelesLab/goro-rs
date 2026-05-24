@@ -544,13 +544,15 @@ pub fn reflection_property_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
     let class_arg = args.get(1).cloned().unwrap_or(Value::Null);
     let prop_arg = args.get(2).cloned().unwrap_or(Value::Null);
 
-    let class_name = match &class_arg {
+    let class_name_raw = match &class_arg {
         Value::Object(obj) => {
             let ob = obj.borrow();
             String::from_utf8_lossy(&ob.class_name).to_string()
         }
         _ => class_arg.to_php_string().to_string_lossy(),
     };
+    // Strip a leading backslash from absolute class names (e.g. "\X").
+    let class_name = class_name_raw.trim_start_matches('\\').to_string();
     let prop_name = prop_arg.to_php_string().to_string_lossy();
 
     let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -660,7 +662,8 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -
                 Value::String(s) => s.as_bytes().to_vec(),
                 _ => Vec::new(),
             };
-            let method_name = items[1].to_php_string().as_bytes().to_vec();
+            // For objects with __toString, invoke it to obtain the method name.
+            let method_name = vm.value_to_string(&items[1]).as_bytes().to_vec();
             // Detect closure (either as an object or as the internal string
             // representation used by goro-rs for closures stored in arrays).
             let is_closure_obj = class_name.starts_with(b"__closure_")
@@ -733,7 +736,7 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -
                     Value::String(s) => s.to_string_lossy(),
                     _ => String::new(),
                 };
-                let method_part = items[1].to_php_string().to_string_lossy();
+                let method_part = vm.value_to_string(&items[1]).to_string_lossy();
                 // If class is closure, use the closure string directly.
                 let cl_low = class_part.to_ascii_lowercase();
                 if cl_low == "closure" || items[0].clone().to_php_string().to_string_lossy().starts_with("__closure_")
@@ -917,13 +920,15 @@ pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u3
         return false;
     }
 
-    let class_name = match &class_arg {
+    let class_name_raw = match &class_arg {
         Value::Object(obj) => {
             let ob = obj.borrow();
             String::from_utf8_lossy(&ob.class_name).to_string()
         }
         _ => class_arg.to_php_string().to_string_lossy(),
     };
+    // Strip a leading backslash from absolute class names (e.g. "\X").
+    let class_name = class_name_raw.trim_start_matches('\\').to_string();
     let const_name = const_arg.to_php_string().to_string_lossy();
 
     let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -4349,6 +4354,64 @@ fn extract_param_default(op_array: &crate::opcode::OpArray, cv_idx: u32) -> Opti
     None
 }
 
+/// Identify the kind of default value for the parameter at `cv_idx`.
+/// Returns Some("global:<NAME>") for a global constant default
+/// (emitted by ConstLookup), Some("class:<Class>::<CONST>") for a class
+/// constant default (StaticPropGet with class+name), or None.
+fn extract_param_default_constant(
+    op_array: &crate::opcode::OpArray,
+    cv_idx: u32,
+) -> Option<String> {
+    use crate::opcode::{OpCode, OperandType};
+    // Find the Assign for this CV; the op2 should be a Tmp(t) that was
+    // produced by the immediately preceding ConstLookup or StaticPropGet.
+    for (i, op) in op_array.ops.iter().enumerate() {
+        if op.opcode != OpCode::Assign { continue; }
+        if let OperandType::Cv(target_cv) = op.op1 {
+            if target_cv != cv_idx { continue; }
+            let src_tmp = match op.op2 {
+                OperandType::Tmp(t) => t,
+                _ => continue,
+            };
+            // Search backwards for the op producing this Tmp.
+            for j in (0..i).rev() {
+                let prev = &op_array.ops[j];
+                let writes_tmp = match prev.result {
+                    OperandType::Tmp(t) => t == src_tmp,
+                    _ => false,
+                };
+                if !writes_tmp { continue; }
+                match prev.opcode {
+                    OpCode::ConstLookup => {
+                        if let OperandType::Const(idx) = prev.op1 {
+                            if let Some(Value::String(s)) = op_array.literals.get(idx as usize) {
+                                return Some(format!("global:{}", s.to_string_lossy()));
+                            }
+                        }
+                    }
+                    OpCode::StaticPropGet => {
+                        if let (OperandType::Const(ci), OperandType::Const(ni)) = (prev.op1, prev.op2) {
+                            let cls = match op_array.literals.get(ci as usize) {
+                                Some(Value::String(s)) => s.to_string_lossy(),
+                                _ => return None,
+                            };
+                            let nm = match op_array.literals.get(ni as usize) {
+                                Some(Value::String(s)) => s.to_string_lossy(),
+                                _ => return None,
+                            };
+                            return Some(format!("class:{}::{}", cls, nm));
+                        }
+                    }
+                    _ => {}
+                }
+                break;
+            }
+            return None;
+        }
+    }
+    None
+}
+
 /// Resolve the underlying OpArray for a ReflectionParameter by checking either
 /// the `__reflection_func` property (free function/closure) or the class+method
 /// properties (method parameters).
@@ -4503,18 +4566,64 @@ pub fn reflection_parameter_method(
             }
         }
         b"getdeclaringfunction" => {
-            // Return a ReflectionFunction for the declaring function
+            // Return a ReflectionFunction/ReflectionMethod for the declaring
+            // function. If the parameter belongs to a method (class+method
+            // were stored when the parameter was created), construct a
+            // ReflectionMethod instead.
             let ob = obj.borrow();
-            let func_name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            let class_opt = ob.get_property(b"__reflection_param_class").to_php_string();
+            let method_opt = ob.get_property(b"__reflection_param_method").to_php_string();
+            // For functions, __reflection_func has the lowercase function name.
+            let func_lower = ob.get_property(b"__reflection_func").to_php_string();
             drop(ob);
+
+            let class_bytes = class_opt.as_bytes();
+            let method_bytes = method_opt.as_bytes();
+            if !class_bytes.is_empty() && !method_bytes.is_empty() {
+                // Build a ReflectionMethod
+                let class_str = String::from_utf8_lossy(class_bytes).to_string();
+                let method_str = String::from_utf8_lossy(method_bytes).to_string();
+                let canonical_class = vm.classes.get(class_bytes)
+                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                    .unwrap_or_else(|| class_str.clone());
+                let obj_id = vm.next_object_id();
+                let mut rm_obj = PhpObject::new(b"ReflectionMethod".to_vec(), obj_id);
+                rm_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(method_str.clone())));
+                rm_obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical_class)));
+                rm_obj.set_property(b"__reflection_class".to_vec(), Value::String(PhpString::from_vec(class_bytes.to_vec())));
+                rm_obj.set_property(b"__reflection_method".to_vec(), Value::String(PhpString::from_vec(method_bytes.to_vec())));
+                return Some(Value::Object(Rc::new(RefCell::new(rm_obj))));
+            }
+
+            // Free function path. Resolve the canonical function name from
+            // the user_functions table if available; otherwise fall back to
+            // the stored lowercase name.
+            let lower = func_lower.as_bytes();
+            let canonical_func = if !lower.is_empty() {
+                vm.user_functions.get(lower)
+                    .map(|op| String::from_utf8_lossy(&op.name).to_string())
+                    .unwrap_or_else(|| String::from_utf8_lossy(lower).to_string())
+            } else {
+                String::new()
+            };
             let obj_id = vm.next_object_id();
             let mut rf_obj = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
-            rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(func_name.clone())));
+            rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(canonical_func)));
             rf_obj.set_property(b"__reflection_target".to_vec(), Value::String(func_target.clone()));
             Some(Value::Object(Rc::new(RefCell::new(rf_obj))))
         }
         b"getdeclaringclass" => {
-            // Returns null for functions, ReflectionClass for methods
+            // Returns null for functions, ReflectionClass for methods.
+            let ob = obj.borrow();
+            let class_lower = ob.get_property(b"__reflection_param_class").to_php_string();
+            drop(ob);
+            let bytes = class_lower.as_bytes();
+            if !bytes.is_empty() {
+                if let Some(ce) = vm.classes.get(bytes) {
+                    let name_str = String::from_utf8_lossy(&ce.name).to_string();
+                    return Some(create_reflection_class(vm, &name_str));
+                }
+            }
             Some(Value::Null)
         }
         b"getclass" => {
@@ -4598,10 +4707,28 @@ pub fn reflection_parameter_method(
             Some(if is_callable { Value::True } else { Value::False })
         }
         b"isdefaultvalueconstant" => {
+            if let Some(op_array) = resolved_op_array.as_ref() {
+                if extract_param_default_constant(op_array, type_idx as u32).is_some() {
+                    return Some(Value::True);
+                }
+            }
             Some(Value::False)
         }
         b"getdefaultvalueconstantname" => {
-            Some(Value::String(PhpString::empty()))
+            if let Some(op_array) = resolved_op_array.as_ref() {
+                if let Some(name) = extract_param_default_constant(op_array, type_idx as u32) {
+                    let display = if let Some(rest) = name.strip_prefix("global:") {
+                        // Strip leading backslash from fully-qualified names
+                        rest.trim_start_matches('\\').to_string()
+                    } else if let Some(rest) = name.strip_prefix("class:") {
+                        rest.to_string()
+                    } else {
+                        name
+                    };
+                    return Some(Value::String(PhpString::from_string(display)));
+                }
+            }
+            Some(Value::Null)
         }
         b"ispromoted" => {
             Some(Value::False)
