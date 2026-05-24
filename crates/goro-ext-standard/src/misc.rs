@@ -3548,10 +3548,39 @@ fn range_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    // Float range (if any argument is float or step is float)
-    let use_float = matches!(start_val, Value::Double(_))
-        || matches!(end_val, Value::Double(_))
-        || step_val.is_some_and(|v| matches!(v, Value::Double(_)));
+    // Float range (if any argument is float or step is float).
+    // Strings that look like floats (contain '.' or exponent) also force float mode.
+    let looks_like_float = |v: &Value| -> bool {
+        match v {
+            Value::Double(_) => true,
+            Value::String(s) => {
+                let b = s.as_bytes();
+                b.iter().any(|&c| c == b'.' || c == b'e' || c == b'E')
+            }
+            _ => false,
+        }
+    };
+    // PHP treats whole-number float values (e.g. 2.0) as integer-equivalent if
+    // the start/end are ints and the step has no fractional component. Numeric
+    // strings with no decimal point are also int-equivalent.
+    let is_int_equivalent = |v: &Value| -> bool {
+        match v {
+            Value::Long(_) | Value::True | Value::False | Value::Null | Value::Undef => true,
+            Value::Double(d) => d.is_finite() && d.fract() == 0.0,
+            Value::String(s) => {
+                let b = s.as_bytes();
+                !b.iter().any(|&c| c == b'.' || c == b'e' || c == b'E')
+            }
+            _ => false,
+        }
+    };
+    let all_int_equivalent = is_int_equivalent(start_val)
+        && is_int_equivalent(end_val)
+        && step_val.is_none_or(is_int_equivalent);
+    let use_float = !all_int_equivalent
+        && (looks_like_float(start_val)
+            || looks_like_float(end_val)
+            || step_val.is_some_and(looks_like_float));
 
     if use_float {
         let start = start_val.to_double();
@@ -4196,6 +4225,9 @@ fn debug_zval_refcount(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::Null)
 }
 fn extract_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // extract() is compiled to the dedicated OpCode::Extract since it modifies
+    // the caller's local scope. This stub exists only so that
+    // function_exists('extract') and call_user_func('extract', ...) don't fail.
     Ok(Value::Long(0))
 }
 fn array_column(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

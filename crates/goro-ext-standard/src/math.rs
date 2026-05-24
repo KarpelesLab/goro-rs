@@ -519,8 +519,14 @@ fn sqrt(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let base = args.first().unwrap_or(&Value::Null);
-    let exp = args.get(1).unwrap_or(&Value::Null);
+    if args.len() != 2 {
+        let msg = format!("pow() expects exactly 2 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let base = &args[0];
+    let exp = &args[1];
     // Emit deprecation warning for pow(0, negative)
     let base_f = base.to_double();
     let exp_f = exp.to_double();

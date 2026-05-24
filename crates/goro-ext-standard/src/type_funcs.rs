@@ -443,6 +443,17 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
         _ => val_raw,
     };
     let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    // Validate mode: PHP 8+ throws ValueError for anything other than 0/1.
+    // Note: bool TRUE casts to 1, FALSE casts to 0, so they're valid.
+    if mode != 0 && mode != 1 {
+        let msg = format!(
+            "{}(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE",
+            fname
+        );
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     match val {
         Value::Array(arr) => {
             if mode == 1 {
