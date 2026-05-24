@@ -3889,12 +3889,60 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
     let mut hours = 0i64;
     let mut minutes = 0i64;
     let mut seconds = 0i64;
+    let mut matched_any = false;
 
     let mut i = 0;
     while i < tokens.len() {
-        if let Ok(val) = tokens[i].parse::<i64>() {
+        let tok = tokens[i];
+        // Bare relative keywords.
+        let is_kw = matches!(tok,
+            "yesterday" | "tomorrow" | "midnight" | "noon" | "today" | "now"
+            | "last" | "next" | "first" | "second" | "third" | "fourth" | "fifth"
+            | "sixth" | "seventh" | "eighth" | "ninth" | "tenth" | "eleventh" | "twelfth"
+            | "back" | "front"
+        );
+        // Time-of-day modifiers don't add to relative components but are valid.
+        if matches!(tok, "noon" | "midnight" | "today" | "now") {
+            matched_any = true;
+            i += 1;
+            continue;
+        }
+        if tok == "tomorrow" { days += 1; matched_any = true; i += 1; continue; }
+        if tok == "yesterday" { days -= 1; matched_any = true; i += 1; continue; }
+        // "last/next <unit>" -> +/-1 unit
+        if (tok == "last" || tok == "next" || tok == "previous") && i + 1 < tokens.len() {
+            let sign: i64 = if tok == "last" || tok == "previous" { -1 } else { 1 };
+            let unit = tokens[i + 1].trim_end_matches('s');
+            let known = matches!(unit,
+                "year" | "month" | "day" | "hour" | "minute" | "min"
+                | "second" | "sec" | "week"
+                | "monday" | "tuesday" | "wednesday" | "thursday" | "friday"
+                | "saturday" | "sunday"
+            );
+            if known {
+                match unit {
+                    "year" => years += sign,
+                    "month" => months += sign,
+                    "day" => days += sign,
+                    "hour" => hours += sign,
+                    "minute" | "min" => minutes += sign,
+                    "second" | "sec" => seconds += sign,
+                    "week" => days += sign * 7,
+                    // weekday names => +/- 7 days as a placeholder
+                    _ => days += sign * 7,
+                }
+                matched_any = true;
+                i += 2;
+                continue;
+            }
+        }
+        if let Ok(val) = tok.parse::<i64>() {
             if i + 1 < tokens.len() {
                 let unit = tokens[i + 1].trim_end_matches('s');
+                let is_known = matches!(unit,
+                    "year" | "month" | "day" | "hour" | "minute" | "min"
+                    | "second" | "sec" | "week" | "fortnight"
+                );
                 match unit {
                     "year" => years = val,
                     "month" => months = val,
@@ -3903,13 +3951,36 @@ fn date_interval_create_from_date_string_fn(_vm: &mut Vm, args: &[Value]) -> Res
                     "minute" | "min" => minutes = val,
                     "second" | "sec" => seconds = val,
                     "week" => days += val * 7,
+                    "fortnight" => days += val * 14,
                     _ => {}
                 }
+                if is_known { matched_any = true; }
                 i += 2;
                 continue;
             }
         }
+        // Drop bare relative keywords without consuming logic.
+        if is_kw { matched_any = true; }
         i += 1;
+    }
+
+    // PHP throws when the string contains no recognised relative tokens.
+    if !matched_any {
+        // Find position of first non-whitespace character to mimic PHP's
+        // "at position N (c)" error.
+        let (pos, ch) = s
+            .char_indices()
+            .find(|(_, c)| !c.is_whitespace())
+            .map(|(p, c)| (p, c))
+            .unwrap_or((0, ' '));
+        let err_msg = format!(
+            "Unknown or bad format ({}) at position {} ({}): The timezone could not be found in the database",
+            s, pos, ch
+        );
+        let line = _vm.current_line;
+        let exc = _vm.create_exception(b"DateMalformedIntervalStringException", &err_msg, line);
+        _vm.current_exception = Some(exc);
+        return Err(VmError { message: err_msg, line });
     }
 
     let obj_id = _vm.next_object_id();

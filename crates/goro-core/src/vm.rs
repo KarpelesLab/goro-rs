@@ -16638,8 +16638,26 @@ impl Vm {
                     } else if func_name_lower == b"dateinterval::createfromdatestring" {
                         // DateInterval::createFromDateString - delegate to procedural function
                         if let Some(f) = self.functions.get(b"date_interval_create_from_date_string".as_ref()).copied() {
-                            let result = f(self, &call.args)?;
-                            self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                            match f(self, &call.args) {
+                                Ok(result) => {
+                                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                }
+                                Err(e) => {
+                                    if let Some(exc_val) = self.current_exception.take() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            self.current_exception = Some(exc_val);
+                                            ip = catch_target as usize;
+                                            continue;
+                                        } else {
+                                            self.current_exception = Some(exc_val);
+                                            return Err(e);
+                                        }
+                                    } else {
+                                        return Err(e);
+                                    }
+                                }
+                            }
                         } else {
                             self.write_operand(&op.result, Value::False, &mut cvs, &mut tmps, &static_cv_keys);
                         }
@@ -19256,10 +19274,18 @@ impl Vm {
                                             // DateInterval::__construct($duration) - ISO 8601 duration
                                             if call.args.len() > 1 {
                                                 let spec = call.args[1].to_php_string().to_string_lossy();
-                                                // Validate: must start with P
+                                                // PHP distinguishes two error shapes:
+                                                //  * "Failed to parse interval (...)" when the spec contains '/'
+                                                //    (it looks like a date1/date2 form but isn't valid)
+                                                //  * "Unknown or bad format (...)" for any other malformed spec
+                                                let contains_slash = spec.contains('/');
                                                 if !spec.starts_with('P') && !spec.starts_with('p') {
                                                     drop(obj_mut);
-                                                    let err_msg = format!("DateInterval::__construct(): Unknown or bad format ({})", spec);
+                                                    let err_msg = if contains_slash {
+                                                        format!("Failed to parse interval ({})", spec)
+                                                    } else {
+                                                        format!("Unknown or bad format ({})", spec)
+                                                    };
                                                     let exc = self.create_exception(b"DateMalformedIntervalStringException", &err_msg, op.line);
                                                     self.current_exception = Some(exc);
                                                     if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
