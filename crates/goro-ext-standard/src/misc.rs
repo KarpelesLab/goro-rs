@@ -6,6 +6,39 @@ use goro_core::vm::{Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Deep-clone a Value so that arrays are independent (PHP value semantics).
+/// Objects and resources are still shared (PHP object semantics).
+/// References are preserved as-is to handle circular references safely.
+fn deep_clone_value(val: &Value) -> Value {
+    deep_clone_value_depth(val, 0)
+}
+
+fn deep_clone_value_depth(val: &Value, depth: usize) -> Value {
+    if depth > 256 {
+        return val.clone();
+    }
+    match val {
+        Value::Array(arr) => {
+            // Detect if we can borrow - if borrow_mut would fail (already borrowed mutably),
+            // just return as is to avoid infinite recursion
+            match arr.try_borrow() {
+                Ok(src) => {
+                    let mut new_arr = PhpArray::new();
+                    for (k, v) in src.iter() {
+                        new_arr.set(k.clone(), deep_clone_value_depth(v, depth + 1));
+                    }
+                    Value::Array(Rc::new(RefCell::new(new_arr)))
+                }
+                Err(_) => val.clone(),
+            }
+        }
+        // Preserve references as-is - cloning a reference deep-clones the
+        // underlying Value would defeat the purpose of references
+        Value::Reference(_) => val.clone(),
+        _ => val.clone(),
+    }
+}
+
 /// Validate that an argument is an array and throw TypeError if not.
 /// Returns Ok(()) if valid array (or reference to array), Err with VmError if not.
 fn require_array_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<(), VmError> {
@@ -1698,13 +1731,18 @@ fn array_merge(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for (i, arg) in args.iter().enumerate() {
         require_array_arg_variadic(vm, arg, "array_merge", (i + 1) as u32)?;
+        let arg = match arg {
+            Value::Reference(r) => r.borrow().clone(),
+            v => v.clone(),
+        };
         if let Value::Array(arr) = arg {
             let arr = arr.borrow();
             for (key, val) in arr.iter() {
+                let cloned = deep_clone_value(val);
                 match key {
-                    goro_core::array::ArrayKey::Int(_) => result.push(val.clone()),
+                    goro_core::array::ArrayKey::Int(_) => result.push(cloned),
                     goro_core::array::ArrayKey::String(s) => {
-                        result.set(goro_core::array::ArrayKey::String(s.clone()), val.clone());
+                        result.set(goro_core::array::ArrayKey::String(s.clone()), cloned);
                     }
                 }
             }
