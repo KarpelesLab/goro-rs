@@ -8634,21 +8634,41 @@ where
     }
 }
 
+fn cmp_callback_result(
+    vm: &mut Vm,
+    result: Value,
+    fname: &str,
+    warned: &mut bool,
+) -> std::cmp::Ordering {
+    // PHP 8.2+ deprecates comparison functions returning bool. PHP emits the
+    // notice once per sort call (not once per comparison) and then continues
+    // with int coercion semantics.
+    if matches!(result, Value::True | Value::False) && !*warned {
+        *warned = true;
+        vm.emit_deprecated(&format!(
+            "{}(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero",
+            fname
+        ));
+    }
+    let cmp = result.to_long();
+    if cmp < 0 {
+        std::cmp::Ordering::Less
+    } else if cmp > 0 {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
+    }
+}
+
 fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
         let callback = callback.clone();
         let mut entries: Vec<Value> = arr.borrow().values().cloned().collect();
 
+        let mut warned = false;
         stable_sort_by(&mut entries, |a, b| {
             let result = vm.call_callback(&callback, &[a.clone(), b.clone()]).unwrap_or(Value::Long(0));
-            let cmp = result.to_long();
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
+            cmp_callback_result(vm, result, "usort", &mut warned)
         });
 
         let mut new_arr = PhpArray::new();
@@ -8666,16 +8686,10 @@ fn uasort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         let cb = callback.clone();
+        let mut warned = false;
         stable_sort_by(&mut entries, |a, b| {
             let result = call_user_func(vm, &[cb.clone(), a.1.clone(), b.1.clone()]).unwrap_or(Value::Long(0));
-            let cmp = result.to_long();
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
+            cmp_callback_result(vm, result, "uasort", &mut warned)
         });
 
         let mut new_arr = PhpArray::new();
@@ -8692,6 +8706,7 @@ fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         let cb = callback.clone();
+        let mut warned = false;
         stable_sort_by(&mut entries, |a, b| {
             let key_a = match &a.0 {
                 ArrayKey::Int(n) => Value::Long(*n),
@@ -8702,14 +8717,7 @@ fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 ArrayKey::String(s) => Value::String(s.clone()),
             };
             let result = call_user_func(vm, &[cb.clone(), key_a, key_b]).unwrap_or(Value::Long(0));
-            let cmp = result.to_long();
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
+            cmp_callback_result(vm, result, "uksort", &mut warned)
         });
 
         let mut new_arr = PhpArray::new();
