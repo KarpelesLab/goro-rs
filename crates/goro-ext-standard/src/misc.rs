@@ -1656,9 +1656,12 @@ fn array_shift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_unshift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        // Deep-clone the new values BEFORE we borrow_mut, to avoid
+        // recursive self-reference when the user passes $arr itself as a value.
+        let new_values: Vec<Value> = args[1..].iter().map(deep_clone_value).collect();
+
         let mut arr_mut = arr.borrow_mut();
         let existing: Vec<_> = arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let new_values: Vec<Value> = args[1..].to_vec();
 
         let mut new_arr = PhpArray::new();
         // Prepended values always get sequential integer keys
@@ -9730,7 +9733,7 @@ fn array_replace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_replace_recursive_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
@@ -9743,18 +9746,31 @@ fn array_replace_recursive_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
 
     for arg in &args[1..] {
         if let Value::Array(arr) = arg {
-            let arr = arr.borrow();
-            for (key, value) in arr.iter() {
-                if let Value::Array(inner_new) = value {
-                    if let Some(existing) = result.get(&key) {
+            let arr_ptr = Rc::as_ptr(arr) as usize;
+            let entries: Vec<_> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (key, value) in entries {
+                if let Value::Array(inner_new) = &value {
+                    let existing_inner = if let Some(existing) = result.get(&key) {
                         if let Value::Array(inner_old) = existing {
-                            // Recursively merge
-                            let merged_val = array_replace_recursive_inner(
-                                &inner_old.borrow(),
-                                &inner_new.borrow(),
-                            );
-                            result.set(key.clone(), merged_val);
-                            continue;
+                            Some(inner_old.clone())
+                        } else { None }
+                    } else { None };
+                    if let Some(inner_old) = existing_inner {
+                        let mut visited = vec![arr_ptr, Rc::as_ptr(inner_new) as usize];
+                        match array_replace_recursive_inner(
+                            &inner_old.borrow(),
+                            inner_new,
+                            &mut visited,
+                        ) {
+                            Ok(merged_val) => {
+                                result.set(key.clone(), merged_val);
+                                continue;
+                            }
+                            Err(e) => {
+                                let exc = vm.create_exception(b"Error", &e, vm.current_line);
+                                vm.current_exception = Some(exc);
+                                return Err(VmError { message: format!("Uncaught Error: {}", e), line: vm.current_line });
+                            }
                         }
                     }
                 }
@@ -9765,13 +9781,20 @@ fn array_replace_recursive_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_replace_recursive_inner(base: &PhpArray, replacement: &PhpArray) -> Value {
+fn array_replace_recursive_inner(base: &PhpArray, replacement: &Rc<RefCell<PhpArray>>, visited: &mut Vec<usize>) -> Result<Value, String> {
     let mut result = base.clone();
-    for (key, value) in replacement.iter() {
+    let replacement_borrow = replacement.borrow();
+    for (key, value) in replacement_borrow.iter() {
         if let Value::Array(inner_new) = value {
+            let ptr = Rc::as_ptr(inner_new) as usize;
+            if visited.contains(&ptr) {
+                return Err("recursion detected".to_string());
+            }
             if let Some(existing) = result.get(&key) {
                 if let Value::Array(inner_old) = existing {
-                    let merged = array_replace_recursive_inner(&inner_old.borrow(), &inner_new.borrow());
+                    visited.push(ptr);
+                    let merged = array_replace_recursive_inner(&inner_old.borrow(), inner_new, visited)?;
+                    visited.pop();
                     result.set(key.clone(), merged);
                     continue;
                 }
@@ -9779,7 +9802,7 @@ fn array_replace_recursive_inner(base: &PhpArray, replacement: &PhpArray) -> Val
         }
         result.set(key.clone(), value.clone());
     }
-    Value::Array(Rc::new(RefCell::new(result)))
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn array_find_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
