@@ -924,11 +924,8 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if !meta.attributes.is_empty() {
                         if let Some(custom_msg) = vm.get_deprecated_message(&meta.attributes) {
                             let class_display = String::from_utf8_lossy(&class.name).to_string();
-                            let msg = if custom_msg.is_empty() {
-                                format!("Constant {}::{} is deprecated", class_display, const_name)
-                            } else {
-                                format!("Constant {}::{} is deprecated, {}", class_display, const_name, custom_msg)
-                            };
+                            let prefix = format!("Constant {}::{}", class_display, const_name);
+                            let msg = vm.format_deprecated_message(&prefix, &custom_msg);
                             vm.emit_user_deprecated_at(&msg, vm.current_line);
                         }
                     }

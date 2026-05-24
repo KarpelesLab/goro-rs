@@ -1971,6 +1971,20 @@ impl Vm {
         None
     }
 
+    /// Compose a deprecation banner with the right separator before the suffix.
+    /// PHP renders "X is deprecated" (no suffix), "X is deprecated, msg" (with msg only),
+    /// "X is deprecated since V" (with since only), or "X is deprecated since V, msg" (both).
+    pub fn format_deprecated_message(&self, prefix: &str, suffix: &str) -> String {
+        if suffix.is_empty() {
+            format!("{} is deprecated", prefix)
+        } else if suffix.starts_with("since ") {
+            // since takes a space separator, not a comma
+            format!("{} is deprecated {}", prefix, suffix)
+        } else {
+            format!("{} is deprecated, {}", prefix, suffix)
+        }
+    }
+
     /// PHP-style "type given" name for a Value used in TypeError messages.
     fn format_arg_type(&self, v: &Value) -> String {
         match v {
@@ -18722,19 +18736,12 @@ impl Vm {
                                 } else {
                                     call.name.to_string_lossy()
                                 };
-                                let msg = if fn_display.contains("::") && !fn_display.starts_with("{closure:") {
-                                    if custom_msg.is_empty() {
-                                        format!("Method {}() is deprecated", fn_display)
-                                    } else {
-                                        format!("Method {}() is deprecated, {}", fn_display, custom_msg)
-                                    }
+                                let prefix = if fn_display.contains("::") && !fn_display.starts_with("{closure:") {
+                                    format!("Method {}()", fn_display)
                                 } else {
-                                    if custom_msg.is_empty() {
-                                        format!("Function {}() is deprecated", fn_display)
-                                    } else {
-                                        format!("Function {}() is deprecated, {}", fn_display, custom_msg)
-                                    }
+                                    format!("Function {}()", fn_display)
                                 };
+                                let msg = self.format_deprecated_message(&prefix, &custom_msg);
                                 self.emit_user_deprecated_at(&msg, op.line);
                             }
                             // #[\NoDiscard] - warn if result is discarded
@@ -24072,11 +24079,8 @@ impl Vm {
                                 if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
                                     let class_display = String::from_utf8_lossy(&resolved_class).to_string();
                                     let const_display = prop_name.to_string_lossy();
-                                    let msg = if custom_msg.is_empty() {
-                                        format!("Constant {}::{} is deprecated", class_display, const_display)
-                                    } else {
-                                        format!("Constant {}::{} is deprecated, {}", class_display, const_display, custom_msg)
-                                    };
+                                    let prefix = format!("Constant {}::{}", class_display, const_display);
+                                    let msg = self.format_deprecated_message(&prefix, &custom_msg);
                                     self.emit_user_deprecated_at(&msg, op.line);
                                 }
                             }
@@ -24146,6 +24150,61 @@ impl Vm {
                         None
                     };
                     if let Some(val) = val {
+                        // #[\Deprecated] on a user-defined constant
+                        // Resolve the actual key used in constant_attributes (try raw, then normalized).
+                        let attr_key: Option<Vec<u8>> = if self.constant_attributes.contains_key(name_bytes) {
+                            Some(name_bytes.to_vec())
+                        } else if name_bytes.contains(&b'\\') {
+                            let mut norm = Vec::with_capacity(name_bytes.len());
+                            if let Some(pos) = name_bytes.iter().rposition(|&b| b == b'\\') {
+                                for &b in &name_bytes[..pos] {
+                                    norm.push(b.to_ascii_lowercase());
+                                }
+                                norm.extend_from_slice(&name_bytes[pos..]);
+                            }
+                            if self.constant_attributes.contains_key(&norm) {
+                                Some(norm)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(key) = attr_key {
+                            let attrs = self.constant_attributes.get(&key).cloned().unwrap_or_default();
+                            if !attrs.is_empty() {
+                                if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
+                                    let display = String::from_utf8_lossy(&key).to_string();
+                                    let prefix = format!("Constant {}", display);
+                                    let msg = self.format_deprecated_message(&prefix, &custom_msg);
+                                    self.emit_user_deprecated_at(&msg, op.line);
+                                } else if self.current_exception.is_some() {
+                                    // TypeError raised inside Deprecated::__construct evaluation
+                                    if let Some((catch_target, finally_target, _, _, eh_pc_depth)) = exception_handlers.last().copied() { pending_calls_catch_depth = Some(eh_pc_depth);
+                                        if catch_target > 0 {
+                                            exception_handlers.pop();
+                                            ip = catch_target as usize;
+                                        } else if finally_target > 0 {
+                                            ip = finally_target as usize;
+                                        }
+                                        continue;
+                                    }
+                                    let exc_msg = self.current_exception
+                                        .as_ref()
+                                        .and_then(|e| if let Value::Object(o) = e {
+                                            let obj = o.borrow();
+                                            obj.properties.iter()
+                                                .find(|(k, _)| k == b"message")
+                                                .map(|(_, v)| v.to_php_string().to_string_lossy())
+                                        } else { None })
+                                        .unwrap_or_default();
+                                    return Err(VmError {
+                                        message: format!("Uncaught TypeError: {}", exc_msg),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                        }
                         // Emit deprecation for E_STRICT (deprecated since PHP 8.4)
                         if name_bytes == b"E_STRICT" {
                             self.emit_deprecated_at(
@@ -28999,11 +29058,8 @@ impl Vm {
                             let attrs_clone = class.attributes.clone();
                             if let Some(custom_msg) = self.get_deprecated_message(&attrs_clone) {
                                 let class_display = crate::value::display_class_name(class_name.as_bytes());
-                                let msg = if custom_msg.is_empty() {
-                                    format!("Class {} is deprecated", class_display)
-                                } else {
-                                    format!("Class {} is deprecated, {}", class_display, custom_msg)
-                                };
+                                let prefix = format!("Class {}", class_display);
+                                let msg = self.format_deprecated_message(&prefix, &custom_msg);
                                 self.emit_user_deprecated_at(&msg, op.line);
                             }
                         }
