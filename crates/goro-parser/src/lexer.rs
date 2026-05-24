@@ -524,7 +524,7 @@ impl<'a> Lexer<'a> {
                                 result.push(b'u');
                             }
                         }
-                        Some(b'x' | b'X') => {
+                        Some(x_ch @ (b'x' | b'X')) => {
                             let mut hex = Vec::new();
                             for _ in 0..2 {
                                 if let Some(ch) = self.peek() {
@@ -538,6 +538,10 @@ impl<'a> Lexer<'a> {
                             if !hex.is_empty() {
                                 let s: String = hex.iter().map(|&b| b as char).collect();
                                 result.push(u8::from_str_radix(&s, 16).unwrap_or(0));
+                            } else {
+                                // \x not followed by hex digits: keep literal \x
+                                result.push(b'\\');
+                                result.push(x_ch);
                             }
                         }
                         Some(ch) if ch.is_ascii_digit() && ch < b'8' => {
@@ -1760,6 +1764,7 @@ impl<'a> Lexer<'a> {
                             i += 1;
                         }
                         b'x' | b'X' => {
+                            let x_ch = content[i];
                             i += 1;
                             let mut hex = Vec::new();
                             for _ in 0..2 {
@@ -1773,6 +1778,10 @@ impl<'a> Lexer<'a> {
                             if !hex.is_empty() {
                                 let s: String = hex.iter().map(|&b| b as char).collect();
                                 result.push(u8::from_str_radix(&s, 16).unwrap_or(0));
+                            } else {
+                                // \x not followed by hex digits: keep literal \x
+                                result.push(b'\\');
+                                result.push(x_ch);
                             }
                         }
                         c if c.is_ascii_digit() && c < b'8' => {
