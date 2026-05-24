@@ -6741,6 +6741,7 @@ fn reflection_class_to_string(
     // Properties (non-static). Inherited private (instance) props are not
     // listed on subclasses.
     if let Some(ce) = vm.classes.get(class_lower) {
+        let is_readonly_class = ce.is_readonly;
         let inst_props: Vec<_> = ce.properties.iter()
             .filter(|p| !p.is_static)
             .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
@@ -6752,6 +6753,13 @@ fn reflection_class_to_string(
                 Visibility::Protected => "protected",
                 Visibility::Private => "private",
             };
+            // In readonly classes, public properties get implicit
+            // protected(set) visibility on the set hook.
+            let set_vis_str = if is_readonly_class && prop.visibility == Visibility::Public {
+                " protected(set)"
+            } else {
+                ""
+            };
             let readonly_str = if prop.is_readonly { " readonly" } else { "" };
             let type_str = prop.property_type.as_ref().map(|t| format!(" {}", param_type_name(t))).unwrap_or_default();
             let prop_name_str = String::from_utf8_lossy(&prop.name);
@@ -6760,7 +6768,7 @@ fn reflection_class_to_string(
             } else {
                 String::new()
             };
-            s.push_str(&format!("    Property [ {}{}{} ${}{} ]\n", vis, readonly_str, type_str, prop_name_str, default_str));
+            s.push_str(&format!("    Property [ {}{}{}{} ${}{} ]\n", vis, set_vis_str, readonly_str, type_str, prop_name_str, default_str));
         }
         s.push_str("  }\n");
     } else {
@@ -6856,7 +6864,17 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
                 if let Some(pce) = vm.classes.get(&p_lower) {
                     if let Some(pm) = pce.get_method(method_bytes) {
                         if pm.visibility != Visibility::Private {
-                            let canonical = String::from_utf8_lossy(&pce.name).to_string();
+                            // Use the method's declaring class so an inherited
+                            // method counts as overwritten at the original
+                            // definition site, not the inheriting class.
+                            let decl_lower: Vec<u8> = pm.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let canonical = if !decl_lower.is_empty() {
+                                vm.classes.get(decl_lower.as_slice())
+                                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                    .unwrap_or_else(|| String::from_utf8_lossy(&pce.name).to_string())
+                            } else {
+                                String::from_utf8_lossy(&pce.name).to_string()
+                            };
                             if overwrites.is_none() {
                                 overwrites = Some(canonical.clone());
                             }
