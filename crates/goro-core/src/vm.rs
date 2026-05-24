@@ -4716,7 +4716,14 @@ impl Vm {
                 // Walk up to parent
                 match &ce.parent {
                     Some(p) => {
-                        current = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        // If the class itself is an interface, its parent is
+                        // another interface it extends -- treat that as
+                        // "implementing" as well.
+                        if ce.is_interface && p_lower == iface_name {
+                            return true;
+                        }
+                        current = p_lower;
                     }
                     None => return false,
                 }
@@ -17762,16 +17769,35 @@ impl Vm {
                     } else if func_name_lower.starts_with(b"__spl::") {
                         // SPL method call with args
                         let spl_path = &func_name_lower[7..]; // skip "__spl::"
+                        // Also walk the original-case name so we can extract
+                        // the user-typed method name for stack traces.
+                        let orig_name_bytes = call.name.as_bytes();
+                        let orig_spl_path = if orig_name_bytes.len() >= 7 && &orig_name_bytes[..7] == b"__spl::" {
+                            &orig_name_bytes[7..]
+                        } else {
+                            spl_path
+                        };
                         if let Some(sep) = spl_path.iter().position(|&b| b == b':') {
                             if sep + 1 < spl_path.len() && spl_path[sep + 1] == b':' {
                                 let spl_class = &spl_path[..sep];
                                 let spl_method = &spl_path[sep + 2..];
+                                // Find the corresponding method substring in the
+                                // original-case name (it must be the same length).
+                                let orig_method = if let Some(orig_sep) = orig_spl_path.iter().position(|&b| b == b':') {
+                                    if orig_sep + 1 < orig_spl_path.len() && orig_spl_path[orig_sep + 1] == b':' {
+                                        &orig_spl_path[orig_sep + 2..]
+                                    } else {
+                                        spl_method
+                                    }
+                                } else {
+                                    spl_method
+                                };
                                 // Push a call-stack frame so exceptions raised inside
                                 // the dispatcher (e.g. "Cannot call method X when
                                 // function X is disabled") produce a proper stack trace
                                 // with the method entry.
                                 let class_display = self.builtin_canonical_name(spl_class);
-                                let method_display = String::from_utf8_lossy(spl_method).to_string();
+                                let method_display = String::from_utf8_lossy(orig_method).to_string();
                                 let frame_name = format!("{}->{}", class_display, method_display);
                                 let extra_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
                                 self.call_stack.push((
@@ -19453,6 +19479,20 @@ impl Vm {
                                         b"dateinterval".to_vec()
                                     } else if self.class_extends(&raw_class_lower, b"dateperiod") {
                                         b"dateperiod".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionenum") {
+                                        b"reflectionenum".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionobject") {
+                                        b"reflectionobject".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionclass") {
+                                        b"reflectionclass".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionmethod") {
+                                        b"reflectionmethod".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionfunction") {
+                                        b"reflectionfunction".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionproperty") {
+                                        b"reflectionproperty".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionparameter") {
+                                        b"reflectionparameter".to_vec()
                                     } else if let Some(found) = builtin_outer_iters.iter().find(|c|
                                         raw_class_lower.as_slice() == **c
                                             || self.class_extends(&raw_class_lower, c)
@@ -20260,7 +20300,25 @@ impl Vm {
                                             // ReflectionConstant::__construct(string $name)
                                             if call.args.len() > 1 {
                                                 let const_name = call.args[1].to_php_string().to_string_lossy();
-                                                obj_mut.set_property(b"name".to_vec(), Value::String(PhpString::from_string(const_name)));
+                                                let normalized = if const_name.starts_with('\\') { const_name[1..].to_string() } else { const_name.clone() };
+                                                // Validate that the constant exists (user or builtin).
+                                                let exists = self.constants.contains_key(normalized.as_bytes());
+                                                if !exists {
+                                                    drop(obj_mut);
+                                                    let msg = format!("Constant \"{}\" does not exist", normalized);
+                                                    let exc = self.create_exception(b"ReflectionException", &msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                                        ip = catch_target as usize;
+                                                        continue;
+                                                    } else {
+                                                        return Err(VmError {
+                                                            message: format!("Uncaught ReflectionException: {}", msg),
+                                                            line: op.line,
+                                                        });
+                                                    }
+                                                }
+                                                obj_mut.set_property(b"name".to_vec(), Value::String(PhpString::from_string(normalized)));
                                             }
                                         }
                                         b"reflectionextension" => {
@@ -20968,7 +21026,7 @@ impl Vm {
                                     let method_part = &func_display[sep_pos + 2..];
                                     let class_lower_str = class_part.to_ascii_lowercase();
                                     let method_lower_str = method_part.to_ascii_lowercase();
-                                    let result = crate::reflection::reflection_static_call(self, &class_lower_str, &method_lower_str, &call.args, op.line);
+                                    let result = crate::reflection::reflection_static_call_named(self, &class_lower_str, &method_lower_str, method_part, &call.args, op.line);
                                     if let Some(val) = result {
                                         self.write_operand(
                                             &op.result,
@@ -20978,6 +21036,24 @@ impl Vm {
                                             &static_cv_keys,
                                         );
                                         handled = true;
+                                        // If the reflection static-call dispatcher set an
+                                        // exception (e.g. "cannot be called statically"),
+                                        // propagate it now.
+                                        if self.current_exception.is_some() {
+                                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                ip = *catch_target as usize;
+                                                continue;
+                                            } else {
+                                                let exc_msg = if let Some(Value::Object(o)) = self.current_exception.as_ref() {
+                                                    let ob = o.borrow();
+                                                    let cls = crate::value::display_class_name(&ob.class_name);
+                                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                                    format!("Uncaught {}: {}", cls, msg)
+                                                } else { "Uncaught exception".to_string() };
+                                                return Err(VmError { message: exc_msg, line: op.line });
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -24293,7 +24369,22 @@ impl Vm {
                             let obj_borrow = obj.borrow();
                             // Check if this is an uncloneable object
                             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if class_lower == b"generator" || class_lower == b"closure" || class_lower == b"xmlparser" || class_lower == b"fiber" || obj_borrow.has_property(b"__enum_case") {
+                            // Reflection classes and a few others are
+                            // explicitly marked uncloneable in PHP.
+                            let reflection_uncloneable = matches!(
+                                class_lower.as_slice(),
+                                b"reflectionclass" | b"reflectionobject"
+                                    | b"reflectionenum" | b"reflectionmethod"
+                                    | b"reflectionproperty" | b"reflectionfunction"
+                                    | b"reflectionparameter" | b"reflectionclassconstant"
+                                    | b"reflectionenumunitcase" | b"reflectionenumbackedcase"
+                                    | b"reflectionnamedtype" | b"reflectionuniontype"
+                                    | b"reflectionintersectiontype" | b"reflectiontype"
+                                    | b"reflectionattribute" | b"reflectionextension"
+                                    | b"reflectionconstant" | b"reflectiongenerator"
+                                    | b"reflectionfiber" | b"reflectionreference"
+                            );
+                            if reflection_uncloneable || class_lower == b"generator" || class_lower == b"closure" || class_lower == b"xmlparser" || class_lower == b"fiber" || obj_borrow.has_property(b"__enum_case") {
                                 let class_name = crate::value::display_class_name(&obj_borrow.class_name);
                                 drop(obj_borrow);
                                 let msg = format!("Trying to clone an uncloneable object of class {}", class_name);
@@ -26460,13 +26551,15 @@ impl Vm {
                                         }
                                     }
                                 }
-                                let mut new_props = Vec::new();
+                                // Order: child's own properties (and overrides) first,
+                                // then parent's non-overridden properties. This matches
+                                // PHP's iteration order for foreach and getDefaultProperties().
+                                let mut new_props = std::mem::take(&mut class.properties);
                                 for prop in &parent.properties {
                                     if !child_prop_names.contains(&prop.name) {
                                         new_props.push(prop.clone());
                                     }
                                 }
-                                new_props.append(&mut class.properties);
                                 class.properties = new_props;
                                 // Inherit constants
                                 for (const_name, const_val) in &parent.constants {
@@ -30393,10 +30486,13 @@ impl Vm {
                                     } else { break; }
                                 }
                             }
+                            // Preserve the original method casing so stack traces
+                            // can render the user-typed name. The dispatcher
+                            // lowercases as needed.
                             let mut spl_name = b"__spl::".to_vec();
                             spl_name.extend_from_slice(&spl_class);
                             spl_name.extend_from_slice(b"::");
-                            spl_name.extend_from_slice(&method_name_lower);
+                            spl_name.extend_from_slice(method_name.as_bytes());
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::from_vec(spl_name),
                                 args: vec![obj_val.clone()],
