@@ -13104,24 +13104,45 @@ fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line.push(separator as char);
         }
         first = false;
+        // PHP emits "Array to string conversion" warning when fputcsv encounters
+        // an array element (and writes literal "Array").
+        if matches!(val, Value::Array(_)) {
+            let cur_line = vm.current_line;
+            vm.emit_warning_at("Array to string conversion", cur_line);
+        }
         let s = val.to_php_string().to_string_lossy();
-        // Check if we need to enclose
-        let needs_enclosure = s.contains(separator as char) || s.contains(enclosure as char) || s.contains('\n') || s.contains('\r');
+        // Check if we need to enclose (delimiter, enclosure, escape, \n, \r,
+        // \t, or space anywhere in the field — matches PHP behavior).
+        let s_bytes = s.as_bytes();
+        let needs_enclosure = s_bytes.iter().any(|&b| {
+            b == separator
+                || b == enclosure
+                || escape.map(|e| b == e).unwrap_or(false)
+                || b == b'\n'
+                || b == b'\r'
+                || b == b'\t'
+                || b == b' '
+        });
         if needs_enclosure {
             line.push(enclosure as char);
-            let chars: Vec<char> = s.chars().collect();
+            let bytes: Vec<u8> = s_bytes.to_vec();
             let mut i = 0;
-            while i < chars.len() {
-                let c = chars[i];
-                if c == enclosure as char {
-                    let prev_is_escape = escape
-                        .map(|e| i > 0 && chars[i - 1] == e as char)
-                        .unwrap_or(false);
-                    if !prev_is_escape {
-                        line.push(enclosure as char);
+            let mut escaped = false;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if let Some(e) = escape {
+                    if c == e && !escaped {
+                        escaped = true;
+                        line.push(c as char);
+                        i += 1;
+                        continue;
                     }
                 }
-                line.push(c);
+                if c == enclosure && !escaped {
+                    line.push(enclosure as char);
+                }
+                escaped = false;
+                line.push(c as char);
                 i += 1;
             }
             line.push(enclosure as char);
