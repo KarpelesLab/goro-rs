@@ -13164,6 +13164,35 @@ fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::Array(arr)) => arr.clone(),
         _ => return Ok(Value::False),
     };
+    // Validate separator/enclosure/escape — each must be a single character
+    // (escape may be empty). PHP throws ValueError for invalid sizes.
+    if let Some(v) = args.get(2) {
+        let s = v.to_php_string();
+        if s.len() != 1 {
+            let msg = "fputcsv(): Argument #3 ($separator) must be a single character".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
+    if let Some(v) = args.get(3) {
+        let s = v.to_php_string();
+        if s.len() != 1 {
+            let msg = "fputcsv(): Argument #4 ($enclosure) must be a single character".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
+    if let Some(v) = args.get(4) {
+        let s = v.to_php_string();
+        if s.len() > 1 {
+            let msg = "fputcsv(): Argument #5 ($escape) must be empty or a single character".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
     let separator = args.get(2).map(|v| {
         let s = v.to_php_string();
         let b = s.as_bytes();
