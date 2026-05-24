@@ -18841,6 +18841,32 @@ impl Vm {
                                 };
                                 let msg = self.format_deprecated_message(&prefix, &custom_msg);
                                 self.emit_user_deprecated_at(&msg, op.line);
+                                // If the user error handler threw, propagate that exception
+                                // before executing the deprecated function body.
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                        if catch_target > 0 {
+                                            ip = catch_target as usize;
+                                        } else if finally_target > 0 {
+                                            ip = finally_target as usize;
+                                        }
+                                        continue;
+                                    }
+                                    let exc_msg = self.current_exception
+                                        .as_ref()
+                                        .and_then(|e| if let Value::Object(o) = e {
+                                            let obj = o.borrow();
+                                            let cls = String::from_utf8_lossy(&obj.class_name).to_string();
+                                            obj.properties.iter()
+                                                .find(|(k, _)| k == b"message")
+                                                .map(|(_, v)| format!("Uncaught {}: {}", cls, v.to_php_string().to_string_lossy()))
+                                        } else { None })
+                                        .unwrap_or_default();
+                                    return Err(VmError {
+                                        message: exc_msg,
+                                        line: op.line,
+                                    });
+                                }
                             }
                             // #[\NoDiscard] - warn if result is discarded
                             if matches!(op.op1, OperandType::Const(_)) {
