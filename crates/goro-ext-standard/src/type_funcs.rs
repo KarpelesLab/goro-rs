@@ -50,7 +50,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"isset", php_isset);
     vm.register_function(b"empty", php_empty);
     vm.register_function(b"count", count);
-    vm.register_function(b"sizeof", count);
+    vm.register_function(b"sizeof", sizeof);
     vm.register_function(b"is_scalar", is_scalar);
     vm.register_function(b"is_resource", is_resource);
     vm.register_function(b"is_countable", is_countable);
@@ -136,8 +136,20 @@ fn is_array(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn is_numeric(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
+fn is_numeric(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        let msg = "is_numeric() expects exactly 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
+    }
+    if args.len() > 1 {
+        let msg = format!("is_numeric() expects exactly 1 argument, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let val = &args[0];
     Ok(match val {
         Value::Long(_) | Value::Double(_) => Value::True,
         Value::String(s) => {
@@ -421,8 +433,33 @@ fn php_empty(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
+    count_impl(vm, args, "count")
+}
+
+fn sizeof(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    count_impl(vm, args, "sizeof")
+}
+
+fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError> {
+    let val_raw = args.first().unwrap_or(&Value::Null);
+    // Dereference if a reference
+    let val_owned;
+    let val: &Value = match val_raw {
+        Value::Reference(r) => { val_owned = r.borrow().clone(); &val_owned }
+        _ => val_raw,
+    };
     let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    // Validate mode: PHP 8+ throws ValueError for anything other than 0/1.
+    // Note: bool TRUE casts to 1, FALSE casts to 0, so they're valid.
+    if mode != 0 && mode != 1 {
+        let msg = format!(
+            "{}(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE",
+            fname
+        );
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
     match val {
         Value::Array(arr) => {
             if mode == 1 {
@@ -461,19 +498,26 @@ fn count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Ok(result);
             }
 
-            // Non-countable object
-            // Emit warning for non-Countable objects
-            Ok(Value::Long(1))
-        }
-        Value::Generator(_) => {
-            let err_msg = "count(): Argument #1 ($value) must be of type Countable|array, Generator given";
-            let exc = vm.throw_type_error(err_msg.to_string());
+            // Non-countable object: TypeError in PHP 8+
+            let class_name = String::from_utf8_lossy(&obj.borrow().class_name).into_owned();
+            let err_msg = format!("{}(): Argument #1 ($value) must be of type Countable|array, {} given", fname, class_name);
+            let exc = vm.throw_type_error(err_msg.clone());
             vm.current_exception = Some(exc);
             Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: vm.current_line })
         }
-        Value::Null | Value::Undef => Ok(Value::Long(0)),
+        Value::Generator(_) => {
+            let err_msg = format!("{}(): Argument #1 ($value) must be of type Countable|array, Generator given", fname);
+            let exc = vm.throw_type_error(err_msg.clone());
+            vm.current_exception = Some(exc);
+            Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: vm.current_line })
+        }
         _ => {
-            Ok(Value::Long(1))
+            // null, bool, int, float, string -> TypeError in PHP 8+
+            let type_name = Vm::value_type_name(val);
+            let err_msg = format!("{}(): Argument #1 ($value) must be of type Countable|array, {} given", fname, type_name);
+            let exc = vm.throw_type_error(err_msg.clone());
+            vm.current_exception = Some(exc);
+            Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: vm.current_line })
         }
     }
 }

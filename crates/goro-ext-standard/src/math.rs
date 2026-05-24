@@ -452,7 +452,7 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             return Ok(max_val);
         } else {
-            let type_name = args[0].type_name();
+            let type_name = Vm::value_type_name(&args[0]);
             let msg = format!("max(): Argument #1 ($value) must be of type array, {} given", type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -496,7 +496,7 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             return Ok(min_val);
         } else {
-            let type_name = args[0].type_name();
+            let type_name = Vm::value_type_name(&args[0]);
             let msg = format!("min(): Argument #1 ($value) must be of type array, {} given", type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -519,8 +519,14 @@ fn sqrt(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let base = args.first().unwrap_or(&Value::Null);
-    let exp = args.get(1).unwrap_or(&Value::Null);
+    if args.len() != 2 {
+        let msg = format!("pow() expects exactly 2 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let base = &args[0];
+    let exp = &args[1];
     // If either operand is a GMP object, route through the extension's operator
     // overloading so pow(gmp, n) / pow(n, gmp) returns a GMP object (matching PHP).
     let is_gmp_obj = vm.object_is_operator_type.map(|f| f(base) || f(exp)).unwrap_or(false);

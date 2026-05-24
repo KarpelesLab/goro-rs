@@ -6,6 +6,39 @@ use goro_core::vm::{Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Deep-clone a Value so that arrays are independent (PHP value semantics).
+/// Objects and resources are still shared (PHP object semantics).
+/// References are preserved as-is to handle circular references safely.
+fn deep_clone_value(val: &Value) -> Value {
+    deep_clone_value_depth(val, 0)
+}
+
+fn deep_clone_value_depth(val: &Value, depth: usize) -> Value {
+    if depth > 256 {
+        return val.clone();
+    }
+    match val {
+        Value::Array(arr) => {
+            // Detect if we can borrow - if borrow_mut would fail (already borrowed mutably),
+            // just return as is to avoid infinite recursion
+            match arr.try_borrow() {
+                Ok(src) => {
+                    let mut new_arr = PhpArray::new();
+                    for (k, v) in src.iter() {
+                        new_arr.set(k.clone(), deep_clone_value_depth(v, depth + 1));
+                    }
+                    Value::Array(Rc::new(RefCell::new(new_arr)))
+                }
+                Err(_) => val.clone(),
+            }
+        }
+        // Preserve references as-is - cloning a reference deep-clones the
+        // underlying Value would defeat the purpose of references
+        Value::Reference(_) => val.clone(),
+        _ => val.clone(),
+    }
+}
+
 /// Validate that an argument is an array and throw TypeError if not.
 /// Returns Ok(()) if valid array (or reference to array), Err with VmError if not.
 fn require_array_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<(), VmError> {
@@ -15,6 +48,27 @@ fn require_array_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str
 /// Like require_array_arg but without parameter name in error message (for variadic args)
 fn require_array_arg_variadic(vm: &mut Vm, val: &Value, func_name: &str, param_num: u32) -> Result<(), VmError> {
     require_array_arg_inner(vm, val, func_name, None, param_num)
+}
+
+/// Like Vm::value_type_name but returns "resource" for registered resource ids
+/// (since resources are stored as Value::Long internally).
+/// Skip ids 1-3 since those are pre-registered as STDIN/STDOUT/STDERR and
+/// would falsely classify integer literals 1, 2, 3 as resources.
+fn arg_type_name(val: &Value) -> String {
+    match val {
+        Value::Long(n) if *n > 3 && goro_core::value::is_registered_resource(*n) => "resource".to_string(),
+        Value::Reference(r) => arg_type_name(&*r.borrow()),
+        _ => Vm::value_type_name(val),
+    }
+}
+
+/// Compare two values as PHP would compare them in array_*_assoc functions:
+/// cast both to string and compare bytes. This matches PHP's
+/// `string_compare_function` semantics used in zend_hash_array_diff/intersect_assoc.
+fn php_value_string_eq(a: &Value, b: &Value) -> bool {
+    let a = a.deref();
+    let b = b.deref();
+    a.to_php_string().as_bytes() == b.to_php_string().as_bytes()
 }
 
 fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name: Option<&str>, param_num: u32) -> Result<(), VmError> {
@@ -32,7 +86,7 @@ fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name
             if matches!(&*inner, Value::Array(_)) {
                 Ok(())
             } else {
-                let type_name = Vm::value_type_name(&*inner);
+                let type_name = arg_type_name(&*inner);
                 let msg = make_msg(&type_name);
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
@@ -40,7 +94,7 @@ fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name
             }
         }
         _ => {
-            let type_name = Vm::value_type_name(val);
+            let type_name = arg_type_name(val);
             let msg = make_msg(&type_name);
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
@@ -1787,9 +1841,12 @@ fn array_shift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_unshift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
+        // Deep-clone the new values BEFORE we borrow_mut, to avoid
+        // recursive self-reference when the user passes $arr itself as a value.
+        let new_values: Vec<Value> = args[1..].iter().map(deep_clone_value).collect();
+
         let mut arr_mut = arr.borrow_mut();
         let existing: Vec<_> = arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let new_values: Vec<Value> = args[1..].to_vec();
 
         let mut new_arr = PhpArray::new();
         // Prepended values always get sequential integer keys
@@ -1862,13 +1919,18 @@ fn array_merge(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for (i, arg) in args.iter().enumerate() {
         require_array_arg_variadic(vm, arg, "array_merge", (i + 1) as u32)?;
+        let arg = match arg {
+            Value::Reference(r) => r.borrow().clone(),
+            v => v.clone(),
+        };
         if let Value::Array(arr) = arg {
             let arr = arr.borrow();
             for (key, val) in arr.iter() {
+                let cloned = deep_clone_value(val);
                 match key {
-                    goro_core::array::ArrayKey::Int(_) => result.push(val.clone()),
+                    goro_core::array::ArrayKey::Int(_) => result.push(cloned),
                     goro_core::array::ArrayKey::String(s) => {
-                        result.set(goro_core::array::ArrayKey::String(s.clone()), val.clone());
+                        result.set(goro_core::array::ArrayKey::String(s.clone()), cloned);
                     }
                 }
             }
@@ -2128,10 +2190,15 @@ fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_search(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_search(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let needle = args.first().unwrap_or(&Value::Null);
     let strict = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
-    if let Some(Value::Array(arr)) = args.get(1) {
+    let haystack_raw = args.get(1).cloned().unwrap_or(Value::Null);
+    let haystack = match &haystack_raw {
+        Value::Reference(r) => r.borrow().clone(),
+        v => v.clone(),
+    };
+    if let Value::Array(arr) = &haystack {
         let arr = arr.borrow();
         for (key, val) in arr.iter() {
             let matches = if strict {
@@ -2146,8 +2213,14 @@ fn array_search(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 });
             }
         }
+        return Ok(Value::False);
     }
-    Ok(Value::False)
+    // Throw TypeError for non-array haystack
+    let type_name = Vm::value_type_name(&haystack);
+    let msg = format!("array_search(): Argument #2 ($haystack) must be of type array, {} given", type_name);
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError { message: msg, line: vm.current_line })
 }
 
 fn array_key_exists(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2169,9 +2242,14 @@ fn array_key_exists(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn in_array(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let needle = args.first().unwrap_or(&Value::Null);
-    if let Some(Value::Array(arr)) = args.get(1) {
+    let haystack_raw = args.get(1).cloned().unwrap_or(Value::Null);
+    let haystack = match &haystack_raw {
+        Value::Reference(r) => r.borrow().clone(),
+        v => v.clone(),
+    };
+    if let Value::Array(arr) = &haystack {
         let strict = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
         let arr = arr.borrow();
         for (_, val) in arr.iter() {
@@ -2183,17 +2261,27 @@ fn in_array(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Ok(Value::True);
             }
         }
+        return Ok(Value::False);
     }
-    Ok(Value::False)
+    // Throw TypeError for non-array haystack
+    let type_name = Vm::value_type_name(&haystack);
+    let msg = format!("in_array(): Argument #2 ($haystack) must be of type array, {} given", type_name);
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError { message: msg, line: vm.current_line })
 }
 
 fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), VmError> {
+    validate_callback_generic(vm, callback, "array_map", "Argument #1 ($callback)")
+}
+
+fn validate_callback_generic(vm: &mut Vm, callback: &Value, fn_name: &str, arg_label: &str) -> Result<(), VmError> {
     match callback {
         Value::Null => Ok(()), // null is valid (identity/zip)
         Value::String(s) => {
             let name = s.as_bytes();
             if name.is_empty() {
-                let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, function \"\" not found or invalid function name".to_string();
+                let msg = format!("{}(): {} must be a valid callback or null, function \"\" not found or invalid function name", fn_name, arg_label);
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
                 return Err(VmError { message: msg, line: vm.current_line });
@@ -2209,13 +2297,15 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
                         if class.get_method(&method_lower).is_some() {
                             return Ok(());
                         }
-                        let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, class '{}' does not have a method '{}'",
+                        let msg = format!("{}(): {} must be a valid callback or null, class '{}' does not have a method '{}'",
+                            fn_name, arg_label,
                             String::from_utf8_lossy(class_name), String::from_utf8_lossy(method_name));
                         let exc = vm.throw_type_error(msg.clone());
                         vm.current_exception = Some(exc);
                         return Err(VmError { message: msg, line: vm.current_line });
                     }
-                    let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, class \"{}\" not found",
+                    let msg = format!("{}(): {} must be a valid callback or null, class \"{}\" not found",
+                        fn_name, arg_label,
                         String::from_utf8_lossy(class_name));
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
@@ -2227,10 +2317,25 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
             if name_lower.starts_with(b"__closure_") || name_lower.starts_with(b"__arrow_") {
                 return Ok(());
             }
+            // PHP language constructs cannot be used as callbacks
+            const LANG_CONSTRUCTS: &[&[u8]] = &[
+                b"echo", b"print", b"isset", b"unset", b"empty",
+                b"include", b"include_once", b"require", b"require_once",
+                b"eval", b"exit", b"die", b"list", b"array",
+            ];
+            if LANG_CONSTRUCTS.contains(&name_lower.as_slice()) {
+                let msg = format!("{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
+                    fn_name, arg_label,
+                    String::from_utf8_lossy(name));
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
             if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
                 return Ok(());
             }
-            let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, function \"{}\" not found or invalid function name",
+            let msg = format!("{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
+                fn_name, arg_label,
                 String::from_utf8_lossy(name));
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -2240,7 +2345,7 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
             let arr_borrow = arr.borrow();
             let len = arr_borrow.len();
             if len != 2 {
-                let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, array callback must have exactly two members".to_string();
+                let msg = format!("{}(): {} must be a valid callback or null, array callback must have exactly two members", fn_name, arg_label);
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
                 return Err(VmError { message: msg, line: vm.current_line });
@@ -2256,14 +2361,14 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
                     if vm.classes.contains_key(&class_lower) {
                         return Ok(());
                     }
-                    let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, first array member is not a valid class name or object".to_string();
+                    let msg = format!("{}(): {} must be a valid callback or null, first array member is not a valid class name or object", fn_name, arg_label);
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
                     Err(VmError { message: msg, line: vm.current_line })
                 }
                 Value::Object(_) => Ok(()),
                 _ => {
-                    let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, first array member is not a valid class name or object".to_string();
+                    let msg = format!("{}(): {} must be a valid callback or null, first array member is not a valid class name or object", fn_name, arg_label);
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
                     Err(VmError { message: msg, line: vm.current_line })
@@ -2277,13 +2382,13 @@ fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), 
                     return Ok(());
                 }
             }
-            let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, no array or string given".to_string();
+            let msg = format!("{}(): {} must be a valid callback or null, no array or string given", fn_name, arg_label);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             Err(VmError { message: msg, line: vm.current_line })
         }
         _ => {
-            let msg = "array_map(): Argument #1 ($callback) must be a valid callback or null, no array or string given".to_string();
+            let msg = format!("{}(): {} must be a valid callback or null, no array or string given", fn_name, arg_label);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             Err(VmError { message: msg, line: vm.current_line })
@@ -2500,6 +2605,26 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 result.set(key.clone(), mapped);
             }
         } else if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+            // Check required argument count - array_map calls user function with 1 arg
+            // plus captured args. Verify the function accepts this.
+            let provided = (1 + captured_args.len()) as u32;
+            let required = user_fn.required_param_count;
+            if provided < required {
+                let display_name = String::from_utf8_lossy(&func_name).into_owned();
+                let total_params = user_fn.param_count;
+                let has_optional = total_params > required;
+                let qualifier = if has_optional { "at least" } else { "exactly" };
+                let plural = if required == 1 { "" } else { "s" };
+                let pass_plural = if provided == 1 { "" } else { "s" };
+                let msg = format!(
+                    "Too few arguments to function {}(), {} passed and {} {} expected",
+                    display_name, provided, qualifier, required
+                );
+                let _ = (plural, pass_plural);
+                let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: vm.current_line });
+            }
             for (key, val) in arr.iter() {
                 let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
                 // Pass captured vars first, then the element
@@ -2549,6 +2674,34 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
         if has_callback {
             let cb = callback.unwrap().clone();
+            validate_callback_generic(vm, &cb, "array_filter", "Argument #2 ($callback)")?;
+
+            // Pre-validate arg count for known string-named user functions / builtins.
+            // array_filter calls the callback with `n_args`:
+            //   mode 0: 1 arg (value)
+            //   mode 1: 2 args (value, key)
+            //   mode 2: 1 arg (key)
+            let n_args: u32 = if mode == 1 { 2 } else { 1 };
+            if let Value::String(s) = &cb {
+                let func_name = s.as_bytes().to_vec();
+                let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+                    let required = user_fn.required_param_count;
+                    if n_args < required {
+                        let display_name = String::from_utf8_lossy(&func_name).into_owned();
+                        let total_params = user_fn.param_count;
+                        let has_optional = total_params > required;
+                        let qualifier = if has_optional { "at least" } else { "exactly" };
+                        let msg = format!(
+                            "Too few arguments to function {}(), {} passed and {} {} expected",
+                            display_name, n_args, qualifier, required
+                        );
+                        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: vm.current_line });
+                    }
+                }
+            }
 
             for (key, val) in &arr_data {
                 let key_val = match key {
@@ -2982,17 +3135,23 @@ fn array_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
 
         if pad_size < 0 {
-            // Pad at the beginning
+            // Pad at the beginning: pad values reindex from 0, string keys preserved
             for _ in 0..pad_count {
                 result.push(pad_value.clone());
             }
-            for (_k, v) in arr.iter() {
-                result.push(v.clone());
+            for (k, v) in arr.iter() {
+                match k {
+                    ArrayKey::Int(_) => { result.push(v.clone()); }
+                    ArrayKey::String(_) => { result.set(k.clone(), v.clone()); }
+                }
             }
         } else {
-            // Pad at the end
-            for (_k, v) in arr.iter() {
-                result.push(v.clone());
+            // Pad at the end: input first with string keys preserved, then pad values
+            for (k, v) in arr.iter() {
+                match k {
+                    ArrayKey::Int(_) => { result.push(v.clone()); }
+                    ArrayKey::String(_) => { result.set(k.clone(), v.clone()); }
+                }
             }
             for _ in 0..pad_count {
                 result.push(pad_value.clone());
@@ -3040,15 +3199,53 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fill_val = args.get(1).cloned().unwrap_or(Value::Null);
     let mut result = PhpArray::new();
     if let Value::Array(arr) = keys {
-        let arr = arr.borrow();
-        for (_key, val) in arr.iter() {
-            // For array_fill_keys, float values should become string keys
-            let k = match val {
-                Value::Double(_f) => {
-                    let s = val.to_php_string();
-                    ArrayKey::String(s)
+        // Clone iterator so we can call vm methods inside the loop (for __toString).
+        let entries: Vec<Value> = arr.borrow().iter().map(|(_, v)| v.clone()).collect();
+        for raw in &entries {
+            let val = raw.deref();
+            // array_fill_keys uses PHP's key-coercion rules, which mirror how
+            // hash table inserts work in zend_hash. Float -> string, bool/null
+            // -> int(0/1)/"" follow normal rules, but resource/object/array
+            // values are coerced via to-string semantics (with the usual
+            // warnings).
+            let k = match &val {
+                Value::Long(n) => {
+                    // Resource IDs (registered) become "Resource id #N" strings.
+                    if *n > 3 && goro_core::value::is_registered_resource(*n) {
+                        ArrayKey::String(PhpString::from_vec(
+                            format!("Resource id #{}", n).into_bytes()
+                        ))
+                    } else {
+                        ArrayKey::Int(*n)
+                    }
                 }
-                _ => value_to_array_key(val),
+                Value::Double(_) => ArrayKey::String(val.to_php_string()),
+                Value::String(s) => {
+                    // Try to parse as integer (PHP normalizes numeric string keys)
+                    if let Ok(n) = s.to_string_lossy().parse::<i64>() {
+                        ArrayKey::Int(n)
+                    } else {
+                        ArrayKey::String(s.clone())
+                    }
+                }
+                Value::True => ArrayKey::Int(1),
+                Value::False => ArrayKey::String(PhpString::empty()),
+                Value::Null | Value::Undef => ArrayKey::String(PhpString::empty()),
+                Value::Array(_) => {
+                    // PHP emits a warning and uses literal "Array" as the key.
+                    vm.emit_warning("Array to string conversion");
+                    ArrayKey::String(PhpString::from_vec(b"Array".to_vec()))
+                }
+                Value::Object(obj) => {
+                    // Use __toString if available; otherwise fall back to to_php_string.
+                    let obj_val = Value::Object(obj.clone());
+                    if let Some(s) = vm.call_object_method(&obj_val, b"__toString", &[]) {
+                        ArrayKey::String(s.to_php_string())
+                    } else {
+                        ArrayKey::String(val.to_php_string())
+                    }
+                }
+                _ => value_to_array_key(&val),
             };
             result.set(k, fill_val.clone());
         }
@@ -3123,8 +3320,12 @@ fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Validate all arguments are arrays
     for (i, arg) in args.iter().enumerate() {
         if !matches!(arg, Value::Array(_)) {
-            let type_name = Vm::value_type_name(arg);
-            let msg = format!("array_diff(): Argument #{} must be of type array, {} given", i + 1, type_name);
+            let type_name = arg_type_name(arg);
+            let msg = if i == 0 {
+                format!("array_diff(): Argument #1 ($array) must be of type array, {} given", type_name)
+            } else {
+                format!("array_diff(): Argument #{} must be of type array, {} given", i + 1, type_name)
+            };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
@@ -3167,7 +3368,11 @@ fn array_intersect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Validate all arguments are arrays
     for (i, arg) in args.iter().enumerate() {
-        require_array_arg(vm, arg, "array_intersect", "array", (i + 1) as u32)?;
+        if i == 0 {
+            require_array_arg(vm, arg, "array_intersect", "array", 1)?;
+        } else {
+            require_array_arg_variadic(vm, arg, "array_intersect", (i + 1) as u32)?;
+        }
     }
     // Single array: return it as-is
     if args.len() == 1 {
@@ -3507,10 +3712,39 @@ fn range_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    // Float range (if any argument is float or step is float)
-    let use_float = matches!(start_val, Value::Double(_))
-        || matches!(end_val, Value::Double(_))
-        || step_val.is_some_and(|v| matches!(v, Value::Double(_)));
+    // Float range (if any argument is float or step is float).
+    // Strings that look like floats (contain '.' or exponent) also force float mode.
+    let looks_like_float = |v: &Value| -> bool {
+        match v {
+            Value::Double(_) => true,
+            Value::String(s) => {
+                let b = s.as_bytes();
+                b.iter().any(|&c| c == b'.' || c == b'e' || c == b'E')
+            }
+            _ => false,
+        }
+    };
+    // PHP treats whole-number float values (e.g. 2.0) as integer-equivalent if
+    // the start/end are ints and the step has no fractional component. Numeric
+    // strings with no decimal point are also int-equivalent.
+    let is_int_equivalent = |v: &Value| -> bool {
+        match v {
+            Value::Long(_) | Value::True | Value::False | Value::Null | Value::Undef => true,
+            Value::Double(d) => d.is_finite() && d.fract() == 0.0,
+            Value::String(s) => {
+                let b = s.as_bytes();
+                !b.iter().any(|&c| c == b'.' || c == b'e' || c == b'E')
+            }
+            _ => false,
+        }
+    };
+    let all_int_equivalent = is_int_equivalent(start_val)
+        && is_int_equivalent(end_val)
+        && step_val.is_none_or(is_int_equivalent);
+    let use_float = !all_int_equivalent
+        && (looks_like_float(start_val)
+            || looks_like_float(end_val)
+            || step_val.is_some_and(looks_like_float));
 
     if use_float {
         let start = start_val.to_double();
@@ -3529,23 +3763,22 @@ fn range_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .unwrap_or(1.0)
             .max(f64::EPSILON);
         let mut result = PhpArray::new();
+        // Use iteration counter to avoid accumulated floating point errors.
+        // PHP computes count = floor((|end - start|) / step + EPSILON) + 1
+        let diff = (end - start).abs();
+        let count = (diff / step + 1e-9).floor() as i64 + 1;
+        let count = count.min(10_000_001);
         if start <= end {
-            let mut v = start;
-            while v <= end + f64::EPSILON {
+            for i in 0..count {
+                let v = start + (i as f64) * step;
+                if v > end + 1e-9 { break; }
                 result.push(Value::Double(v));
-                v += step;
-                if result.len() > 10000 {
-                    break;
-                }
             }
         } else {
-            let mut v = start;
-            while v >= end - f64::EPSILON {
+            for i in 0..count {
+                let v = start - (i as f64) * step;
+                if v < end - 1e-9 { break; }
                 result.push(Value::Double(v));
-                v -= step;
-                if result.len() > 10000 {
-                    break;
-                }
             }
         }
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
@@ -4183,6 +4416,9 @@ fn debug_zval_refcount(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::Null)
 }
 fn extract_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // extract() is compiled to the dedicated OpCode::Extract since it modifies
+    // the caller's local scope. This stub exists only so that
+    // function_exists('extract') and call_user_func('extract', ...) don't fail.
     Ok(Value::Long(0))
 }
 fn array_column(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -4298,7 +4534,14 @@ fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
         for (_, val) in arr.iter() {
             let key = match val {
-                Value::Long(n) => ArrayKey::Int(*n),
+                Value::Long(n) => {
+                    // Resource ids (registered Longs > 3) should be treated as resources and skipped
+                    if *n > 3 && goro_core::value::is_registered_resource(*n) {
+                        vm.emit_warning("array_count_values(): Can only count string and integer values, entry skipped");
+                        continue;
+                    }
+                    ArrayKey::Int(*n)
+                }
                 Value::String(s) => ArrayKey::String(s.clone()),
                 _ => {
                     // PHP warns and skips non-int/non-string values
@@ -4327,12 +4570,22 @@ fn array_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arr_borrow = arr.borrow();
     let len = arr_borrow.len();
     if len == 0 {
-        vm.emit_warning("array_rand(): Array is empty");
-        return Ok(Value::Null);
+        let msg = "array_rand(): Argument #1 ($array) must not be empty".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line });
     }
     if num < 1 || num as usize > len {
-        vm.emit_warning("array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)");
-        return Ok(Value::Null);
+        let msg = "array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line });
     }
     let keys: Vec<goro_core::array::ArrayKey> = arr_borrow.iter().map(|(k, _)| k.clone()).collect();
     drop(arr_borrow);
@@ -6923,8 +7176,20 @@ fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
         }
     }
 }
-fn is_numeric_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
+fn is_numeric_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        let msg = "is_numeric() expects exactly 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: vm.current_line });
+    }
+    if args.len() > 1 {
+        let msg = format!("is_numeric() expects exactly 1 argument, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let val = &args[0];
     Ok(match val {
         Value::Long(_) | Value::Double(_) => Value::True,
         Value::String(s) => {
@@ -10532,7 +10797,7 @@ fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for (i, arg) in args.iter().enumerate() {
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&a);
+            let type_name = arg_type_name(&a);
             let msg = if i == 0 {
                 format!("array_diff_key(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
@@ -10576,7 +10841,7 @@ fn array_diff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for (i, arg) in args.iter().enumerate() {
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&a);
+            let type_name = arg_type_name(&a);
             let msg = if i == 0 {
                 format!("array_diff_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
@@ -10624,7 +10889,7 @@ fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     for (i, arg) in args.iter().enumerate() {
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&a);
+            let type_name = arg_type_name(&a);
             let msg = if i == 0 {
                 format!("array_intersect_key(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
@@ -10665,7 +10930,7 @@ fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     for (i, arg) in args.iter().enumerate() {
         let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
         if !matches!(a, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&a);
+            let type_name = arg_type_name(&a);
             let msg = if i == 0 {
                 format!("array_intersect_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
             } else {
@@ -10849,28 +11114,42 @@ where
     }
 }
 
+fn cmp_callback_result(
+    vm: &mut Vm,
+    result: Value,
+    fname: &str,
+    warned: &mut bool,
+) -> std::cmp::Ordering {
+    // PHP 8.2+ deprecates comparison functions returning bool. PHP emits the
+    // notice once per sort call (not once per comparison) and then continues
+    // with int coercion semantics.
+    if matches!(result, Value::True | Value::False) && !*warned {
+        *warned = true;
+        vm.emit_deprecated(&format!(
+            "{}(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero",
+            fname
+        ));
+    }
+    let cmp = result.to_long();
+    if cmp < 0 {
+        std::cmp::Ordering::Less
+    } else if cmp > 0 {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
+    }
+}
+
 fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
         let callback = callback.clone();
         let mut entries: Vec<Value> = arr.borrow().values().cloned().collect();
-        let mut bool_returned = false;
 
+        let mut warned = false;
         stable_sort_by(&mut entries, |a, b| {
             let result = vm.call_callback(&callback, &[a.clone(), b.clone()]).unwrap_or(Value::Long(0));
-            if matches!(result, Value::True | Value::False) { bool_returned = true; }
-            let cmp = result.to_long();
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
+            cmp_callback_result(vm, result, "usort", &mut warned)
         });
-
-        if bool_returned {
-            vm.emit_deprecated("usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero");
-        }
 
         let mut new_arr = PhpArray::new();
         for val in entries {
@@ -10887,23 +11166,11 @@ fn uasort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         let cb = callback.clone();
-        let mut bool_returned = false;
+        let mut warned = false;
         stable_sort_by(&mut entries, |a, b| {
             let result = call_user_func(vm, &[cb.clone(), a.1.clone(), b.1.clone()]).unwrap_or(Value::Long(0));
-            if matches!(result, Value::True | Value::False) { bool_returned = true; }
-            let cmp = result.to_long();
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
+            cmp_callback_result(vm, result, "uasort", &mut warned)
         });
-
-        if bool_returned {
-            vm.emit_deprecated("uasort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero");
-        }
 
         let mut new_arr = PhpArray::new();
         for (key, val) in entries {
@@ -10919,7 +11186,7 @@ fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         let cb = callback.clone();
-        let mut bool_returned = false;
+        let mut warned = false;
         stable_sort_by(&mut entries, |a, b| {
             let key_a = match &a.0 {
                 ArrayKey::Int(n) => Value::Long(*n),
@@ -10930,20 +11197,8 @@ fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 ArrayKey::String(s) => Value::String(s.clone()),
             };
             let result = call_user_func(vm, &[cb.clone(), key_a, key_b]).unwrap_or(Value::Long(0));
-            if matches!(result, Value::True | Value::False) { bool_returned = true; }
-            let cmp = result.to_long();
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
+            cmp_callback_result(vm, result, "uksort", &mut warned)
         });
-
-        if bool_returned {
-            vm.emit_deprecated("uksort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero");
-        }
 
         let mut new_arr = PhpArray::new();
         for (key, val) in entries {
@@ -10965,9 +11220,14 @@ fn array_reduce_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let entries: Vec<Value> = arr.values().cloned().collect();
     drop(arr);
 
-    let mut carry = initial;
+    // Deep-clone the initial value so that modifications inside the callback
+    // do not affect the caller's $initial (PHP value semantics for arrays).
+    // Also deep-clone the carry between iterations to ensure the user's
+    // returned value semantics are preserved.
+    let mut carry = deep_clone_value(&initial);
     for val in entries {
-        carry = vm.call_callback(&callback, &[carry, val])?;
+        let result = vm.call_callback(&callback, &[deep_clone_value(&carry), val])?;
+        carry = result;
     }
 
     Ok(carry)
@@ -11796,6 +12056,29 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.emit_deprecated("Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead");
     }
 
+    // Float keys with fractional or out-of-range components trigger a
+    // deprecation notice when implicitly truncated to int.
+    if let Value::Double(f) = key_deref {
+        let truncated = f.trunc();
+        let in_range = (i64::MIN as f64) <= truncated && truncated <= (i64::MAX as f64);
+        if !f.is_nan() && (f != truncated || !in_range) {
+            // PHP emits this notice with serialize_precision (-1 / shortest
+            // roundtrip) formatting, matching what var_dump uses for float
+            // values when serialize_precision is the default.
+            // Use shortest-roundtrip formatting (serialize_precision=-1)
+            // matching PHP's deprecation notice format.
+            let prev_prec = goro_core::value::get_php_precision();
+            goro_core::value::set_php_precision(-1);
+            let formatted: String = Value::Double(f).to_php_string().to_string_lossy().to_string();
+            goro_core::value::set_php_precision(prev_prec);
+            let msg = format!(
+                "Implicit conversion from float {} to int loses precision",
+                formatted
+            );
+            vm.emit_deprecated(&msg);
+        }
+    }
+
     // Check for invalid key types (array, object)
     match &key_deref {
         Value::Array(_) => {
@@ -11822,7 +12105,7 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::False
         })
     } else {
-        let type_name = Vm::value_type_name(arr);
+        let type_name = arg_type_name(arr);
         let msg = format!("array_key_exists(): Argument #2 ($array) must be of type array, {} given", type_name);
         let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
@@ -12657,7 +12940,7 @@ fn array_replace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_replace_recursive_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
@@ -12669,19 +12952,43 @@ fn array_replace_recursive_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
     };
 
     for arg in &args[1..] {
-        if let Value::Array(arr) = arg {
-            let arr = arr.borrow();
-            for (key, value) in arr.iter() {
-                if let Value::Array(inner_new) = value {
-                    if let Some(existing) = result.get(&key) {
+        let arg_deref = arg.deref();
+        if let Value::Array(arr) = &arg_deref {
+            let arr_ptr = Rc::as_ptr(arr) as usize;
+            let entries: Vec<_> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (key, value) in entries {
+                let value_deref = value.deref();
+                if let Value::Array(inner_new) = &value_deref {
+                    let inner_new_ptr = Rc::as_ptr(inner_new) as usize;
+                    // Detect direct self-reference before recursing.
+                    if inner_new_ptr == arr_ptr {
+                        let e = "Recursion detected".to_string();
+                        let exc = vm.create_exception(b"Error", &e, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: format!("Uncaught Error: {}", e), line: vm.current_line });
+                    }
+                    let existing_inner = if let Some(existing) = result.get(&key) {
+                        let existing = existing.deref();
                         if let Value::Array(inner_old) = existing {
-                            // Recursively merge
-                            let merged_val = array_replace_recursive_inner(
-                                &inner_old.borrow(),
-                                &inner_new.borrow(),
-                            );
-                            result.set(key.clone(), merged_val);
-                            continue;
+                            Some(inner_old.clone())
+                        } else { None }
+                    } else { None };
+                    if let Some(inner_old) = existing_inner {
+                        let mut visited = vec![arr_ptr, inner_new_ptr];
+                        match array_replace_recursive_inner(
+                            &inner_old.borrow(),
+                            inner_new,
+                            &mut visited,
+                        ) {
+                            Ok(merged_val) => {
+                                result.set(key.clone(), merged_val);
+                                continue;
+                            }
+                            Err(e) => {
+                                let exc = vm.create_exception(b"Error", &e, vm.current_line);
+                                vm.current_exception = Some(exc);
+                                return Err(VmError { message: format!("Uncaught Error: {}", e), line: vm.current_line });
+                            }
                         }
                     }
                 }
@@ -12692,13 +12999,24 @@ fn array_replace_recursive_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_replace_recursive_inner(base: &PhpArray, replacement: &PhpArray) -> Value {
+fn array_replace_recursive_inner(base: &PhpArray, replacement: &Rc<RefCell<PhpArray>>, visited: &mut Vec<usize>) -> Result<Value, String> {
     let mut result = base.clone();
-    for (key, value) in replacement.iter() {
-        if let Value::Array(inner_new) = value {
+    let replacement_borrow = replacement.borrow();
+    for (key, value) in replacement_borrow.iter() {
+        // Unwrap references so that recursive structures created via
+        // `$x[] = &$x;` are detected via their inner Rc pointer.
+        let value_owned = value.deref();
+        if let Value::Array(inner_new) = &value_owned {
+            let ptr = Rc::as_ptr(inner_new) as usize;
+            if visited.contains(&ptr) {
+                return Err("Recursion detected".to_string());
+            }
             if let Some(existing) = result.get(&key) {
+                let existing = existing.deref();
                 if let Value::Array(inner_old) = existing {
-                    let merged = array_replace_recursive_inner(&inner_old.borrow(), &inner_new.borrow());
+                    visited.push(ptr);
+                    let merged = array_replace_recursive_inner(&inner_old.borrow(), inner_new, visited)?;
+                    visited.pop();
                     result.set(key.clone(), merged);
                     continue;
                 }
@@ -12706,7 +13024,7 @@ fn array_replace_recursive_inner(base: &PhpArray, replacement: &PhpArray) -> Val
         }
         result.set(key.clone(), value.clone());
     }
-    Value::Array(Rc::new(RefCell::new(result)))
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn array_find_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -13072,7 +13390,7 @@ fn array_u_op(
     for i in 0..array_arg_count {
         let val = args[i].deref();
         if !matches!(val, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&val);
+            let type_name = arg_type_name(&val);
             let msg = if i == 0 {
                 format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
             } else {
@@ -13111,6 +13429,7 @@ fn array_u_op(
             ArrayKey::String(s) => Value::String(s.clone()),
         };
         let mut found_in_all = true;
+        let mut found_in_any = false;
         for other in &other_arrays {
             let mut found_in_this = false;
             for (okey, ovalue) in other.iter() {
@@ -13122,7 +13441,9 @@ fn array_u_op(
                     let cmp_result = call_user_func(vm, &[callback.clone(), key_val.clone(), okey_val.clone()])?;
                     if cmp_result.to_long() == 0 {
                         if also_compare_values {
-                            if value.equals(ovalue) {
+                            // PHP uses string comparison (zend_compare with string semantics)
+                            // for values in array_*_assoc functions, not loose `==`.
+                            if php_value_string_eq(value, ovalue) {
                                 found_in_this = true;
                                 break;
                             }
@@ -13142,10 +13463,14 @@ fn array_u_op(
             }
             if !found_in_this {
                 found_in_all = false;
-                break;
+            } else {
+                found_in_any = true;
             }
         }
-        if is_intersect == found_in_all {
+        // intersect: keep if found in ALL others
+        // diff: keep if NOT found in ANY other
+        let keep = if is_intersect { found_in_all } else { !found_in_any };
+        if keep {
             result.set(key.clone(), value.clone());
         }
     }
@@ -13168,7 +13493,7 @@ fn array_udiff_with_key_check(
     for i in 0..array_arg_count {
         let val = args[i].deref();
         if !matches!(val, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&val);
+            let type_name = arg_type_name(&val);
             let msg = if i == 0 {
                 format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
             } else {
@@ -13240,7 +13565,7 @@ fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) -> Resu
     for i in 0..array_arg_count {
         let val = args[i].deref();
         if !matches!(val, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&val);
+            let type_name = arg_type_name(&val);
             let msg = if i == 0 {
                 format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
             } else {
@@ -13325,7 +13650,7 @@ fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) ->
     for i in 0..array_arg_count {
         let val = args[i].deref();
         if !matches!(val, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&val);
+            let type_name = arg_type_name(&val);
             let msg = if i == 0 {
                 format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
             } else {
