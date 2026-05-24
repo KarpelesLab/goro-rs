@@ -5141,7 +5141,7 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(len as i64))
 }
 
-fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null).to_php_string();
     let format = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let input_bytes = input.as_bytes();
@@ -5190,6 +5190,15 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 width = std::str::from_utf8(&format_bytes[width_start..fmt_pos]).ok().and_then(|s| s.parse().ok());
             }
 
+            // Skip length modifiers (h, l, L, j, z, t, q, hh, ll) — they don't
+            // change the result type in PHP fscanf/sscanf.
+            while fmt_pos < format_bytes.len() {
+                match format_bytes[fmt_pos] {
+                    b'h' | b'l' | b'L' | b'j' | b'z' | b't' | b'q' => fmt_pos += 1,
+                    _ => break,
+                }
+            }
+
             if fmt_pos >= format_bytes.len() { break; }
             let spec = format_bytes[fmt_pos];
             fmt_pos += 1;
@@ -5197,7 +5206,7 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Skip leading whitespace for numeric types
             match spec {
                 b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'g' => {
-                    while input_pos < input_bytes.len() && input_bytes[input_pos] == b' ' {
+                    while input_pos < input_bytes.len() && (input_bytes[input_pos] == b' ' || input_bytes[input_pos] == b'\t' || input_bytes[input_pos] == b'\n' || input_bytes[input_pos] == b'\r') {
                         input_pos += 1;
                     }
                 }
@@ -5206,25 +5215,33 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
             match spec {
                 b'd' | b'i' | b'u' => {
-                    // Read integer
+                    // Read integer. Width counts total characters consumed,
+                    // including any leading sign.
                     let start = input_pos;
-                    if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
-                        input_pos += 1;
-                    }
-                    let mut count = 0usize;
                     let max = width.unwrap_or(usize::MAX);
+                    let mut count = 0usize;
+                    if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') && count < max {
+                        input_pos += 1;
+                        count += 1;
+                    }
                     while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() && count < max {
                         input_pos += 1;
                         count += 1;
                     }
-                    if input_pos > start {
+                    // If only the sign was consumed (no digits), reject.
+                    let digit_len = input_pos - start - (if input_bytes.get(start) == Some(&b'-') || input_bytes.get(start) == Some(&b'+') { 1 } else { 0 });
+                    if digit_len > 0 {
                         if !suppress {
                             let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
                             let val = s.parse::<i64>().unwrap_or(0);
                             results.push(Value::Long(val));
                         }
-                    } else if !suppress {
-                        results.push(Value::Null);
+                    } else {
+                        // Roll back if we consumed just a sign.
+                        input_pos = start;
+                        if !suppress {
+                            results.push(Value::Null);
+                        }
                     }
                 }
                 b'x' | b'X' => {
@@ -5260,15 +5277,48 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         results.push(Value::Long(val));
                     }
                 }
-                b'f' | b'e' | b'g' => {
+                b'f' | b'e' | b'g' | b'E' | b'G' => {
                     let start = input_pos;
                     if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
                         input_pos += 1;
                     }
-                    while input_pos < input_bytes.len() && (input_bytes[input_pos].is_ascii_digit() || input_bytes[input_pos] == b'.') {
+                    let int_start = input_pos;
+                    let mut saw_digit = false;
+                    while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() {
                         input_pos += 1;
+                        saw_digit = true;
                     }
-                    if !suppress {
+                    if input_pos < input_bytes.len() && input_bytes[input_pos] == b'.' {
+                        input_pos += 1;
+                        while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() {
+                            input_pos += 1;
+                            saw_digit = true;
+                        }
+                    }
+                    // Optional exponent.
+                    if saw_digit && input_pos < input_bytes.len() && (input_bytes[input_pos] == b'e' || input_bytes[input_pos] == b'E') {
+                        let exp_start = input_pos;
+                        input_pos += 1;
+                        if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
+                            input_pos += 1;
+                        }
+                        let exp_digit_start = input_pos;
+                        while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() {
+                            input_pos += 1;
+                        }
+                        if input_pos == exp_digit_start {
+                            // No digits after e — roll back exponent.
+                            input_pos = exp_start;
+                        }
+                    }
+                    if !saw_digit {
+                        // No digits matched — roll back and push NULL.
+                        input_pos = start;
+                        let _ = int_start;
+                        if !suppress {
+                            results.push(Value::Null);
+                        }
+                    } else if !suppress {
                         let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
                         let val = s.parse::<f64>().unwrap_or(0.0);
                         results.push(Value::Double(val));
@@ -5288,13 +5338,25 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 b'c' => {
-                    // Read single char (or width chars)
+                    // Read up to width non-whitespace chars (default 1).
+                    // Like %s but does not skip leading whitespace.
                     let n = width.unwrap_or(1);
                     let start = input_pos;
-                    let end = (input_pos + n).min(input_bytes.len());
-                    input_pos = end;
+                    let mut count = 0;
+                    while input_pos < input_bytes.len() && count < n {
+                        let b = input_bytes[input_pos];
+                        if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+                            break;
+                        }
+                        input_pos += 1;
+                        count += 1;
+                    }
                     if !suppress {
-                        results.push(Value::String(PhpString::from_vec(input_bytes[start..end].to_vec())));
+                        if input_pos > start {
+                            results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                        } else {
+                            results.push(Value::Null);
+                        }
                     }
                 }
                 b'n' => {
@@ -5304,25 +5366,47 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 b'[' => {
-                    // Character class [abc] or [^abc]
+                    // Character class [abc] or [^abc]. Supports ranges like
+                    // [0-9], [a-z]. A `]` as first char is literal.
                     let negated = fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b'^';
                     if negated { fmt_pos += 1; }
-                    let mut char_set = Vec::new();
-                    // Special case: ] as first char is literal
+                    let mut raw_set: Vec<u8> = Vec::new();
                     if fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b']' {
-                        char_set.push(b']');
+                        raw_set.push(b']');
                         fmt_pos += 1;
                     }
                     while fmt_pos < format_bytes.len() && format_bytes[fmt_pos] != b']' {
-                        char_set.push(format_bytes[fmt_pos]);
+                        raw_set.push(format_bytes[fmt_pos]);
                         fmt_pos += 1;
                     }
                     if fmt_pos < format_bytes.len() { fmt_pos += 1; } // skip ]
+
+                    // Build expanded set, processing ranges (a-b).
+                    let mut in_set_check = |c: u8| -> bool {
+                        let mut i = 0;
+                        while i < raw_set.len() {
+                            if i + 2 < raw_set.len() && raw_set[i + 1] == b'-' {
+                                let lo = raw_set[i];
+                                let hi = raw_set[i + 2];
+                                if lo <= c && c <= hi {
+                                    return true;
+                                }
+                                i += 3;
+                            } else {
+                                if raw_set[i] == c {
+                                    return true;
+                                }
+                                i += 1;
+                            }
+                        }
+                        false
+                    };
+
                     let start = input_pos;
                     let max = width.unwrap_or(usize::MAX);
                     let mut count = 0;
                     while input_pos < input_bytes.len() && count < max {
-                        let in_set = char_set.contains(&input_bytes[input_pos]);
+                        let in_set = in_set_check(input_bytes[input_pos]);
                         if (negated && in_set) || (!negated && !in_set) {
                             break;
                         }
@@ -5337,7 +5421,18 @@ fn sscanf_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    // Bad scan conversion character — PHP throws ValueError.
+                    let ch_str = if (32..=126).contains(&spec) {
+                        format!("{}", spec as char)
+                    } else {
+                        format!("\\x{:02x}", spec)
+                    };
+                    let msg = format!("Bad scan conversion character \"{}\"", ch_str);
+                    let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
+                }
             }
         } else if format_bytes[fmt_pos] == b' ' || format_bytes[fmt_pos] == b'\t' || format_bytes[fmt_pos] == b'\n' {
             // Whitespace in format matches any amount of whitespace in input
