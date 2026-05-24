@@ -1863,6 +1863,22 @@ impl Vm {
         }
     }
 
+    /// Emit a user-triggered deprecated notice (E_USER_DEPRECATED = 16384).
+    /// Used by the #[\Deprecated] attribute when calling user functions,
+    /// methods and constants.
+    pub fn emit_user_deprecated_at(&mut self, msg: &str, line: u32) {
+        if self.error_reporting & 16384 != 0 {
+            // E_USER_DEPRECATED = 16384
+            if self.call_user_error_handler(16384, msg, line) {
+                return;
+            }
+            // Fall back to the standard deprecation banner if no handler ran.
+            let effective_line = if line == 0 { self.current_line } else { line };
+            let deprec = format!("\nDeprecated: {} in {} on line {}\n", msg, self.current_file, effective_line);
+            self.output.extend_from_slice(deprec.as_bytes());
+        }
+    }
+
     /// Check if attributes contain #[\Deprecated] and return the message
     pub fn get_deprecated_message(&mut self, attrs: &[crate::object::RuntimeAttribute]) -> Option<String> {
         for attr in attrs {
@@ -18596,7 +18612,7 @@ impl Vm {
                                         format!("Function {}() is deprecated, {}", fn_display, custom_msg)
                                     }
                                 };
-                                self.emit_deprecated_at(&msg, op.line);
+                                self.emit_user_deprecated_at(&msg, op.line);
                             }
                             // #[\NoDiscard] - warn if result is discarded
                             if matches!(op.op1, OperandType::Const(_)) {
@@ -23938,7 +23954,7 @@ impl Vm {
                                     } else {
                                         format!("Constant {}::{} is deprecated, {}", class_display, const_display, custom_msg)
                                     };
-                                    self.emit_deprecated_at(&msg, op.line);
+                                    self.emit_user_deprecated_at(&msg, op.line);
                                 }
                             }
                         }
@@ -28865,7 +28881,7 @@ impl Vm {
                                 } else {
                                     format!("Class {} is deprecated, {}", class_display, custom_msg)
                                 };
-                                self.emit_deprecated_at(&msg, op.line);
+                                self.emit_user_deprecated_at(&msg, op.line);
                             }
                         }
                     }

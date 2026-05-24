@@ -929,7 +929,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             } else {
                                 format!("Constant {}::{} is deprecated, {}", class_display, const_name, custom_msg)
                             };
-                            vm.emit_deprecated_at(&msg, vm.current_line);
+                            vm.emit_user_deprecated_at(&msg, vm.current_line);
                         }
                     }
                 }
