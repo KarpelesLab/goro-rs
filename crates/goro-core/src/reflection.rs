@@ -3238,6 +3238,27 @@ pub fn reflection_method_docall(
                 let target_obj = args.get(1)?.clone();
                 let invoke_args: Vec<Value> = args.iter().skip(2).cloned().collect();
 
+                // Block direct instantiation of internal classes via invoke($obj, __construct)
+                if method_lower_bytes.as_bytes() == b"__construct" {
+                    let no_direct: &[&[u8]] = &[
+                        b"reflectionattribute", b"reflectiongenerator",
+                        b"reflectionfiber", b"reflectionreference",
+                    ];
+                    if no_direct.iter().any(|c| *c == class_lower.as_slice()) {
+                        let canonical = match class_lower.as_slice() {
+                            b"reflectionattribute" => "ReflectionAttribute",
+                            b"reflectiongenerator" => "ReflectionGenerator",
+                            b"reflectionfiber" => "ReflectionFiber",
+                            b"reflectionreference" => "ReflectionReference",
+                            _ => "ReflectionAttribute",
+                        };
+                        let msg = format!("Cannot directly instantiate {}", canonical);
+                        let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
+
                 let method_def = vm.classes.get(&class_lower)
                     .and_then(|c| c.get_method(method_lower_bytes.as_bytes()))
                     .cloned();
@@ -7193,6 +7214,16 @@ pub fn reflection_attribute_method(
 ) -> Option<Value> {
     let ob = obj.borrow();
     match method {
+        b"__construct" => {
+            drop(ob);
+            let exc = vm.create_exception(
+                b"ReflectionException",
+                "Cannot directly instantiate ReflectionAttribute",
+                vm.current_line,
+            );
+            vm.current_exception = Some(exc);
+            Some(Value::Null)
+        }
         b"getname" => {
             let name = ob.get_property(b"__attr_name");
             Some(name)
