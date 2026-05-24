@@ -2396,8 +2396,43 @@ pub fn reflection_class_docall(
                 // Reset an existing object to the uninitialized lazy state.
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 let initializer = args.get(2).cloned().unwrap_or(Value::Null);
+                let options = args.get(3).map(|v| v.to_long()).unwrap_or(0);
                 let is_proxy = method == b"resetaslazyproxy";
+                // Validate options:
+                //   - resetAsLazyGhost: only SKIP_INITIALIZATION_ON_SERIALIZE (1) allowed
+                //   - resetAsLazyProxy: SKIP_INITIALIZATION_ON_SERIALIZE (1) | SKIP_DESTRUCTOR (2)
+                let valid_mask = if is_proxy { 3 } else { 1 };
+                if options & !valid_mask != 0 {
+                    let method_name = if is_proxy { "resetAsLazyProxy" } else { "resetAsLazyGhost" };
+                    let err_msg = format!(
+                        "ReflectionClass::{}(): Argument #3 ($options) contains invalid flags",
+                        method_name
+                    );
+                    let exc = vm.create_exception(b"ReflectionException", &err_msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 if let Value::Object(obj) = &target {
+                    // PHP: classes with no declared instance properties are never lazy
+                    // — resetAsLazy*() is a no-op (object remains non-lazy).
+                    let decl_prop_count = vm.classes.get(&class_lower)
+                        .map(|ce| ce.properties.iter().filter(|p| !p.is_static).count())
+                        .unwrap_or(0);
+                    if decl_prop_count == 0 {
+                        // Still wipe dynamic properties to match expected behavior
+                        let mut ob = obj.borrow_mut();
+                        let names: Vec<Vec<u8>> = ob.properties.iter()
+                            .filter(|(n, _)| !n.starts_with(b"__lazy_"))
+                            .map(|(n, _)| n.clone())
+                            .collect();
+                        for n in names {
+                            ob.remove_property(&n);
+                        }
+                        ob.remove_property(b"__lazy_state");
+                        ob.remove_property(b"__lazy_initializer");
+                        ob.remove_property(b"__lazy_real");
+                        return Some(Value::Null);
+                    }
                     let mut ob = obj.borrow_mut();
                     // Clear existing state
                     ob.remove_property(b"__lazy_real");
@@ -2430,13 +2465,89 @@ pub fn reflection_class_docall(
             }
             b"newlazyghost" | b"newlazyproxy" => {
                 let initializer = args.get(1).cloned().unwrap_or(Value::Null);
-                let _options = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                let options = args.get(2).map(|v| v.to_long()).unwrap_or(0);
                 let is_proxy = method == b"newlazyproxy";
+                // PHP: internal classes cannot be initialized lazily.
+                // stdClass is whitelisted as it is considered safe.
+                if !vm.classes.contains_key(&class_lower) && class_lower != b"stdclass" {
+                    let canonical = vm.builtin_canonical_name(&class_lower);
+                    let err_msg = format!(
+                        "Cannot make instance of internal class lazy: {} is internal",
+                        canonical
+                    );
+                    let exc = vm.create_exception(b"Error", &err_msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                // PHP: sub-classes of internal classes (other than stdClass) cannot
+                // be initialized lazily either.
+                {
+                    let mut cur = class_lower.clone();
+                    let canonical_self = vm.classes.get(&class_lower)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
+                    let self_disp = String::from_utf8_lossy(&canonical_self).to_string();
+                    let mut bad_internal_ancestor: Option<String> = None;
+                    while let Some(ce) = vm.classes.get(&cur) {
+                        if let Some(parent_lower) = &ce.parent {
+                            let pl: Vec<u8> = parent_lower.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if pl == b"stdclass" {
+                                break;
+                            }
+                            if !vm.classes.contains_key(&pl) {
+                                // Parent is internal
+                                let parent_disp = vm.builtin_canonical_name(&pl);
+                                bad_internal_ancestor = Some(parent_disp);
+                                break;
+                            }
+                            cur = pl;
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(parent_name) = bad_internal_ancestor {
+                        let err_msg = format!(
+                            "Cannot make instance of internal class lazy: {} inherits internal class {}",
+                            self_disp, parent_name
+                        );
+                        let exc = vm.create_exception(b"Error", &err_msg, 0);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
+                // Validate options: only SKIP_INITIALIZATION_ON_SERIALIZE (1)
+                // is allowed for newLazyGhost/newLazyProxy. SKIP_DESTRUCTOR (2)
+                // is only allowed on resetAsLazyProxy.
+                if options & !1 != 0 {
+                    let method_name = if is_proxy { "newLazyProxy" } else { "newLazyGhost" };
+                    let err_msg = if options & 2 != 0 && options & !3 == 0 {
+                        format!(
+                            "ReflectionClass::{}(): Argument #2 ($options) does not accept ReflectionClass::SKIP_DESTRUCTOR",
+                            method_name
+                        )
+                    } else {
+                        format!(
+                            "ReflectionClass::{}(): Argument #2 ($options) contains invalid flags",
+                            method_name
+                        )
+                    };
+                    let exc = vm.create_exception(b"ReflectionException", &err_msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let obj_id = vm.next_object_id();
                 let canonical = vm.classes.get(&class_lower)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
                 let mut new_obj = PhpObject::new(canonical, obj_id);
+                // PHP: classes with no declared instance properties are never lazy
+                // — they are returned as already-initialized objects (no initializer).
+                let decl_prop_count = vm.classes.get(&class_lower)
+                    .map(|ce| ce.properties.iter().filter(|p| !p.is_static).count())
+                    .unwrap_or(0);
+                if decl_prop_count == 0 {
+                    return Some(Value::Object(Rc::new(RefCell::new(new_obj))));
+                }
                 // For lazy objects, all declared properties are seeded as Undef
                 // in declaration order so later assignments preserve that order.
                 // Typed properties will render as uninitialized() in var_dump
@@ -2463,13 +2574,33 @@ pub fn reflection_class_docall(
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Object(inner) = &target {
                     vm.maybe_run_lazy_init(inner);
+                    // For proxies, return the real backing instance.
+                    let ob = inner.borrow();
+                    let state = ob.get_property(b"__lazy_state");
+                    let is_proxy = matches!(&state, Value::String(s) if s.as_bytes() == b"proxy");
+                    if is_proxy {
+                        if let Value::Object(real) = ob.get_property(b"__lazy_real") {
+                            return Some(Value::Object(real));
+                        }
+                    }
                 }
                 Some(target)
             }
             b"marklazyobjectasinitialized" => {
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Object(inner) = &target {
+                    // Initialize properties to their default values from the class
+                    // definition, skipping the initializer.
+                    let defaults: Vec<(Vec<u8>, Value)> = vm.classes.get(&class_lower)
+                        .map(|ce| ce.properties.iter()
+                            .filter(|p| !p.is_static && !matches!(p.default, Value::Undef))
+                            .map(|p| (p.name.clone(), p.default.clone()))
+                            .collect())
+                        .unwrap_or_default();
                     let mut ob = inner.borrow_mut();
+                    for (name, val) in defaults {
+                        ob.set_property(name, val);
+                    }
                     ob.remove_property(b"__lazy_state");
                     ob.remove_property(b"__lazy_initializer");
                 }
@@ -5223,12 +5354,50 @@ pub fn reflection_constant_method(
             Some(Value::False)
         }
         b"getattributes" => {
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+            let attrs = constant_attrs_lookup(vm, name.as_bytes()).unwrap_or_default();
+            Some(create_reflection_attributes(vm, &attrs, None, 0, 64))
         }
         b"__tostring" => {
             Some(Value::String(PhpString::from_string(format!("Constant [ {} ]\n", name))))
         }
         _ => None,
+    }
+}
+
+fn constant_attrs_lookup(vm: &Vm, name: &[u8]) -> Option<Vec<crate::object::RuntimeAttribute>> {
+    if let Some(a) = vm.constant_attributes.get(name) {
+        return Some(a.clone());
+    }
+    // Fall back to lowercase
+    let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    if let Some(a) = vm.constant_attributes.get(&lower[..]) {
+        return Some(a.clone());
+    }
+    None
+}
+
+pub fn reflection_constant_docall(
+    vm: &mut Vm,
+    method: &[u8],
+    args: &[Value],
+) -> Option<Value> {
+    let this = args.first()?;
+    if let Value::Object(obj) = this {
+        let ob = obj.borrow();
+        let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+        drop(ob);
+        match method {
+            b"getattributes" => {
+                let attrs = constant_attrs_lookup(vm, name.as_bytes()).unwrap_or_default();
+                let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
+                let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                // TARGET_CONSTANT = 64
+                Some(create_reflection_attributes(vm, &attrs, filter_name.as_deref(), filter_flags, 64))
+            }
+            _ => None,
+        }
+    } else {
+        None
     }
 }
 
@@ -7256,6 +7425,48 @@ pub fn create_reflection_attributes(
     target: i64,
 ) -> Value {
     let mut result = PhpArray::new();
+    // Validate flags: only 0 (default) and 2 (IS_INSTANCEOF) are allowed.
+    if filter_flags != 0 && filter_flags != 2 {
+        let line = vm.current_line;
+        let exc = vm.create_exception(
+            b"ValueError",
+            "ReflectionFunctionAbstract::getAttributes(): Argument #2 ($flags) must be a valid attribute filter flag",
+            line,
+        );
+        vm.current_exception = Some(exc);
+        return Value::Null;
+    }
+    // Resolve filter_name; if given and IS_INSTANCEOF specified, the class
+    // must exist or throw an error.
+    if filter_flags == 2 {
+        if let Some(fname) = filter_name {
+            let fl: Vec<u8> = fname.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let exists = vm.classes.contains_key(&fl) ||
+                // Built-in well-known classes
+                matches!(fl.as_slice(),
+                    b"stdclass" | b"exception" | b"error" | b"throwable" | b"closure" |
+                    b"generator" | b"weakreference" | b"weakmap" |
+                    b"arrayaccess" | b"iterator" | b"iteratoraggregate" |
+                    b"traversable" | b"countable" | b"stringable" |
+                    b"reflectionclass" | b"reflectionobject" | b"reflectionmethod" |
+                    b"reflectionfunction" | b"reflectionproperty" | b"reflectionparameter" |
+                    b"reflectionconstant" | b"reflectionclassconstant" | b"reflectionattribute" |
+                    b"reflectionextension" | b"reflectionnamedtype" | b"reflectionuniontype" |
+                    b"reflectionintersectiontype"
+                );
+            if !exists {
+                let display = String::from_utf8_lossy(fname);
+                let line = vm.current_line;
+                let exc = vm.create_exception(
+                    b"Error",
+                    &format!("Class \"{}\" not found", display),
+                    line,
+                );
+                vm.current_exception = Some(exc);
+                return Value::Null;
+            }
+        }
+    }
     for attr in attrs {
         // If a filter name is specified, check it
         if let Some(fname) = filter_name {
@@ -7265,33 +7476,29 @@ pub fn create_reflection_attributes(
                     continue;
                 }
             } else {
-                // IS_INSTANCEOF = 2: check if attribute class is the given class or subclass
-                // For now, just do case-insensitive match (we can refine later)
+                // IS_INSTANCEOF = 2: check if attribute class is the given class
+                // or any subclass/implementer (transitive).
                 if !attr.name.eq_ignore_ascii_case(fname) {
-                    // Check if class inherits from filter_name
                     let attr_lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                     let filter_lower: Vec<u8> = fname.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    let is_subclass = vm.classes.get(&attr_lower)
-                        .map(|ce| {
-                            // Walk parent chain
-                            let mut current = ce.parent.clone();
-                            while let Some(ref p) = current {
-                                let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                if p_lower == filter_lower {
-                                    return true;
-                                }
-                                current = vm.classes.get(&p_lower).and_then(|c| c.parent.clone());
+                    // Walk attr class + ancestors checking class + interfaces (transitively).
+                    let mut visited: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+                    let mut queue: Vec<Vec<u8>> = vec![attr_lower];
+                    let mut is_subclass = false;
+                    while let Some(cur) = queue.pop() {
+                        if !visited.insert(cur.clone()) { continue; }
+                        if cur == filter_lower { is_subclass = true; break; }
+                        if let Some(ce) = vm.classes.get(&cur) {
+                            if let Some(p) = &ce.parent {
+                                let pl: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                queue.push(pl);
                             }
-                            // Check interfaces
                             for iface in &ce.interfaces {
-                                let i_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                if i_lower == filter_lower {
-                                    return true;
-                                }
+                                let il: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                queue.push(il);
                             }
-                            false
-                        })
-                        .unwrap_or(false);
+                        }
+                    }
                     if !is_subclass {
                         continue;
                     }
@@ -7381,21 +7588,138 @@ pub fn reflection_attribute_method(
             let attr_name = ob.get_property(b"__attr_name").to_php_string().to_string_lossy();
             let args = ob.get_property(b"__attr_args");
             drop(ob);
+            // Capture the call-site line before any inner op-array execution
+            // (e.g. evaluating #[Attribute(...)] args) overwrites self.current_line.
+            let call_site_line = vm.current_line;
             // Create a new instance of the attribute class
             let class_lower: Vec<u8> = attr_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Built-in attribute classes: AllowDynamicProperties, Override,
+            // SensitiveParameter, ReturnTypeWillChange, DelayedTargetValidation
+            // are marker attributes that have no constructor body.
+            // Their newInstance() returns an empty object of the right type.
+            let builtin_marker_attrs: &[&[u8]] = &[
+                b"allowdynamicproperties",
+                b"override",
+                b"sensitiveparameter",
+                b"returntypewillchange",
+                b"delayedtargetvalidation",
+            ];
+            if builtin_marker_attrs.contains(&class_lower.as_slice())
+                && !vm.classes.contains_key(&class_lower)
+            {
+                let obj_id = vm.next_object_id();
+                // Preserve canonical PHP class name casing
+                let canonical_name: &[u8] = match class_lower.as_slice() {
+                    b"allowdynamicproperties" => b"AllowDynamicProperties",
+                    b"override" => b"Override",
+                    b"sensitiveparameter" => b"SensitiveParameter",
+                    b"returntypewillchange" => b"ReturnTypeWillChange",
+                    b"delayedtargetvalidation" => b"DelayedTargetValidation",
+                    _ => unreachable!(),
+                };
+                let new_obj = PhpObject::new(canonical_name.to_vec(), obj_id);
+                return Some(Value::Object(Rc::new(RefCell::new(new_obj))));
+            }
             if !vm.classes.contains_key(&class_lower) {
                 let err_msg = format!("Attribute class \"{}\" not found", attr_name);
-                let exc = vm.create_exception(b"Error", &err_msg, 0);
+                let exc = vm.create_exception(b"Error", &err_msg, call_site_line);
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
             // Check if the class has #[Attribute] -- only attribute classes can be instantiated via newInstance
-            let is_attribute_class = vm.classes.get(&class_lower)
-                .map(|ce| ce.attributes.iter().any(|a| a.name.eq_ignore_ascii_case(b"attribute")))
-                .unwrap_or(false);
+            let attribute_args_op = vm.classes.get(&class_lower)
+                .and_then(|ce| ce.attributes.iter().find(|a| a.name.eq_ignore_ascii_case(b"attribute")))
+                .map(|a| a.args_op_array.clone());
+            let is_attribute_class = attribute_args_op.is_some();
             if !is_attribute_class && class_lower != b"attribute" {
                 let err_msg = format!("Attempting to use non-attribute class \"{}\" as attribute", attr_name);
-                let exc = vm.create_exception(b"Error", &err_msg, 0);
+                let exc = vm.create_exception(b"Error", &err_msg, call_site_line);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
+            // Validate the #[Attribute(...)] flags on this attribute class.
+            let mut attr_flags: i64 = 127; // Default TARGET_ALL
+            if let Some(args_op) = attribute_args_op {
+                let args_val = vm.execute_op_array_pub(&args_op, vec![]).unwrap_or(Value::Null);
+                // Restore the call-site line after the inner op-array updated it.
+                vm.current_line = call_site_line;
+                if let Value::Array(arr) = &args_val {
+                    let arr_b = arr.borrow();
+                    if let Some((_, flag_val)) = arr_b.iter().next() {
+                        // Type-check first: must be int
+                        if !matches!(flag_val, Value::Long(_) | Value::Null) {
+                            let actual_type = match flag_val {
+                                Value::String(_) => "string",
+                                Value::Double(_) => "float",
+                                Value::True | Value::False => "bool",
+                                Value::Array(_) => "array",
+                                Value::Object(_) => "object",
+                                _ => "unknown",
+                            };
+                            let err_msg = format!(
+                                "Attribute::__construct(): Argument #1 ($flags) must be of type int, {} given",
+                                actual_type
+                            );
+                            let exc = vm.create_exception(b"TypeError", &err_msg, call_site_line);
+                            vm.current_exception = Some(exc);
+                            return Some(Value::Null);
+                        }
+                        // Value range check: must be 0..=255 (TARGET_ALL=127 | IS_REPEATABLE=128)
+                        if let Value::Long(n) = flag_val {
+                            if *n < 0 || *n > (127 | 128) {
+                                let err_msg = "Invalid attribute flags specified".to_string();
+                                let exc = vm.create_exception(b"ValueError", &err_msg, call_site_line);
+                                vm.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            attr_flags = *n;
+                        }
+                    }
+                }
+            }
+            // Check target compatibility. The attribute object stores
+            // `__attr_target` as the active target bit (e.g. TARGET_CLASS=1).
+            let active_target = {
+                let ob2 = obj.borrow();
+                ob2.get_property(b"__attr_target").to_long()
+            };
+            let target_mask = attr_flags & 127;
+            if active_target != 0 && (target_mask & active_target) == 0 {
+                let target_str = match active_target {
+                    1 => "class",
+                    2 => "function",
+                    4 => "method",
+                    8 => "property",
+                    16 => "class constant",
+                    32 => "parameter",
+                    64 => "constant",
+                    _ => "unknown",
+                };
+                let mut allowed: Vec<&str> = Vec::new();
+                if target_mask & 1 != 0 { allowed.push("class"); }
+                if target_mask & 2 != 0 { allowed.push("function"); }
+                if target_mask & 4 != 0 { allowed.push("method"); }
+                if target_mask & 8 != 0 { allowed.push("property"); }
+                if target_mask & 16 != 0 { allowed.push("class constant"); }
+                if target_mask & 32 != 0 { allowed.push("parameter"); }
+                if target_mask & 64 != 0 { allowed.push("constant"); }
+                let err_msg = format!(
+                    "Attribute \"{}\" cannot target {} (allowed targets: {})",
+                    attr_name, target_str, allowed.join(", ")
+                );
+                let exc = vm.create_exception(b"Error", &err_msg, call_site_line);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
+            // Check repetition: if the attribute is repeated but not flagged
+            // as IS_REPEATABLE, throw an error.
+            let is_repeated = {
+                let ob2 = obj.borrow();
+                matches!(ob2.get_property(b"__attr_repeated"), Value::True)
+            };
+            if is_repeated && (attr_flags & 128) == 0 {
+                let err_msg = format!("Attribute \"{}\" must not be repeated", attr_name);
+                let exc = vm.create_exception(b"Error", &err_msg, call_site_line);
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
@@ -7417,6 +7741,69 @@ pub fn reflection_attribute_method(
             // Create the object and call its constructor
             let obj_id = vm.next_object_id();
             let ce = vm.classes.get(&class_lower).unwrap().clone();
+            // Pre-flight: validate constructor visibility and argument count.
+            let construct_lower = b"__construct".to_vec();
+            if let Some(constructor) = ce.get_method(&construct_lower) {
+                use crate::object::Visibility;
+                if matches!(constructor.visibility, Visibility::Private) {
+                    let err_msg = format!(
+                        "Call to private {}::__construct() from global scope",
+                        std::str::from_utf8(&ce.name).unwrap_or("")
+                    );
+                    let exc = vm.create_exception(b"Error", &err_msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                if matches!(constructor.visibility, Visibility::Protected) {
+                    let err_msg = format!(
+                        "Call to protected {}::__construct() from global scope",
+                        std::str::from_utf8(&ce.name).unwrap_or("")
+                    );
+                    let exc = vm.create_exception(b"Error", &err_msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                // Build effective argument count after merging positional and
+                // named arguments against parameter names.
+                let op = &constructor.op_array;
+                let required = op.required_param_count as usize;
+                let positional = call_args.len();
+                // Count distinct CV indices satisfied via positional + named.
+                let mut satisfied = vec![false; op.cv_names.len()];
+                // Param CVs follow $this, so start at offset 1 for non-static.
+                let skip = 1usize;
+                for i in 0..positional {
+                    if i + skip < satisfied.len() {
+                        satisfied[i + skip] = true;
+                    }
+                }
+                for (name, _) in &named_args {
+                    for (ci, cv_name) in op.cv_names.iter().enumerate() {
+                        if cv_name == name {
+                            if ci < satisfied.len() { satisfied[ci] = true; }
+                            break;
+                        }
+                    }
+                }
+                let mut filled_required = 0usize;
+                for i in 0..required {
+                    if i + skip < satisfied.len() && satisfied[i + skip] {
+                        filled_required += 1;
+                    }
+                }
+                if filled_required < required {
+                    let err_msg = format!(
+                        "Too few arguments to function {}::__construct(), {} passed and {} {} expected",
+                        std::str::from_utf8(&ce.name).unwrap_or(""),
+                        positional + named_args.len(),
+                        required,
+                        if (op.param_count as usize) > required { "at least" } else { "exactly" }
+                    );
+                    let exc = vm.create_exception(b"ArgumentCountError", &err_msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+            }
             let mut new_obj = PhpObject::new(ce.name.clone(), obj_id);
             // Initialize properties from class definition
             for prop in &ce.properties {
@@ -7426,7 +7813,6 @@ pub fn reflection_attribute_method(
             }
             let instance = Value::Object(Rc::new(RefCell::new(new_obj)));
             // Call __construct if it exists
-            let construct_lower = b"__construct".to_vec();
             if let Some(constructor) = ce.get_method(&construct_lower) {
                 let op = constructor.op_array.clone();
                 let mut cvs = vec![Value::Undef; op.cv_names.len()];

@@ -443,6 +443,26 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 return;
             }
 
+            // ReflectionAttribute: only show "name" property in var_dump
+            if class_lower == b"reflectionattribute" {
+                let name_val = obj_borrow.get_property(b"__attr_name");
+                let class_name_owned = class_name.to_string();
+                drop(obj_borrow);
+                vm.write_output(
+                    format!("{}object({})#{} (1) {{\n", prefix, class_name_owned, oid).as_bytes(),
+                );
+                if !seen.insert(oid) {
+                    vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
+                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    return;
+                }
+                vm.write_output(format!("{}  [\"name\"]=>\n", prefix).as_bytes());
+                var_dump_value(vm, &name_val, indent + 2, seen);
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
+
             // Uri classes: expose __uri_* properties as scheme/username/... for var_dump
             let is_uri_class = matches!(
                 class_lower.as_slice(),
