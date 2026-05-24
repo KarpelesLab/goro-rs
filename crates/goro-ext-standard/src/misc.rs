@@ -3035,15 +3035,53 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fill_val = args.get(1).cloned().unwrap_or(Value::Null);
     let mut result = PhpArray::new();
     if let Value::Array(arr) = keys {
-        let arr = arr.borrow();
-        for (_key, val) in arr.iter() {
-            // For array_fill_keys, float values should become string keys
-            let k = match val {
-                Value::Double(_f) => {
-                    let s = val.to_php_string();
-                    ArrayKey::String(s)
+        // Clone iterator so we can call vm methods inside the loop (for __toString).
+        let entries: Vec<Value> = arr.borrow().iter().map(|(_, v)| v.clone()).collect();
+        for raw in &entries {
+            let val = raw.deref();
+            // array_fill_keys uses PHP's key-coercion rules, which mirror how
+            // hash table inserts work in zend_hash. Float -> string, bool/null
+            // -> int(0/1)/"" follow normal rules, but resource/object/array
+            // values are coerced via to-string semantics (with the usual
+            // warnings).
+            let k = match &val {
+                Value::Long(n) => {
+                    // Resource IDs (registered) become "Resource id #N" strings.
+                    if *n > 3 && goro_core::value::is_registered_resource(*n) {
+                        ArrayKey::String(PhpString::from_vec(
+                            format!("Resource id #{}", n).into_bytes()
+                        ))
+                    } else {
+                        ArrayKey::Int(*n)
+                    }
                 }
-                _ => value_to_array_key(val),
+                Value::Double(_) => ArrayKey::String(val.to_php_string()),
+                Value::String(s) => {
+                    // Try to parse as integer (PHP normalizes numeric string keys)
+                    if let Ok(n) = s.to_string_lossy().parse::<i64>() {
+                        ArrayKey::Int(n)
+                    } else {
+                        ArrayKey::String(s.clone())
+                    }
+                }
+                Value::True => ArrayKey::Int(1),
+                Value::False => ArrayKey::String(PhpString::empty()),
+                Value::Null | Value::Undef => ArrayKey::String(PhpString::empty()),
+                Value::Array(_) => {
+                    // PHP emits a warning and uses literal "Array" as the key.
+                    vm.emit_warning("Array to string conversion");
+                    ArrayKey::String(PhpString::from_vec(b"Array".to_vec()))
+                }
+                Value::Object(obj) => {
+                    // Use __toString if available; otherwise fall back to to_php_string.
+                    let obj_val = Value::Object(obj.clone());
+                    if let Some(s) = vm.call_object_method(&obj_val, b"__toString", &[]) {
+                        ArrayKey::String(s.to_php_string())
+                    } else {
+                        ArrayKey::String(val.to_php_string())
+                    }
+                }
+                _ => value_to_array_key(&val),
             };
             result.set(k, fill_val.clone());
         }
