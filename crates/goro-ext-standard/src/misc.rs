@@ -9942,18 +9942,29 @@ fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     };
 
     for arg in &args[1..] {
-        if let Value::Array(arr) = arg {
+        let arg_deref = arg.deref();
+        if let Value::Array(arr) = &arg_deref {
             let arr_ptr = Rc::as_ptr(arr) as usize;
             let entries: Vec<_> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             for (key, value) in entries {
-                if let Value::Array(inner_new) = &value {
+                let value_deref = value.deref();
+                if let Value::Array(inner_new) = &value_deref {
+                    let inner_new_ptr = Rc::as_ptr(inner_new) as usize;
+                    // Detect direct self-reference before recursing.
+                    if inner_new_ptr == arr_ptr {
+                        let e = "Recursion detected".to_string();
+                        let exc = vm.create_exception(b"Error", &e, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: format!("Uncaught Error: {}", e), line: vm.current_line });
+                    }
                     let existing_inner = if let Some(existing) = result.get(&key) {
+                        let existing = existing.deref();
                         if let Value::Array(inner_old) = existing {
                             Some(inner_old.clone())
                         } else { None }
                     } else { None };
                     if let Some(inner_old) = existing_inner {
-                        let mut visited = vec![arr_ptr, Rc::as_ptr(inner_new) as usize];
+                        let mut visited = vec![arr_ptr, inner_new_ptr];
                         match array_replace_recursive_inner(
                             &inner_old.borrow(),
                             inner_new,
@@ -9982,12 +9993,16 @@ fn array_replace_recursive_inner(base: &PhpArray, replacement: &Rc<RefCell<PhpAr
     let mut result = base.clone();
     let replacement_borrow = replacement.borrow();
     for (key, value) in replacement_borrow.iter() {
-        if let Value::Array(inner_new) = value {
+        // Unwrap references so that recursive structures created via
+        // `$x[] = &$x;` are detected via their inner Rc pointer.
+        let value_owned = value.deref();
+        if let Value::Array(inner_new) = &value_owned {
             let ptr = Rc::as_ptr(inner_new) as usize;
             if visited.contains(&ptr) {
-                return Err("recursion detected".to_string());
+                return Err("Recursion detected".to_string());
             }
             if let Some(existing) = result.get(&key) {
+                let existing = existing.deref();
                 if let Value::Array(inner_old) = existing {
                     visited.push(ptr);
                     let merged = array_replace_recursive_inner(&inner_old.borrow(), inner_new, visited)?;
