@@ -10574,9 +10574,24 @@ fn readdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn chmod_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Stub: pretend chmod always succeeds to avoid tests breaking test directory permissions
-    Ok(Value::True)
+fn chmod_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string();
+    let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0o644);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = filename.to_string_lossy().to_string();
+        let perms = std::fs::Permissions::from_mode(mode as u32 & 0o7777);
+        match std::fs::set_permissions(&path, perms) {
+            Ok(_) => Ok(Value::True),
+            Err(_) => Ok(Value::False),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (filename, mode);
+        Ok(Value::True)
+    }
 }
 
 fn symlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

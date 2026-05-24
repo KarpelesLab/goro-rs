@@ -6221,9 +6221,14 @@ impl Vm {
                     if a.len() == 0 {
                         drop(a);
                         drop(ob);
-                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
+                        // current() returns NULL on empty queue; top() throws
+                        if method == b"current" {
+                            Some(Value::Null)
+                        } else {
+                            let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
+                            self.current_exception = Some(exc);
+                            Some(Value::Null)
+                        }
                     } else {
                         // Return data/priority/both per extract flags.
                         let val = a.values().next().cloned().unwrap_or(Value::Null);
@@ -6243,9 +6248,13 @@ impl Vm {
                         })
                     }
                 } else {
-                    let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                    self.current_exception = Some(exc);
-                    Some(Value::Null)
+                    if method == b"current" {
+                        Some(Value::Null)
+                    } else {
+                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    }
                 }
             }
             b"valid" => {
@@ -6362,16 +6371,25 @@ impl Vm {
                     if a.len() == 0 {
                         drop(a);
                         drop(ob);
-                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
+                        // current() returns NULL on empty heap; top() throws
+                        if method == b"current" {
+                            Some(Value::Null)
+                        } else {
+                            let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
+                            self.current_exception = Some(exc);
+                            Some(Value::Null)
+                        }
                     } else {
                         Some(a.values().next().cloned().unwrap_or(Value::Null))
                     }
                 } else {
-                    let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                    self.current_exception = Some(exc);
-                    Some(Value::Null)
+                    if method == b"current" {
+                        Some(Value::Null)
+                    } else {
+                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    }
                 }
             }
             b"valid" => {
@@ -10956,11 +10974,34 @@ impl Vm {
                                 let ob = obj.borrow();
                                 let lines = ob.get_property(b"__spl_file_lines");
                                 if let Value::Array(a) = lines {
-                                    // Append data as new line(s)
+                                    // Split data into proper lines (each ending in \n except possibly last)
                                     let content = data.to_string_lossy();
                                     let mut a_mut = a.borrow_mut();
-                                    for line in content.split('\n') {
-                                        a_mut.push(Value::String(PhpString::from_string(format!("{}\n", line))));
+                                    let mut pieces: Vec<String> = Vec::new();
+                                    let mut current = String::new();
+                                    for ch in content.chars() {
+                                        current.push(ch);
+                                        if ch == '\n' {
+                                            pieces.push(std::mem::take(&mut current));
+                                        }
+                                    }
+                                    if !current.is_empty() {
+                                        pieces.push(current);
+                                    }
+                                    // If the storage already has a partial last line (no trailing \n),
+                                    // merge with the first new piece.
+                                    let len = a_mut.len() as i64;
+                                    if len > 0 {
+                                        if let Some(last) = a_mut.get(&ArrayKey::Int(len - 1)) {
+                                            let last_str = last.to_php_string().to_string_lossy();
+                                            if !last_str.ends_with('\n') && !pieces.is_empty() {
+                                                let merged = format!("{}{}", last_str, pieces.remove(0));
+                                                a_mut.set(ArrayKey::Int(len - 1), Value::String(PhpString::from_string(merged)));
+                                            }
+                                        }
+                                    }
+                                    for p in pieces {
+                                        a_mut.push(Value::String(PhpString::from_string(p)));
                                     }
                                 } else {
                                     drop(ob);
