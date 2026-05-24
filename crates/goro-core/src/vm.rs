@@ -223,6 +223,10 @@ pub struct Vm {
     pub error_reporting: i64,
     /// Recursion depth for magic methods (prevent infinite recursion)
     magic_depth: u32,
+    /// Per-property guards for __get/__set/__isset/__unset: tracks
+    /// (object_id, property_name, kind) currently being handled. Used
+    /// to short-circuit recursive magic-method calls (PHP behavior).
+    pub magic_prop_guards: std::collections::HashSet<(u64, Vec<u8>, u8)>,
     /// Objects with __destruct methods, tracked for shutdown-time destruction
     destructible_objects: Vec<Value>,
     /// Stack of "called class" names for late static binding (static::)
@@ -354,6 +358,7 @@ impl Vm {
             constant_attributes: HashMap::new(),
             error_reporting: 30719, // E_ALL
             magic_depth: 0,
+            magic_prop_guards: std::collections::HashSet::new(),
             destructible_objects: Vec::new(),
             called_class_stack: Vec::new(),
             class_scope_stack: Vec::new(),
@@ -20303,8 +20308,55 @@ impl Vm {
 
                 OpCode::PropertyIsset => {
                     // Check if object property is set (with __isset support)
-                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
+
+                    // Lazy object handling: if uninitialized and class has __isset
+                    // for an undeclared prop, defer init so __isset runs on the
+                    // proxy. Otherwise run init now. Also track guard propagation
+                    // so init triggered from within __isset doesn't re-enter.
+                    let mut propagate_isset_guard_to_real: Option<(u64, Vec<u8>)> = None;
+                    if let Value::Object(obj) = &obj_val_raw {
+                        let pn = prop_name.as_bytes();
+                        if !pn.starts_with(b"__lazy_") && !is_prop_skipped(obj, pn) {
+                            let class_name = obj.borrow().class_name.clone();
+                            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let has_isset = self.classes.get(&class_lower)
+                                .map(|c| c.methods.contains_key(&b"__isset".to_vec()))
+                                .unwrap_or(false);
+                            let state = obj.borrow().get_property(b"__lazy_state");
+                            let is_proxy = matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy");
+                            let is_ghost = matches!(state, Value::String(ref s) if s.as_bytes() == b"ghost");
+                            let already_real = obj.borrow().has_property(b"__lazy_real");
+                            let prop_declared = self.classes.get(&class_lower)
+                                .map(|c| c.properties.iter().any(|p| p.name == pn && !p.is_static))
+                                .unwrap_or(false);
+                            let oid = obj.borrow().object_id;
+                            let guard_active = self.magic_prop_guards.contains(&(oid, pn.to_vec(), 1u8));
+                            let is_lazy_uninit = (is_proxy && !already_real) || is_ghost;
+                            let skip_init = is_lazy_uninit && has_isset && !prop_declared && !guard_active;
+                            if !skip_init {
+                                self.maybe_run_lazy_init(obj);
+                                if guard_active && is_proxy {
+                                    if let Value::Object(real) = obj.borrow().get_property(b"__lazy_real") {
+                                        propagate_isset_guard_to_real = Some((real.borrow().object_id, pn.to_vec()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some((rid, pname)) = &propagate_isset_guard_to_real {
+                        self.magic_prop_guards.insert((*rid, pname.clone(), 1u8));
+                    }
+                    let obj_val = if let Value::Object(obj) = &obj_val_raw {
+                        if !prop_name.as_bytes().starts_with(b"__lazy_") {
+                            Value::Object(self.proxy_redirect(obj))
+                        } else {
+                            obj_val_raw.clone()
+                        }
+                    } else {
+                        obj_val_raw.clone()
+                    };
                     // For hooked properties, isset() behaves like a get access:
                     //  - a get-hook is called (its return value determines the result)
                     //  - if only a set hook is defined (write-only) -> throw Error
@@ -20386,11 +20438,14 @@ impl Vm {
                             if matches!(val, Value::Null | Value::Undef) { Value::False } else { Value::True }
                         } else {
                             drop(ob);
-                            // Try __isset magic
+                            // Try __isset magic (with per-prop recursion guard)
                             let has_isset = self.classes.get(&class_lower)
                                 .map(|c| c.methods.contains_key(&b"__isset".to_vec()))
                                 .unwrap_or(false);
-                            if has_isset && self.magic_depth < 5 {
+                            let isset_obj_id = obj.borrow().object_id;
+                            let isset_guard_key = (isset_obj_id, prop_name.as_bytes().to_vec(), 1u8);
+                            let isset_already = self.magic_prop_guards.contains(&isset_guard_key);
+                            if has_isset && !isset_already && self.magic_depth < 5 {
                                 self.magic_depth += 1;
                                 let magic_method_def = self.classes.get(&class_lower).unwrap().get_method(b"__isset").unwrap();
                                 let method = magic_method_def.op_array.clone();
@@ -20398,11 +20453,13 @@ impl Vm {
                                 let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
                                 if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
                                 if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); }
+                                self.magic_prop_guards.insert(isset_guard_key.clone());
                                 self.class_scope_stack.push(magic_declaring);
                                 self.called_class_stack.push(class_name_orig);
                                 let isset_result = self.execute_op_array(&method, fn_cvs).unwrap_or(Value::False);
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
+                                self.magic_prop_guards.remove(&isset_guard_key);
                                 self.magic_depth -= 1;
                                 if isset_result.is_truthy() { Value::True } else { Value::False }
                             } else {
@@ -20412,6 +20469,9 @@ impl Vm {
                     } else {
                         Value::False
                     };
+                    if let Some((rid, pname)) = propagate_isset_guard_to_real {
+                        self.magic_prop_guards.remove(&(rid, pname, 1u8));
+                    }
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
@@ -20524,10 +20584,54 @@ impl Vm {
 
                 OpCode::PropertyUnset => {
                     // Remove property from object: op1 = object, op2 = property name
-                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // Lazy object handling: defer init if class has __unset and
+                    // prop is not declared on uninitialized lazy obj.
+                    let mut propagate_unset_guard_to_real: Option<(u64, Vec<u8>)> = None;
+                    if let Value::Object(obj) = &obj_val_raw {
+                        let pn = prop_name.as_bytes();
+                        if !pn.starts_with(b"__lazy_") && !is_prop_skipped(obj, pn) {
+                            let class_name = obj.borrow().class_name.clone();
+                            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let has_unset = self.classes.get(&class_lower)
+                                .map(|c| c.methods.contains_key(&b"__unset".to_vec()))
+                                .unwrap_or(false);
+                            let state = obj.borrow().get_property(b"__lazy_state");
+                            let is_proxy = matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy");
+                            let is_ghost = matches!(state, Value::String(ref s) if s.as_bytes() == b"ghost");
+                            let already_real = obj.borrow().has_property(b"__lazy_real");
+                            let prop_declared = self.classes.get(&class_lower)
+                                .map(|c| c.properties.iter().any(|p| p.name == pn && !p.is_static))
+                                .unwrap_or(false);
+                            let oid = obj.borrow().object_id;
+                            let guard_active = self.magic_prop_guards.contains(&(oid, pn.to_vec(), 3u8));
+                            let is_lazy_uninit = (is_proxy && !already_real) || is_ghost;
+                            let skip_init = is_lazy_uninit && has_unset && !prop_declared && !guard_active;
+                            if !skip_init {
+                                self.maybe_run_lazy_init(obj);
+                                if guard_active && is_proxy {
+                                    if let Value::Object(real) = obj.borrow().get_property(b"__lazy_real") {
+                                        propagate_unset_guard_to_real = Some((real.borrow().object_id, pn.to_vec()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some((rid, pname)) = &propagate_unset_guard_to_real {
+                        self.magic_prop_guards.insert((*rid, pname.clone(), 3u8));
+                    }
+                    let obj_val = if let Value::Object(obj) = &obj_val_raw {
+                        if !prop_name.as_bytes().starts_with(b"__lazy_") {
+                            Value::Object(self.proxy_redirect(obj))
+                        } else {
+                            obj_val_raw.clone()
+                        }
+                    } else {
+                        obj_val_raw.clone()
+                    };
                     if let Value::Object(obj) = &obj_val {
                         // Hooked properties cannot be unset
                         {
@@ -20692,7 +20796,10 @@ impl Vm {
                                     continue;
                                 }
                                 return Err(VmError { message: msg, line: op.line });
-                            } else if has_unset && self.magic_depth < 5 {
+                            } else if has_unset && self.magic_depth < 5 && {
+                                let oid = obj.borrow().object_id;
+                                !self.magic_prop_guards.contains(&(oid, prop_name.as_bytes().to_vec(), 3u8))
+                            } {
                                 self.magic_depth += 1;
                                 let magic_method_def = self.classes.get(&class_lower).unwrap().get_method(b"__unset").unwrap();
                                 let method = magic_method_def.op_array.clone();
@@ -20700,11 +20807,15 @@ impl Vm {
                                 let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
                                 if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
                                 if fn_cvs.len() > 1 { fn_cvs[1] = Value::String(prop_name.clone()); }
+                                let unset_obj_id = obj.borrow().object_id;
+                                let unset_guard_key = (unset_obj_id, prop_name.as_bytes().to_vec(), 3u8);
+                                self.magic_prop_guards.insert(unset_guard_key.clone());
                                 self.class_scope_stack.push(magic_declaring);
                                 self.called_class_stack.push(class_name_orig);
                                 let _ = self.execute_op_array(&method, fn_cvs);
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
+                                self.magic_prop_guards.remove(&unset_guard_key);
                                 self.magic_depth -= 1;
                                 // Propagate any exception thrown inside __unset
                                 if self.current_exception.is_some() {
@@ -20732,6 +20843,9 @@ impl Vm {
                                 return Err(VmError { message: msg, line: op.line });
                             }
                         }
+                    }
+                    if let Some((rid, pname)) = propagate_unset_guard_to_real {
+                        self.magic_prop_guards.remove(&(rid, pname, 3u8));
                     }
                 }
 
@@ -24156,39 +24270,71 @@ impl Vm {
                     // init so that __get is called on the still-lazy object.
                     // If __get itself accesses $this->foo for a declared prop,
                     // that inner PropertyGet will trigger init then.
+                    // Capture guard propagation for proxy + __get: when __get
+                    // is active on the proxy and the body reads the same prop,
+                    // we want init to run then the read to land on the real
+                    // backing AS-IF guarded.
+                    let mut propagate_get_guard_to_real: Option<(u64, Vec<u8>)> = None;
                     if let Value::Object(obj) = &obj_val_raw {
                         let pn = prop_name.as_bytes();
                         if !pn.starts_with(b"__lazy_") && !is_prop_skipped(obj, pn) {
                             // Check whether this is an undeclared property on a
                             // class with __get — if so, defer init so __get
                             // can decide whether to observe $this state.
-                            // Only applies to lazy ghosts: for proxies, the
-                            // backing real object may have a different class
-                            // without __get, so we must init first.
+                            // For proxies (when not inside __get for this prop),
+                            // also defer so __get is called on the proxy.
                             let defer = {
                                 let ob = obj.borrow();
+                                let state = ob.get_property(b"__lazy_state");
                                 let is_ghost = matches!(
-                                    ob.get_property(b"__lazy_state"),
-                                    Value::String(ref s) if s.as_bytes() == b"ghost"
+                                    state, Value::String(ref s) if s.as_bytes() == b"ghost"
                                 );
-                                if !is_ghost {
-                                    false
-                                } else {
-                                    let class_lower: Vec<u8> = ob.class_name.iter()
-                                        .map(|b| b.to_ascii_lowercase())
-                                        .collect();
-                                    let has_get = self.classes.get(&class_lower)
-                                        .map(|c| c.methods.contains_key(&b"__get".to_vec()))
-                                        .unwrap_or(false);
-                                    let is_declared = self.classes.get(&class_lower)
-                                        .map(|c| c.properties.iter()
-                                            .any(|p| !p.is_static && p.name == pn))
-                                        .unwrap_or(false);
+                                let is_proxy = matches!(
+                                    state, Value::String(ref s) if s.as_bytes() == b"proxy"
+                                );
+                                let already_real = ob.has_property(b"__lazy_real");
+                                let class_lower: Vec<u8> = ob.class_name.iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
+                                let has_get = self.classes.get(&class_lower)
+                                    .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                    .unwrap_or(false);
+                                let is_declared = self.classes.get(&class_lower)
+                                    .map(|c| c.properties.iter()
+                                        .any(|p| !p.is_static && p.name == pn))
+                                    .unwrap_or(false);
+                                let oid = ob.object_id;
+                                let guard_active = self.magic_prop_guards
+                                    .contains(&(oid, pn.to_vec(), 0u8));
+                                if is_ghost {
                                     has_get && !is_declared
+                                } else if is_proxy && !already_real {
+                                    has_get && !is_declared && !guard_active
+                                } else {
+                                    false
                                 }
                             };
                             if !defer {
+                                // Check guard before init so we can propagate.
+                                let (is_proxy, already_real, oid_pre, guard_active) = {
+                                    let ob = obj.borrow();
+                                    let state = ob.get_property(b"__lazy_state");
+                                    let p = matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy");
+                                    let r = ob.has_property(b"__lazy_real");
+                                    let id = ob.object_id;
+                                    let ga = self.magic_prop_guards.contains(&(id, pn.to_vec(), 0u8));
+                                    (p, r, id, ga)
+                                };
                                 self.maybe_run_lazy_init(obj);
+                                // If guard was active on the proxy before init,
+                                // propagate to the real backing so the read
+                                // doesn't re-enter __get.
+                                if guard_active && is_proxy && !already_real {
+                                    if let Value::Object(real) = obj.borrow().get_property(b"__lazy_real") {
+                                        propagate_get_guard_to_real = Some((real.borrow().object_id, pn.to_vec()));
+                                    }
+                                }
+                                let _ = oid_pre;
                                 // If lazy init threw, propagate the exception now
                                 // (so the user sees the initializer's error, not
                                 // a subsequent "undefined property" warning).
@@ -24209,6 +24355,9 @@ impl Vm {
                                 }
                             }
                         }
+                    }
+                    if let Some((rid, pname)) = &propagate_get_guard_to_real {
+                        self.magic_prop_guards.insert((*rid, pname.clone(), 0u8));
                     }
 
                     // Proxy redirect: forward property access to the real object
@@ -24493,7 +24642,10 @@ impl Vm {
                                     .get(&class_lower)
                                     .map(|c| c.methods.contains_key(&b"__get".to_vec()))
                                     .unwrap_or(false);
-                                if has_get {
+                                let get_obj_id = obj.borrow().object_id;
+                                let get_guard_key = (get_obj_id, prop_name.as_bytes().to_vec(), 0u8);
+                                let get_already = self.magic_prop_guards.contains(&get_guard_key);
+                                if has_get && !get_already {
                                     self.magic_depth += 1;
                                     let magic_method_def = self
                                         .classes
@@ -24510,6 +24662,7 @@ impl Vm {
                                     if fn_cvs.len() > 1 {
                                         fn_cvs[1] = Value::String(prop_name.clone());
                                     } // $name
+                                    self.magic_prop_guards.insert(get_guard_key.clone());
                                     self.class_scope_stack.push(magic_declaring);
                                     self.called_class_stack.push(class_name_orig.clone());
                                     let result = self
@@ -24517,8 +24670,19 @@ impl Vm {
                                         .unwrap_or(Value::Null);
                                     self.called_class_stack.pop();
                                     self.class_scope_stack.pop();
+                                    self.magic_prop_guards.remove(&get_guard_key);
                                     self.magic_depth -= 1;
                                     result
+                                } else if get_already {
+                                    // Recursive __get for the same prop: don't
+                                    // re-enter; emit the standard undefined
+                                    // property warning and return NULL.
+                                    if self.error_reporting != 0 {
+                                        let class_display = crate::value::display_class_name(&class_name_orig);
+                                        let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
+                                        self.emit_warning(&format!("Undefined property: {}::${}", class_display, prop_display));
+                                    }
+                                    Value::Null
                                 } else {
                                     // Check if property was declared as typed in the class (unset typed property)
                                     let typed_prop = self.classes.get(&class_lower)
@@ -24585,6 +24749,9 @@ impl Vm {
                         }
                         Value::Null
                     };
+                    if let Some((rid, pname)) = propagate_get_guard_to_real {
+                        self.magic_prop_guards.remove(&(rid, pname, 0u8));
+                    }
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
@@ -24596,15 +24763,70 @@ impl Vm {
                         .to_php_string();
 
                     // Lazy init on write access (skip internal __lazy_* and
-                    // properties marked via ReflectionProperty::skipLazyInitialization)
+                    // properties marked via ReflectionProperty::skipLazyInitialization).
+                    // BUT: if the class has __set and the property doesn't exist
+                    // on the proxy or its (uninitialized) backing, call __set
+                    // on the PROXY itself (PHP behavior). This is important
+                    // for proxies where __set's body decides whether to
+                    // initialize.
+                    // Capture whether we should propagate __set guard to the
+                    // real object after lazy init. (When __set is active on a
+                    // proxy and the body writes to the same prop, we want the
+                    // write to land on the real backing AS-IF guarded, not
+                    // re-invoke __set.)
+                    let mut propagate_guard_to_real: Option<(u64, Vec<u8>)> = None;
                     if let Value::Object(obj) = &obj_val_raw {
                         let pn = prop_name.as_bytes();
                         if !pn.starts_with(b"__lazy_") && !is_prop_skipped(obj, pn) {
-                            self.maybe_run_lazy_init(obj);
+                            // Decide whether to defer init: if class has __set
+                            // and prop is not declared, don't init now.
+                            let class_name = obj.borrow().class_name.clone();
+                            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let has_set = self.classes.get(&class_lower)
+                                .map(|c| c.methods.contains_key(&b"__set".to_vec()))
+                                .unwrap_or(false);
+                            let state = obj.borrow().get_property(b"__lazy_state");
+                            let is_proxy = matches!(
+                                state, Value::String(ref s) if s.as_bytes() == b"proxy"
+                            );
+                            let is_ghost = matches!(
+                                state, Value::String(ref s) if s.as_bytes() == b"ghost"
+                            );
+                            let already_real = obj.borrow().has_property(b"__lazy_real");
+                            let prop_declared = self.classes.get(&class_lower)
+                                .map(|c| c.properties.iter().any(|p| p.name == pn && !p.is_static))
+                                .unwrap_or(false);
+                            // Check if __set guard is active for this prop (we're
+                            // inside __set body writing to the same prop): in that
+                            // case, do init so the write goes to the real.
+                            let obj_id_for_guard_check = obj.borrow().object_id;
+                            let guard_active = self.magic_prop_guards
+                                .contains(&(obj_id_for_guard_check, pn.to_vec(), 2u8));
+                            // Skip init if: uninitialized lazy obj AND has __set
+                            // AND the property is not declared AND we're not
+                            // already inside __set for this prop.
+                            let is_lazy_uninit = (is_proxy && !already_real) || is_ghost;
+                            let skip_init = is_lazy_uninit && has_set && !prop_declared && !guard_active;
+                            if !skip_init {
+                                self.maybe_run_lazy_init(obj);
+                                // After init, if guard was active on the proxy,
+                                // propagate the guard to the real object so the
+                                // write doesn't re-enter __set.
+                                if guard_active && is_proxy {
+                                    if let Value::Object(real) = obj.borrow().get_property(b"__lazy_real") {
+                                        propagate_guard_to_real = Some((real.borrow().object_id, pn.to_vec()));
+                                    }
+                                }
+                            }
                         }
+                    }
+                    if let Some((rid, pname)) = &propagate_guard_to_real {
+                        self.magic_prop_guards.insert((*rid, pname.clone(), 2u8));
                     }
 
                     // Proxy redirect: forward property writes to the real object
+                    // ONLY if the proxy has been initialized. An uninitialized
+                    // proxy keeps its identity so __set runs on it.
                     let obj_val = if let Value::Object(obj) = &obj_val_raw {
                         if !prop_name.as_bytes().starts_with(b"__lazy_") {
                             Value::Object(self.proxy_redirect(obj))
@@ -25022,9 +25244,13 @@ impl Vm {
                                 .get(&class_lower)
                                 .map(|c| c.methods.contains_key(&b"__set".to_vec()))
                                 .unwrap_or(false);
+                            let obj_id_for_guard = obj.borrow().object_id;
+                            let guard_key = (obj_id_for_guard, prop_name.as_bytes().to_vec(), 2u8);
+                            let already_setting = self.magic_prop_guards.contains(&guard_key);
                             if has_set
                                 && !obj.borrow().has_property(prop_name.as_bytes())
                                 && self.magic_depth < 5
+                                && !already_setting
                             {
                                 let magic_method_def = self
                                     .classes
@@ -25044,11 +25270,19 @@ impl Vm {
                                 if fn_cvs.len() > 2 {
                                     fn_cvs[2] = value;
                                 }
+                                self.magic_prop_guards.insert(guard_key.clone());
                                 self.class_scope_stack.push(magic_declaring);
                                 self.called_class_stack.push(class_name_orig.clone());
                                 let _ = self.execute_op_array(&method, fn_cvs);
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
+                                self.magic_prop_guards.remove(&guard_key);
+                            } else if already_setting {
+                                // Guard is active: set the property directly
+                                // (PHP semantics: recursive __set creates a
+                                // dynamic property rather than re-entering
+                                // __set).
+                                obj.borrow_mut().set_property(prop_name.as_bytes().to_vec(), value);
                             } else {
                                 if matches!(obj.borrow().get_property(b"__clone_window"), Value::True) {
                                     let modified_key = format!("__clone_modified_{}", String::from_utf8_lossy(prop_name.as_bytes()));
@@ -25128,6 +25362,10 @@ impl Vm {
                             continue;
                         }
                         return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                    }
+                    // Clean up propagated guard if we set one.
+                    if let Some((rid, pname)) = propagate_guard_to_real {
+                        self.magic_prop_guards.remove(&(rid, pname, 2u8));
                     }
                 }
 
