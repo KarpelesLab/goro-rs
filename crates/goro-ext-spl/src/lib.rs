@@ -316,12 +316,11 @@ fn spl_object_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Push a call-stack frame so any exception thrown while iterating the
     // generator/iterator captures `iterator_to_array(...)` in its backtrace.
-    let trace_arg = args.first().cloned().unwrap_or(Value::Null);
     vm.call_stack.push((
         "iterator_to_array".to_string(),
         vm.current_file.clone(),
         vm.current_line,
-        vec![trace_arg],
+        args.to_vec(),
         false,
     ));
     let r = iterator_to_array_impl(vm, args);
@@ -442,6 +441,22 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
 }
 
 fn iterator_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Push a call-stack frame so any exception thrown while iterating the
+    // iterator (or by the type-check below) captures `iterator_count(...)` in
+    // its backtrace.
+    vm.call_stack.push((
+        "iterator_count".to_string(),
+        vm.current_file.clone(),
+        vm.current_line,
+        args.to_vec(),
+        false,
+    ));
+    let r = iterator_count_impl(vm, args);
+    vm.call_stack.pop();
+    r
+}
+
+fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Type check first argument
     if let Some(first) = args.first() {
         let type_name = match first {
