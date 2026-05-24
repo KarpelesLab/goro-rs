@@ -2984,23 +2984,27 @@ pub fn reflection_method_method(
                 // Find prototype: walk parent chain looking for a method with
                 // the same name. The first ancestor that has it is the
                 // "overwrites" target, the deepest one is the "prototype".
+                // Private methods are not inherited, so don't report
+                // overwrites/prototype for them.
                 let mut overwrites_name: Option<String> = None;
                 let mut prototype_name: Option<String> = None;
-                if owner_display.is_none() {
-                    // Only inspect overrides when the method was declared on
-                    // this class itself (not inherited as-is).
+                if owner_display.is_none() && m.visibility != Visibility::Private {
                     if let Some(ce) = vm.classes.get(&class_lower) {
                         let method_bytes = method_lower.as_bytes();
                         let mut cur_parent = ce.parent.clone();
                         while let Some(ref p) = cur_parent {
                             let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(pce) = vm.classes.get(&p_lower) {
-                                if pce.get_method(method_bytes).is_some() {
-                                    let canonical = String::from_utf8_lossy(&pce.name).to_string();
-                                    if overwrites_name.is_none() {
-                                        overwrites_name = Some(canonical.clone());
+                                if let Some(pm) = pce.get_method(method_bytes) {
+                                    // Skip ancestor private methods — they
+                                    // aren't part of the visible chain.
+                                    if pm.visibility != Visibility::Private {
+                                        let canonical = String::from_utf8_lossy(&pce.name).to_string();
+                                        if overwrites_name.is_none() {
+                                            overwrites_name = Some(canonical.clone());
+                                        }
+                                        prototype_name = Some(canonical);
                                     }
-                                    prototype_name = Some(canonical);
                                 }
                                 cur_parent = pce.parent.clone();
                             } else {
@@ -6149,8 +6153,10 @@ fn reflection_class_to_string(
             .filter(|m| !m.name.starts_with(b"__property_get_") && !m.name.starts_with(b"__property_set_"))
             .collect();
         s.push_str(&format!("\n  - Static methods [{}] {{\n", static_methods.len()));
-        for m in static_methods {
+        let total = static_methods.len();
+        for (i, m) in static_methods.iter().enumerate() {
             reflection_method_to_string_section(&mut s, m, vm, class_lower);
+            if i + 1 < total { s.push('\n'); }
         }
         s.push_str("  }\n");
     } else {
@@ -6222,8 +6228,10 @@ fn reflection_class_to_string(
             .filter(|m| !(m.visibility == Visibility::Private && m.declaring_class != class_lower))
             .collect();
         s.push_str(&format!("\n  - Methods [{}] {{\n", inst_methods.len()));
-        for m in inst_methods {
+        let total = inst_methods.len();
+        for (i, m) in inst_methods.iter().enumerate() {
             reflection_method_to_string_section(&mut s, m, vm, class_lower);
+            if i + 1 < total { s.push('\n'); }
         }
         s.push_str("  }\n");
     } else {
@@ -6296,33 +6304,36 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
     let param_count = if m.op_array.param_count as usize > skip { m.op_array.param_count as usize - skip } else { 0 };
     let required_count = m.op_array.required_param_count as usize;
 
-    s.push_str(&format!("\n      - Parameters [{}] {{\n", param_count));
-    for i in 0..param_count {
-        let cv_idx = i + skip;
-        if cv_idx < m.op_array.cv_names.len() {
-            let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
-            let required = i < required_count;
-            let type_str = if cv_idx < m.op_array.param_types.len() {
-                if let Some(ref pti) = m.op_array.param_types[cv_idx] {
-                    format!("{} ", param_type_name(&pti.param_type))
+    // PHP omits the "Parameters" section entirely when there are no parameters.
+    if param_count > 0 {
+        s.push_str(&format!("\n      - Parameters [{}] {{\n", param_count));
+        for i in 0..param_count {
+            let cv_idx = i + skip;
+            if cv_idx < m.op_array.cv_names.len() {
+                let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
+                let required = i < required_count;
+                let type_str = if cv_idx < m.op_array.param_types.len() {
+                    if let Some(ref pti) = m.op_array.param_types[cv_idx] {
+                        format!("{} ", param_type_name(&pti.param_type))
+                    } else {
+                        String::new()
+                    }
                 } else {
                     String::new()
-                }
-            } else {
-                String::new()
-            };
-            s.push_str(&format!("        Parameter #{} [ <{}> {}${} ]\n", i,
-                if required { "required" } else { "optional" }, type_str, pname));
+                };
+                s.push_str(&format!("        Parameter #{} [ <{}> {}${} ]\n", i,
+                    if required { "required" } else { "optional" }, type_str, pname));
+            }
         }
+        s.push_str("      }\n");
     }
-    s.push_str("      }\n");
 
     // Return type
     if let Some(ref rt) = m.op_array.return_type {
         s.push_str(&format!("      - Return [ {} ]\n", param_type_name(rt)));
     }
 
-    s.push_str("    }\n\n");
+    s.push_str("    }\n");
 }
 
 /// Convert a ParamType to its string representation
