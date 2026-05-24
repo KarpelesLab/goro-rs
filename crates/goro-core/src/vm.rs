@@ -7537,49 +7537,91 @@ impl Vm {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.mode() as i64)),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getPerms(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getinode" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.ino() as i64)),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getInode(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getowner" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.uid() as i64)),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getOwner(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getgroup" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.gid() as i64)),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getGroup(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getatime" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.atime())),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getATime(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getmtime" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.mtime())),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getMTime(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"getctime" => {
                 use std::os::unix::fs::MetadataExt;
                 match std::fs::metadata(&path_str) {
                     Ok(m) => Some(Value::Long(m.ctime())),
-                    Err(_) => Some(Value::False),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getCTime(): stat failed for {}", class_canonical, path_str);
+                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    },
                 }
             }
             b"__tostring" | b"tostring" => {
@@ -8001,6 +8043,41 @@ impl Vm {
                 }
                 Some(Value::Long(byte_count))
             }
+            b"fstat" => {
+                // Returns stat info on the file
+                use std::os::unix::fs::MetadataExt;
+                let ob = obj.borrow();
+                let path_val = ob.get_property(b"__spl_file_path");
+                let path_str = path_val.to_php_string().to_string_lossy();
+                drop(ob);
+                match std::fs::metadata(&path_str) {
+                    Ok(m) => {
+                        let mut arr = PhpArray::new();
+                        // PHP fstat returns a 26-key array with numeric and string keys
+                        let entries: [(i64, &[u8], i64); 13] = [
+                            (0, b"dev", m.dev() as i64),
+                            (1, b"ino", m.ino() as i64),
+                            (2, b"mode", m.mode() as i64),
+                            (3, b"nlink", m.nlink() as i64),
+                            (4, b"uid", m.uid() as i64),
+                            (5, b"gid", m.gid() as i64),
+                            (6, b"rdev", m.rdev() as i64),
+                            (7, b"size", m.size() as i64),
+                            (8, b"atime", m.atime()),
+                            (9, b"mtime", m.mtime()),
+                            (10, b"ctime", m.ctime()),
+                            (11, b"blksize", m.blksize() as i64),
+                            (12, b"blocks", m.blocks() as i64),
+                        ];
+                        for (i, name, val) in entries.iter() {
+                            arr.set(ArrayKey::Int(*i), Value::Long(*val));
+                            arr.set(ArrayKey::String(PhpString::from_bytes(*name)), Value::Long(*val));
+                        }
+                        Some(Value::Array(Rc::new(RefCell::new(arr))))
+                    }
+                    Err(_) => Some(Value::False),
+                }
+            }
             b"setflags" => None, // handled in handle_spl_docall
             b"getflags" => {
                 let ob = obj.borrow();
@@ -8117,7 +8194,7 @@ impl Vm {
                 method,
                 b"seek" | b"setflags" | b"setcsvcontrol" | b"setmaxlinelen"
                     | b"fgetcsv" | b"fputcsv" | b"fwrite" | b"flock" | b"ftruncate"
-                    | b"getbasename"
+                    | b"getbasename" | b"fread" | b"fscanf"
             ),
             b"splfileinfo" => matches!(
                 method,
@@ -10907,6 +10984,81 @@ impl Vm {
                         b"flock" => {
                             // Stub: pretend the lock was acquired.
                             Some(Value::True)
+                        }
+                        b"fread" => {
+                            // SplFileObject::fread(int $length): string|false
+                            let length = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+                            if length <= 0 {
+                                let msg = "SplFileObject::fread(): Argument #1 ($length) must be greater than 0";
+                                let line = self.current_line;
+                                let exc = self.create_exception(b"ValueError", msg, line);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                            let ob = obj.borrow();
+                            let path_val = ob.get_property(b"__spl_file_path");
+                            let path_str = path_val.to_php_string().to_string_lossy();
+                            let char_pos = if let Value::Long(p) = ob.get_property(b"__spl_char_pos") { p } else {
+                                // Initialize from line position
+                                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
+                                let lines = ob.get_property(b"__spl_file_lines");
+                                if let Value::Array(a) = lines {
+                                    let a = a.borrow();
+                                    let mut total = 0i64;
+                                    for i in 0..pos {
+                                        if let Some(line) = a.get(&ArrayKey::Int(i)) {
+                                            total += line.to_php_string().as_bytes().len() as i64;
+                                        }
+                                    }
+                                    total
+                                } else { 0 }
+                            };
+                            drop(ob);
+                            // Read from file at char_pos
+                            if let Ok(content) = std::fs::read(&*path_str) {
+                                if (char_pos as usize) < content.len() {
+                                    let end = std::cmp::min(content.len(), (char_pos + length) as usize);
+                                    let data: Vec<u8> = content[char_pos as usize..end].to_vec();
+                                    let mut ob = obj.borrow_mut();
+                                    ob.set_property(b"__spl_char_pos".to_vec(), Value::Long(end as i64));
+                                    Some(Value::String(PhpString::from_vec(data)))
+                                } else {
+                                    // EOF returns empty string in PHP fread (and false for very-low-level)
+                                    Some(Value::String(PhpString::from_bytes(b"")))
+                                }
+                            } else {
+                                Some(Value::False)
+                            }
+                        }
+                        b"fscanf" => {
+                            // SplFileObject::fscanf(string $format, mixed &...$vars)
+                            // Read a line, then sscanf it.
+                            let format_arg = args.get(1).cloned().unwrap_or(Value::Null);
+                            // Get current line
+                            let mut ob = obj.borrow_mut();
+                            let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
+                            let lines = ob.get_property(b"__spl_file_lines");
+                            let line_value = if let Value::Array(a) = lines {
+                                let a_b = a.borrow();
+                                a_b.get(&ArrayKey::Int(pos)).cloned()
+                            } else { None };
+                            if line_value.is_none() {
+                                return Some(Value::Long(-1));
+                            }
+                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
+                            drop(ob);
+                            let line = line_value.unwrap();
+                            // Call sscanf with the line
+                            let sscanf_fn = self.functions.get(b"sscanf".as_slice()).copied();
+                            if let Some(sscanf) = sscanf_fn {
+                                let mut sscanf_args = vec![line, format_arg];
+                                for a in args.iter().skip(2) {
+                                    sscanf_args.push(a.clone());
+                                }
+                                sscanf(self, &sscanf_args).ok()
+                            } else {
+                                Some(Value::Null)
+                            }
                         }
                         _ => None,
                     }
@@ -18861,6 +19013,21 @@ impl Vm {
                                             // __construct(string $directory)
                                             if call.args.len() > 1 {
                                                 let path = call.args[1].to_php_string().to_string_lossy();
+                                                // Empty path is a ValueError
+                                                if path.is_empty() {
+                                                    drop(obj_mut);
+                                                    let class_canonical = self.builtin_canonical_name(&class_lower);
+                                                    let msg = format!("{}::__construct(): Argument #1 ($directory) must not be empty", class_canonical);
+                                                    let exc = self.create_exception(b"ValueError", &msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                        let ct = *catch_target;
+                                                        ip = ct as usize;
+                                                        continue;
+                                                    }
+                                                    return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: op.line });
+                                                }
                                                 obj_mut.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(path.clone())));
                                                 // Read directory entries
                                                 if let Ok(entries) = std::fs::read_dir(&path) {
