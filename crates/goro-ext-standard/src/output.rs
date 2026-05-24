@@ -22,6 +22,9 @@ fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__cert_id")
         || name.starts_with(b"__csr_id")
         || name.starts_with(b"__xml_")
+        // ReflectionType internal storage (PHP exposes no public properties on
+        // ReflectionNamedType / ReflectionUnionType / ReflectionIntersectionType).
+        || matches!(name, b"__type_name" | b"__allows_null" | b"__is_builtin" | b"__types")
         // DateInterval components from createFromDateString are stored under
         // these short hidden names; PHP only exposes from_string + date_string.
         || matches!(name, b"__y" | b"__m" | b"__d" | b"__h" | b"__i" | b"__s" | b"__f" | b"__invert")

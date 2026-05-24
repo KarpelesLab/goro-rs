@@ -2721,8 +2721,20 @@ pub fn reflection_method_method(
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .and_then(|m| m.op_array.return_type.as_ref())
                 .cloned();
+            // Resolve `self` to the declaring class of the method, falling
+            // back to the lookup class if declaring info is unavailable.
+            let scope: Vec<u8> = vm.classes.get(&class_lower)
+                .and_then(|c| c.get_method(method_lower.as_bytes()))
+                .map(|m| {
+                    let decl_lower: Vec<u8> = m.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    vm.classes.get(&decl_lower)
+                        .map(|dc| dc.name.clone())
+                        .unwrap_or_else(|| m.declaring_class.clone())
+                })
+                .or_else(|| vm.classes.get(&class_lower).map(|c| c.name.clone()))
+                .unwrap_or_else(|| class_lower.clone());
             if let Some(rt) = ret {
-                Some(create_reflection_type(vm, &rt))
+                Some(create_reflection_type_scoped(vm, &rt, Some(&scope)))
             } else {
                 Some(Value::Null)
             }
@@ -5901,9 +5913,26 @@ fn param_type_allows_null(pt: &ParamType) -> bool {
 
 /// Create a ReflectionType object from a ParamType
 pub fn create_reflection_type(vm: &mut Vm, param_type: &ParamType) -> Value {
+    create_reflection_type_scoped(vm, param_type, None)
+}
+
+/// Create a ReflectionType with optional scope class name (canonical) used to
+/// resolve `self` references in PHP types. `static` is left as the literal
+/// string "static" (it's a late-bound type).
+pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_class: Option<&[u8]>) -> Value {
+    // Helper: resolve a simple type name with `self` substitution.
+    fn resolve_name(name: &[u8], scope: Option<&[u8]>) -> Vec<u8> {
+        if name == b"self" {
+            if let Some(s) = scope {
+                return s.to_vec();
+            }
+        }
+        name.to_vec()
+    }
     match param_type {
         ParamType::Simple(name) => {
-            let type_name = String::from_utf8_lossy(name).to_string();
+            let resolved = resolve_name(name, scope_class);
+            let type_name = String::from_utf8_lossy(&resolved).to_string();
             let obj_id = vm.next_object_id();
             let mut obj = PhpObject::new(b"ReflectionNamedType".to_vec(), obj_id);
             let is_builtin = matches!(
@@ -5922,7 +5951,8 @@ pub fn create_reflection_type(vm: &mut Vm, param_type: &ParamType) -> Value {
         ParamType::Nullable(inner) => {
             match inner.as_ref() {
                 ParamType::Simple(name) => {
-                    let type_name = String::from_utf8_lossy(name).to_string();
+                    let resolved = resolve_name(name, scope_class);
+                    let type_name = String::from_utf8_lossy(&resolved).to_string();
                     let obj_id = vm.next_object_id();
                     let mut obj = PhpObject::new(b"ReflectionNamedType".to_vec(), obj_id);
                     let is_builtin = matches!(
@@ -5938,8 +5968,8 @@ pub fn create_reflection_type(vm: &mut Vm, param_type: &ParamType) -> Value {
                 }
                 _ => {
                     // Nullable complex type becomes union with null
-                    let inner_type = create_reflection_type(vm, inner);
-                    let null_type = create_reflection_type(vm, &ParamType::Simple(b"null".to_vec()));
+                    let inner_type = create_reflection_type_scoped(vm, inner, scope_class);
+                    let null_type = create_reflection_type_scoped(vm, &ParamType::Simple(b"null".to_vec()), scope_class);
                     let mut types = PhpArray::new();
                     types.push(inner_type);
                     types.push(null_type);
@@ -5955,7 +5985,7 @@ pub fn create_reflection_type(vm: &mut Vm, param_type: &ParamType) -> Value {
             let mut type_arr = PhpArray::new();
             let mut allows_null = false;
             for t in types {
-                let rt = create_reflection_type(vm, t);
+                let rt = create_reflection_type_scoped(vm, t, scope_class);
                 if param_type_allows_null(t) {
                     allows_null = true;
                 }
@@ -5970,7 +6000,7 @@ pub fn create_reflection_type(vm: &mut Vm, param_type: &ParamType) -> Value {
         ParamType::Intersection(types) => {
             let mut type_arr = PhpArray::new();
             for t in types {
-                let rt = create_reflection_type(vm, t);
+                let rt = create_reflection_type_scoped(vm, t, scope_class);
                 type_arr.push(rt);
             }
             let obj_id = vm.next_object_id();

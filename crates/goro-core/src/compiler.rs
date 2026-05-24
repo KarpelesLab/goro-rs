@@ -7815,6 +7815,7 @@ impl Compiler {
                 body,
                 use_vars,
                 is_static,
+                return_type: closure_return_type,
                 attributes: closure_attributes,
                 end_line: closure_end_line,
                 doc_comment: closure_doc_comment,
@@ -7840,6 +7841,12 @@ impl Compiler {
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(closure_attributes);
                 closure_compiler.op_array.doc_comment = closure_doc_comment.clone();
+                // Propagate the closure's declared return type so ReflectionFunction
+                // observes it via `hasReturnType`/`getReturnType`.
+                if let Some(hint) = closure_return_type {
+                    closure_compiler.op_array.return_type =
+                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                }
                 closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
@@ -8070,7 +8077,7 @@ impl Compiler {
                 }
             }
 
-            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, doc_comment: arrow_doc_comment, .. } => {
+            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, doc_comment: arrow_doc_comment, return_type: arrow_return_type, .. } => {
                 // Arrow function: fn($x) => $x * 2
                 // Arrow functions implicitly capture outer variables by value
 
@@ -8101,6 +8108,11 @@ impl Compiler {
                 closure_compiler.op_array.attributes = self.compile_attributes(attributes);
                 closure_compiler.op_array.doc_comment = arrow_doc_comment.clone();
                 closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
+                // Propagate arrow function's declared return type.
+                if let Some(hint) = arrow_return_type {
+                    closure_compiler.op_array.return_type =
+                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                }
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
