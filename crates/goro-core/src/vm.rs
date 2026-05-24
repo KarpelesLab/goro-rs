@@ -1672,6 +1672,10 @@ impl Vm {
         if self.classes.contains_key(&class_lower) {
             return true;
         }
+        // Don't autoload for known builtin classes (already provided)
+        if self.is_known_builtin_class(&class_lower) {
+            return true;
+        }
         // Clone autoload functions to avoid borrow issues
         let autoloaders = self.autoload_functions.clone();
         let class_str = Value::String(PhpString::from_vec(class_name.to_vec()));
@@ -2892,7 +2896,7 @@ impl Vm {
     }
 
     /// Coerce a single value to match a parameter type.
-    fn coerce_value_to_type(value: &mut Value, param_type: &ParamType, strict: bool) {
+    pub(crate) fn coerce_value_to_type(value: &mut Value, param_type: &ParamType, strict: bool) {
         match param_type {
             ParamType::Simple(type_name) => {
                 match type_name.as_slice() {
@@ -4716,7 +4720,14 @@ impl Vm {
                 // Walk up to parent
                 match &ce.parent {
                     Some(p) => {
-                        current = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        // If the class itself is an interface, its parent is
+                        // another interface it extends -- treat that as
+                        // "implementing" as well.
+                        if ce.is_interface && p_lower == iface_name {
+                            return true;
+                        }
+                        current = p_lower;
                     }
                     None => return false,
                 }
@@ -17762,16 +17773,35 @@ impl Vm {
                     } else if func_name_lower.starts_with(b"__spl::") {
                         // SPL method call with args
                         let spl_path = &func_name_lower[7..]; // skip "__spl::"
+                        // Also walk the original-case name so we can extract
+                        // the user-typed method name for stack traces.
+                        let orig_name_bytes = call.name.as_bytes();
+                        let orig_spl_path = if orig_name_bytes.len() >= 7 && &orig_name_bytes[..7] == b"__spl::" {
+                            &orig_name_bytes[7..]
+                        } else {
+                            spl_path
+                        };
                         if let Some(sep) = spl_path.iter().position(|&b| b == b':') {
                             if sep + 1 < spl_path.len() && spl_path[sep + 1] == b':' {
                                 let spl_class = &spl_path[..sep];
                                 let spl_method = &spl_path[sep + 2..];
+                                // Find the corresponding method substring in the
+                                // original-case name (it must be the same length).
+                                let orig_method = if let Some(orig_sep) = orig_spl_path.iter().position(|&b| b == b':') {
+                                    if orig_sep + 1 < orig_spl_path.len() && orig_spl_path[orig_sep + 1] == b':' {
+                                        &orig_spl_path[orig_sep + 2..]
+                                    } else {
+                                        spl_method
+                                    }
+                                } else {
+                                    spl_method
+                                };
                                 // Push a call-stack frame so exceptions raised inside
                                 // the dispatcher (e.g. "Cannot call method X when
                                 // function X is disabled") produce a proper stack trace
                                 // with the method entry.
                                 let class_display = self.builtin_canonical_name(spl_class);
-                                let method_display = String::from_utf8_lossy(spl_method).to_string();
+                                let method_display = String::from_utf8_lossy(orig_method).to_string();
                                 let frame_name = format!("{}->{}", class_display, method_display);
                                 let extra_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
                                 self.call_stack.push((
@@ -19453,6 +19483,20 @@ impl Vm {
                                         b"dateinterval".to_vec()
                                     } else if self.class_extends(&raw_class_lower, b"dateperiod") {
                                         b"dateperiod".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionenum") {
+                                        b"reflectionenum".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionobject") {
+                                        b"reflectionobject".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionclass") {
+                                        b"reflectionclass".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionmethod") {
+                                        b"reflectionmethod".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionfunction") {
+                                        b"reflectionfunction".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionproperty") {
+                                        b"reflectionproperty".to_vec()
+                                    } else if self.class_extends(&raw_class_lower, b"reflectionparameter") {
+                                        b"reflectionparameter".to_vec()
                                     } else if let Some(found) = builtin_outer_iters.iter().find(|c|
                                         raw_class_lower.as_slice() == **c
                                             || self.class_extends(&raw_class_lower, c)
@@ -20260,11 +20304,82 @@ impl Vm {
                                             // ReflectionConstant::__construct(string $name)
                                             if call.args.len() > 1 {
                                                 let const_name = call.args[1].to_php_string().to_string_lossy();
+                                                // For lookup, strip a single leading backslash and
+                                                // lowercase the namespace prefix (the form used when
+                                                // the constant was registered via define()).
+                                                let stripped = if const_name.starts_with('\\') { &const_name[1..] } else { &const_name[..] };
+                                                let lookup_bytes: Vec<u8> = if let Some(pos) = stripped.as_bytes().iter().rposition(|&b| b == b'\\') {
+                                                    let mut out = Vec::with_capacity(stripped.len());
+                                                    for &b in &stripped.as_bytes()[..pos] { out.push(b.to_ascii_lowercase()); }
+                                                    out.extend_from_slice(&stripped.as_bytes()[pos..]);
+                                                    out
+                                                } else {
+                                                    stripped.as_bytes().to_vec()
+                                                };
+                                                let exists = self.constants.contains_key(&lookup_bytes);
+                                                if !exists {
+                                                    drop(obj_mut);
+                                                    let msg = format!("Constant \"{}\" does not exist", const_name);
+                                                    let exc = self.create_exception(b"ReflectionException", &msg, op.line);
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                                        ip = catch_target as usize;
+                                                        continue;
+                                                    } else {
+                                                        return Err(VmError {
+                                                            message: format!("Uncaught ReflectionException: {}", msg),
+                                                            line: op.line,
+                                                        });
+                                                    }
+                                                }
                                                 obj_mut.set_property(b"name".to_vec(), Value::String(PhpString::from_string(const_name)));
                                             }
                                         }
                                         b"reflectionextension" => {
                                             // ReflectionExtension::__construct(string $name)
+                                            // Validate argument count (must be exactly 1).
+                                            let user_args = call.args.len().saturating_sub(1);
+                                            if user_args != 1 {
+                                                drop(obj_mut);
+                                                let msg = format!("ReflectionExtension::__construct() expects exactly 1 argument, {} given", user_args);
+                                                let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                                    pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                } else {
+                                                    return Err(VmError {
+                                                        message: format!("Uncaught ArgumentCountError: {}", msg),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
+                                            // Validate type of the name argument (must be string).
+                                            let actual_value = match &call.args[1] {
+                                                Value::Reference(r) => r.borrow().clone(),
+                                                v => v.clone(),
+                                            };
+                                            if !matches!(&actual_value, Value::String(_)) {
+                                                drop(obj_mut);
+                                                let type_name = Self::value_type_name(&actual_value);
+                                                let msg = format!(
+                                                    "ReflectionExtension::__construct(): Argument #1 ($name) must be of type string, {} given",
+                                                    type_name
+                                                );
+                                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                                    pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                } else {
+                                                    return Err(VmError {
+                                                        message: format!("Uncaught TypeError: {}", msg),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
                                             if call.args.len() > 1 {
                                                 let raw = call.args[1].to_php_string().to_string_lossy();
                                                 // Canonicalize known extension names; otherwise pass through unchanged.
@@ -20968,7 +21083,7 @@ impl Vm {
                                     let method_part = &func_display[sep_pos + 2..];
                                     let class_lower_str = class_part.to_ascii_lowercase();
                                     let method_lower_str = method_part.to_ascii_lowercase();
-                                    let result = crate::reflection::reflection_static_call(self, &class_lower_str, &method_lower_str, &call.args, op.line);
+                                    let result = crate::reflection::reflection_static_call_named(self, &class_lower_str, &method_lower_str, method_part, &call.args, op.line);
                                     if let Some(val) = result {
                                         self.write_operand(
                                             &op.result,
@@ -20978,6 +21093,24 @@ impl Vm {
                                             &static_cv_keys,
                                         );
                                         handled = true;
+                                        // If the reflection static-call dispatcher set an
+                                        // exception (e.g. "cannot be called statically"),
+                                        // propagate it now.
+                                        if self.current_exception.is_some() {
+                                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                ip = *catch_target as usize;
+                                                continue;
+                                            } else {
+                                                let exc_msg = if let Some(Value::Object(o)) = self.current_exception.as_ref() {
+                                                    let ob = o.borrow();
+                                                    let cls = crate::value::display_class_name(&ob.class_name);
+                                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                                    format!("Uncaught {}: {}", cls, msg)
+                                                } else { "Uncaught exception".to_string() };
+                                                return Err(VmError { message: exc_msg, line: op.line });
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -24317,7 +24450,22 @@ impl Vm {
                             let obj_borrow = obj.borrow();
                             // Check if this is an uncloneable object
                             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if class_lower == b"generator" || class_lower == b"closure" || class_lower == b"xmlparser" || class_lower == b"fiber" || obj_borrow.has_property(b"__enum_case") {
+                            // Reflection classes and a few others are
+                            // explicitly marked uncloneable in PHP.
+                            let reflection_uncloneable = matches!(
+                                class_lower.as_slice(),
+                                b"reflectionclass" | b"reflectionobject"
+                                    | b"reflectionenum" | b"reflectionmethod"
+                                    | b"reflectionproperty" | b"reflectionfunction"
+                                    | b"reflectionparameter" | b"reflectionclassconstant"
+                                    | b"reflectionenumunitcase" | b"reflectionenumbackedcase"
+                                    | b"reflectionnamedtype" | b"reflectionuniontype"
+                                    | b"reflectionintersectiontype" | b"reflectiontype"
+                                    | b"reflectionattribute" | b"reflectionextension"
+                                    | b"reflectionconstant" | b"reflectiongenerator"
+                                    | b"reflectionfiber" | b"reflectionreference"
+                            );
+                            if reflection_uncloneable || class_lower == b"generator" || class_lower == b"closure" || class_lower == b"xmlparser" || class_lower == b"fiber" || obj_borrow.has_property(b"__enum_case") {
                                 let class_name = crate::value::display_class_name(&obj_borrow.class_name);
                                 drop(obj_borrow);
                                 let msg = format!("Trying to clone an uncloneable object of class {}", class_name);
@@ -26484,13 +26632,15 @@ impl Vm {
                                         }
                                     }
                                 }
-                                let mut new_props = Vec::new();
+                                // Order: child's own properties (and overrides) first,
+                                // then parent's non-overridden properties. This matches
+                                // PHP's iteration order for foreach and getDefaultProperties().
+                                let mut new_props = std::mem::take(&mut class.properties);
                                 for prop in &parent.properties {
                                     if !child_prop_names.contains(&prop.name) {
                                         new_props.push(prop.clone());
                                     }
                                 }
-                                new_props.append(&mut class.properties);
                                 class.properties = new_props;
                                 // Inherit constants
                                 for (const_name, const_val) in &parent.constants {
@@ -29647,7 +29797,25 @@ impl Vm {
                         let mut type_error: Option<String> = None;
                         let caller_scope_for_prop = self.current_class_scope()
                             .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        if let Some((vis, declaring_class, prop_is_readonly, prop_type, set_vis)) = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_prop.as_deref()) {
+                        // If the runtime class allows dynamic properties and the only
+                        // matching property is an inherited *private* one not visible
+                        // from the current scope, treat it as a dynamic property
+                        // (PHP allows this on subclasses with #[AllowDynamicProperties]).
+                        let allows_dynamic = self.classes.get(&class_lower)
+                            .map(|c| c.allow_dynamic_properties || c.name.eq_ignore_ascii_case(b"stdClass"))
+                            .unwrap_or(false);
+                        let resolved_prop = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_prop.as_deref());
+                        let skip_inherited_private = if let Some((vis, declaring_class, _, _, _)) = &resolved_prop {
+                            let decl_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            allows_dynamic
+                                && *vis == Visibility::Private
+                                && decl_lower != class_lower
+                                && caller_scope_for_prop.as_deref() != Some(decl_lower.as_slice())
+                        } else {
+                            false
+                        };
+                        let effective_prop = if skip_inherited_private { None } else { resolved_prop };
+                        if let Some((vis, declaring_class, prop_is_readonly, prop_type, set_vis)) = effective_prop {
                             // Use set_visibility for write access checks if present
                             let effective_write_vis = set_vis.unwrap_or(vis);
                             if effective_write_vis != Visibility::Public {
@@ -30417,10 +30585,13 @@ impl Vm {
                                     } else { break; }
                                 }
                             }
+                            // Preserve the original method casing so stack traces
+                            // can render the user-typed name. The dispatcher
+                            // lowercases as needed.
                             let mut spl_name = b"__spl::".to_vec();
                             spl_name.extend_from_slice(&spl_class);
                             spl_name.extend_from_slice(b"::");
-                            spl_name.extend_from_slice(&method_name_lower);
+                            spl_name.extend_from_slice(method_name.as_bytes());
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::from_vec(spl_name),
                                 args: vec![obj_val.clone()],

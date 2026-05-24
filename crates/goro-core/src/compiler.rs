@@ -1766,6 +1766,10 @@ impl Compiler {
                 func_compiler.op_array.doc_comment = func_doc_comment.clone();
                 func_compiler.op_array.strict_types = self.op_array.strict_types;
                 func_compiler.op_array.attributes = self.compile_attributes(func_attributes);
+                // Carry the source filename so ReflectionFunction::getFileName()
+                // can report where the function was declared, not where it was
+                // first looked up.
+                func_compiler.op_array.filename = self.source_file.clone();
                 func_compiler.source_file = self.source_file.clone();
                 func_compiler.anon_class_name_map = self.anon_class_name_map.clone();
 
@@ -1868,11 +1872,18 @@ impl Compiler {
 
                 // Set up parameter CVs and default values
                 func_compiler.op_array.param_count = params.len() as u32;
-                // Count required params (those without defaults and not variadic)
-                func_compiler.op_array.required_param_count = params
-                    .iter()
-                    .filter(|p| p.default.is_none() && !p.variadic)
-                    .count() as u32;
+                // required_param_count: equals the index AFTER the last required
+                // parameter (1-based position). Optional params that appear before
+                // a required one are implicitly treated as required (PHP 8.0+).
+                func_compiler.op_array.required_param_count = {
+                    let mut last_req: i64 = -1;
+                    for (i, p) in params.iter().enumerate() {
+                        if !p.variadic && p.default.is_none() {
+                            last_req = i as i64;
+                        }
+                    }
+                    (last_req + 1) as u32
+                };
                 // Compile parameter attributes
                 func_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                 // Record which parameters are by-reference
@@ -3143,9 +3154,13 @@ impl Compiler {
                                         closure_compiler.current_parent_class = self.current_parent_class.clone();
                                         closure_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
                                         closure_compiler.op_array.param_count = closure_params.len() as u32;
-                                        closure_compiler.op_array.required_param_count = closure_params.iter()
-                                            .take_while(|p| p.default.is_none() && !p.variadic)
-                                            .count() as u32;
+                                        closure_compiler.op_array.required_param_count = {
+                                            let mut last_req: i64 = -1;
+                                            for (i, p) in closure_params.iter().enumerate() {
+                                                if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                            }
+                                            (last_req + 1) as u32
+                                        };
                                         closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
                                         closure_compiler.op_array.param_has_default = closure_params.iter().map(|p| p.default.is_some()).collect();
                                         for p in closure_params {
@@ -4111,10 +4126,13 @@ impl Compiler {
                                 // Set param_count and required_param_count for the method
                                 method_compiler.op_array.param_count = params.len() as u32
                                     + if *is_static { 0 } else { 1 }; // +1 for $this
-                                method_compiler.op_array.required_param_count = params
-                                    .iter()
-                                    .filter(|p| p.default.is_none() && !p.variadic)
-                                    .count() as u32;
+                                method_compiler.op_array.required_param_count = {
+                                    let mut last_req: i64 = -1;
+                                    for (i, p) in params.iter().enumerate() {
+                                        if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                    }
+                                    (last_req + 1) as u32
+                                };
                                 // Record by-ref params (offset by 1 for non-static methods due to $this)
                                 if *is_static {
                                     method_compiler.op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
@@ -4353,10 +4371,13 @@ impl Compiler {
                                 }
                                 abstract_op_array.param_count = params.len() as u32
                                     + if *is_static { 0 } else { 1 };
-                                abstract_op_array.required_param_count = params
-                                    .iter()
-                                    .filter(|p| p.default.is_none() && !p.variadic)
-                                    .count() as u32;
+                                abstract_op_array.required_param_count = {
+                                    let mut last_req: i64 = -1;
+                                    for (i, p) in params.iter().enumerate() {
+                                        if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                    }
+                                    (last_req + 1) as u32
+                                };
                                 if *is_static {
                                     abstract_op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
                                     abstract_op_array.param_has_default = params.iter().map(|p| p.default.is_some()).collect();
@@ -4734,9 +4755,13 @@ impl Compiler {
                                         closure_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
                                         // Compile params and body
                                         closure_compiler.op_array.param_count = closure_params.len() as u32;
-                                        closure_compiler.op_array.required_param_count = closure_params.iter()
-                                            .take_while(|p| p.default.is_none() && !p.variadic)
-                                            .count() as u32;
+                                        closure_compiler.op_array.required_param_count = {
+                                            let mut last_req: i64 = -1;
+                                            for (i, p) in closure_params.iter().enumerate() {
+                                                if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                            }
+                                            (last_req + 1) as u32
+                                        };
                                         closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
                                         closure_compiler.op_array.param_has_default = closure_params.iter().map(|p| p.default.is_some()).collect();
                                         for p in closure_params {
@@ -7815,6 +7840,7 @@ impl Compiler {
                 body,
                 use_vars,
                 is_static,
+                return_type: closure_return_type,
                 attributes: closure_attributes,
                 end_line: closure_end_line,
                 doc_comment: closure_doc_comment,
@@ -7840,6 +7866,12 @@ impl Compiler {
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(closure_attributes);
                 closure_compiler.op_array.doc_comment = closure_doc_comment.clone();
+                // Propagate the closure's declared return type so ReflectionFunction
+                // observes it via `hasReturnType`/`getReturnType`.
+                if let Some(hint) = closure_return_type {
+                    closure_compiler.op_array.return_type =
+                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                }
                 closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
@@ -7873,10 +7905,13 @@ impl Compiler {
                 closure_compiler.op_array.param_count = params.len() as u32
                     + use_vars.len() as u32
                     + if !*is_static && self.current_class.is_some() { 1 } else { 0 };
-                closure_compiler.op_array.required_param_count = params
-                    .iter()
-                    .filter(|p| p.default.is_none() && !p.variadic)
-                    .count() as u32;
+                closure_compiler.op_array.required_param_count = {
+                    let mut last_req: i64 = -1;
+                    for (i, p) in params.iter().enumerate() {
+                        if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                    }
+                    (last_req + 1) as u32
+                };
                 // Compile parameter attributes
                 closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
                 // Record by-ref params for closures (with offset for $this and use vars)
@@ -8070,7 +8105,7 @@ impl Compiler {
                 }
             }
 
-            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, doc_comment: arrow_doc_comment, .. } => {
+            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, doc_comment: arrow_doc_comment, return_type: arrow_return_type, .. } => {
                 // Arrow function: fn($x) => $x * 2
                 // Arrow functions implicitly capture outer variables by value
 
@@ -8101,6 +8136,11 @@ impl Compiler {
                 closure_compiler.op_array.attributes = self.compile_attributes(attributes);
                 closure_compiler.op_array.doc_comment = arrow_doc_comment.clone();
                 closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
+                // Propagate arrow function's declared return type.
+                if let Some(hint) = arrow_return_type {
+                    closure_compiler.op_array.return_type =
+                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                }
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
