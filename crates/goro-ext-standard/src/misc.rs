@@ -10006,6 +10006,10 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let ret = unsafe { libc::glob(c_pattern.as_ptr(), libc_flags, None, &mut glob_buf) };
 
+    // GLOB_ONLYDIR is a hint to the OS; on Linux it can still return
+    // non-directories. PHP enforces it explicitly.
+    let only_dir = flags & 8192 != 0;
+
     let mut arr = PhpArray::new();
     if ret == 0 {
         for i in 0..glob_buf.gl_pathc {
@@ -10013,6 +10017,14 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let p = *glob_buf.gl_pathv.add(i);
                 std::ffi::CStr::from_ptr(p).to_string_lossy().to_string()
             };
+            if only_dir {
+                // Strip trailing slash before testing is_dir (so GLOB_MARK
+                // entries still work).
+                let test_path = path.trim_end_matches('/');
+                if !std::fs::metadata(test_path).map(|m| m.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+            }
             arr.push(Value::String(PhpString::from_string(path)));
         }
     }
