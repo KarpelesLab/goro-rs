@@ -7487,10 +7487,17 @@ impl Vm {
                 Some(Value::String(PhpString::from_string(name)))
             }
             b"getextension" => {
-                let ext = std::path::Path::new(&path_str)
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_string())
+                // PHP's behavior differs from Rust's Path::extension:
+                // - Files starting with "." but having more dots ARE treated as having
+                //   an extension (e.g. ".test" returns "test", ".tar.gz" returns "gz")
+                let name = std::path::Path::new(&path_str)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
+                let ext = match name.rfind('.') {
+                    Some(idx) if idx + 1 < name.len() => name[idx + 1..].to_string(),
+                    _ => String::new(),
+                };
                 Some(Value::String(PhpString::from_string(ext)))
             }
             b"getbasename" => None, // handled in handle_spl_docall (takes optional suffix arg)
@@ -7533,6 +7540,19 @@ impl Vm {
             }
             b"islink" => {
                 Some(if std::fs::symlink_metadata(&path_str).map_or(false, |m| m.file_type().is_symlink()) { Value::True } else { Value::False })
+            }
+            b"getlinktarget" => {
+                match std::fs::read_link(&path_str) {
+                    Ok(target) => Some(Value::String(PhpString::from_string(target.to_string_lossy().to_string()))),
+                    Err(_) => {
+                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+                        let msg = format!("{}::getLinkTarget(): Unable to read link {}, error: No such file or directory", class_canonical, path_str);
+                        let line = self.current_line;
+                        let exc = self.create_exception(b"RuntimeException", &msg, line);
+                        self.current_exception = Some(exc);
+                        Some(Value::Null)
+                    }
+                }
             }
             b"isreadable" => {
                 Some(if std::path::Path::new(&path_str).exists() { Value::True } else { Value::False })
@@ -7827,10 +7847,10 @@ impl Vm {
                     let a = a.borrow();
                     if let Some(entry) = a.get(&ArrayKey::Int(pos)) {
                         let name = entry.to_php_string().to_string_lossy();
-                        let ext = std::path::Path::new(&*name)
-                            .extension()
-                            .map(|e| e.to_string_lossy().to_string())
-                            .unwrap_or_default();
+                        let ext = match name.rfind('.') {
+                            Some(idx) if idx + 1 < name.len() => name[idx + 1..].to_string(),
+                            _ => String::new(),
+                        };
                         Some(Value::String(PhpString::from_string(ext)))
                     } else {
                         Some(Value::String(PhpString::from_bytes(b"")))
@@ -8975,6 +8995,13 @@ impl Vm {
                         b"pop" => {
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
+                            let is_empty = if let Value::Array(a) = &arr { a.borrow().len() == 0 } else { true };
+                            if is_empty {
+                                drop(ob);
+                                let exc = self.create_exception(b"RuntimeException", "Can't pop from an empty datastructure", 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             if let Value::Array(a) = arr {
                                 let mut a = a.borrow_mut();
                                 a.pop().map(|v| Some(v)).unwrap_or(Some(Value::Null))
@@ -8985,6 +9012,14 @@ impl Vm {
                         b"dequeue" | b"shift" => {
                             let ob = obj.borrow();
                             let arr = ob.get_property(b"__spl_array");
+                            let is_empty = if let Value::Array(a) = &arr { a.borrow().len() == 0 } else { true };
+                            if is_empty {
+                                drop(ob);
+                                let what = if method == b"dequeue" { "dequeue" } else { "shift" };
+                                let exc = self.create_exception(b"RuntimeException", &format!("Can't {} from an empty datastructure", what), 0);
+                                self.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
                             if let Value::Array(a) = arr {
                                 let mut a = a.borrow_mut();
                                 a.shift().map(|v| Some(v)).unwrap_or(Some(Value::Null))
@@ -9361,6 +9396,13 @@ impl Vm {
                                     if has_string_key {
                                         let exc = self.create_exception(b"InvalidArgumentException",
                                             "array must contain only positive integer keys", 0);
+                                        self.current_exception = Some(exc);
+                                        return Some(Value::Null);
+                                    }
+                                    // Detect integer overflow when max_key + 1 overflows i64
+                                    if max_key == i64::MAX {
+                                        let exc = self.create_exception(b"OverflowException",
+                                            "integer overflow detected", 0);
                                         self.current_exception = Some(exc);
                                         return Some(Value::Null);
                                     }

@@ -235,6 +235,25 @@ fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
+    // Type check first argument
+    if let Some(first) = args.first() {
+        let type_name = match first {
+            Value::Array(_) | Value::Object(_) | Value::Generator(_) => None,
+            Value::String(_) => Some("string"),
+            Value::Long(_) => Some("int"),
+            Value::Double(_) => Some("float"),
+            Value::True | Value::False => Some("bool"),
+            Value::Null => Some("null"),
+            _ => Some("unknown"),
+        };
+        if let Some(tn) = type_name {
+            let msg = format!("iterator_to_array(): Argument #1 ($iterator) must be of type Traversable|array, {} given", tn);
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::Null);
+        }
+    }
     match args.first() {
         Some(Value::Array(arr)) => {
             if use_keys {
@@ -327,6 +346,25 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
 }
 
 fn iterator_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Type check first argument
+    if let Some(first) = args.first() {
+        let type_name = match first {
+            Value::Array(_) | Value::Object(_) | Value::Generator(_) => None,
+            Value::String(_) => Some("string"),
+            Value::Long(_) => Some("int"),
+            Value::Double(_) => Some("float"),
+            Value::True | Value::False => Some("bool"),
+            Value::Null => Some("null"),
+            _ => Some("unknown"),
+        };
+        if let Some(tn) = type_name {
+            let msg = format!("iterator_count(): Argument #1 ($iterator) must be of type Traversable|array, {} given", tn);
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::Null);
+        }
+    }
     match args.first() {
         Some(Value::Array(arr)) => Ok(Value::Long(arr.borrow().len() as i64)),
         Some(val @ Value::Object(_)) => {
