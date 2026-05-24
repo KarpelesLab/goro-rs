@@ -452,7 +452,7 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             return Ok(max_val);
         } else {
-            let type_name = args[0].type_name();
+            let type_name = Vm::value_type_name(&args[0]);
             let msg = format!("max(): Argument #1 ($value) must be of type array, {} given", type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -496,7 +496,7 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             return Ok(min_val);
         } else {
-            let type_name = args[0].type_name();
+            let type_name = Vm::value_type_name(&args[0]);
             let msg = format!("min(): Argument #1 ($value) must be of type array, {} given", type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
