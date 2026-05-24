@@ -1672,6 +1672,10 @@ impl Vm {
         if self.classes.contains_key(&class_lower) {
             return true;
         }
+        // Don't autoload for known builtin classes (already provided)
+        if self.is_known_builtin_class(&class_lower) {
+            return true;
+        }
         // Clone autoload functions to avoid borrow issues
         let autoloaders = self.autoload_functions.clone();
         let class_str = Value::String(PhpString::from_vec(class_name.to_vec()));
@@ -2892,7 +2896,7 @@ impl Vm {
     }
 
     /// Coerce a single value to match a parameter type.
-    fn coerce_value_to_type(value: &mut Value, param_type: &ParamType, strict: bool) {
+    pub(crate) fn coerce_value_to_type(value: &mut Value, param_type: &ParamType, strict: bool) {
         match param_type {
             ParamType::Simple(type_name) => {
                 match type_name.as_slice() {

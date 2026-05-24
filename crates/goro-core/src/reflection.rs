@@ -210,8 +210,15 @@ pub fn reflection_class_construct(vm: &mut Vm, args: &[Value], line: u32) -> boo
     let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
 
     // Check if class exists
-    let class_exists = vm.classes.contains_key(&class_lower)
+    let mut class_exists = vm.classes.contains_key(&class_lower)
         || vm.is_known_builtin_class(&class_lower);
+
+    // If class is unknown, try autoloading
+    if !class_exists {
+        vm.try_autoload_class(class_name.as_bytes());
+        class_exists = vm.classes.contains_key(&class_lower)
+            || vm.is_known_builtin_class(&class_lower);
+    }
 
     if !class_exists {
         let err_msg = format!("Class \"{}\" does not exist", class_name);
@@ -2528,8 +2535,39 @@ pub fn reflection_class_docall(
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
+                // Enforce property type if declared
+                let prop_type = vm.classes.get(&class_lower)
+                    .and_then(|ce| ce.properties.iter().find(|p| p.is_static && p.name == prop_name.as_bytes()))
+                    .and_then(|p| p.property_type.clone());
+                let mut coerced = value;
+                if let Some(pt) = prop_type.as_ref() {
+                    let strict = false;
+                    let original = coerced.clone();
+                    crate::vm::Vm::coerce_value_to_type(&mut coerced, pt, strict);
+                    if !vm.value_matches_type(&coerced, pt) {
+                        let canonical = vm.classes.get(&class_lower)
+                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                            .unwrap_or(target.clone());
+                        let type_str = param_type_name(pt);
+                        let value_type = match &original {
+                            Value::Null => "null",
+                            Value::True | Value::False => "bool",
+                            Value::Long(_) => "int",
+                            Value::Double(_) => "float",
+                            Value::String(_) => "string",
+                            Value::Array(_) => "array",
+                            Value::Object(_) => "object",
+                            _ => "unknown",
+                        };
+                        let err_msg = format!("Cannot assign {} to property {}::${} of type {}",
+                            value_type, canonical, prop_name_s, type_str);
+                        let exc = vm.create_exception(b"TypeError", &err_msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
                 if let Some(ce) = vm.classes.get_mut(&class_lower) {
-                    ce.static_properties.insert(prop_name.as_bytes().to_vec(), value);
+                    ce.static_properties.insert(prop_name.as_bytes().to_vec(), coerced);
                 }
                 Some(Value::Null)
             }
