@@ -6738,10 +6738,14 @@ fn is_link_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         },
     )
 }
-fn stat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn stat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
-    stat_path(&path_str, false)
+    let res = stat_path(&path_str, false)?;
+    if matches!(res, Value::False) {
+        vm.emit_warning(&format!("stat(): stat failed for {}", path_str));
+    }
+    Ok(res)
 }
 
 fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
@@ -6942,55 +6946,139 @@ fn basename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(base)))
 }
 
+/// PHP zend_dirname: returns the dirname portion (or empty string for len 0).
+/// Operates on bytes; only '/' is a separator (Unix).
+fn php_dirname_bytes(path: &[u8]) -> Vec<u8> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    let mut bytes = path.to_vec();
+    let mut end = bytes.len() - 1;
+    // Strip trailing slashes
+    loop {
+        if bytes[end] != b'/' { break; }
+        if end == 0 {
+            return vec![b'/'];
+        }
+        end -= 1;
+    }
+    // Strip filename (non-slash chars)
+    loop {
+        if bytes[end] == b'/' { break; }
+        if end == 0 {
+            return vec![b'.'];
+        }
+        end -= 1;
+    }
+    // Strip slashes that came before the filename
+    loop {
+        if bytes[end] != b'/' { break; }
+        if end == 0 {
+            return vec![b'/'];
+        }
+        end -= 1;
+    }
+    bytes.truncate(end + 1);
+    bytes
+}
+
+/// PHP php_basename for Unix: strips trailing slashes, then returns the
+/// substring from the last slash onward.
+fn php_basename_bytes(path: &[u8]) -> Vec<u8> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    // Find last byte that is not a trailing slash.
+    let mut end = path.len();
+    while end > 0 && path[end - 1] == b'/' {
+        end -= 1;
+    }
+    if end == 0 {
+        return Vec::new();
+    }
+    // Find the previous '/' before end.
+    let mut start = end;
+    while start > 0 && path[start - 1] != b'/' {
+        start -= 1;
+    }
+    path[start..end].to_vec()
+}
+
 fn pathinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let option = args.get(1).map(|v| v.to_long());
-    let s = path.to_string_lossy();
+    let opt = args.get(1).map(|v| v.to_long()).unwrap_or(15); // PATHINFO_ALL
+    let bytes = path.as_bytes();
 
-    // PHP's pathinfo() algorithm (effective):
-    //   1. Trim trailing '/'s from the path -> trimmed
-    //   2. Find rightmost '/' in trimmed
-    //   3. basename = everything after that
-    //   4. dirname = everything before that, with trailing '/'s stripped
-    //      (preserving leading '/'s for absolute paths like '//foo' -> '//foo')
-    //   5. If no '/' at all, dirname is "." and basename is the trimmed path.
-    let trimmed = s.trim_end_matches('/');
-    let (dirname, basename) = if let Some(pos) = trimmed.rfind('/') {
-        let mut dn = trimmed[..pos].to_string();
-        // Strip trailing slashes from dirname, but keep root '/' or leading '//'.
-        while dn.len() > 1 && dn.ends_with('/') {
-            dn.pop();
+    let want_dirname = opt & 1 != 0;
+    let want_basename = opt & 2 != 0;
+    let want_extension = opt & 4 != 0;
+    let want_filename = opt & 8 != 0;
+
+    let dirname_bytes = if want_dirname {
+        Some(php_dirname_bytes(bytes))
+    } else {
+        None
+    };
+    let basename_bytes = php_basename_bytes(bytes);
+
+    let extension_bytes: Option<Vec<u8>> = if want_extension {
+        basename_bytes.iter().rposition(|&c| c == b'.').map(|p| basename_bytes[p + 1..].to_vec())
+    } else {
+        None
+    };
+    let filename_bytes: Vec<u8> = if want_filename {
+        match basename_bytes.iter().rposition(|&c| c == b'.') {
+            Some(p) => basename_bytes[..p].to_vec(),
+            None => basename_bytes.clone(),
         }
-        if dn.is_empty() { dn = "/".to_string(); }
-        (dn, trimmed[pos + 1..].to_string())
     } else {
-        (".".to_string(), trimmed.to_string())
-    };
-    // For basename starting with '.', PHP's extension/filename split is the
-    // SAME as normal: the rightmost '.' separates filename from extension.
-    let extension = basename.rfind('.').map(|pos| basename[pos + 1..].to_string());
-    let filename = if let Some(pos) = basename.rfind('.') {
-        basename[..pos].to_string()
-    } else {
-        basename.clone()
+        Vec::new()
     };
 
-    match option {
-        Some(1) => Ok(Value::String(PhpString::from_string(dirname))),  // PATHINFO_DIRNAME
-        Some(2) => Ok(Value::String(PhpString::from_string(basename))), // PATHINFO_BASENAME
-        Some(4) => Ok(Value::String(PhpString::from_string(extension.unwrap_or_default()))), // PATHINFO_EXTENSION
-        Some(8) => Ok(Value::String(PhpString::from_string(filename))), // PATHINFO_FILENAME
-        _ => {
-            // Return full array
-            let mut result = PhpArray::new();
-            result.set(ArrayKey::String(PhpString::from_bytes(b"dirname")), Value::String(PhpString::from_string(dirname)));
-            result.set(ArrayKey::String(PhpString::from_bytes(b"basename")), Value::String(PhpString::from_string(basename)));
-            if let Some(ext) = extension {
-                result.set(ArrayKey::String(PhpString::from_bytes(b"extension")), Value::String(PhpString::from_string(ext)));
+    // For PATHINFO_ALL (== 15) PHP returns the full array.
+    if opt == 15 {
+        let mut result = PhpArray::new();
+        // dirname only added when non-empty.
+        if let Some(d) = dirname_bytes.as_ref() {
+            if !d.is_empty() {
+                result.set(ArrayKey::String(PhpString::from_bytes(b"dirname")), Value::String(PhpString::from_bytes(d)));
             }
-            result.set(ArrayKey::String(PhpString::from_bytes(b"filename")), Value::String(PhpString::from_string(filename)));
-            Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
+        result.set(ArrayKey::String(PhpString::from_bytes(b"basename")), Value::String(PhpString::from_bytes(&basename_bytes)));
+        // Extension only present when basename contains '.'.
+        if let Some(e) = extension_bytes.as_ref() {
+            result.set(ArrayKey::String(PhpString::from_bytes(b"extension")), Value::String(PhpString::from_bytes(e)));
+        }
+        result.set(ArrayKey::String(PhpString::from_bytes(b"filename")), Value::String(PhpString::from_bytes(&filename_bytes)));
+        return Ok(Value::Array(Rc::new(RefCell::new(result))));
+    }
+
+    // For specific opt with single bit set, return string corresponding to that bit.
+    // PHP behaviour: builds the array with only the requested keys, then returns the
+    // first value if any, else empty string.
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    if want_dirname {
+        if let Some(d) = dirname_bytes.as_ref() {
+            if !d.is_empty() {
+                entries.push(d.clone());
+            }
+        }
+    }
+    if want_basename {
+        entries.push(basename_bytes.clone());
+    }
+    if want_extension {
+        if let Some(e) = extension_bytes.as_ref() {
+            entries.push(e.clone());
+        }
+    }
+    if want_filename {
+        entries.push(filename_bytes.clone());
+    }
+    if let Some(first) = entries.into_iter().next() {
+        Ok(Value::String(PhpString::from_bytes(&first)))
+    } else {
+        Ok(Value::String(PhpString::from_bytes(b"")))
     }
 }
 
@@ -12116,10 +12204,14 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn lstat_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn lstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
-    stat_path(&path_str, true)
+    let res = stat_path(&path_str, true)?;
+    if matches!(res, Value::False) {
+        vm.emit_warning(&format!("lstat(): Lstat failed for {}", path_str));
+    }
+    Ok(res)
 }
 
 fn is_executable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
