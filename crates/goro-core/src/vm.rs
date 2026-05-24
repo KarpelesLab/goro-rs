@@ -1281,6 +1281,50 @@ impl Vm {
         }
         let iv_lower = b"random\\intervalboundary".to_vec();
         vm.classes.insert(iv_lower, iv);
+
+        // Built-in attribute class: Deprecated
+        {
+            use crate::object::{PropertyDef, Visibility as ObjVis};
+            let mut dep = ClassEntry::new(b"Deprecated".to_vec());
+            dep.is_final = true;
+            // public readonly ?string $message;
+            dep.properties.push(PropertyDef {
+                name: b"message".to_vec(),
+                default: Value::Null,
+                is_static: false,
+                is_readonly: true,
+                visibility: ObjVis::Public,
+                set_visibility: None,
+                declaring_class: b"deprecated".to_vec(),
+                property_type: None,
+                has_get_hook: false,
+                has_set_hook: false,
+                is_virtual: false,
+                is_abstract: false,
+                is_final: false,
+                attributes: Vec::new(),
+                doc_comment: None,
+            });
+            // public readonly ?string $since;
+            dep.properties.push(PropertyDef {
+                name: b"since".to_vec(),
+                default: Value::Null,
+                is_static: false,
+                is_readonly: true,
+                visibility: ObjVis::Public,
+                set_visibility: None,
+                declaring_class: b"deprecated".to_vec(),
+                property_type: None,
+                has_get_hook: false,
+                has_set_hook: false,
+                is_virtual: false,
+                is_abstract: false,
+                is_final: false,
+                attributes: Vec::new(),
+                doc_comment: None,
+            });
+            vm.classes.insert(b"deprecated".to_vec(), dep);
+        }
         vm
     }
 
@@ -1503,6 +1547,14 @@ impl Vm {
     /// Call the user error handler if set. Returns true if the handler was called and handled the error.
     pub fn call_user_error_handler(&mut self, errno: i64, errstr: &str, line: u32) -> bool {
         if let Some(handler) = self.error_handler.clone() {
+            // If the error handler itself is #[\Deprecated], emit that banner
+            // first, located at the original error site (the deprecated call's
+            // file/line, not "Unknown:0" — error handlers are invoked from user
+            // code, unlike exception handlers). Temporarily detach the handler
+            // so the meta-deprecation doesn't recurse.
+            let saved_handler = self.error_handler.take();
+            self.emit_deprecation_for_callback_at(&handler, &self.current_file.clone(), line);
+            self.error_handler = saved_handler;
             let errno_val = Value::Long(errno);
             let errstr_val = Value::String(PhpString::from_string(errstr.to_string()));
             let file_val = Value::String(PhpString::from_string(self.current_file.clone()));
@@ -1518,7 +1570,13 @@ impl Vm {
                                 cvs[i] = arg.clone();
                             }
                         }
+                        // Push a [internal function] frame so backtraces captured by
+                        // an exception thrown inside the error handler include the
+                        // error handler call frame (and its args).
+                        let handler_display = s.to_string_lossy();
+                        self.call_stack.push((handler_display, String::new(), 0, args.clone(), false));
                         let result = self.execute_op_array(&user_fn, cvs);
+                        self.call_stack.pop();
                         // If the error handler threw an exception, it's already in current_exception
                         if result.is_err() || self.current_exception.is_some() {
                             self.error_handler_threw = true;
@@ -2015,6 +2073,88 @@ impl Vm {
             };
             let msg = self.format_deprecated_message(&prefix, &custom_msg);
             self.emit_user_deprecated_at(&msg, line);
+        }
+    }
+
+    /// Like [`emit_deprecation_for_callback`] but uses an explicit file/line
+    /// for the banner location. Used by [`call_user_error_handler`] so that the
+    /// deprecation of the *error handler itself* reports the user file/line of
+    /// the original error rather than "Unknown:0".
+    pub fn emit_deprecation_for_callback_at(&mut self, callback: &Value, file: &str, line: u32) {
+        let saved_file = std::mem::replace(&mut self.current_file, file.to_string());
+        let saved_line = std::mem::replace(&mut self.current_line, line);
+        self.emit_deprecation_for_callback_inner(callback, line);
+        self.current_file = saved_file;
+        self.current_line = saved_line;
+    }
+
+    /// Emit a deprecation banner for a callback being invoked from an internal
+    /// callsite (e.g. set_exception_handler / set_error_handler / shutdown
+    /// function dispatch). For PHP-internal callsites the location is reported
+    /// as "Unknown" on line 0. Looks up the function/method by name and emits
+    /// only if it carries a `#[\Deprecated]` attribute.
+    pub fn emit_deprecation_for_callback(&mut self, callback: &Value) {
+        let saved_file = std::mem::replace(&mut self.current_file, "Unknown".to_string());
+        let saved_line = std::mem::replace(&mut self.current_line, 0);
+        self.emit_deprecation_for_callback_inner(callback, 0);
+        self.current_file = saved_file;
+        self.current_line = saved_line;
+    }
+
+    fn emit_deprecation_for_callback_inner(&mut self, callback: &Value, line: u32) {
+        match callback {
+            Value::String(s) => {
+                let func_name = s.as_bytes().to_vec();
+                let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                // Skip ::-qualified callable strings here; handle them as Method below.
+                let is_class_method = func_lower.windows(2).any(|w| w == b"::");
+                if !is_class_method {
+                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                        if user_fn.attributes.is_empty() { return; }
+                        let attrs = user_fn.attributes.clone();
+                        if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
+                            let display = String::from_utf8_lossy(&func_name).into_owned();
+                            let prefix = format!("Function {}()", display);
+                            let msg = self.format_deprecated_message(&prefix, &custom_msg);
+                            self.emit_user_deprecated_at(&msg, line);
+                        }
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                let arr_b = arr.borrow();
+                let vals: Vec<Value> = arr_b.values().cloned().collect();
+                drop(arr_b);
+                if vals.len() < 2 { return; }
+                let method_name = vals[1].to_php_string();
+                let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                let (class_lower, class_display) = match &vals[0] {
+                    Value::Object(o) => {
+                        let lower: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let display = crate::value::display_class_name(&o.borrow().class_name);
+                        (lower, display)
+                    }
+                    Value::String(s) => {
+                        let lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let display = String::from_utf8_lossy(s.as_bytes()).into_owned();
+                        (lower, display)
+                    }
+                    _ => return,
+                };
+                if let Some(class) = self.classes.get(&class_lower).cloned() {
+                    if let Some(method) = class.methods.get(&method_lower) {
+                        if method.attributes.is_empty() { return; }
+                        let attrs = method.attributes.clone();
+                        if let Some(custom_msg) = self.get_deprecated_message(&attrs) {
+                            let display = format!("{}::{}", class_display, String::from_utf8_lossy(method_name.as_bytes()));
+                            let prefix = format!("Method {}()", display);
+                            let msg = self.format_deprecated_message(&prefix, &custom_msg);
+                            self.emit_user_deprecated_at(&msg, line);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -13038,7 +13178,7 @@ impl Vm {
                 | b"splobserver" | b"splsubject"
                 | b"reflectiontype" | b"reflectionreference" | b"reflectionconstant"
                 | b"fiber" | b"fibererror"
-                | b"attribute"
+                | b"attribute" | b"deprecated" | b"nodiscard" | b"override"
                 | b"mysqli" | b"mysqli_driver" | b"mysqli_result" | b"mysqli_stmt"
                 | b"mysqli_warning" | b"mysqli_sql_exception"
                 | b"curlhandle" | b"curlmultihandle" | b"curlsharehandle"
@@ -13114,6 +13254,9 @@ impl Vm {
             b"reflectiongenerator" => "ReflectionGenerator",
             b"reflectionattribute" => "ReflectionAttribute",
             b"attribute" => "Attribute",
+            b"deprecated" => "Deprecated",
+            b"nodiscard" => "NoDiscard",
+            b"override" => "Override",
             b"fiber" => "Fiber",
             b"fibererror" => "FiberError",
             b"arrayobject" => "ArrayObject",
@@ -14573,6 +14716,38 @@ impl Vm {
                         _ => "[closure]".to_string(),
                     };
                     let frame_args = vec![exc.clone()];
+                    // If the exception handler is itself a #[\Deprecated] function/method,
+                    // emit the deprecation banner before pushing the my_exception_handler
+                    // call frame. If the user error handler turns the deprecation into a
+                    // throw, the exception handler must NOT run — propagate the new
+                    // exception instead, and the stack trace must show the error handler
+                    // frame (which is pushed by call_user_error_handler), not the
+                    // exception handler frame.
+                    self.emit_deprecation_for_callback(&handler);
+                    if self.current_exception.is_some() {
+                        // The deprecation emit produced a new exception (e.g. a throwing
+                        // error handler). Abort the exception handler dispatch; the new
+                        // exception will be reported as Uncaught.
+                        let new_exc = self.current_exception.take().unwrap();
+                        let (class, msg) = if let Value::Object(o) = &new_exc {
+                            let ob = o.borrow();
+                            let cls = String::from_utf8_lossy(&ob.class_name).to_string();
+                            let m = if let Value::String(s) = ob.get_property(b"message") {
+                                s.to_string_lossy()
+                            } else { String::new() };
+                            (cls, m)
+                        } else { (String::new(), String::new()) };
+                        self.current_exception = Some(new_exc);
+                        result = Err(VmError {
+                            message: if msg.is_empty() {
+                                format!("Uncaught {}", class)
+                            } else {
+                                format!("Uncaught {}: {}", class, msg)
+                            },
+                            line: 0,
+                        });
+                        break;
+                    }
                     // [internal function] is encoded by file="" and line=0.
                     self.call_stack.push((handler_name, String::new(), 0, frame_args, false));
                     let handler_result = self.call_callback(&handler, &[exc.clone()]);
@@ -21199,6 +21374,69 @@ impl Vm {
                                                 }
                                                 return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: op.line });
                                             }
+                                        }
+                                        b"deprecated" => {
+                                            // Deprecated::__construct(?string $message = null, ?string $since = null)
+                                            // Validate args as nullable string. On type mismatch, throw TypeError.
+                                            let user_arg_count = call.args.len().saturating_sub(1);
+                                            if user_arg_count > 2 {
+                                                drop(obj_mut);
+                                                let msg = format!(
+                                                    "Deprecated::__construct() expects at most 2 arguments, {} given",
+                                                    user_arg_count
+                                                );
+                                                let exc = self.create_exception(b"ArgumentCountError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: op.line });
+                                            }
+                                            // Validate each arg is null or string (nullable string)
+                                            let mut type_err: Option<(u32, &'static str, String)> = None;
+                                            for (idx, name) in [(1usize, "message"), (2usize, "since")] {
+                                                if let Some(v) = call.args.get(idx) {
+                                                    if !matches!(v, Value::Null | Value::String(_)) {
+                                                        let type_name = self.format_arg_type(v);
+                                                        type_err = Some((idx as u32, name, type_name));
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if let Some((idx, name, type_name)) = type_err {
+                                                drop(obj_mut);
+                                                let msg = format!(
+                                                    "Deprecated::__construct(): Argument #{} (${}) must be of type ?string, {} given",
+                                                    idx, name, type_name
+                                                );
+                                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
+                                            }
+                                            // If $this->message is already set (readonly), reject re-assignment.
+                                            let already_init = matches!(obj_mut.get_property(b"message"), Value::String(_) | Value::Null)
+                                                && obj_mut.has_property(b"message");
+                                            if already_init {
+                                                // __construct called twice: readonly violation on $message
+                                                drop(obj_mut);
+                                                let msg = "Cannot modify readonly property Deprecated::$message".to_string();
+                                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                            }
+                                            let msg_val = call.args.get(1).cloned().unwrap_or(Value::Null);
+                                            let since_val = call.args.get(2).cloned().unwrap_or(Value::Null);
+                                            obj_mut.set_property(b"message".to_vec(), msg_val);
+                                            obj_mut.set_property(b"since".to_vec(), since_val);
                                         }
                                         _ => {
                                             // Only apply exception constructor logic for throwable classes
