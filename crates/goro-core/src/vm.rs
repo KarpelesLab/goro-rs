@@ -24334,11 +24334,34 @@ impl Vm {
                                 while let Some(p) = parent {
                                     let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
                                     if let Some(pc) = self.classes.get(&p_lower) {
-                                        if let Some(v) = pc.static_properties.get(prop_name.as_bytes())
-                                            .or_else(|| pc.constants.get(prop_name.as_bytes())) {
-                                            raw_val_opt = Some(v.clone());
-                                            found = true;
-                                            break;
+                                        // Private constants are NOT inherited — skip them
+                                        // unless the lookup is happening from within the
+                                        // declaring class's own scope.
+                                        let const_visible = if let Some(meta) =
+                                            pc.constants_meta.get(prop_name.as_bytes())
+                                        {
+                                            use crate::object::Visibility;
+                                            if meta.visibility == Visibility::Private {
+                                                // Private constants are only accessible
+                                                // when the calling scope is the declaring
+                                                // class itself — not from descendants.
+                                                self.class_scope_stack
+                                                    .last()
+                                                    .map(|s| s == &p_lower)
+                                                    .unwrap_or(false)
+                                            } else {
+                                                true
+                                            }
+                                        } else {
+                                            true
+                                        };
+                                        if const_visible {
+                                            if let Some(v) = pc.static_properties.get(prop_name.as_bytes())
+                                                .or_else(|| pc.constants.get(prop_name.as_bytes())) {
+                                                raw_val_opt = Some(v.clone());
+                                                found = true;
+                                                break;
+                                            }
                                         }
                                         parent = pc.parent.clone();
                                     } else {
@@ -27850,11 +27873,15 @@ impl Vm {
                                     }
                                 }
                                 class.properties = new_props;
-                                // Inherit constants
+                                // Inherit constants — private constants are NOT inherited.
                                 for (const_name, const_val) in &parent.constants {
+                                    let parent_meta = parent.constants_meta.get(const_name);
+                                    let is_private = parent_meta
+                                        .map(|m| m.visibility == Visibility::Private)
+                                        .unwrap_or(false);
                                     if class.constants.contains_key(const_name) {
                                         // Child overrides parent constant - check if parent's is final
-                                        if let Some(meta) = parent.constants_meta.get(const_name) {
+                                        if let Some(meta) = parent_meta {
                                             if meta.is_final {
                                                 let child_display = String::from_utf8_lossy(&class.name).to_string();
                                                 let parent_display = String::from_utf8_lossy(parent_name).to_string();
@@ -27866,12 +27893,12 @@ impl Vm {
                                                 });
                                             }
                                         }
-                                    } else {
+                                    } else if !is_private {
                                         class
                                             .constants
                                             .insert(const_name.clone(), const_val.clone());
                                         // Also inherit the meta
-                                        if let Some(meta) = parent.constants_meta.get(const_name) {
+                                        if let Some(meta) = parent_meta {
                                             class.constants_meta.insert(const_name.clone(), meta.clone());
                                         }
                                     }

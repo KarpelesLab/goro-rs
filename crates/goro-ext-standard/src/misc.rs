@@ -918,6 +918,38 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let class_name_stripped = class_name.strip_prefix('\\').unwrap_or(class_name);
         let class_lower: Vec<u8> = class_name_stripped.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
         if let Some(class) = vm.classes.get(&class_lower).cloned() {
+            // Visibility check: constant() honours protected/private the same as
+            // the compiler does for direct Class::CONST references. Caller scope
+            // is the innermost class on the scope stack (or its hierarchy).
+            if let Some(meta) = class.constants_meta.get(const_name.as_bytes()) {
+                use goro_core::object::Visibility;
+                if meta.visibility != Visibility::Public {
+                    let caller_lower: Option<Vec<u8>> = vm.current_class_scope()
+                        .map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect());
+                    let target_lower = class_lower.clone();
+                    let accessible = match (&meta.visibility, &caller_lower) {
+                        (Visibility::Private, Some(c)) => c == &target_lower,
+                        (Visibility::Protected, Some(c)) => {
+                            c == &target_lower
+                                || vm.class_extends(c, &target_lower)
+                                || vm.class_extends(&target_lower, c)
+                        }
+                        _ => false,
+                    };
+                    if !accessible {
+                        let vis_str = if meta.visibility == Visibility::Private { "private" } else { "protected" };
+                        let class_display = String::from_utf8_lossy(&class.name).to_string();
+                        let msg = format!(
+                            "Cannot access {} constant {}::{}",
+                            vis_str, class_display, const_name
+                        );
+                        let line = vm.current_line;
+                        let exc = vm.create_exception(b"Error", &msg, line);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: msg, line });
+                    }
+                }
+            }
             if let Some(val) = class.constants.get(const_name.as_bytes()) {
                 // Check for #[\Deprecated] attribute on class constant
                 if let Some(meta) = class.constants_meta.get(const_name.as_bytes()) {

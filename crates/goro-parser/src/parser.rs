@@ -2237,6 +2237,12 @@ impl Parser {
                 if is_readonly {
                     return Err(ParseError { message: "Cannot use the readonly modifier on a class constant".into(), span: self.span() });
                 }
+                if is_static {
+                    return Err(ParseError { message: "Cannot use the static modifier on a class constant".into(), span: self.span() });
+                }
+                if is_abstract {
+                    return Err(ParseError { message: "Cannot use the abstract modifier on a class constant".into(), span: self.span() });
+                }
                 self.advance();
 
                 // Detect whether the next thing is a type hint or directly the

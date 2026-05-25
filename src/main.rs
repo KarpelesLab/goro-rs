@@ -159,7 +159,19 @@ fn run_code(source: &[u8], filename: &str) {
     let program = match parser.parse() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}", e);
+            // PHP routes most parser-rejected language errors to stdout as
+            // "Fatal error". Plain syntax errors are reported as parse
+            // errors and PHP prints them to stdout as well, but with a
+            // different leading word.
+            let is_fatal = is_fatal_parse_error(&e.message);
+            let kind = if is_fatal { "Fatal error" } else { "Parse error" };
+            let line = e.span.line;
+            let out = format!("\n{}: {} in {} on line {}\n", kind, e.message, filename, line);
+            use std::io::Write as _;
+            let stdout = std::io::stdout();
+            let mut h = stdout.lock();
+            let _ = h.write_all(out.as_bytes());
+            let _ = h.flush();
             process::exit(255);
         }
     };
@@ -341,6 +353,70 @@ fn format_trace_from_value(trace_val: &goro_core::value::Value, fallback: &str) 
         return fallback.to_string();
     }
     "#0 {main}".to_string()
+}
+
+fn is_fatal_parse_error(err_msg: &str) -> bool {
+    // PHP classifies many parser-rejected language errors as "Fatal error"
+    // rather than "Parse error". Mirror the predicate used by the PHPT
+    // harness (crates/goro-phpt/src/lib.rs) so the CLI binary produces
+    // matching output for these cases.
+    err_msg.contains("Match expressions")
+        || err_msg.contains("Cannot use")
+        || err_msg.contains("cannot declare")
+        || err_msg.contains("cannot implement")
+        || err_msg.contains("cannot extend")
+        || err_msg.contains("is reserved")
+        || err_msg.contains("must be compatible")
+        || err_msg.contains("must be")
+        || err_msg.contains("previously implemented")
+        || err_msg.contains("already in use")
+        || err_msg.contains("is redundant")
+        || err_msg.contains("not allowed")
+        || err_msg.contains("Can't use")
+        || err_msg.contains("Abstract function")
+        || err_msg.contains("Non-abstract method")
+        || err_msg.contains("cannot be part of an intersection type")
+        || err_msg.contains("cannot be a reference")
+        || err_msg.contains("Cannot redeclare")
+        || err_msg.contains("cannot take arguments")
+        || err_msg.contains("must take exactly")
+        || err_msg.contains("cannot be static")
+        || err_msg.contains("may not be nested")
+        || err_msg.contains("cannot accept")
+        || err_msg.contains("may be declared abstract")
+        || err_msg.contains("must have type")
+        || err_msg.contains("Duplicate value in enum")
+        || err_msg.contains("Visibility of property")
+        || err_msg.contains("asymmetric visibility")
+        || err_msg.contains("cannot have type")
+        || err_msg.contains("Enum ")
+        || err_msg.contains("Property ")
+        || err_msg.contains("Readonly property")
+        || err_msg.contains("Static property")
+        || err_msg.contains("constant must")
+        || err_msg.contains("class must")
+        || err_msg.starts_with("Unknown hook")
+        || err_msg.starts_with("Cannot override final property hook")
+        || err_msg.starts_with("Type of parameter")
+        || err_msg.contains("define the same hooked property")
+        || err_msg.starts_with("Parameter $")
+        || err_msg.starts_with("set hook parameter")
+        || err_msg.starts_with("Cannot use the static modifier on a property hook")
+        || err_msg.starts_with("Cannot use the public modifier on a property hook")
+        || err_msg.starts_with("Cannot use the protected modifier on a property hook")
+        || err_msg.starts_with("Cannot use the private modifier on a property hook")
+        || err_msg.starts_with("Property hooks cannot have visibility")
+        || err_msg.starts_with("Property hook cannot be")
+        || err_msg.starts_with("Property hook list must")
+        || err_msg.starts_with("Property hook cannot have")
+        || err_msg.starts_with("Cannot declare hooks for static property")
+        || err_msg.starts_with("get hook of property")
+        || err_msg.starts_with("set hook of property")
+        || err_msg.starts_with("Abstract property")
+        || err_msg.starts_with("Property in interface cannot be explicitly abstract")
+        || err_msg.starts_with("Property in interface cannot be final")
+        || err_msg.starts_with("Property in interface cannot be protected or private")
+        || err_msg.starts_with("Final promoted property")
 }
 
 fn print_usage(program: &str) {
