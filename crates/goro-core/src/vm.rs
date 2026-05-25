@@ -30749,22 +30749,15 @@ impl Vm {
                                         }
                                         return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
                                     }
-                                    // Emit "Undefined property" warning, but only for user-defined classes
-                                    // that have declared properties in the class table.
-                                    // Internal classes (Reflection*, Exception, etc.) use dynamic properties.
-                                    // WeakReference/WeakMap always emit this warning for undefined properties.
-                                    let has_declared_props = matches!(class_lower.as_slice(), b"weakreference" | b"weakmap")
-                                        || self.classes.get(&class_lower)
-                                            .map(|c| !c.properties.is_empty() || !c.methods.is_empty())
-                                            .unwrap_or(false);
-                                    if has_declared_props {
-                                        let class_display = crate::value::display_class_name(&class_name_orig);
-                                        let prop_display = prop_name.to_string_lossy();
-                                        self.emit_warning_at(&format!(
-                                            "Undefined property: {}::${}",
-                                            class_display, prop_display
-                                        ), op.line);
-                                    }
+                                    // PHP emits "Undefined property" for any read of an
+                                    // undeclared property on any class (including stdClass,
+                                    // Exception, ReflectionClass, and empty user classes).
+                                    let class_display = crate::value::display_class_name(&class_name_orig);
+                                    let prop_display = prop_name.to_string_lossy();
+                                    self.emit_warning_at(&format!(
+                                        "Undefined property: {}::${}",
+                                        class_display, prop_display
+                                    ), op.line);
                                     Value::Null
                                 }
                             } else {
