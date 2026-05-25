@@ -599,6 +599,14 @@ pub fn reflection_property_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
     let is_user_class = vm.classes.contains_key(&class_lower);
     let is_builtin = vm.is_known_builtin_class(&class_lower);
 
+    // PHP triggers autoload when ReflectionProperty resolves an unknown class.
+    let (is_user_class, is_builtin) = if !is_user_class && !is_builtin {
+        vm.try_autoload_class(class_name.as_bytes());
+        (vm.classes.contains_key(&class_lower), vm.is_known_builtin_class(&class_lower))
+    } else {
+        (is_user_class, is_builtin)
+    };
+
     if !is_user_class && !is_builtin {
         let err_msg = format!("Class \"{}\" does not exist", class_name);
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
@@ -1845,6 +1853,13 @@ pub fn reflection_class_docall(
                     if !is_self && !is_ancestor {
                         let qc_exists = vm.classes.contains_key(qc_lower) || vm.is_known_builtin_class(qc_lower);
                         if !qc_exists {
+                            // Give a registered autoloader a chance to load this class
+                            // before reporting it as missing — PHP triggers autoload
+                            // when resolving "Class::prop" qualifiers in getProperty().
+                            vm.try_autoload_class(qc_lower);
+                        }
+                        let qc_exists = vm.classes.contains_key(qc_lower) || vm.is_known_builtin_class(qc_lower);
+                        if !qc_exists {
                             let qc_canonical = String::from_utf8_lossy(qc_lower).to_string();
                             let err = format!("Class \"{}\" does not exist", qc_canonical);
                             let exc = vm.create_exception(b"ReflectionException", &err, vm.current_line);
@@ -2095,6 +2110,14 @@ pub fn reflection_class_docall(
                     _ => iface_arg.to_php_string().to_string_lossy(),
                 };
                 let iface_lower: Vec<u8> = iface_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                // PHP triggers autoload before reporting an interface as
+                // missing from implementsInterface().
+                if !vm.classes.contains_key(&iface_lower)
+                    && !vm.is_known_builtin_class(&iface_lower)
+                {
+                    vm.try_autoload_class(iface_name.as_bytes());
+                }
 
                 // Check if the target is actually an interface
                 let is_interface = vm.classes.get(&iface_lower)

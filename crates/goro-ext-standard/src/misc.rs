@@ -1705,6 +1705,17 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     class_part_lower.clone()
                 };
 
+                // If class is missing and not forwarding/builtin, give a
+                // registered autoloader a chance to define it (PHP triggers
+                // autoload for the class half of a "Class::method" callable).
+                if !is_forwarding
+                    && !vm.classes.contains_key(&resolved_class_lower)
+                    && !vm.is_known_builtin_class(&resolved_class_lower)
+                {
+                    let class_orig = &func_name[..pos];
+                    vm.try_autoload_class(class_orig);
+                }
+
                 if let Some(class) = vm.classes.get(&resolved_class_lower).cloned() {
                     if let Some(method) = class.methods.get(method_lower) {
                         let mut op = method.op_array.clone();
@@ -1746,6 +1757,19 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         ];
                         return vm.execute_fn_with_named_args(&op, magic_args, vec![], None);
                     }
+                } else if !is_forwarding
+                    && !vm.is_known_builtin_class(&resolved_class_lower)
+                {
+                    // Class still not found after autoload: PHP throws a TypeError.
+                    let class_orig = &func_name[..pos];
+                    let class_display = goro_core::value::display_class_name(class_orig);
+                    let msg = format!(
+                        "call_user_func(): Argument #1 ($callback) must be a valid callback, class \"{}\" not found",
+                        class_display
+                    );
+                    let exc = vm.create_exception(b"TypeError", &msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
                 }
             }
         }
@@ -8457,6 +8481,47 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
             let obj_id = vm.next_object_id();
             // Use canonical class name
             let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+            // PHP triggers autoload when unserialize encounters an unknown class.
+            // If autoload still doesn't load it the object becomes __PHP_Incomplete_Class.
+            if !vm.classes.contains_key(&class_lower)
+                && !vm.is_known_builtin_class(&class_lower)
+            {
+                vm.try_autoload_class(&class_name);
+            }
+            let class_known = vm.classes.contains_key(&class_lower)
+                || vm.is_known_builtin_class(&class_lower);
+            if !class_known {
+                // Unknown class: synthesize a __PHP_Incomplete_Class wrapping the
+                // original class name and the unserialized properties.
+                let mut obj = PhpObject::new(b"__PHP_Incomplete_Class".to_vec(), obj_id);
+                obj.set_property(
+                    b"__PHP_Incomplete_Class_Name".to_vec(),
+                    Value::String(PhpString::from_vec(class_name.clone())),
+                );
+                for _ in 0..prop_count {
+                    let key = unserialize_value(data, pos, vm)?;
+                    let value = unserialize_value(data, pos, vm)?;
+                    if let Value::String(s) = &key {
+                        let name_bytes = s.as_bytes();
+                        let prop_name = if !name_bytes.is_empty() && name_bytes[0] == 0 {
+                            if let Some(end) = name_bytes[1..].iter().position(|&b| b == 0) {
+                                name_bytes[end + 2..].to_vec()
+                            } else {
+                                name_bytes.to_vec()
+                            }
+                        } else {
+                            name_bytes.to_vec()
+                        };
+                        obj.set_property(prop_name, value);
+                    }
+                }
+                if *pos < data.len() && data[*pos] == b'}' {
+                    *pos += 1;
+                }
+                return Some(Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj))));
+            }
+
             let canonical = if let Some(ce) = vm.classes.get(&class_lower) {
                 ce.name.clone()
             } else {

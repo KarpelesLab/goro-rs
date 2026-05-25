@@ -1738,6 +1738,25 @@ impl Vm {
         if self.autoload_functions.is_empty() {
             return false;
         }
+        // PHP refuses to invoke autoload handlers for names that aren't valid
+        // class identifiers (e.g. paths like "../X" or names containing
+        // separators like '/' or '.'). The accepted set is identifier chars
+        // plus '\' for namespaces. Empty names also short-circuit.
+        if class_name.is_empty() {
+            return false;
+        }
+        let valid_first = |b: u8| -> bool {
+            b == b'_' || b == b'\\' || b.is_ascii_alphabetic() || b >= 0x80
+        };
+        let valid_rest = |b: u8| -> bool {
+            b == b'_' || b == b'\\' || b.is_ascii_alphanumeric() || b >= 0x80
+        };
+        if !valid_first(class_name[0]) {
+            return false;
+        }
+        if !class_name[1..].iter().copied().all(valid_rest) {
+            return false;
+        }
         let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
         // Already loaded?
         if self.classes.contains_key(&class_lower) {
@@ -27314,6 +27333,26 @@ impl Vm {
                             {
                                 self.try_autoload_class(parent_name);
                             }
+                            if !self.classes.contains_key(&parent_lower)
+                                && !self.is_known_builtin_class(&parent_lower)
+                            {
+                                // Parent class still missing after autoload attempt:
+                                // PHP raises a fatal "Class \"X\" not found".
+                                let parent_display = crate::value::display_class_name(parent_name);
+                                let msg = format!("Class \"{}\" not found", parent_display);
+                                let exc_val = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc_val);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    let ct = *catch_target;
+                                    ip = ct as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
                             if let Some(parent) = self.classes.get(&parent_lower).cloned() {
                                 // Check: interface can only extend another interface
                                 if class.is_interface && !parent.is_interface {
@@ -27852,6 +27891,15 @@ impl Vm {
                         for iface_name in &iface_names {
                             let iface_lower: Vec<u8> =
                                 iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            // If the interface isn't loaded yet, give a registered
+                            // autoloader the chance to define it. PHP triggers
+                            // autoload when resolving interfaces during class
+                            // declaration, just like for the parent class.
+                            if !self.classes.contains_key(&iface_lower)
+                                && !self.is_known_builtin_class(&iface_lower)
+                            {
+                                self.try_autoload_class(iface_name);
+                            }
                             if let Some(iface) = self.classes.get(&iface_lower).cloned() {
                                 // Check that we're implementing an interface, not a class
                                 if !iface.is_interface && !class.is_interface {
@@ -29746,6 +29794,25 @@ impl Vm {
                     // Try autoload if class not found
                     if !self.classes.contains_key(&name_lower) {
                         self.try_autoload_class(class_name.as_bytes());
+                    }
+                    // After autoload, if the class still doesn't exist (and isn't a
+                    // known built-in) PHP throws an Error: `Class "X" not found`.
+                    if !self.classes.contains_key(&name_lower)
+                        && !self.is_known_builtin_class(&name_lower)
+                    {
+                        let class_display = crate::value::display_class_name(class_name.as_bytes());
+                        let err_msg = format!("Class \"{}\" not found", class_display);
+                        let exc = self.create_exception(b"Error", &err_msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", err_msg),
+                            line: op.line,
+                        });
                     }
 
                     // Check for #[\Deprecated] attribute on the class
