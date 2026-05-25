@@ -27538,9 +27538,16 @@ impl Vm {
                                                     Visibility::Private => "private",
                                                 };
                                                 let suffix = if method.visibility == Visibility::Public { "" } else { " or weaker" };
+                                                // Report the overriding child method's declaration
+                                                // line (matches PHP behavior).
+                                                let report_line = if child_method.op_array.decl_line > 0 {
+                                                    child_method.op_array.decl_line
+                                                } else {
+                                                    op.line
+                                                };
                                                 return Err(VmError {
                                                     message: format!("Access level to {}::{}() must be {} (as in class {}){}", child_display, method_display, vis_str, parent_display, suffix),
-                                                    line: op.line,
+                                                    line: report_line,
                                                 });
                                             }
                                         }
