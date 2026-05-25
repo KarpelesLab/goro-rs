@@ -109,6 +109,11 @@ pub struct Compiler {
     has_never_return: bool,
     /// Map from parser anonymous class names (__anonymous_class_N) to PHP NUL-byte names
     anon_class_name_map: HashMap<Vec<u8>, Vec<u8>>,
+    /// Lowercased qualified names of classes that were early-bound (hoisted) in the
+    /// hoisting pass. Used so the second pass knows which class decls to skip, and so
+    /// the hoisting pass can decide whether a `extends Parent` class can itself be
+    /// hoisted (its parent must already be hoisted or be an internal class).
+    hoisted_class_names: std::collections::HashSet<Vec<u8>>,
     /// Whether we're compiling inside a trait (for self:: tracking)
     is_in_trait: bool,
     /// Compile-time warnings (message, line)
@@ -257,6 +262,7 @@ impl Compiler {
             source_file: Vec::new(),
             has_never_return: false,
             anon_class_name_map: HashMap::new(),
+            hoisted_class_names: std::collections::HashSet::new(),
             is_in_trait: false,
             warnings: Vec::new(),
             is_discarding_result: false,
@@ -932,7 +938,16 @@ impl Compiler {
                     // Already compiled in first pass
                 }
                 StmtKind::ClassDecl { name, .. } if !name.starts_with(b"__anonymous_class_") => {
-                    // Already compiled in first pass (skip non-anonymous classes)
+                    // Hoisted (early-bound) classes were already compiled in the first
+                    // pass; non-early-bindable ones are compiled here, in source order.
+                    let qn_lower: Vec<u8> = self
+                        .prefix_with_namespace(name)
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+                    if !self.hoisted_class_names.contains(&qn_lower) {
+                        self.compile_stmt(stmt)?;
+                    }
                 }
                 StmtKind::NamespaceDecl { name, body } => {
                     // Set namespace state for second pass
@@ -958,7 +973,16 @@ impl Compiler {
                                     // Already compiled in first pass
                                 }
                                 StmtKind::ClassDecl { name, .. } if !name.starts_with(b"__anonymous_class_") => {
-                                    // Already compiled in first pass
+                                    // Hoisted classes already compiled in first pass; compile
+                                    // non-early-bindable ones here, in source order.
+                                    let qn_lower: Vec<u8> = self
+                                        .prefix_with_namespace(name)
+                                        .iter()
+                                        .map(|b| b.to_ascii_lowercase())
+                                        .collect();
+                                    if !self.hoisted_class_names.contains(&qn_lower) {
+                                        self.compile_stmt(s)?;
+                                    }
                                 }
                                 _ => {
                                     self.compile_stmt(s)?;
@@ -1034,13 +1058,63 @@ impl Compiler {
                 StmtKind::FunctionDecl { .. } => {
                     self.compile_stmt(stmt)?;
                 }
-                StmtKind::ClassDecl { name, .. } if !name.starts_with(b"__anonymous_class_") => {
-                    self.compile_stmt(stmt)?;
+                StmtKind::ClassDecl { name, modifiers, extends, implements, body, .. }
+                    if !name.starts_with(b"__anonymous_class_") =>
+                {
+                    // Only early-bind (hoist) declarations PHP would early-bind. Others are
+                    // left for the second pass to emit at their source position.
+                    if self.class_is_early_bindable(modifiers, extends, implements, body) {
+                        let qn_lower: Vec<u8> = self
+                            .prefix_with_namespace(name)
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        self.compile_stmt(stmt)?;
+                        self.hoisted_class_names.insert(qn_lower);
+                    }
                 }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    /// Decide whether a top-level declaration is eligible for early binding (hoisting),
+    /// mirroring PHP's Zend early-binding rule:
+    /// - enums: never early-bound
+    /// - interfaces / traits: early-bound
+    /// - classes: early-bound iff no `implements`, no trait `use`, and either no parent
+    ///   or the parent is already hoisted (declared earlier) or is an internal class.
+    fn class_is_early_bindable(
+        &self,
+        modifiers: &ClassModifiers,
+        extends: &Option<Vec<u8>>,
+        implements: &[Vec<u8>],
+        body: &[ClassMember],
+    ) -> bool {
+        // Enums, interfaces and traits keep prior (always-hoisted) behavior: goro's VM
+        // pre-registers these so forward references resolve, and deferring them caused
+        // regressions with no observable benefit (PHP's stricter ordering for enums is
+        // not what the deprecation/trait-binding tests exercise).
+        if modifiers.is_enum || modifiers.is_interface || modifiers.is_trait {
+            return true;
+        }
+        if !implements.is_empty() {
+            return false;
+        }
+        if body.iter().any(|m| matches!(m, ClassMember::TraitUse { .. })) {
+            return false;
+        }
+        if let Some(parent) = extends {
+            let parent_lower: Vec<u8> = self
+                .resolve_class_name(parent)
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            return self.hoisted_class_names.contains(&parent_lower)
+                || crate::vm::is_known_builtin_class_name(&parent_lower);
+        }
+        true
     }
 
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {

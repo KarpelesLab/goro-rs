@@ -13170,6 +13170,14 @@ impl Vm {
 
     /// Check if a class name is a known built-in class
     pub fn is_known_builtin_class(&self, class_lower: &[u8]) -> bool {
+        is_known_builtin_class_name(class_lower)
+    }
+}
+
+/// Standalone, `self`-free predicate for "is this a built-in/internal class name?".
+/// Mirrors `Vm::is_known_builtin_class` so the compiler (which has no Vm) can use it
+/// for early-binding decisions. Keep the two lists in sync.
+pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
         matches!(
             class_lower,
             b"stdclass" | b"exception" | b"error" | b"typeerror" | b"valueerror"
@@ -13237,8 +13245,9 @@ impl Vm {
                 | b"uri\\invaliduriexception"
                 | b"uri\\uricomparisonmode"
         )
-    }
+}
 
+impl Vm {
     /// Get canonical (properly cased) name for built-in class
     pub fn builtin_canonical_name(&self, class_lower: &[u8]) -> String {
         let canonical = match class_lower {
