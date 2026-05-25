@@ -3376,6 +3376,27 @@ impl Vm {
     }
 
     /// Execute a function OpArray with given CVs (public interface for ext crates)
+    /// Choose the connector word PHP uses between an exception's message and
+    /// its file:line when rendering __toString / "Uncaught ...".
+    ///
+    /// Argument/return type errors embed the *call site* in the message
+    /// (", called in FILE on line N") and carry the function *definition*
+    /// site as the exception's file:line. PHP renders those as
+    /// "... on line N and defined in DEF_FILE:DEF_LINE". Every other
+    /// exception uses the plain " in FILE:LINE".
+    pub fn exception_location_connector(message: &str) -> &'static str {
+        if let Some(pos) = message.rfind(", called in ") {
+            let tail = &message[pos..];
+            if let Some(lp) = tail.rfind(" on line ") {
+                let num = &tail[lp + " on line ".len()..];
+                if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+                    return " and defined in ";
+                }
+            }
+        }
+        " in "
+    }
+
     pub fn execute_fn(&mut self, op_array: &OpArray, cvs: Vec<Value>) -> Result<Value, VmError> {
         // A function/closure invoked imperatively (autoload, usort/array_map
         // callbacks, __invoke, etc.) runs in its own scope, NOT global scope.
@@ -31868,7 +31889,8 @@ impl Vm {
                                     let result = if message.is_empty() {
                                         format!("{} in {}:{}\nStack trace:\n{}", class_display, file_str, line, trace_str)
                                     } else {
-                                        format!("{}: {} in {}:{}\nStack trace:\n{}", class_display, message, file_str, line, trace_str)
+                                        let conn = Self::exception_location_connector(&message);
+                                        format!("{}: {}{}{}:{}\nStack trace:\n{}", class_display, message, conn, file_str, line, trace_str)
                                     };
                                     Some(Value::String(PhpString::from_string(result)))
                                 }
@@ -32852,7 +32874,8 @@ impl Vm {
                 let result = if message.is_empty() {
                     format!("{} in {}:{}\nStack trace:\n{}", class_display, file_str, line, trace_str)
                 } else {
-                    format!("{}: {} in {}:{}\nStack trace:\n{}", class_display, message, file_str, line, trace_str)
+                    let conn = Self::exception_location_connector(&message);
+                    format!("{}: {}{}{}:{}\nStack trace:\n{}", class_display, message, conn, file_str, line, trace_str)
                 };
                 return PhpString::from_string(result);
             }

@@ -255,9 +255,10 @@ fn run_code(source: &[u8], filename: &str) {
                             class, file_str, line_num, trace_str, file_str, line_num
                         )
                     } else {
+                        let conn = Vm::exception_location_connector(&msg_str);
                         format!(
-                            "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n{}\n  thrown in {} on line {}\n",
-                            class, msg_str, file_str, line_num, trace_str, file_str, line_num
+                            "\nFatal error: Uncaught {}: {}{}{}:{}\nStack trace:\n{}\n  thrown in {} on line {}\n",
+                            class, msg_str, conn, file_str, line_num, trace_str, file_str, line_num
                         )
                     };
                     handle.write_all(fatal.as_bytes()).ok();

@@ -865,9 +865,10 @@ fn execute_php_request(
                 let class = String::from_utf8_lossy(&obj.class_name).to_string();
                 let msg = obj.get_property(b"message").to_php_string().to_string_lossy();
                 let line = obj.get_property(b"line").to_long();
+                let conn = goro_core::vm::Vm::exception_location_connector(&msg);
                 let fatal = format!(
-                    "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n#0 {{main}}\n  thrown in {} on line {}\n",
-                    class, msg, filename, line, filename, line
+                    "\nFatal error: Uncaught {}: {}{}{}:{}\nStack trace:\n#0 {{main}}\n  thrown in {} on line {}\n",
+                    class, msg, conn, filename, line, filename, line
                 );
                 body_out.extend_from_slice(fatal.as_bytes());
             }
