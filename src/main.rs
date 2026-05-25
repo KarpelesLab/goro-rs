@@ -130,8 +130,14 @@ fn main() {
         eprintln!("Error: file not found: {}", file_path);
         process::exit(1);
     }
+    // PHP exposes an absolute path through __FILE__/__DIR__ even when the script
+    // is invoked with a relative path (e.g. `php tests/foo.php`). Mirror that so
+    // includes via `__DIR__ . '/companion.inc'` resolve against the real dir.
+    let abs_path = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| file_path.clone());
     match std::fs::read(path) {
-        Ok(source) => run_code(&source, &file_path),
+        Ok(source) => run_code(&source, &abs_path),
         Err(e) => {
             eprintln!("Error reading file: {}", e);
             process::exit(1);

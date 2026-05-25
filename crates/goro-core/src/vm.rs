@@ -3427,6 +3427,12 @@ impl Vm {
                     let display_fallback = format!("{}::__destruct", String::from_utf8_lossy(&class_name_orig));
                     let line = self.current_line;
                     self.check_user_function_deprecation(&destruct_op, &display_fallback, line);
+                    // If the #[\Deprecated] check routed through an error handler that
+                    // threw (e.g. converting E_USER_DEPRECATED to an ErrorException),
+                    // the destructor body must NOT run — PHP aborts before entering it.
+                    if self.current_exception.is_some() {
+                        continue;
+                    }
                     let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
                     if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
                     self.called_class_stack.push(class_name_orig);
