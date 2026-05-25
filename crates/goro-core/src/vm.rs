@@ -3036,12 +3036,56 @@ impl Vm {
                 if self.class_is_a(parent_entry, target_lower) {
                     return true;
                 }
+            } else if self.builtin_implements_interface(&parent_lower, target_lower) {
+                return true;
+            } else if is_builtin_subclass(&parent_lower, target_lower) {
+                return true;
             }
         }
-        // Check interfaces
+        // Check interfaces — and recursively the interfaces they extend.
         for iface in &class_entry.interfaces {
             let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
             if iface_lower == target_lower {
+                return true;
+            }
+            // Walk the interface's own ancestry: an interface in our list may
+            // itself extend the target interface. Iterator extends Traversable,
+            // IteratorAggregate extends Traversable, etc.
+            if let Some(iface_entry) = self.classes.get(&iface_lower) {
+                if self.class_is_a(iface_entry, target_lower) {
+                    return true;
+                }
+            } else {
+                // Built-in interface: consult builtin parent-interface table.
+                if self.builtin_interface_extends(&iface_lower, target_lower) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Builtin-interface parent relations. Mirrors PHP's interface inheritance
+    /// graph for the few cases that matter — e.g. Iterator/IteratorAggregate
+    /// both extend Traversable.
+    fn builtin_interface_extends(&self, iface_lower: &[u8], target_lower: &[u8]) -> bool {
+        if iface_lower == target_lower {
+            return true;
+        }
+        let parents: &[&[u8]] = match iface_lower {
+            b"iterator" => &[b"traversable"],
+            b"iteratoraggregate" => &[b"traversable"],
+            b"outeriterator" => &[b"iterator", b"traversable"],
+            b"recursiveiterator" => &[b"iterator", b"traversable"],
+            b"seekableiterator" => &[b"iterator", b"traversable"],
+            b"backedenum" => &[b"unitenum"],
+            _ => &[],
+        };
+        for p in parents {
+            if p == &target_lower {
+                return true;
+            }
+            if self.builtin_interface_extends(p, target_lower) {
                 return true;
             }
         }
@@ -23248,7 +23292,10 @@ impl Vm {
                             foreach_positions.insert(iter_idx, pos + 1);
                         }
                     } else if let Value::Object(_) = &arr_val {
-                        // Iterator object: call valid(), current(), key(), next()
+                        // Iterator object: call valid(), current(), next()
+                        // key() is invoked lazily by ForeachKey only when the
+                        // foreach actually binds a key variable. PHP only
+                        // calls Iterator::key when the user wrote `$k => $v`.
                         // On pos > 0, advance first via next()
                         if pos > 0 {
                             self.call_object_method(&arr_val, b"next", &[]);
@@ -23298,13 +23345,12 @@ impl Vm {
                             let value = self
                                 .call_object_method(&arr_val, b"current", &[])
                                 .unwrap_or(Value::Null);
-                            // Get key
-                            let key = self
-                                .call_object_method(&arr_val, b"key", &[])
-                                .unwrap_or(Value::Long(pos as i64));
 
-                            // Save the key for ForeachKey to read
-                            foreach_gen_keys.insert(iter_idx, key);
+                            // key() is deferred to ForeachKey — PHP does not
+                            // call Iterator::key when the foreach has no key
+                            // variable. Clear any stale key from a previous
+                            // iteration so ForeachKey re-fetches it.
+                            foreach_gen_keys.remove(&iter_idx);
 
                             self.write_operand(
                                 &op.result,
@@ -23410,11 +23456,20 @@ impl Vm {
                             &static_cv_keys,
                         );
                     } else if let Value::Object(_) = &arr_val {
-                        // Iterator object: use the key saved by ForeachNext
-                        let key_val = foreach_gen_keys
-                            .get(&iter_idx)
-                            .cloned()
-                            .unwrap_or(Value::Long(0));
+                        // Iterator object: call key() lazily here, on demand.
+                        // PHP only invokes Iterator::key when the foreach
+                        // captures a key variable (`$k => $v`). Reuse a
+                        // cached value if ForeachNext (Generator path) already
+                        // stored one for this position.
+                        let key_val = if let Some(cached) = foreach_gen_keys.get(&iter_idx) {
+                            cached.clone()
+                        } else {
+                            let k = self
+                                .call_object_method(&arr_val, b"key", &[])
+                                .unwrap_or(Value::Long(0));
+                            foreach_gen_keys.insert(iter_idx, k.clone());
+                            k
+                        };
                         self.write_operand(
                             &op.result,
                             key_val,
