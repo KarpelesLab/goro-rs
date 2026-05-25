@@ -6156,7 +6156,7 @@ impl Compiler {
                             .add_literal(Value::String(PhpString::from_vec(property.clone())));
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropGet,
+                            opcode: OpCode::StaticPropFetch,
                             op1: class_operand,
                             op2: OperandType::Const(prop_idx),
                             result: OperandType::Tmp(read_tmp),
@@ -6186,7 +6186,7 @@ impl Compiler {
                         let prop_op = self.compile_expr(property)?;
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropGet,
+                            opcode: OpCode::StaticPropFetch,
                             op1: class_operand,
                             op2: prop_op,
                             result: OperandType::Tmp(read_tmp),
@@ -6459,7 +6459,7 @@ impl Compiler {
                             .add_literal(Value::String(PhpString::from_vec(property.clone())));
                         let old_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropGet,
+                            opcode: OpCode::StaticPropFetch,
                             op1: class_operand,
                             op2: OperandType::Const(prop_idx),
                             result: OperandType::Tmp(old_tmp),
@@ -6497,7 +6497,7 @@ impl Compiler {
                         let prop_op = self.compile_expr(property)?;
                         let old_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropGet,
+                            opcode: OpCode::StaticPropFetch,
                             op1: class_operand,
                             op2: prop_op,
                             result: OperandType::Tmp(old_tmp),
@@ -8049,6 +8049,50 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(result_tmp));
                     }
+                    // isset(C::$p) / isset($obj::$p) — static property isset
+                    // never throws, just returns bool.
+                    if let ExprKind::StaticPropertyAccess { class, property } = &exprs[0].kind {
+                        let class_operand = self.compile_static_class_operand(class)?;
+                        let prop_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(property.clone())));
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropIsset,
+                            op1: class_operand,
+                            op2: OperandType::Const(prop_idx),
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ErrorRestore,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(tmp));
+                    }
+                    if let ExprKind::DynamicStaticPropertyAccess { class, property } = &exprs[0].kind {
+                        let class_operand = self.compile_static_class_operand(class)?;
+                        let prop_op = self.compile_expr(property)?;
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropIsset,
+                            op1: class_operand,
+                            op2: prop_op,
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ErrorRestore,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(tmp));
+                    }
                     let val = self.compile_expr(&exprs[0])?;
                     let tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
@@ -9262,7 +9306,7 @@ impl Compiler {
                 };
 
                 self.op_array.emit(Op {
-                    opcode: OpCode::StaticPropGet,
+                    opcode: OpCode::StaticPropFetch,
                     op1: class_operand,
                     op2: OperandType::Const(prop_idx),
                     result: OperandType::Tmp(tmp),
@@ -9295,7 +9339,7 @@ impl Compiler {
             }
 
             ExprKind::DynamicStaticPropertyAccess { class, property } => {
-                // Test::$$bar - compile class and property expression, then StaticPropGet
+                // Test::$$bar - compile class and property expression, then StaticPropFetch
                 let class_operand = match &class.kind {
                     ExprKind::Identifier(name) => {
                         let resolved = self.resolve_class_name(name);
@@ -9321,7 +9365,7 @@ impl Compiler {
                 let prop_op = self.compile_expr(property)?;
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
-                    opcode: OpCode::StaticPropGet,
+                    opcode: OpCode::StaticPropFetch,
                     op1: class_operand,
                     op2: prop_op,
                     result: OperandType::Tmp(tmp),

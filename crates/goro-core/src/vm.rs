@@ -24871,11 +24871,212 @@ impl Vm {
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
 
+                    // Check the property is declared on the class or its
+                    // ancestors. Writing to an undeclared static raises
+                    // an Error in PHP.
+                    let declared = if let Some(class) = self.classes.get(&class_lower) {
+                        if class.static_properties.contains_key(prop_name.as_bytes()) {
+                            true
+                        } else {
+                            let mut walker = class.parent.clone();
+                            let mut found = false;
+                            while let Some(p) = walker {
+                                let p_lower: Vec<u8> =
+                                    p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(pc) = self.classes.get(&p_lower) {
+                                    if pc.static_properties.contains_key(prop_name.as_bytes()) {
+                                        found = true;
+                                        break;
+                                    }
+                                    walker = pc.parent.clone();
+                                } else {
+                                    break;
+                                }
+                            }
+                            found
+                        }
+                    } else {
+                        // Unknown class - let it fall through (existing
+                        // behaviour for non-user classes).
+                        true
+                    };
+
+                    if !declared {
+                        let class_display = String::from_utf8_lossy(&resolved_class).to_string();
+                        let prop_display = prop_name.to_string_lossy();
+                        let err_msg = format!(
+                            "Access to undeclared static property {}::${}",
+                            class_display, prop_display
+                        );
+                        let exc = self.create_exception(b"Error", &err_msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", err_msg),
+                            line: op.line,
+                        });
+                    }
+
                     if let Some(class) = self.classes.get_mut(&class_lower) {
                         class
                             .static_properties
                             .insert(prop_name.as_bytes().to_vec(), value);
                     }
+                }
+
+                OpCode::StaticPropFetch => {
+                    // Fetch a static property only (no constant fallback).
+                    // Used for `C::$p` reads.
+                    let class_name_raw = self
+                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let prop_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+
+                    let resolved_class = self
+                        .resolve_static_class(class_name_raw.as_bytes())
+                        .to_vec();
+                    let class_lower: Vec<u8> = resolved_class
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+
+                    // First: class must exist.
+                    if !self.classes.contains_key(&class_lower) {
+                        let class_display =
+                            String::from_utf8_lossy(&resolved_class).to_string();
+                        let err_msg = format!("Class \"{}\" not found", class_display);
+                        let exc = self.create_exception(b"Error", &err_msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", err_msg),
+                            line: op.line,
+                        });
+                    }
+
+                    let mut value_opt: Option<Value> = None;
+                    if let Some(class) = self.classes.get(&class_lower) {
+                        if let Some(v) = class.static_properties.get(prop_name.as_bytes()) {
+                            value_opt = Some(v.clone());
+                        } else {
+                            // Walk parent chain
+                            let mut walker = class.parent.clone();
+                            while let Some(p) = walker {
+                                let p_lower: Vec<u8> =
+                                    p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(pc) = self.classes.get(&p_lower) {
+                                    if let Some(v) =
+                                        pc.static_properties.get(prop_name.as_bytes())
+                                    {
+                                        value_opt = Some(v.clone());
+                                        break;
+                                    }
+                                    walker = pc.parent.clone();
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(v) = value_opt {
+                        self.write_operand(
+                            &op.result,
+                            v,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                    } else {
+                        let class_display =
+                            String::from_utf8_lossy(&resolved_class).to_string();
+                        let prop_display = prop_name.to_string_lossy();
+                        let err_msg = format!(
+                            "Access to undeclared static property {}::${}",
+                            class_display, prop_display
+                        );
+                        let exc = self.create_exception(b"Error", &err_msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", err_msg),
+                            line: op.line,
+                        });
+                    }
+                }
+
+                OpCode::StaticPropIsset => {
+                    // isset(C::$p) — returns bool without raising errors.
+                    let class_name_raw = self
+                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let prop_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+
+                    let resolved_class = self
+                        .resolve_static_class(class_name_raw.as_bytes())
+                        .to_vec();
+                    let class_lower: Vec<u8> = resolved_class
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+
+                    let mut found_val: Option<Value> = None;
+                    if let Some(class) = self.classes.get(&class_lower) {
+                        if let Some(v) = class.static_properties.get(prop_name.as_bytes()) {
+                            found_val = Some(v.clone());
+                        } else {
+                            let mut walker = class.parent.clone();
+                            while let Some(p) = walker {
+                                let p_lower: Vec<u8> =
+                                    p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if let Some(pc) = self.classes.get(&p_lower) {
+                                    if let Some(v) =
+                                        pc.static_properties.get(prop_name.as_bytes())
+                                    {
+                                        found_val = Some(v.clone());
+                                        break;
+                                    }
+                                    walker = pc.parent.clone();
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    let result = match found_val {
+                        Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
+                        _ => Value::False,
+                    };
+                    self.write_operand(
+                        &op.result,
+                        result,
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
                 }
 
                 OpCode::ConstLookup => {

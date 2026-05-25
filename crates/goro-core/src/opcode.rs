@@ -208,10 +208,18 @@ pub enum OpCode {
     InitMethodCall,
     /// Declare a class: op1 = class name (const), op2 = class def index (const)
     DeclareClass,
-    /// Get static property: op1 = class name (const), op2 = prop name (const), result = value
+    /// Get static property OR class constant: op1 = class name (const),
+    /// op2 = prop/const name (const), result = value. Used for `C::FOO`.
     StaticPropGet,
+    /// Fetch static property only (no constant fallback): op1 = class name,
+    /// op2 = prop name (const), result = value. Used for `C::$p`. Errors
+    /// with "Access to undeclared static property" if not declared.
+    StaticPropFetch,
     /// Set static property: op1 = class name (const), op2 = value, result = prop name (const)
     StaticPropSet,
+    /// Isset check for static property: op1 = class name, op2 = prop name,
+    /// result = bool (Value::True/Value::False). Never throws.
+    StaticPropIsset,
 
     // ---- Exceptions ----
     /// Throw: op1 = exception value. Sets VM exception state.
