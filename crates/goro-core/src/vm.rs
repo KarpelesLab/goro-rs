@@ -3377,7 +3377,16 @@ impl Vm {
 
     /// Execute a function OpArray with given CVs (public interface for ext crates)
     pub fn execute_fn(&mut self, op_array: &OpArray, cvs: Vec<Value>) -> Result<Value, VmError> {
-        self.execute_op_array(op_array, cvs)
+        // A function/closure invoked imperatively (autoload, usort/array_map
+        // callbacks, __invoke, etc.) runs in its own scope, NOT global scope.
+        // If is_global_scope stayed true, an include inside the callback would
+        // round-trip the callback's locals through $self.globals and clobber
+        // them across re-entrant calls.
+        let was_global = self.is_global_scope;
+        self.is_global_scope = false;
+        let result = self.execute_op_array(op_array, cvs);
+        self.is_global_scope = was_global;
+        result
     }
 
     /// Run destructors for objects that are only held by the destructible_objects list.
@@ -3524,7 +3533,13 @@ impl Vm {
             return Ok(Value::Generator(gen_rc));
         }
 
-        self.execute_op_array(op_array, func_cvs)
+        // Imperative call entry point: run in function scope, not global scope
+        // (see execute_fn for why this matters with includes in callbacks).
+        let was_global = self.is_global_scope;
+        self.is_global_scope = false;
+        let result = self.execute_op_array(op_array, func_cvs);
+        self.is_global_scope = was_global;
+        result
     }
 
     /// Register a class (from the compiler's compiled_classes list)
