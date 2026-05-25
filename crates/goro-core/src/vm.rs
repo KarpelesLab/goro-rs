@@ -21495,8 +21495,12 @@ impl Vm {
                                             if already_init {
                                                 // __construct called twice: readonly violation on $message
                                                 drop(obj_mut);
+                                                // Push call frame so the trace shows Deprecated->__construct(...)
+                                                let ctor_trace_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+                                                self.call_stack.push(("Deprecated->__construct".to_string(), self.current_file.clone(), op.line, ctor_trace_args, true));
                                                 let msg = "Cannot modify readonly property Deprecated::$message".to_string();
                                                 let exc = self.create_exception(b"Error", &msg, op.line);
+                                                self.call_stack.pop();
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
