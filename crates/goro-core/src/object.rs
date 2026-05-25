@@ -40,6 +40,11 @@ pub struct ConstantMeta {
     pub declared_type: Option<crate::opcode::ParamType>,
     /// Doc comment for the constant (if any).
     pub doc_comment: Option<String>,
+    /// Class constants referenced in this constant's value expression.
+    /// Each pair is (class_name_lower, constant_name). Used to re-emit
+    /// #[\Deprecated] banners for those referenced constants when this
+    /// constant is accessed (e.g. CONST = self::PREFIX . self::SUFFIX).
+    pub referenced_constants: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// A PHP class entry (class definition)

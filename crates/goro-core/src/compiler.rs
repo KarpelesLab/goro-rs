@@ -4704,93 +4704,12 @@ impl Compiler {
                                             Value::String(PhpString::from_vec(marker))
                                         }
                                     }
-                                    ExprKind::BinaryOp { op, left, right, .. } => {
-                                        // Handle simple binary ops on constants
-                                        // Try resolving with class context first (for self::CONST references)
-                                        let l = Self::eval_const_expr(left).or_else(|| {
-                                            Self::eval_class_const_expr(left, &class, &qualified_name, extends.as_deref(), self)
-                                        });
-                                        let r = Self::eval_const_expr(right).or_else(|| {
-                                            Self::eval_class_const_expr(right, &class, &qualified_name, extends.as_deref(), self)
-                                        });
-                                        // Helper: resolve an operand, producing a deferred marker for ClassConstAccess if needed
-                                        let resolve_or_defer = |operand: &Expr, resolved: Option<Value>| -> Option<Value> {
-                                            if let Some(v) = resolved {
-                                                return Some(v);
-                                            }
-                                            // Try to produce a deferred const marker for ClassConstAccess
-                                            if let ExprKind::ClassConstAccess { class: class_expr, constant } = &operand.kind {
-                                                let class_name = match &class_expr.kind {
-                                                    ExprKind::Identifier(ident_name) => {
-                                                        let resolved_name = self.resolve_class_name(ident_name);
-                                                        if resolved_name.eq_ignore_ascii_case(b"self") {
-                                                            qualified_name.clone()
-                                                        } else if resolved_name.eq_ignore_ascii_case(b"parent") {
-                                                            extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved_name)
-                                                        } else {
-                                                            resolved_name
-                                                        }
-                                                    }
-                                                    _ => qualified_name.clone(),
-                                                };
-                                                let mut marker = b"__deferred_const__::".to_vec();
-                                                marker.extend_from_slice(&class_name);
-                                                marker.push(b':');
-                                                marker.push(b':');
-                                                marker.extend_from_slice(constant);
-                                                return Some(Value::String(PhpString::from_vec(marker)));
-                                            }
-                                            None
-                                        };
-                                        let lv = resolve_or_defer(left, l);
-                                        let rv = resolve_or_defer(right, r);
-                                        if let (Some(lv), Some(rv)) = (lv, rv) {
-                                            // Check if any side is a deferred marker - if so, create a deferred binary expression
-                                            let l_deferred = matches!(&lv, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"));
-                                            let r_deferred = matches!(&rv, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"));
-                                            if l_deferred || r_deferred {
-                                                // Encode as deferred binary expression: __deferred_binop__::OP_CODE::left_repr\x00right_repr
-                                                let op_code: u8 = match op {
-                                                    BinaryOp::Concat => 1,
-                                                    BinaryOp::Add => 2,
-                                                    BinaryOp::Sub => 3,
-                                                    BinaryOp::Mul => 4,
-                                                    BinaryOp::BitwiseOr => 5,
-                                                    BinaryOp::BitwiseAnd => 6,
-                                                    BinaryOp::ShiftLeft => 7,
-                                                    BinaryOp::ShiftRight => 8,
-                                                    _ => 0,
-                                                };
-                                                let l_str = lv.to_php_string();
-                                                let r_str = rv.to_php_string();
-                                                let mut marker = b"__deferred_binop__::".to_vec();
-                                                marker.push(op_code);
-                                                marker.push(b':');
-                                                marker.extend_from_slice(l_str.as_bytes());
-                                                marker.push(0); // null separator
-                                                marker.extend_from_slice(r_str.as_bytes());
-                                                Value::String(PhpString::from_vec(marker))
-                                            } else {
-                                                match op {
-                                                    BinaryOp::Add => lv.add(&rv),
-                                                    BinaryOp::Sub => lv.sub(&rv),
-                                                    BinaryOp::Mul => lv.mul(&rv),
-                                                    BinaryOp::Concat => {
-                                                        let mut result = lv.to_php_string().as_bytes().to_vec();
-                                                        result.extend_from_slice(rv.to_php_string().as_bytes());
-                                                        Value::String(PhpString::from_vec(result))
-                                                    }
-                                                    BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
-                                                    BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
-                                                    BinaryOp::ShiftLeft => Value::Long(lv.to_long() << rv.to_long()),
-                                                    BinaryOp::ShiftRight => Value::Long(lv.to_long() >> rv.to_long()),
-                                                    _ => Value::Null,
-                                                }
-                                            }
-                                        } else {
-                                            // Create a deferred marker for the entire expression
-                                            Value::Null
-                                        }
+                                    ExprKind::BinaryOp { .. } => {
+                                        // Recursive helper handles nested binops, ConstantAccess,
+                                        // ClassConstAccess, and produces a __deferred_binop__ marker
+                                        // when any subexpression must be resolved at runtime.
+                                        self.eval_or_defer_in_class_const(const_expr, &class, &qualified_name, extends.as_deref())
+                                            .unwrap_or(Value::Null)
                                     }
                                     ExprKind::ConstantAccess(parts) => {
                                         // Handle magic constants and known constants in class constant context
@@ -5098,6 +5017,11 @@ impl Compiler {
                             let declared_type = const_type_hint.as_ref().map(|hint| {
                                 type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
                             });
+                            // Collect class constant references in the value expression so
+                            // accessing this constant can re-emit #[\Deprecated] banners for
+                            // any deprecated constants it depends on.
+                            let mut refs = Vec::new();
+                            Self::collect_class_const_refs(const_expr, &qualified_name, extends.as_deref(), self, &mut refs);
                             class.constants_meta.insert(const_name.clone(), crate::object::ConstantMeta {
                                 visibility: const_vis,
                                 is_final: *const_is_final,
@@ -5106,6 +5030,7 @@ impl Compiler {
                                 declared_type,
                                 doc_comment: const_doc_comment.as_ref()
                                     .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                referenced_constants: refs,
                             });
                             // Private constants cannot be final
                             if *const_is_final && const_vis == crate::object::Visibility::Private {
@@ -5258,6 +5183,7 @@ impl Compiler {
                                 declared_type: None,
                                 doc_comment: case_doc_comment.as_ref()
                                     .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                referenced_constants: Vec::new(),
                             });
                         }
                         ClassMember::TraitUse { traits, adaptations } => {
@@ -10275,6 +10201,210 @@ impl Compiler {
                 None
             }
             _ => None,
+        }
+    }
+
+    /// Compile a class-constant value expression into either a concrete Value
+    /// or a deferred marker string that the runtime resolves at access time.
+    /// Returns None when the expression has no constant-evaluable form (e.g.,
+    /// references a function call or `new Foo()`); callers should fall back
+    /// to other paths or store Value::Null.
+    ///
+    /// Handles recursion through nested BinaryOps, so expressions like
+    ///   self::class . '-' . SUFFIX
+    /// where SUFFIX is a runtime-defined global constant produce a chained
+    /// `__deferred_binop__::` marker rather than collapsing to Null.
+    fn eval_or_defer_in_class_const(
+        &self,
+        expr: &Expr,
+        class: &ClassEntry,
+        qualified_name: &[u8],
+        extends: Option<&[u8]>,
+    ) -> Option<Value> {
+        // Fast path: literal constants.
+        if let Some(v) = Self::eval_const_expr(expr) {
+            return Some(v);
+        }
+        // Class-context constants (self::FOO, OtherClass::BAR, ::class).
+        if let Some(v) = Self::eval_class_const_expr(expr, class, qualified_name, extends, self) {
+            return Some(v);
+        }
+        match &expr.kind {
+            ExprKind::ClassConstAccess { class: class_expr, constant } => {
+                // Unresolved: emit a deferred marker.
+                let class_name = match &class_expr.kind {
+                    ExprKind::Identifier(name) => {
+                        let resolved = self.resolve_class_name(name);
+                        if resolved.eq_ignore_ascii_case(b"self") {
+                            qualified_name.to_vec()
+                        } else if resolved.eq_ignore_ascii_case(b"parent") {
+                            extends.map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                        } else {
+                            resolved
+                        }
+                    }
+                    _ => qualified_name.to_vec(),
+                };
+                let mut marker = b"__deferred_const__::".to_vec();
+                marker.extend_from_slice(&class_name);
+                marker.push(b':');
+                marker.push(b':');
+                marker.extend_from_slice(constant);
+                Some(Value::String(crate::string::PhpString::from_vec(marker)))
+            }
+            ExprKind::ConstantAccess(parts) => {
+                // Try magic constants first.
+                let name_lower: Vec<u8> = parts.iter().flat_map(|p| p.iter()).copied().collect();
+                let name_lower_lc: Vec<u8> = name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let magic_val = self.resolve_class_const_magic(&name_lower_lc, qualified_name, expr.span.line);
+                if !matches!(magic_val, Value::Null) {
+                    return Some(magic_val);
+                }
+                let mut full_name = Vec::new();
+                for (i, part) in parts.iter().enumerate() {
+                    if i > 0 { full_name.push(b'\\'); }
+                    full_name.extend_from_slice(part);
+                }
+                let mut marker = b"__deferred_global_const__::".to_vec();
+                marker.extend_from_slice(&full_name);
+                Some(Value::String(crate::string::PhpString::from_vec(marker)))
+            }
+            ExprKind::Identifier(name) => {
+                let name_lower_lc: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let magic_val = self.resolve_class_const_magic(&name_lower_lc, qualified_name, expr.span.line);
+                if !matches!(magic_val, Value::Null) {
+                    return Some(magic_val);
+                }
+                let resolved_name = if self.current_namespace.is_empty() {
+                    name.clone()
+                } else {
+                    let mut fqn = self.current_namespace.clone();
+                    fqn.push(b'\\');
+                    fqn.extend_from_slice(name);
+                    fqn
+                };
+                let mut marker = b"__deferred_global_const__::".to_vec();
+                marker.extend_from_slice(&resolved_name);
+                Some(Value::String(crate::string::PhpString::from_vec(marker)))
+            }
+            ExprKind::BinaryOp { op, left, right, .. } => {
+                let lv = self.eval_or_defer_in_class_const(left, class, qualified_name, extends)?;
+                let rv = self.eval_or_defer_in_class_const(right, class, qualified_name, extends)?;
+                let is_deferred = |v: &Value| matches!(v, Value::String(s)
+                    if s.as_bytes().starts_with(b"__deferred_const__::")
+                    || s.as_bytes().starts_with(b"__deferred_global_const__::")
+                    || s.as_bytes().starts_with(b"__deferred_binop__::"));
+                if is_deferred(&lv) || is_deferred(&rv) {
+                    let op_code: u8 = match op {
+                        BinaryOp::Concat => 1,
+                        BinaryOp::Add => 2,
+                        BinaryOp::Sub => 3,
+                        BinaryOp::Mul => 4,
+                        BinaryOp::BitwiseOr => 5,
+                        BinaryOp::BitwiseAnd => 6,
+                        BinaryOp::ShiftLeft => 7,
+                        BinaryOp::ShiftRight => 8,
+                        _ => 0,
+                    };
+                    let l_str = lv.to_php_string();
+                    let r_str = rv.to_php_string();
+                    let mut marker = b"__deferred_binop__::".to_vec();
+                    marker.push(op_code);
+                    marker.push(b':');
+                    marker.extend_from_slice(l_str.as_bytes());
+                    marker.push(0);
+                    marker.extend_from_slice(r_str.as_bytes());
+                    Some(Value::String(crate::string::PhpString::from_vec(marker)))
+                } else {
+                    Some(match op {
+                        BinaryOp::Add => lv.add(&rv),
+                        BinaryOp::Sub => lv.sub(&rv),
+                        BinaryOp::Mul => lv.mul(&rv),
+                        BinaryOp::Concat => {
+                            let mut result = lv.to_php_string().as_bytes().to_vec();
+                            result.extend_from_slice(rv.to_php_string().as_bytes());
+                            Value::String(crate::string::PhpString::from_vec(result))
+                        }
+                        BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
+                        BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
+                        BinaryOp::ShiftLeft => Value::Long(lv.to_long() << rv.to_long()),
+                        BinaryOp::ShiftRight => Value::Long(lv.to_long() >> rv.to_long()),
+                        _ => Value::Null,
+                    })
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Walk a constant value expression and collect all class constant
+    /// references as (class_name_lower, constant_name) pairs. The class name
+    /// uses the resolved fully-qualified form, lowercased, so it can be used
+    /// as a lookup key into `self.classes`. `self`/`parent`/`static` are
+    /// resolved to the actual class. Used to track which constants a class
+    /// constant depends on, so #[\Deprecated] banners for those can be
+    /// re-emitted at access time.
+    fn collect_class_const_refs(
+        expr: &Expr,
+        qualified_name: &[u8],
+        extends: Option<&[u8]>,
+        compiler: &Compiler,
+        out: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) {
+        match &expr.kind {
+            ExprKind::ClassConstAccess { class: class_expr, constant } => {
+                if constant == b"class" {
+                    return;
+                }
+                let class_resolved: Option<Vec<u8>> = match &class_expr.kind {
+                    ExprKind::Identifier(name) => {
+                        let resolved = compiler.resolve_class_name(name);
+                        let lower: Vec<u8> = resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if lower == b"self" || lower == b"static" {
+                            Some(qualified_name.to_vec())
+                        } else if lower == b"parent" {
+                            extends.map(|p| compiler.resolve_class_name(p))
+                        } else {
+                            Some(resolved)
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(cls) = class_resolved {
+                    let cls_lower: Vec<u8> = cls.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    out.push((cls_lower, constant.clone()));
+                }
+            }
+            ExprKind::BinaryOp { left, right, .. } => {
+                Self::collect_class_const_refs(left, qualified_name, extends, compiler, out);
+                Self::collect_class_const_refs(right, qualified_name, extends, compiler, out);
+            }
+            ExprKind::UnaryOp { operand, .. } => {
+                Self::collect_class_const_refs(operand, qualified_name, extends, compiler, out);
+            }
+            ExprKind::Ternary { condition, if_true, if_false } => {
+                Self::collect_class_const_refs(condition, qualified_name, extends, compiler, out);
+                if let Some(t) = if_true {
+                    Self::collect_class_const_refs(t, qualified_name, extends, compiler, out);
+                }
+                Self::collect_class_const_refs(if_false, qualified_name, extends, compiler, out);
+            }
+            ExprKind::NullCoalesce { left, right } => {
+                Self::collect_class_const_refs(left, qualified_name, extends, compiler, out);
+                Self::collect_class_const_refs(right, qualified_name, extends, compiler, out);
+            }
+            ExprKind::Array(elements) => {
+                for elem in elements {
+                    if let Some(k) = &elem.key {
+                        Self::collect_class_const_refs(k, qualified_name, extends, compiler, out);
+                    }
+                    Self::collect_class_const_refs(&elem.value, qualified_name, extends, compiler, out);
+                }
+            }
+            ExprKind::Cast(_, inner) => {
+                Self::collect_class_const_refs(inner, qualified_name, extends, compiler, out);
+            }
+            _ => {}
         }
     }
 }

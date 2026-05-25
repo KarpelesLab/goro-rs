@@ -3943,6 +3943,40 @@ impl Vm {
                     }
                 }
             }
+            // Invokable object: $obj where $obj has an __invoke method.
+            // Equivalent to the [$obj, "__invoke"] array callable.
+            Value::Object(obj) => {
+                let class_name = obj.borrow().class_name.clone();
+                let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let mut func_name = class_name.clone();
+                func_name.extend_from_slice(b"::__invoke");
+                let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                if !self.user_functions.contains_key(&func_lower) {
+                    if let Some(class_def) = self.classes.get(&class_lower) {
+                        if let Some(method_def) = class_def.get_method(b"__invoke") {
+                            let mut op_array = method_def.op_array.clone();
+                            if op_array.attributes.is_empty() && !method_def.attributes.is_empty() {
+                                op_array.attributes = method_def.attributes.clone();
+                            }
+                            self.user_functions.insert(func_lower.clone(), op_array);
+                        }
+                    }
+                }
+
+                if self.user_functions.contains_key(&func_lower) || self.functions.contains_key(&func_lower) {
+                    // Create closure array: [func_name, $this]
+                    let mut closure_arr = crate::array::PhpArray::new();
+                    closure_arr.push(Value::String(PhpString::from_vec(func_name)));
+                    closure_arr.push(callable.clone());
+                    Value::Array(Rc::new(RefCell::new(closure_arr)))
+                } else {
+                    let msg = "Failed to create closure from callable";
+                    let exc = self.create_exception(b"TypeError", msg, line);
+                    self.current_exception = Some(exc);
+                    Value::Null
+                }
+            }
             _ => {
                 let msg = "Failed to create closure from callable";
                 let exc = self.create_exception(b"TypeError", msg, line);
@@ -14652,6 +14686,43 @@ impl Vm {
         }
     }
 
+    /// Returns true if every `__deferred_global_const__` reference embedded in a
+    /// deferred-binop marker is currently defined. PHP evaluates constant
+    /// initializers lazily, so a class-constant value that depends on a global
+    /// constant defined at runtime (via `define()`) must NOT be folded at class
+    /// declaration time — at that point the `define()` may not have run yet.
+    /// We leave such markers intact so they are resolved on first access.
+    fn deferred_binop_global_consts_ready(&self, s_bytes: &[u8]) -> bool {
+        let pat = b"__deferred_global_const__::";
+        let mut i = 0;
+        while i + pat.len() <= s_bytes.len() {
+            if &s_bytes[i..i + pat.len()] == pat {
+                let start = i + pat.len();
+                // const name runs until the next null byte (operand separator) or end
+                let end = s_bytes[start..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|p| start + p)
+                    .unwrap_or(s_bytes.len());
+                let const_name = &s_bytes[start..end];
+                let found = self.constants.get(const_name).is_some()
+                    || (const_name.contains(&b'\\')
+                        && const_name
+                            .iter()
+                            .rposition(|&b| b == b'\\')
+                            .map(|sep| self.constants.get(&const_name[sep + 1..]).is_some())
+                            .unwrap_or(false));
+                if !found {
+                    return false;
+                }
+                i = end;
+            } else {
+                i += 1;
+            }
+        }
+        true
+    }
+
     /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
@@ -24333,6 +24404,17 @@ impl Vm {
                                         continue;
                                     }
                                 }
+                                // Check for deferred binary expression marker (e.g. self::class . '-' . SUFFIX
+                                // where SUFFIX is a runtime-defined global constant). Resolve at access time.
+                                if s.as_bytes().starts_with(b"__deferred_binop__::") {
+                                    let s_bytes = s.as_bytes().to_vec();
+                                    let class_clone = self.classes.get(&class_lower).cloned();
+                                    if let Some(class) = class_clone {
+                                        if let Some(resolved) = self.resolve_deferred_binop(&s_bytes, &class_lower, &class) {
+                                            raw_val = resolved;
+                                        }
+                                    }
+                                }
                             }
                             // Check if constant is an array with unresolved deferred spread markers (circular refs)
                             if let Value::Array(arr_rc) = &raw_val {
@@ -24457,6 +24539,97 @@ impl Vm {
                         };
                         // Check for #[\Deprecated] attribute on class constants
                         if prop_name.as_bytes() != b"class" {
+                            // First, emit deprecation banners for any class constants
+                            // referenced in this constant's value expression. PHP evaluates
+                            // class const expressions at access time, so accessing
+                            //   const CONSTANT = self::PREFIX . self::SUFFIX
+                            // fires PREFIX's and SUFFIX's deprecation. We fold the value at
+                            // compile time but record the references in constants_meta to
+                            // replay those deprecations here.
+                            let refs: Vec<(Vec<u8>, Vec<u8>)> = self.classes.get(&class_lower)
+                                .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
+                                .map(|meta| meta.referenced_constants.clone())
+                                .unwrap_or_default();
+                            for (ref_class_lower, ref_const_name) in &refs {
+                                // Skip self-reference (would be circular).
+                                if ref_class_lower == &class_lower && ref_const_name == prop_name.as_bytes() {
+                                    continue;
+                                }
+                                let ref_attrs = self.classes.get(ref_class_lower)
+                                    .and_then(|c| c.constants_meta.get(ref_const_name.as_slice()))
+                                    .filter(|meta| !meta.attributes.is_empty())
+                                    .map(|meta| meta.attributes.clone());
+                                let canonical_class: Vec<u8> = self.classes.get(ref_class_lower)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_else(|| ref_class_lower.clone());
+                                if let Some(ref_attrs_v) = ref_attrs {
+                                    let mut guard_key = ref_class_lower.clone();
+                                    guard_key.extend_from_slice(b"::");
+                                    guard_key.extend_from_slice(ref_const_name);
+                                    if self.deprecation_in_progress.contains(&guard_key) {
+                                        continue;
+                                    }
+                                    self.deprecation_in_progress.insert(guard_key.clone());
+                                    let dep_result = self.get_deprecated_message(&ref_attrs_v);
+                                    self.deprecation_in_progress.remove(&guard_key);
+                                    if let Some(custom_msg) = dep_result {
+                                        let class_display = String::from_utf8_lossy(&canonical_class).to_string();
+                                        let const_display = String::from_utf8_lossy(ref_const_name).to_string();
+                                        let is_enum_case = self.classes.get(ref_class_lower)
+                                            .map(|c| c.is_enum
+                                                && c.enum_cases.iter().any(|(n, _)| n == ref_const_name.as_slice()))
+                                            .unwrap_or(false);
+                                        let prefix = if is_enum_case {
+                                            format!("Enum case {}::{}", class_display, const_display)
+                                        } else {
+                                            format!("Constant {}::{}", class_display, const_display)
+                                        };
+                                        let msg = self.format_deprecated_message(&prefix, &custom_msg);
+                                        self.emit_user_deprecated_at(&msg, op.line);
+                                    }
+                                    // Propagate exception if a throwing error handler turned the
+                                    // deprecation into an ErrorException.
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            if catch_target > 0 { ip = catch_target as usize; }
+                                            else if finally_target > 0 { ip = finally_target as usize; }
+                                            // continue outer loop via a flag - use goto pattern.
+                                            // Set ip then break out of for loop by continuing outer.
+                                            // Since we can't `continue 'outer`, set a sentinel.
+                                            // We'll just do an early return into the outer continue below.
+                                        }
+                                        // Bubble out of this fetch entirely.
+                                        let exc = self.current_exception.take().unwrap();
+                                        let (class_n, msg_s) = if let Value::Object(o) = &exc {
+                                            let ob = o.borrow();
+                                            let cls = String::from_utf8_lossy(&ob.class_name).to_string();
+                                            let m = if let Value::String(s) = ob.get_property(b"message") {
+                                                s.to_string_lossy()
+                                            } else { String::new() };
+                                            (cls, m)
+                                        } else { (String::new(), String::new()) };
+                                        self.current_exception = Some(exc);
+                                        if exception_handlers.is_empty() {
+                                            return Err(VmError {
+                                                message: if msg_s.is_empty() {
+                                                    format!("Uncaught {}", class_n)
+                                                } else {
+                                                    format!("Uncaught {}: {}", class_n, msg_s)
+                                                },
+                                                line: op.line,
+                                            });
+                                        }
+                                        // We already set ip above via the handler; just stop emitting refs.
+                                        break;
+                                    }
+                                }
+                            }
+                            // If a reference emission threw and we set ip into a catch
+                            // block, skip the rest of this op and let the outer loop continue.
+                            if self.current_exception.is_some() {
+                                continue;
+                            }
                             let dep_msg = self.classes.get(&class_lower)
                                 .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
                                 .filter(|meta| !meta.attributes.is_empty())
@@ -24490,6 +24663,36 @@ impl Vm {
                                         };
                                         let msg = self.format_deprecated_message(&prefix, &custom_msg);
                                         self.emit_user_deprecated_at(&msg, op.line);
+                                    }
+                                    // If the deprecation emit produced an exception (e.g. via a
+                                    // throwing user error handler, or the args eval itself threw),
+                                    // propagate it instead of writing the constant value.
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            if catch_target > 0 { ip = catch_target as usize; }
+                                            else if finally_target > 0 { ip = finally_target as usize; }
+                                            continue;
+                                        } else {
+                                            let exc = self.current_exception.take().unwrap();
+                                            let (class, msg) = if let Value::Object(o) = &exc {
+                                                let ob = o.borrow();
+                                                let cls = String::from_utf8_lossy(&ob.class_name).to_string();
+                                                let m = if let Value::String(s) = ob.get_property(b"message") {
+                                                    s.to_string_lossy()
+                                                } else { String::new() };
+                                                (cls, m)
+                                            } else { (String::new(), String::new()) };
+                                            self.current_exception = Some(exc);
+                                            return Err(VmError {
+                                                message: if msg.is_empty() {
+                                                    format!("Uncaught {}", class)
+                                                } else {
+                                                    format!("Uncaught {}: {}", class, msg)
+                                                },
+                                                line: op.line,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -28888,7 +29091,9 @@ impl Vm {
                         for const_name in const_keys2 {
                             if let Some(Value::String(s)) = class.constants.get(&const_name) {
                                 let s_bytes = s.as_bytes();
-                                if s_bytes.starts_with(b"__deferred_binop__::") {
+                                if s_bytes.starts_with(b"__deferred_binop__::")
+                                    && self.deferred_binop_global_consts_ready(s_bytes)
+                                {
                                     if let Some(resolved) = self.resolve_deferred_binop(s_bytes, &name_lower, &class) {
                                         class.constants.insert(const_name, resolved);
                                     }
