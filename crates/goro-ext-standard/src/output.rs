@@ -1332,19 +1332,26 @@ fn print_r_value(
                     continue;
                 }
                 let name_str = String::from_utf8_lossy(name);
-                // Determine visibility from class definition
-                let vis = class_info.and_then(|c| {
+                // Determine visibility and declaring class from class definition.
+                // Private properties always print with their declaring class —
+                // PHP shows `[name:Declaring:private]`, NOT the current class.
+                let prop_info = class_info.and_then(|c| {
                     c.properties
                         .iter()
                         .find(|p| p.name == *name)
-                        .map(|p| p.visibility)
+                        .map(|p| (p.visibility, p.declaring_class.clone()))
                 });
-                let display_name = match vis {
-                    Some(goro_core::object::Visibility::Protected) => {
+                let display_name = match prop_info {
+                    Some((goro_core::object::Visibility::Protected, _)) => {
                         format!("{}:protected", name_str)
                     }
-                    Some(goro_core::object::Visibility::Private) => {
-                        format!("{}:{}:private", name_str, class_name)
+                    Some((goro_core::object::Visibility::Private, decl)) => {
+                        let decl_disp = if decl.is_empty() {
+                            class_name.clone()
+                        } else {
+                            goro_core::value::display_class_name(&decl)
+                        };
+                        format!("{}:{}:private", name_str, decl_disp)
                     }
                     _ => format!("{}", name_str),
                 };

@@ -27863,13 +27863,29 @@ impl Vm {
                                         }
                                     }
                                 }
-                                // Order: child's own properties (and overrides) first,
-                                // then parent's non-overridden properties. This matches
-                                // PHP's iteration order for foreach and getDefaultProperties().
-                                let mut new_props = std::mem::take(&mut class.properties);
+                                // Order matches PHP: walk the parent's property list in
+                                // declaration order, substituting the child's version when
+                                // the child overrides one. Properties declared only on the
+                                // child come last, in child's declaration order.
+                                let child_props_orig = std::mem::take(&mut class.properties);
+                                let parent_prop_names: std::collections::HashSet<Vec<u8>> =
+                                    parent.properties.iter().map(|p| p.name.clone()).collect();
+                                let mut new_props: Vec<_> = Vec::with_capacity(
+                                    parent.properties.len() + child_props_orig.len(),
+                                );
                                 for prop in &parent.properties {
-                                    if !child_prop_names.contains(&prop.name) {
+                                    if let Some(child_prop) = child_props_orig
+                                        .iter()
+                                        .find(|cp| cp.name == prop.name)
+                                    {
+                                        new_props.push(child_prop.clone());
+                                    } else {
                                         new_props.push(prop.clone());
+                                    }
+                                }
+                                for child_prop in &child_props_orig {
+                                    if !parent_prop_names.contains(&child_prop.name) {
+                                        new_props.push(child_prop.clone());
                                     }
                                 }
                                 class.properties = new_props;

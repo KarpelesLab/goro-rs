@@ -5805,6 +5805,15 @@ impl Compiler {
                         line: expr.span.line,
                     });
                 }
+                // $this cannot be re-assigned inside a method body.
+                if let ExprKind::Variable(target_name) = &target.kind {
+                    if target_name == b"this" && self.current_class.is_some() {
+                        return Err(CompileError {
+                            message: "Cannot re-assign $this".into(),
+                            line: expr.span.line,
+                        });
+                    }
+                }
                 let val = self.compile_expr(value)?;
                 match &target.kind {
                     ExprKind::Variable(name) => {
