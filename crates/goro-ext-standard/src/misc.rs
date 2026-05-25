@@ -11639,6 +11639,10 @@ fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::String(s) => {
             let name = s.as_bytes().to_vec();
             let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Trigger autoloading for a not-yet-loaded class name, like PHP does.
+            if !vm.classes.contains_key(&lower) {
+                vm.try_autoload_class(&name);
+            }
             // Check if class exists - if not, emit TypeError
             if !vm.classes.contains_key(&lower) {
                 let type_name = Vm::value_type_name(val);

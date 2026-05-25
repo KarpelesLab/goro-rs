@@ -5728,6 +5728,34 @@ impl Compiler {
     }
 
     /// Compile an expression, returning the operand that holds the result
+    /// Resolve the class part of a static-property access to an operand: a
+    /// `Const` literal for a named class (with self/parent resolved and `static`
+    /// left for late static binding), or a compiled operand for a dynamic class
+    /// expression. Mirrors the resolution used by StaticPropGet/StaticPropSet.
+    fn compile_static_class_operand(&mut self, class: &Expr) -> CompileResult<OperandType> {
+        match &class.kind {
+            ExprKind::Identifier(name) => {
+                let resolved = self.resolve_class_name(name);
+                let is_self = resolved.eq_ignore_ascii_case(b"self");
+                let class_name = if is_self {
+                    self.current_class.clone().unwrap_or(resolved)
+                } else if resolved.eq_ignore_ascii_case(b"static") {
+                    b"static".to_vec()
+                } else if resolved.eq_ignore_ascii_case(b"parent") {
+                    self.current_parent_class.clone().unwrap_or(resolved)
+                } else {
+                    resolved
+                };
+                let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                if is_self && self.is_in_trait {
+                    self.op_array.class_const_literals.push(idx);
+                }
+                Ok(OperandType::Const(idx))
+            }
+            _ => self.compile_expr(class),
+        }
+    }
+
     fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         match &expr.kind {
             ExprKind::Int(n) => {
@@ -6111,6 +6139,68 @@ impl Compiler {
                         });
                         Ok(OperandType::Tmp(result_tmp))
                     }
+                    ExprKind::StaticPropertyAccess { class, property } => {
+                        // self::$n op= $val — read-modify-write the static property.
+                        let class_operand = self.compile_static_class_operand(class)?;
+                        let prop_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(property.clone())));
+                        let read_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropGet,
+                            op1: class_operand,
+                            op2: OperandType::Const(prop_idx),
+                            result: OperandType::Tmp(read_tmp),
+                            line: expr.span.line,
+                        });
+                        let result_tmp = self.op_array.alloc_temp();
+                        let bin_opcode = compound_binary_opcode(op);
+                        self.op_array.emit(Op {
+                            opcode: bin_opcode,
+                            op1: OperandType::Tmp(read_tmp),
+                            op2: val,
+                            result: OperandType::Tmp(result_tmp),
+                            line: expr.span.line,
+                        });
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropSet,
+                            op1: class_operand,
+                            op2: OperandType::Tmp(result_tmp),
+                            result: OperandType::Const(prop_idx),
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Tmp(result_tmp))
+                    }
+                    ExprKind::DynamicStaticPropertyAccess { class, property } => {
+                        // self::$$x op= $val
+                        let class_operand = self.compile_static_class_operand(class)?;
+                        let prop_op = self.compile_expr(property)?;
+                        let read_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropGet,
+                            op1: class_operand,
+                            op2: prop_op,
+                            result: OperandType::Tmp(read_tmp),
+                            line: expr.span.line,
+                        });
+                        let result_tmp = self.op_array.alloc_temp();
+                        let bin_opcode = compound_binary_opcode(op);
+                        self.op_array.emit(Op {
+                            opcode: bin_opcode,
+                            op1: OperandType::Tmp(read_tmp),
+                            op2: val,
+                            result: OperandType::Tmp(result_tmp),
+                            line: expr.span.line,
+                        });
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropSet,
+                            op1: class_operand,
+                            op2: OperandType::Tmp(result_tmp),
+                            result: prop_op,
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Tmp(result_tmp))
+                    }
                     _ => {
                         // For any other target, try to compile it as read-modify-write
                         let target_val = self.compile_expr(target)?;
@@ -6348,6 +6438,85 @@ impl Compiler {
                                 _ => Ok(OperandType::Tmp(old_tmp)),
                             };
                         }
+                    }
+
+                    // Increment/decrement on a static property: self::$n++, C::$n--, etc.
+                    // Without write-back here the increment would land on a throwaway
+                    // temp and the static property would never change.
+                    if let ExprKind::StaticPropertyAccess { class, property } = &operand.kind {
+                        let class_operand = self.compile_static_class_operand(class)?;
+                        let prop_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(property.clone())));
+                        let old_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropGet,
+                            op1: class_operand,
+                            op2: OperandType::Const(prop_idx),
+                            result: OperandType::Tmp(old_tmp),
+                            line: expr.span.line,
+                        });
+                        let new_tmp = self.op_array.alloc_temp();
+                        let inc_opcode = match op {
+                            UnaryOp::PostIncrement | UnaryOp::PreIncrement => OpCode::PostIncrement,
+                            _ => OpCode::PostDecrement,
+                        };
+                        self.op_array.emit(Op {
+                            opcode: inc_opcode,
+                            op1: OperandType::Tmp(old_tmp),
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(new_tmp),
+                            line: expr.span.line,
+                        });
+                        // old_tmp now holds the new value (PostInc/Dec wrote it to op1)
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropSet,
+                            op1: class_operand,
+                            op2: OperandType::Tmp(old_tmp),
+                            result: OperandType::Const(prop_idx),
+                            line: expr.span.line,
+                        });
+                        return match op {
+                            UnaryOp::PostIncrement | UnaryOp::PostDecrement => Ok(OperandType::Tmp(new_tmp)),
+                            _ => Ok(OperandType::Tmp(old_tmp)),
+                        };
+                    }
+
+                    // Increment/decrement on a dynamic static property: self::$$x++
+                    if let ExprKind::DynamicStaticPropertyAccess { class, property } = &operand.kind {
+                        let class_operand = self.compile_static_class_operand(class)?;
+                        let prop_op = self.compile_expr(property)?;
+                        let old_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropGet,
+                            op1: class_operand,
+                            op2: prop_op,
+                            result: OperandType::Tmp(old_tmp),
+                            line: expr.span.line,
+                        });
+                        let new_tmp = self.op_array.alloc_temp();
+                        let inc_opcode = match op {
+                            UnaryOp::PostIncrement | UnaryOp::PreIncrement => OpCode::PostIncrement,
+                            _ => OpCode::PostDecrement,
+                        };
+                        self.op_array.emit(Op {
+                            opcode: inc_opcode,
+                            op1: OperandType::Tmp(old_tmp),
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(new_tmp),
+                            line: expr.span.line,
+                        });
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropSet,
+                            op1: class_operand,
+                            op2: OperandType::Tmp(old_tmp),
+                            result: prop_op,
+                            line: expr.span.line,
+                        });
+                        return match op {
+                            UnaryOp::PostIncrement | UnaryOp::PostDecrement => Ok(OperandType::Tmp(new_tmp)),
+                            _ => Ok(OperandType::Tmp(old_tmp)),
+                        };
                     }
                 }
 
@@ -10488,6 +10657,26 @@ impl Compiler {
 /// For class names, the original case is preserved for error messages.
 fn type_hint_to_param_type(hint: &TypeHint) -> ParamType {
     type_hint_to_param_type_with_ns(hint, &[], &HashMap::new())
+}
+
+/// Map a compound-assignment binary operator (`+=`, `.=`, ...) to the plain
+/// binary opcode used to compute the new value.
+fn compound_binary_opcode(op: &BinaryOp) -> OpCode {
+    match op {
+        BinaryOp::Add => OpCode::Add,
+        BinaryOp::Sub => OpCode::Sub,
+        BinaryOp::Mul => OpCode::Mul,
+        BinaryOp::Div => OpCode::Div,
+        BinaryOp::Mod => OpCode::Mod,
+        BinaryOp::Pow => OpCode::Pow,
+        BinaryOp::Concat => OpCode::Concat,
+        BinaryOp::BitwiseAnd => OpCode::BitwiseAnd,
+        BinaryOp::BitwiseOr => OpCode::BitwiseOr,
+        BinaryOp::BitwiseXor => OpCode::BitwiseXor,
+        BinaryOp::ShiftLeft => OpCode::ShiftLeft,
+        BinaryOp::ShiftRight => OpCode::ShiftRight,
+        _ => OpCode::Add,
+    }
 }
 
 /// Convert an AST TypeHint into a runtime ParamType with namespace resolution.

@@ -27270,6 +27270,14 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
+                            // If the parent class isn't loaded yet, give a registered
+                            // autoloader the chance to define it (PHP triggers autoload
+                            // when resolving a parent during class declaration).
+                            if !self.classes.contains_key(&parent_lower)
+                                && !self.is_known_builtin_class(&parent_lower)
+                            {
+                                self.try_autoload_class(parent_name);
+                            }
                             if let Some(parent) = self.classes.get(&parent_lower).cloned() {
                                 // Check: interface can only extend another interface
                                 if class.is_interface && !parent.is_interface {
