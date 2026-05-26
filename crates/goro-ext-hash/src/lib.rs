@@ -30,6 +30,32 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"hash_hmac_file", hash_hmac_file_fn);
     vm.register_function(b"hash_update_stream", hash_update_stream_fn);
     vm.register_function(b"hash_update_file", hash_update_file_fn);
+
+    // Register parameter types for strict_types enforcement + null-deprecation
+    use goro_core::opcode::ParamType;
+    let s = || Some(ParamType::Simple(b"string".to_vec()));
+    let b = || Some(ParamType::Simple(b"bool".to_vec()));
+    let i = || Some(ParamType::Simple(b"int".to_vec()));
+    vm.register_builtin_param_types(b"md5", vec![s(), b()]);
+    vm.register_builtin_param_types(b"sha1", vec![s(), b()]);
+    vm.register_builtin_param_types(b"md5_file", vec![s(), b()]);
+    vm.register_builtin_param_types(b"sha1_file", vec![s(), b()]);
+    vm.register_builtin_param_types(b"crc32", vec![s()]);
+    vm.register_builtin_param_types(b"hash", vec![s(), s(), b(), Some(ParamType::Simple(b"array".to_vec()))]);
+    vm.register_builtin_param_types(b"hash_file", vec![s(), s(), b(), Some(ParamType::Simple(b"array".to_vec()))]);
+    vm.register_builtin_param_types(b"hash_hmac", vec![s(), s(), s(), b()]);
+    vm.register_builtin_param_types(b"hash_pbkdf2", vec![s(), s(), s(), i(), i(), b()]);
+    vm.register_builtin_param_types(b"hash_equals", vec![s(), s()]);
+
+    // Register parameter names (for deprecation messages that mention $filename, etc.)
+    vm.builtin_param_names.insert(b"md5_file".to_vec(), vec![b"filename".to_vec(), b"binary".to_vec()]);
+    vm.builtin_param_names.insert(b"sha1_file".to_vec(), vec![b"filename".to_vec(), b"binary".to_vec()]);
+    vm.builtin_param_names.insert(b"md5".to_vec(), vec![b"string".to_vec(), b"binary".to_vec()]);
+    vm.builtin_param_names.insert(b"sha1".to_vec(), vec![b"string".to_vec(), b"binary".to_vec()]);
+    vm.builtin_param_names.insert(b"hash".to_vec(), vec![b"algo".to_vec(), b"data".to_vec(), b"binary".to_vec(), b"options".to_vec()]);
+    vm.builtin_param_names.insert(b"hash_file".to_vec(), vec![b"algo".to_vec(), b"filename".to_vec(), b"binary".to_vec(), b"options".to_vec()]);
+    vm.builtin_param_names.insert(b"hash_hmac".to_vec(), vec![b"algo".to_vec(), b"data".to_vec(), b"key".to_vec(), b"binary".to_vec()]);
+    vm.builtin_param_names.insert(b"hash_equals".to_vec(), vec![b"known_string".to_vec(), b"user_string".to_vec()]);
 }
 
 fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1327,6 +1353,12 @@ fn compute_hmac(algo: &str, key: &[u8], data: &[u8]) -> Vec<u8> {
 fn md5_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    if filename.is_empty() {
+        let msg = "Path must not be empty".to_string();
+        let exc = _vm.create_exception(b"ValueError", &msg, 0);
+        _vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: _vm.current_line });
+    }
     match std::fs::read(&filename) {
         Ok(data) => {
             let digest = md5_hash(&data);
@@ -1337,7 +1369,15 @@ fn md5_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Ok(Value::String(PhpString::from_string(hex)))
             }
         }
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let err_msg = match e.kind() {
+                std::io::ErrorKind::NotFound => "Failed to open stream: No such file or directory".to_string(),
+                std::io::ErrorKind::PermissionDenied => "Failed to open stream: Permission denied".to_string(),
+                _ => format!("Failed to open stream: {}", e),
+            };
+            _vm.emit_warning(&format!("md5_file({}): {}", filename, err_msg));
+            Ok(Value::False)
+        }
     }
 }
 
@@ -1823,6 +1863,12 @@ fn joaat_hash(data: &[u8]) -> u32 {
 fn sha1_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    if filename.is_empty() {
+        let msg = "Path must not be empty".to_string();
+        let exc = _vm.create_exception(b"ValueError", &msg, 0);
+        _vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: _vm.current_line });
+    }
     match std::fs::read(&filename) {
         Ok(data) => {
             let digest = sha1_hash(&data);
@@ -1833,7 +1879,15 @@ fn sha1_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Ok(Value::String(PhpString::from_string(hex)))
             }
         }
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let err_msg = match e.kind() {
+                std::io::ErrorKind::NotFound => "Failed to open stream: No such file or directory".to_string(),
+                std::io::ErrorKind::PermissionDenied => "Failed to open stream: Permission denied".to_string(),
+                _ => format!("Failed to open stream: {}", e),
+            };
+            _vm.emit_warning(&format!("sha1_file({}): {}", filename, err_msg));
+            Ok(Value::False)
+        }
     }
 }
 

@@ -209,15 +209,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 }
                 }
             } else {
-                vm.write_output(
-                    format!(
-                        "{}string({}) \"{}\"\n",
-                        prefix,
-                        s.len(),
-                        s.to_string_lossy()
-                    )
-                    .as_bytes(),
-                );
+                vm.write_output(format!("{}string({}) \"", prefix, s.len()).as_bytes());
+                vm.write_output(s.as_bytes());
+                vm.write_output(b"\"\n");
             }
         }
         Value::Array(arr) => {
