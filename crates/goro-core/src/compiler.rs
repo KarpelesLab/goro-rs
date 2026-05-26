@@ -763,7 +763,34 @@ impl Compiler {
                         line,
                     });
                 }
-                let val = self.compile_expr(&arg.value)?;
+                // For by-ref builtin args on $arr[$key], compile as
+                // ArrayGetRef → SendRef(tmp) so writes through the
+                // Reference land back in the array slot (and the slot
+                // is auto-vivified instead of producing an
+                // "Undefined array key" warning).
+                let val = if is_byref {
+                    if let ExprKind::ArrayAccess { array, index } = &arg.value.kind {
+                        if let Some(idx_expr) = index {
+                            let arr_op = self.compile_expr(array)?;
+                            let idx_op = self.compile_expr(idx_expr)?;
+                            let ref_tmp = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayGetRef,
+                                op1: arr_op,
+                                op2: idx_op,
+                                result: OperandType::Tmp(ref_tmp),
+                                line,
+                            });
+                            OperandType::Tmp(ref_tmp)
+                        } else {
+                            self.compile_expr(&arg.value)?
+                        }
+                    } else {
+                        self.compile_expr(&arg.value)?
+                    }
+                } else {
+                    self.compile_expr(&arg.value)?
+                };
                 let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
                 self.op_array.emit(Op {
                     opcode: if is_byref { OpCode::SendRef } else { OpCode::SendVal },

@@ -17332,6 +17332,16 @@ impl Vm {
                     } else {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
+                    // Clear the Tmp slot so the only remaining holder of the
+                    // Reference (when this op1 came from ArrayGetRef) is the
+                    // pending call args and the array element itself. After
+                    // the call returns and args drop, strong_count drops to 1
+                    // (just the array element), and var_dump won't print `&`.
+                    if let OperandType::Tmp(t) = &op.op1 {
+                        if let Some(slot) = tmps.get_mut(*t as usize) {
+                            *slot = Value::Null;
+                        }
+                    }
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.args.push(val);
                     }
