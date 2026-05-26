@@ -1733,9 +1733,10 @@ fn format_php_float_serialize(f: f64) -> String {
         return "-0".to_string();
     }
     // PHP serialize_precision=-1: shortest exact representation
-    // Use scientific notation for very large/small numbers
+    // PHP's zend_gcvt switches to scientific notation when decpt > 17 or decpt < -3.
+    // decpt > 17 corresponds to abs >= 1e17, decpt < -3 corresponds to abs < 1e-4.
     let abs = f.abs();
-    if abs != 0.0 && !(1e-4..1e15).contains(&abs) {
+    if abs != 0.0 && !(1e-4..1e17).contains(&abs) {
         // Use scientific notation like PHP
         // Find shortest scientific representation that roundtrips
         for prec in 0..20 {

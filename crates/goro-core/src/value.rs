@@ -1253,8 +1253,9 @@ fn format_php_float_shortest(f: f64) -> String {
     }
 
     let abs = f.abs();
-    // Use scientific notation for very large/small numbers
-    if abs != 0.0 && (abs >= 1e15 || abs < 1e-4) {
+    // PHP's zend_gcvt with mode=0 (precision=-1) uses scientific notation when
+    // decpt > 17 (abs >= 1e17) or decpt < -3 (abs < 1e-4).
+    if abs != 0.0 && (abs >= 1e17 || abs < 1e-4) {
         // Find shortest roundtrip in scientific notation (start from 1 to ensure decimal point)
         for prec in 1..20 {
             let s = format!("{:.prec$e}", f, prec = prec);
