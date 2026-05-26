@@ -48,7 +48,7 @@ pub enum CallableTarget { Function(Box<Expr>), Method { object: Box<Expr>, metho
 #[derive(Debug, Clone)]
 pub enum StringPart { Literal(Vec<u8>), Expr(Expr) }
 #[derive(Debug, Clone)]
-pub struct ArrayElement { pub key: Option<Expr>, pub value: Expr, pub unpack: bool }
+pub struct ArrayElement { pub key: Option<Expr>, pub value: Expr, pub unpack: bool, pub by_ref: bool }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp { Add, Sub, Mul, Div, Mod, Pow, Concat, BitwiseAnd, BitwiseOr, BitwiseXor, ShiftLeft, ShiftRight, BooleanAnd, BooleanOr, LogicalAnd, LogicalOr, LogicalXor, Equal, Identical, NotEqual, NotIdentical, Less, Greater, LessEqual, GreaterEqual, Spaceship }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

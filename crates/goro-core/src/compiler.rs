@@ -1588,6 +1588,7 @@ impl Compiler {
                                         key: None,
                                         value: a.value.clone(),
                                         unpack: false,
+                                        by_ref: false,
                                     })
                                     .collect(),
                             )
@@ -5564,6 +5565,7 @@ impl Compiler {
                                     }),
                                     value: a.value.clone(),
                                     unpack: false,
+                                    by_ref: false,
                                 })
                                 .collect(),
                         )
@@ -5957,6 +5959,7 @@ impl Compiler {
                                         key: None,
                                         value: a.value.clone(),
                                         unpack: false,
+                                        by_ref: false,
                                     })
                                     .collect()
                             }
@@ -7111,8 +7114,8 @@ impl Compiler {
                 });
 
                 for elem in elements {
-                    let val = self.compile_expr(&elem.value)?;
                     if elem.unpack {
+                        let val = self.compile_expr(&elem.value)?;
                         // Check for compile-time detectable non-array/non-traversable types
                         if let OperandType::Const(idx) = val {
                             if let Some(lit_val) = self.op_array.literals.get(idx as usize) {
@@ -7141,7 +7144,59 @@ impl Compiler {
                             result: OperandType::Unused,
                             line: expr.span.line,
                         });
+                    } else if elem.by_ref {
+                        // [&$var] or ['k' => &$var] — store reference into array slot
+                        // Compile the value as a CV (must be a variable) and make it a reference
+                        let val = self.compile_expr(&elem.value)?;
+                        if let OperandType::Cv(cv) = val {
+                            self.op_array.emit(Op {
+                                opcode: OpCode::MakeRef,
+                                op1: OperandType::Cv(cv),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                            if let Some(key_expr) = &elem.key {
+                                let key = self.compile_expr(key_expr)?;
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArraySetRef,
+                                    op1: OperandType::Tmp(arr_tmp),
+                                    op2: OperandType::Cv(cv),
+                                    result: key,
+                                    line: expr.span.line,
+                                });
+                            } else {
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArrayAppendRef,
+                                    op1: OperandType::Tmp(arr_tmp),
+                                    op2: OperandType::Cv(cv),
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                            }
+                        } else {
+                            // Fallback: not a simple variable, treat as regular value
+                            if let Some(key_expr) = &elem.key {
+                                let key = self.compile_expr(key_expr)?;
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArraySet,
+                                    op1: OperandType::Tmp(arr_tmp),
+                                    op2: val,
+                                    result: key,
+                                    line: expr.span.line,
+                                });
+                            } else {
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArrayAppend,
+                                    op1: OperandType::Tmp(arr_tmp),
+                                    op2: val,
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                            }
+                        }
                     } else if let Some(key_expr) = &elem.key {
+                        let val = self.compile_expr(&elem.value)?;
                         let key = self.compile_expr(key_expr)?;
                         self.op_array.emit(Op {
                             opcode: OpCode::ArraySet,
@@ -7151,6 +7206,7 @@ impl Compiler {
                             line: expr.span.line,
                         });
                     } else {
+                        let val = self.compile_expr(&elem.value)?;
                         self.op_array.emit(Op {
                             opcode: OpCode::ArrayAppend,
                             op1: OperandType::Tmp(arr_tmp),

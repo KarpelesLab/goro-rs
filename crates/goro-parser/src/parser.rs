@@ -4644,6 +4644,7 @@ impl Parser {
                                 kind: ExprKind::Null,
                             },
                             unpack: false,
+                            by_ref: false,
                         });
                         self.advance(); // consume comma
                         continue;
@@ -4654,24 +4655,27 @@ impl Parser {
                             key: None,
                             value,
                             unpack: true,
+                            by_ref: false,
                         });
                     } else {
                         // Handle &$var (reference in array)
-                        let _is_ref = self.eat(&TokenKind::Ampersand);
+                        let is_ref = self.eat(&TokenKind::Ampersand);
                         let first = self.parse_expression()?;
                         if self.eat(&TokenKind::DoubleArrow) {
-                            let _is_val_ref = self.eat(&TokenKind::Ampersand);
+                            let is_val_ref = self.eat(&TokenKind::Ampersand);
                             let value = self.parse_expression()?;
                             elements.push(ArrayElement {
                                 key: Some(first),
                                 value,
                                 unpack: false,
+                                by_ref: is_val_ref,
                             });
                         } else {
                             elements.push(ArrayElement {
                                 key: None,
                                 value: first,
                                 unpack: false,
+                                by_ref: is_ref,
                             });
                         }
                     }
@@ -4691,21 +4695,23 @@ impl Parser {
                 self.expect(&TokenKind::OpenParen)?;
                 let mut elements = Vec::new();
                 while !matches!(self.peek(), TokenKind::CloseParen | TokenKind::Eof) {
-                    self.eat(&TokenKind::Ampersand); // ignore reference in array literal
+                    let is_ref = self.eat(&TokenKind::Ampersand);
                     let first = self.parse_expression()?;
                     if self.eat(&TokenKind::DoubleArrow) {
-                        self.eat(&TokenKind::Ampersand); // ignore reference in value
+                        let is_val_ref = self.eat(&TokenKind::Ampersand);
                         let value = self.parse_expression()?;
                         elements.push(ArrayElement {
                             key: Some(first),
                             value,
                             unpack: false,
+                            by_ref: is_val_ref,
                         });
                     } else {
                         elements.push(ArrayElement {
                             key: None,
                             value: first,
                             unpack: false,
+                            by_ref: is_ref,
                         });
                     }
                     if !self.eat(&TokenKind::Comma) {
@@ -5726,6 +5732,7 @@ impl Parser {
                         span,
                     },
                     unpack: false,
+                    by_ref: false,
                 });
                 if self.eat(&TokenKind::Comma) {
                     if matches!(self.peek(), TokenKind::CloseParen) {
@@ -5744,12 +5751,14 @@ impl Parser {
                     key: Some(first),
                     value,
                     unpack: false,
+                    by_ref: false,
                 });
             } else {
                 elements.push(ArrayElement {
                     key: None,
                     value: first,
                     unpack: false,
+                    by_ref: false,
                 });
             }
 

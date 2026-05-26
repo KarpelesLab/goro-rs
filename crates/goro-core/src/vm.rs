@@ -33660,6 +33660,11 @@ impl Vm {
 
     /// Convert a value to string, calling __toString for objects if available
     pub fn value_to_string(&mut self, val: &Value) -> PhpString {
+        // Unwrap References to handle their inner Value
+        if let Value::Reference(r) = val {
+            let inner = r.borrow().clone();
+            return self.value_to_string(&inner);
+        }
         if let Value::Object(obj) = val {
             let class_lower: Vec<u8> = obj
                 .borrow()
