@@ -1550,6 +1550,70 @@ impl Vm {
         last_private
     }
 
+    /// Look up the non-static `PropertyDef` for a bare-named property on an
+    /// object. Walks the class hierarchy and returns the visibility and
+    /// declaring class (display form) of the first match, preferring
+    /// non-private declarations to match how `find_property_def_for_scope`
+    /// resolves the storage key under bare names.
+    ///
+    /// Returns `None` for dynamic properties or anything not declared as a
+    /// non-static property on the class hierarchy.
+    fn find_instance_prop_def(
+        &self,
+        class_name_lower: &[u8],
+        prop_name: &[u8],
+    ) -> Option<(crate::object::Visibility, Vec<u8>)> {
+        let mut current = class_name_lower.to_vec();
+        let mut last_private: Option<(crate::object::Visibility, Vec<u8>)> = None;
+        for _ in 0..50 {
+            if let Some(class) = self.classes.get(&current) {
+                // Prefer non-private (public/protected) match at this level.
+                for prop in &class.properties {
+                    if prop.name == prop_name
+                        && !prop.is_static
+                        && prop.visibility != crate::object::Visibility::Private
+                    {
+                        return Some((prop.visibility, prop.declaring_class.clone()));
+                    }
+                }
+                for prop in &class.properties {
+                    if prop.name == prop_name
+                        && !prop.is_static
+                        && prop.visibility == crate::object::Visibility::Private
+                    {
+                        last_private = Some((prop.visibility, prop.declaring_class.clone()));
+                    }
+                }
+                if let Some(parent) = &class.parent {
+                    current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                } else {
+                    return last_private;
+                }
+            } else {
+                return last_private;
+            }
+        }
+        last_private
+    }
+
+    /// Is `scope_lower` (the currently executing class scope) allowed to see
+    /// a protected property on an object whose class is `obj_class_lower`?
+    ///
+    /// Allowed when scope is the object's class itself, an ancestor, or a
+    /// descendant — i.e. they share a class hierarchy.
+    fn scope_can_see_protected(&self, scope_lower: &[u8], obj_class_lower: &[u8]) -> bool {
+        if scope_lower == obj_class_lower {
+            return true;
+        }
+        if self.is_subclass_of(obj_class_lower, scope_lower) {
+            return true;
+        }
+        if self.is_subclass_of(scope_lower, obj_class_lower) {
+            return true;
+        }
+        false
+    }
+
     /// Compute the object-storage key for a property access.
     ///
     /// Private properties are stored under a mangled key `\0DeclaringClass\0name`
@@ -23162,10 +23226,16 @@ impl Vm {
                             }
                             // Redirect to real for initialized proxy.
                             let target = self.proxy_redirect(obj);
-                            // Current class scope determines which mangled
-                            // private slots are visible during iteration.
+                            // Current class scope determines which private/
+                            // protected slots are visible during iteration.
                             let scope_lower: Option<Vec<u8>> = self.current_class_scope()
                                 .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect());
+                            let obj_class_lower: Vec<u8> = target
+                                .borrow()
+                                .class_name
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
                             let obj_borrow = target.borrow();
                             let mut arr = PhpArray::new();
                             for (name, value) in &obj_borrow.properties {
@@ -23195,8 +23265,14 @@ impl Vm {
                                         let decl = &name[1..1 + sep];
                                         let bare = &name[1 + sep + 1..];
                                         if decl == b"*" {
-                                            // protected: visible from any class scope
-                                            if scope_lower.is_none() {
+                                            // protected: visible only from a
+                                            // class scope related to the
+                                            // declaring class hierarchy.
+                                            let s = match &scope_lower {
+                                                Some(s) => s,
+                                                None => continue,
+                                            };
+                                            if !self.scope_can_see_protected(s, &obj_class_lower) {
                                                 continue;
                                             }
                                             bare.to_vec()
@@ -23212,6 +23288,40 @@ impl Vm {
                                         name.clone()
                                     }
                                 } else {
+                                    // Bare-named property. Look up its prop_def
+                                    // in the class hierarchy and apply visibility.
+                                    // Dynamic properties (no prop_def) are public.
+                                    if let Some(prop_def) =
+                                        self.find_instance_prop_def(&obj_class_lower, name)
+                                    {
+                                        match prop_def.0 {
+                                            crate::object::Visibility::Public => {}
+                                            crate::object::Visibility::Protected => {
+                                                let s = match &scope_lower {
+                                                    Some(s) => s,
+                                                    None => continue,
+                                                };
+                                                if !self.scope_can_see_protected(
+                                                    s,
+                                                    &obj_class_lower,
+                                                ) {
+                                                    continue;
+                                                }
+                                            }
+                                            crate::object::Visibility::Private => {
+                                                let decl_lower: Vec<u8> = prop_def
+                                                    .1
+                                                    .iter()
+                                                    .map(|b| b.to_ascii_lowercase())
+                                                    .collect();
+                                                if scope_lower.as_deref()
+                                                    != Some(decl_lower.as_slice())
+                                                {
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
                                     name.clone()
                                 };
                                 arr.set(
