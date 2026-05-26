@@ -1951,13 +1951,17 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let is_closing = i < bytes.len() && bytes[i] == b'/';
             if is_closing { i += 1; }
 
-            // Extract tag name
-            let name_start = i;
-            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' && bytes[i] != b'/' {
+            // Extract tag name following PHP's php_tag_find normalization:
+            // '/' is part of the tag name UNLESS right before '>' (self-closing).
+            let mut tag_name_lower: Vec<u8> = Vec::new();
+            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                    // self-closing slash — skip it
+                } else {
+                    tag_name_lower.push(bytes[i].to_ascii_lowercase());
+                }
                 i += 1;
             }
-            let tag_name = &bytes[name_start..i];
-            let tag_name_lower = tag_name.to_ascii_lowercase();
 
             // Skip to end of tag, handling quotes
             let mut in_quote: u8 = 0;
@@ -5146,12 +5150,22 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let is_closing = i < bytes.len() && bytes[i] == b'/';
             if is_closing { i += 1; }
 
-            let name_start = i;
-            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' && bytes[i] != b'/' && bytes[i] != b'<' {
+            // Extract tag name following PHP's php_tag_find normalization:
+            // read chars until whitespace or '>' or '<'. '/' is part of the
+            // tag name UNLESS it's right before '>' (self-closing like <br/>).
+            // The leading '/' of </closing> was already consumed via is_closing.
+            // So `<s/trong>` normalizes to "s/trong" (not "strong"), correctly
+            // failing to match an allowed "strong" tag. `<br/>` normalizes to
+            // "br" (slash before > is skipped), matching allowed "br".
+            let mut tag_name_lower: Vec<u8> = Vec::new();
+            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' && bytes[i] != b'<' {
+                if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                    // self-closing slash — skip it
+                } else {
+                    tag_name_lower.push(bytes[i].to_ascii_lowercase());
+                }
                 i += 1;
             }
-            let tag_name = &bytes[name_start..i];
-            let tag_name_lower = tag_name.to_ascii_lowercase();
 
             // Skip attributes/rest of tag, handling quoted strings
             // PHP strip_tags tracks nested <> with a depth counter:
