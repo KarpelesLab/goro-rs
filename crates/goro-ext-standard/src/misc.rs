@@ -7479,23 +7479,26 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn basename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let suffix = args.get(1).map(|v| v.to_php_string());
-    let s = path.to_string_lossy();
-    // Strip trailing slashes
-    let trimmed = s.trim_end_matches('/');
-    let mut base = if trimmed.is_empty() {
-        String::new()
-    } else if let Some(pos) = trimmed.rfind('/') {
-        trimmed[pos + 1..].to_string()
-    } else {
-        trimmed.to_string()
+    // Operate on raw bytes to preserve non-UTF-8 input (PHP is binary-safe).
+    let bytes = path.as_bytes();
+    // Strip trailing '/'
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1] == b'/' {
+        end -= 1;
+    }
+    let trimmed = &bytes[..end];
+    let start = match trimmed.iter().rposition(|&b| b == b'/') {
+        Some(pos) => pos + 1,
+        None => 0,
     };
+    let mut base: Vec<u8> = trimmed[start..].to_vec();
     if let Some(suf) = suffix {
-        let suf_str = suf.to_string_lossy();
-        if base.ends_with(&suf_str) && base.len() > suf_str.len() {
-            base.truncate(base.len() - suf_str.len());
+        let suf_bytes = suf.as_bytes();
+        if !suf_bytes.is_empty() && base.len() > suf_bytes.len() && base.ends_with(suf_bytes) {
+            base.truncate(base.len() - suf_bytes.len());
         }
     }
-    Ok(Value::String(PhpString::from_string(base)))
+    Ok(Value::String(PhpString::from_vec(base)))
 }
 
 /// PHP zend_dirname: returns the dirname portion (or empty string for len 0).

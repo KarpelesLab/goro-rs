@@ -1654,7 +1654,7 @@ fn stripslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn addcslashes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let charlist_val = args.get(1).unwrap_or(&Value::Null);
     // TypeError if charlist is an array
     if matches!(charlist_val, Value::Array(_)) {

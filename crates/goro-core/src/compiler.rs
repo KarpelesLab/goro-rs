@@ -6406,6 +6406,59 @@ impl Compiler {
                             line: operand.span.line,
                         });
                     }
+
+                    // Increment/decrement on array element: $arr[$key]++ / --$arr[$key]
+                    // Without explicit read-modify-write the inc would land on a
+                    // throwaway temp and the array element would never change.
+                    if let ExprKind::ArrayAccess { array, index } = &operand.kind {
+                        let arr_op = self.compile_expr(array)?;
+                        let idx_op = if let Some(idx_expr) = index {
+                            self.compile_expr(idx_expr)?
+                        } else {
+                            // $arr[]++: append-then-modify makes no sense here;
+                            // fall through to plain unary handler.
+                            return Err(CompileError {
+                                message: "Cannot use [] for reading".into(),
+                                line: operand.span.line,
+                            });
+                        };
+                        // Fetch current value
+                        let old_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayGetRW,
+                            op1: arr_op,
+                            op2: idx_op,
+                            result: OperandType::Tmp(old_tmp),
+                            line: expr.span.line,
+                        });
+                        // Increment/decrement (writes new to op1, old to result)
+                        let new_tmp = self.op_array.alloc_temp();
+                        let inc_opcode = match op {
+                            UnaryOp::PostIncrement | UnaryOp::PreIncrement => OpCode::PostIncrement,
+                            _ => OpCode::PostDecrement,
+                        };
+                        self.op_array.emit(Op {
+                            opcode: inc_opcode,
+                            op1: OperandType::Tmp(old_tmp),
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(new_tmp),
+                            line: expr.span.line,
+                        });
+                        // Write the new value (now in old_tmp) back to $arr[$key]
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArraySet,
+                            op1: arr_op,
+                            op2: OperandType::Tmp(old_tmp),
+                            result: idx_op,
+                            line: expr.span.line,
+                        });
+                        // Pre returns new value (old_tmp); Post returns old (new_tmp).
+                        return match op {
+                            UnaryOp::PostIncrement | UnaryOp::PostDecrement => Ok(OperandType::Tmp(new_tmp)),
+                            _ => Ok(OperandType::Tmp(old_tmp)),
+                        };
+                    }
+
                     if let ExprKind::PropertyAccess { object, property, .. } = &operand.kind {
                         let obj_op = self.compile_expr(object)?;
                         let prop_name = match &property.kind {
