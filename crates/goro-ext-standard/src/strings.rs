@@ -3653,7 +3653,9 @@ fn str_ireplace_single(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> (V
 
 fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let width = args.get(1).map(|v| v.to_long()).unwrap_or(75);
+    // Keep width as signed; negative widths trigger break-on-every-iteration
+    // (matches PHP semantics).
+    let width: i64 = args.get(1).map(|v| v.to_long()).unwrap_or(75);
     let brk = args
         .get(2)
         .map(|v| v.to_php_string())
@@ -3667,7 +3669,6 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg.into(), line: vm.current_line });
     }
 
-    let width = if cut_long { width.max(1) as usize } else { width.max(0) as usize };
     let bytes = s.as_bytes();
     let brk_bytes = brk.as_bytes();
 
@@ -3685,7 +3686,31 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::empty()));
     }
 
-    let width = width.max(1) as usize;
+    // Pre-flight memory check: PHP's zend_string_safe_alloc bails out with a
+    // single Fatal error when the estimated allocation would exceed the
+    // memory_limit. Mirror that here so we don't try to allocate multi-GB
+    // Vecs (which would panic in Rust).
+    let est_breaks = if width > 0 {
+        bytes.len() / width as usize + 1
+    } else {
+        bytes.len() + 1
+    };
+    let alloc_size = bytes
+        .len()
+        .saturating_add(est_breaks.saturating_mul(brk_bytes.len()))
+        .saturating_add(1);
+    let mem_limit = goro_core::value::memory_get_limit();
+    if mem_limit > 0 {
+        let usage = goro_core::value::memory_get_usage();
+        if usage.saturating_add(alloc_size) > mem_limit {
+            let msg = format!(
+                "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
+                mem_limit, alloc_size,
+            );
+            let line = vm.current_line;
+            return Err(vm.emit_fatal_at(&msg, line));
+        }
+    }
 
     // PHP's wordwrap algorithm (mirrors PHP's C implementation for multi-char breaks):
     // 1. Detect existing break sequences in text and copy through.
@@ -3693,43 +3718,48 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // 3. For cut_long: if line_len >= width and no valid space, force cut.
     // 4. For word boundary: if line_len >= width and valid space, break at lastspace.
 
-    let mut result = Vec::with_capacity(bytes.len() + bytes.len() / width * brk_bytes.len());
-    let mut laststart: usize = 0;
-    let mut lastspace: usize = 0;
-    let mut current: usize = 0;
+    let cap = bytes.len().saturating_add(est_breaks.saturating_mul(brk_bytes.len()));
+    let mut result = Vec::with_capacity(cap);
+    let mut laststart: i64 = 0;
+    let mut lastspace: i64 = 0;
+    let mut current: i64 = 0;
+    let bytes_len = bytes.len() as i64;
+    let brk_len = brk_bytes.len() as i64;
 
-    while current < bytes.len() {
-        let ch = bytes[current];
+    while current < bytes_len {
+        let ch = bytes[current as usize];
 
         // Check for existing break string in text
         if ch == brk_bytes[0]
-            && current + brk_bytes.len() <= bytes.len()
-            && &bytes[current..current + brk_bytes.len()] == brk_bytes
+            && current + brk_len <= bytes_len
+            && &bytes[current as usize..(current + brk_len) as usize] == brk_bytes
         {
             // Copy everything from laststart through the break string
-            result.extend_from_slice(&bytes[laststart..current + brk_bytes.len()]);
-            current += brk_bytes.len();
+            result.extend_from_slice(&bytes[laststart as usize..(current + brk_len) as usize]);
+            current += brk_len;
             laststart = current;
             lastspace = current;
             continue;
         } else if ch == b' ' {
             if current - laststart >= width {
                 // Line is long enough - break at this space (replace space with break)
-                result.extend_from_slice(&bytes[laststart..current]);
+                result.extend_from_slice(&bytes[laststart as usize..current as usize]);
                 result.extend_from_slice(brk_bytes);
                 laststart = current + 1;
             }
             lastspace = current;
         } else if current - laststart >= width && cut_long && laststart >= lastspace {
             // Force cut at current position (no valid space available)
-            result.extend_from_slice(&bytes[laststart..current]);
+            result.extend_from_slice(&bytes[laststart as usize..current as usize]);
             result.extend_from_slice(brk_bytes);
             laststart = current;
             lastspace = current;
-            continue; // re-examine current character (like PHP's chk--)
+            // No `continue;` here — PHP's chk-- compensates for the chk++
+            // at the top of the loop, but we increment `current` at the
+            // bottom only, so leaving the fall-through keeps us advancing.
         } else if current - laststart >= width && laststart < lastspace {
             // Break at last recorded space
-            result.extend_from_slice(&bytes[laststart..lastspace]);
+            result.extend_from_slice(&bytes[laststart as usize..lastspace as usize]);
             result.extend_from_slice(brk_bytes);
             laststart = lastspace + 1;
             lastspace = laststart;
@@ -3739,8 +3769,8 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     // Append remaining
-    if laststart < bytes.len() {
-        result.extend_from_slice(&bytes[laststart..]);
+    if laststart < bytes_len {
+        result.extend_from_slice(&bytes[laststart as usize..]);
     }
 
     Ok(Value::String(PhpString::from_vec(result)))

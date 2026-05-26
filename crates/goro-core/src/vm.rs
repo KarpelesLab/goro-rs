@@ -327,6 +327,9 @@ pub struct Vm {
     fiber_stack: Vec<Option<Value>>,
     /// Whether exit() or die() has been called (signals script termination)
     pub exit_requested: bool,
+    /// Set to true when emit_fatal_at has already written the "Fatal error: ..."
+    /// line to vm.output, so the top-level error handler does not re-emit it.
+    pub fatal_emitted: bool,
     /// Stack of property names whose hooks are currently executing (recursion guard)
     property_hook_stack: Vec<Vec<u8>>,
     /// CVs returned from the most recent include/eval execution (for scope sharing)
@@ -448,6 +451,7 @@ impl Vm {
             current_fiber: None,
             fiber_stack: Vec::new(),
             exit_requested: false,
+            fatal_emitted: false,
             property_hook_stack: Vec::new(),
             include_return_cvs: None,
             included_files: std::collections::HashSet::new(),
@@ -2019,6 +2023,17 @@ impl Vm {
             let warning = format!("\nWarning: {} in {} on line {}\n", msg, self.current_file, line);
             self.output.extend_from_slice(warning.as_bytes());
         }
+    }
+
+    /// Emit a PHP "Fatal error" line directly to output and return a VmError
+    /// that callers should propagate up. The error message is *not* wrapped
+    /// in an exception — fatal errors halt execution unconditionally. Sets
+    /// `self.fatal_emitted` so the top-level handler does not re-emit it.
+    pub fn emit_fatal_at(&mut self, msg: &str, line: u32) -> VmError {
+        let fatal = format!("\nFatal error: {} in {} on line {}\n", msg, self.current_file, line);
+        self.output.extend_from_slice(fatal.as_bytes());
+        self.fatal_emitted = true;
+        VmError { message: msg.to_string(), line }
     }
 
     /// Emit a PHP notice

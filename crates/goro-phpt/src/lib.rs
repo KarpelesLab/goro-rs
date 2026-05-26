@@ -1349,12 +1349,12 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                     fatal.push_str(&format!("\n  thrown in {} on line {}\n", thrown_file, thrown_line));
 
                     output.extend_from_slice(fatal.as_bytes());
-                } else {
+                } else if !vm.fatal_emitted {
                     let fatal =
                         format!("\nFatal error: {} in {} on line {}", e.message, vm.current_file, e.line);
                     output.extend_from_slice(fatal.as_bytes());
                 }
-            } else {
+            } else if !vm.fatal_emitted {
                 let fatal = format!(
                     "\nFatal error: {} in {} on line {}\n",
                     e.message, vm.current_file, e.line
