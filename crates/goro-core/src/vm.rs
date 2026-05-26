@@ -19202,16 +19202,48 @@ impl Vm {
                                 }
                             }
                         }
-                        // Non-strict mode: emit "Implicit conversion from float X to int loses precision"
-                        // when a float argument with non-integer fractional part is passed to an int parameter.
+                        // Non-strict mode: emit "Implicit conversion from float X to int loses precision".
+                        // Also throws TypeError for NaN/Inf passed to int params (PHP 8.1+).
                         if !op_array.strict_types {
                             if let Some(param_types) = self.builtin_param_types.get(&func_name_lower).cloned() {
+                                let mut nan_inf_err: Option<(usize, ParamType)> = None;
                                 for (i, arg) in call.args.iter().enumerate() {
                                     if i >= param_types.len() {
                                         break;
                                     }
                                     if let Some(ref pt) = param_types[i] {
                                         self.emit_implicit_float_to_int_if_needed(arg, pt, op.line);
+                                        // NaN/Inf -> int is rejected with TypeError in PHP 8.1+
+                                        let val = arg.deref();
+                                        if let Value::Double(f) = &val {
+                                            if !f.is_finite() && Self::param_type_coerces_float_to_int(pt) {
+                                                nan_inf_err = Some((i, pt.clone()));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some((i, pt)) = nan_inf_err {
+                                    let expected = self.param_type_display(&pt);
+                                    let display_name = call.name.to_string_lossy();
+                                    let param_name = self.builtin_param_names.get(&func_name_lower)
+                                        .and_then(|names| names.get(i))
+                                        .map(|n| String::from_utf8_lossy(n).to_string())
+                                        .unwrap_or_else(|| format!("arg{}", i + 1));
+                                    let err_msg = format!(
+                                        "{}(): Argument #{} (${}) must be of type {}, float given",
+                                        display_name, i + 1, param_name, expected
+                                    );
+                                    let exc_val = self.create_exception(b"TypeError", &err_msg, op.line);
+                                    self.current_exception = Some(exc_val);
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    } else {
+                                        return Err(VmError {
+                                            message: format!("Uncaught TypeError: {}", err_msg),
+                                            line: op.line,
+                                        });
                                     }
                                 }
                             }

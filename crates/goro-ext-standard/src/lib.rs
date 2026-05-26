@@ -83,6 +83,7 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"htmlentities", b"string", b"flags", b"encoding", b"double_encode");
     params!(b"htmlspecialchars_decode", b"string", b"flags");
     params!(b"html_entity_decode", b"string", b"flags", b"encoding");
+    params!(b"get_html_translation_table", b"table", b"flags", b"encoding");
     params!(b"strip_tags", b"string", b"allowed_tags");
     params!(b"addslashes", b"string");
     params!(b"stripslashes", b"string");

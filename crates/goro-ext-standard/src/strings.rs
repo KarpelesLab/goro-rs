@@ -164,6 +164,11 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"quotemeta", vec![s()]);
     vm.register_builtin_param_types(b"str_increment", vec![s()]);
     vm.register_builtin_param_types(b"str_decrement", vec![s()]);
+    vm.register_builtin_param_types(b"get_html_translation_table", vec![i(), i(), s()]);
+    vm.register_builtin_param_types(b"htmlspecialchars", vec![s(), i(), s(), None]);
+    vm.register_builtin_param_types(b"htmlspecialchars_decode", vec![s(), i()]);
+    vm.register_builtin_param_types(b"htmlentities", vec![s(), i(), s(), None]);
+    vm.register_builtin_param_types(b"html_entity_decode", vec![s(), i(), s()]);
 }
 
 fn strlen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
