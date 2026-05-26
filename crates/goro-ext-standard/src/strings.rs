@@ -2503,177 +2503,245 @@ fn soundex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(result)))
 }
 
-fn metaphone(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Faithful port of PHP's ext/standard/metaphone.c (traditional=1).
     let word = args.first().unwrap_or(&Value::Null).to_php_string();
     let max_phonemes = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    let word_str = word.to_string_lossy().to_uppercase();
-    let chars: Vec<char> = word_str.chars().filter(|c| c.is_ascii_alphabetic()).collect();
-    if chars.is_empty() {
+    if max_phonemes < 0 {
+        let msg = "metaphone(): Argument #2 ($max_phonemes) must be greater than or equal to 0".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let word_bytes = word.as_bytes();
+    let max = if max_phonemes > 0 { max_phonemes as usize } else { usize::MAX };
+
+    // _codes table from metachar.h, indexed by letter (A-Z, uppercase).
+    // bit 0: vowel (AEIOU)
+    // bit 1: passthrough (FJMNR)
+    // bit 2: AFFECTH (CGPST) — diphthong-former before H
+    // bit 3: MAKESOFT (EIY) — makes C/G soft
+    // bit 4: NOGHTOF (BDH) — prevents GH→F
+    const CODES: [u8; 26] = [
+        1, 16, 4, 16, 9, 2, 4, 16, 9, 2, 0, 2, 2, 2, 1, 4, 0, 2, 4, 4, 1, 0, 0, 0, 8, 0,
+    ];
+    let encode = |c: u8| -> u8 {
+        if c.is_ascii_alphabetic() {
+            CODES[(c.to_ascii_uppercase() - b'A') as usize]
+        } else { 0 }
+    };
+    let isvowel = |c: u8| encode(c) & 1 != 0;
+    let affecth = |c: u8| encode(c) & 4 != 0;
+    let makesoft = |c: u8| encode(c) & 8 != 0;
+    let noghtof = |c: u8| encode(c) & 16 != 0;
+    let isbreak = |c: u8| !c.is_ascii_alphabetic();
+
+    let convert_raw = |c: u8| c.to_ascii_uppercase();
+
+    let read_at = |idx: usize| -> u8 {
+        if idx < word_bytes.len() { word_bytes[idx] } else { 0 }
+    };
+    let read_letter_at = |idx: usize| -> u8 { convert_raw(read_at(idx)) };
+
+    let mut result: Vec<u8> = Vec::new();
+    // Find first letter.
+    let mut w_idx: usize = 0;
+    while w_idx < word_bytes.len() && !word_bytes[w_idx].is_ascii_alphabetic() {
+        w_idx += 1;
+    }
+    if w_idx >= word_bytes.len() {
         return Ok(Value::String(PhpString::empty()));
     }
-    let mut result = String::new();
-    let max = if max_phonemes > 0 { max_phonemes as usize } else { usize::MAX };
-    let len = chars.len();
 
-    // Helper closures
-    let at = |i: usize| -> char { if i < len { chars[i] } else { '\0' } };
-    let is_vowel = |c: char| -> bool { matches!(c, 'A' | 'E' | 'I' | 'O' | 'U') };
+    let phonize = |result: &mut Vec<u8>, c: u8| {
+        if result.len() < max {
+            result.push(c);
+        }
+    };
 
-    let mut i = 0;
-    let mut last = '\0';
-    // Skip initial silent letters
-    match (at(0), at(1)) {
-        ('A', 'E') | ('G', 'N') | ('K', 'N') | ('P', 'N') | ('W', 'R') => i = 1,
-        ('W', 'H') => {
-            // WH at start: produce W, skip H
-            result.push('W');
-            last = 'W';
-            i = 2;
-        },
-        _ => {}
+    // First letter handling
+    let first = read_letter_at(w_idx);
+    match first {
+        b'A' => {
+            // AE becomes E, else A (preserve initial vowel)
+            if read_letter_at(w_idx + 1) == b'E' {
+                phonize(&mut result, b'E');
+                w_idx += 2;
+            } else {
+                phonize(&mut result, b'A');
+                w_idx += 1;
+            }
+        }
+        b'G' | b'K' | b'P' => {
+            // [GKP]N becomes N
+            if read_letter_at(w_idx + 1) == b'N' {
+                phonize(&mut result, b'N');
+                w_idx += 2;
+            }
+            // Else: do nothing, w_idx stays — main loop will process it
+        }
+        b'W' => {
+            let next = read_letter_at(w_idx + 1);
+            if next == b'R' {
+                phonize(&mut result, b'R');
+                w_idx += 2;
+            } else if next == b'H' || isvowel(next) {
+                phonize(&mut result, b'W');
+                w_idx += 2;
+            }
+            // else: ignore (drop W), w_idx stays
+        }
+        b'X' => {
+            // X becomes S at start
+            phonize(&mut result, b'S');
+            w_idx += 1;
+        }
+        b'E' | b'I' | b'O' | b'U' => {
+            // Vowels are preserved at the start
+            phonize(&mut result, first);
+            w_idx += 1;
+        }
+        _ => {
+            // No first-letter encoding; main loop will handle this letter
+        }
     }
-    while i < len && result.len() < max {
-        let c = at(i);
-        if c == last && c != 'C' {
-            i += 1;
+
+    // Main loop
+    while w_idx < word_bytes.len() && result.len() < max {
+        let raw = word_bytes[w_idx];
+        if !raw.is_ascii_alphabetic() {
+            w_idx += 1;
+            continue;
+        }
+        let curr = convert_raw(raw);
+        // Look at previous letter (in the raw input)
+        let prev = if w_idx >= 1 { convert_raw(word_bytes[w_idx - 1]) } else { 0 };
+
+        // Drop duplicates, except CC
+        if curr == prev && curr != b'C' {
+            w_idx += 1;
             continue;
         }
 
-        match c {
-            'A' | 'E' | 'I' | 'O' | 'U' => {
-                if i == 0 || (i == 1 && chars[0] == 'W' && chars[1] == 'H') {
-                    result.push(c);
-                    last = c;
-                }
+        let mut skip = 0usize;
+        let next = read_letter_at(w_idx + 1);
+        let after_next = read_letter_at(w_idx + 2);
+
+        match curr {
+            b'B' => {
+                if prev != b'M' { phonize(&mut result, b'B'); }
             }
-            'B' => {
-                if i == 0 || at(i.wrapping_sub(1)) != 'M' {
-                    result.push('B');
-                    last = 'B';
-                }
-            }
-            'C' => {
-                if at(i + 1) == 'H' {
-                    result.push('X');
-                    last = 'X';
-                    i += 1; // skip H
-                } else if at(i + 1) == 'I' || at(i + 1) == 'E' || at(i + 1) == 'Y' {
-                    if at(i + 1) == 'I' && at(i + 2) == 'A' {
-                        result.push('X');
-                        last = 'X';
-                    } else if i > 0 && at(i - 1) == 'S' {
-                        // SC[IEY] - skip
-                        last = 'S';
+            b'C' => {
+                if makesoft(next) {
+                    // C[EIY]
+                    if next == b'I' && after_next == b'A' {
+                        phonize(&mut result, b'X');
+                    } else if prev == b'S' {
+                        // SC[IEY] - dropped
                     } else {
-                        result.push('S');
-                        last = 'S';
+                        phonize(&mut result, b'S');
                     }
+                } else if next == b'H' {
+                    // CH - SH (traditional=1 in PHP's metaphone)
+                    phonize(&mut result, b'X');
+                    skip += 1;
                 } else {
-                    result.push('K');
-                    last = 'K';
+                    phonize(&mut result, b'K');
                 }
             }
-            'D' => {
-                if at(i + 1) == 'G' && (at(i + 2) == 'I' || at(i + 2) == 'E' || at(i + 2) == 'Y') {
-                    result.push('J');
-                    last = 'J';
+            b'D' => {
+                if next == b'G' && makesoft(after_next) {
+                    phonize(&mut result, b'J');
+                    skip += 1;
                 } else {
-                    result.push('T');
-                    last = 'T';
+                    phonize(&mut result, b'T');
                 }
             }
-            'F' => { result.push('F'); last = 'F'; }
-            'G' => {
-                if i + 1 < len && at(i + 1) == 'H' && i + 2 < len && !is_vowel(at(i + 2)) {
-                    // GH not followed by vowel - skip
-                    last = 'G';
-                } else if i > 0 && ((i + 1 >= len) || (at(i + 1) == 'N' && (i + 2 >= len || at(i + 2) == 'E' && i + 3 >= len))) {
-                    // Silent G at end
-                    last = 'G';
-                } else if i > 0 && i + 1 < len && at(i - 1) == 'D' && (at(i + 1) == 'E' || at(i + 1) == 'I' || at(i + 1) == 'Y') {
-                    // DGE, DGI, DGY - already handled as J
-                    last = 'G';
-                } else {
-                    if i > 0 && at(i + 1) == 'H' && is_vowel(at(i + 2)) {
-                        // GH before vowel
-                        last = 'G';
-                    } else if at(i + 1) != 'H' || (i + 2 < len && is_vowel(at(i + 2))) {
-                        result.push('K');
-                        last = 'K';
+            b'G' => {
+                if next == b'H' {
+                    let look3 = if w_idx >= 3 { convert_raw(word_bytes[w_idx - 3]) } else { 0 };
+                    let look4 = if w_idx >= 4 { convert_raw(word_bytes[w_idx - 4]) } else { 0 };
+                    if !(noghtof(look3) || look4 == b'H') {
+                        phonize(&mut result, b'F');
+                        skip += 1;
+                    }
+                    // else silent
+                } else if next == b'N' {
+                    // -GN dropped if at break or -GNED
+                    let after_next_raw = read_at(w_idx + 2);
+                    let look_ahead_3 = read_letter_at(w_idx + 3);
+                    if isbreak(after_next_raw) || (after_next == b'E' && look_ahead_3 == b'D') {
+                        // dropped
                     } else {
-                        last = 'G';
+                        phonize(&mut result, b'K');
                     }
-                }
-            }
-            'H' => {
-                if is_vowel(at(i + 1)) && (i == 0 || !is_vowel(at(i - 1))) {
-                    result.push('H');
-                    last = 'H';
-                }
-            }
-            'J' => { result.push('J'); last = 'J'; }
-            'K' => {
-                if i == 0 || at(i - 1) != 'C' {
-                    result.push('K');
-                    last = 'K';
-                }
-            }
-            'L' => { result.push('L'); last = 'L'; }
-            'M' => { result.push('M'); last = 'M'; }
-            'N' => { result.push('N'); last = 'N'; }
-            'P' => {
-                if at(i + 1) == 'H' {
-                    result.push('F');
-                    last = 'F';
-                    i += 1;
+                } else if makesoft(next) && prev != b'G' {
+                    phonize(&mut result, b'J');
                 } else {
-                    result.push('P');
-                    last = 'P';
+                    phonize(&mut result, b'K');
                 }
             }
-            'Q' => { result.push('K'); last = 'K'; }
-            'R' => { result.push('R'); last = 'R'; }
-            'S' => {
-                if at(i + 1) == 'H' || (at(i + 1) == 'I' && (at(i + 2) == 'A' || at(i + 2) == 'O')) {
-                    result.push('X');
-                    last = 'X';
-                    if at(i + 1) == 'H' { i += 1; }
+            b'H' => {
+                if isvowel(next) && !affecth(prev) {
+                    phonize(&mut result, b'H');
+                }
+            }
+            b'K' => {
+                if prev != b'C' { phonize(&mut result, b'K'); }
+            }
+            b'P' => {
+                if next == b'H' {
+                    phonize(&mut result, b'F');
                 } else {
-                    result.push('S');
-                    last = 'S';
+                    phonize(&mut result, b'P');
                 }
             }
-            'T' => {
-                if at(i + 1) == 'H' {
-                    result.push('0');
-                    last = '0';
-                    i += 1;
-                } else if at(i + 1) == 'I' && (at(i + 2) == 'A' || at(i + 2) == 'O') {
-                    result.push('X');
-                    last = 'X';
+            b'Q' => { phonize(&mut result, b'K'); }
+            b'S' => {
+                if next == b'I' && (after_next == b'O' || after_next == b'A') {
+                    phonize(&mut result, b'X');
+                } else if next == b'H' {
+                    phonize(&mut result, b'X');
+                    skip += 1;
                 } else {
-                    result.push('T');
-                    last = 'T';
+                    phonize(&mut result, b'S');
                 }
             }
-            'V' => { result.push('F'); last = 'F'; }
-            'W' | 'Y' => {
-                if i + 1 < len && is_vowel(at(i + 1)) {
-                    result.push(c);
-                    last = c;
+            b'T' => {
+                if next == b'I' && (after_next == b'O' || after_next == b'A') {
+                    phonize(&mut result, b'X');
+                } else if next == b'H' {
+                    phonize(&mut result, b'0');
+                    skip += 1;
+                } else if !(next == b'C' && after_next == b'H') {
+                    // TCH is silent (skip T, let CH handle on next iteration)
+                    phonize(&mut result, b'T');
                 }
             }
-            'X' => {
-                result.push('K');
-                if result.len() < max { result.push('S'); }
-                last = 'S';
+            b'V' => { phonize(&mut result, b'F'); }
+            b'W' => {
+                if isvowel(next) { phonize(&mut result, b'W'); }
             }
-            'Z' => { result.push('S'); last = 'S'; }
+            b'X' => {
+                phonize(&mut result, b'K');
+                phonize(&mut result, b'S');
+            }
+            b'Y' => {
+                if isvowel(next) { phonize(&mut result, b'Y'); }
+            }
+            b'Z' => { phonize(&mut result, b'S'); }
+            b'F' | b'J' | b'L' | b'M' | b'N' | b'R' => {
+                phonize(&mut result, curr);
+            }
             _ => {}
         }
-        i += 1;
+        w_idx += 1 + skip;
     }
-    Ok(Value::String(PhpString::from_string(result)))
+
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 
 fn levenshtein(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
