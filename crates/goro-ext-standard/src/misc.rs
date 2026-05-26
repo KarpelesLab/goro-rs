@@ -11884,6 +11884,34 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
+    // Caller-scope visibility filter: only return properties the calling
+    // class would be allowed to see. Mirrors what PHP's get_class_vars
+    // does at the engine level. Compare scopes in lowercase form because
+    // PHP class names are case-insensitive and declaring_class is stored
+    // lowercase.
+    let caller_scope: Option<Vec<u8>> = vm.current_class_scope()
+        .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect());
+    let target_inherits_caller = if let Some(scope) = &caller_scope {
+        vm.class_extends(&name_lower, scope) || name_lower == *scope
+    } else { false };
+    let caller_inherits_target = if let Some(scope) = &caller_scope {
+        vm.class_extends(scope, &name_lower) || name_lower == *scope
+    } else { false };
+    let can_see = |prop: &goro_core::object::PropertyDef| -> bool {
+        match prop.visibility {
+            goro_core::object::Visibility::Public => true,
+            goro_core::object::Visibility::Protected => {
+                // Visible from the declaring class or any class in the
+                // hierarchy that joins it.
+                target_inherits_caller || caller_inherits_target
+            }
+            goro_core::object::Visibility::Private => {
+                // Visible only when the caller is exactly the declaring
+                // class of this property.
+                caller_scope.as_deref() == Some(prop.declaring_class.as_slice())
+            }
+        }
+    };
     let mut result = PhpArray::new();
     if let Some(class) = vm.classes.get(&name_lower) {
         // Non-static properties first, then static
@@ -11891,6 +11919,9 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if !prop.is_static {
                 // Skip virtual properties (no backing storage)
                 if prop.is_virtual {
+                    continue;
+                }
+                if !can_see(prop) {
                     continue;
                 }
                 // Uninitialized typed properties (Undef) are returned as null
@@ -11907,6 +11938,9 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Static properties
         for prop in &class.properties {
             if prop.is_static {
+                if !can_see(prop) {
+                    continue;
+                }
                 // Get current value from static_properties (may have been modified at runtime)
                 let val = class.static_properties.get(&prop.name)
                     .cloned()
