@@ -2264,43 +2264,98 @@ fn str_getcsv(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn strtr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let subject = args.first().unwrap_or(&Value::Null).to_php_string();
 
-    // Two forms: strtr($str, $from, $to) or strtr($str, $replacements_array)
+    // PHP shortcuts an empty subject before doing any work — no warnings
+    // are emitted even when the replacement set contains empty keys.
+    if subject.as_bytes().is_empty() {
+        return Ok(Value::String(subject));
+    }
+
+    // Two forms: strtr($str, $from, $to) or strtr($str, $replacements_array).
+    // The 3-arg form requires $from to be a string (scalars coerce; null emits
+    // a deprecation); array and resource raise TypeError. The 2-arg form
+    // requires $from to be an array; everything else raises TypeError.
     if args.len() >= 3 {
+        let from_val = args[1].deref();
+        match &from_val {
+            Value::Array(_) => {
+                let msg = "strtr(): Argument #2 ($from) must be of type string, array given".to_string();
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            Value::Resource(_) => {
+                let msg = "strtr(): Argument #2 ($from) must be of type string, resource given".to_string();
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+            Value::Null | Value::Undef => {
+                vm.emit_deprecated_at(
+                    "strtr(): Passing null to parameter #2 ($from) of type array|string is deprecated",
+                    vm.current_line,
+                );
+            }
+            Value::Object(obj) => {
+                // Only objects with __toString coerce cleanly to a string; the
+                // rest must raise TypeError like for any string-typed param.
+                let class_lower: Vec<u8> =
+                    obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let has_to_string = vm
+                    .classes
+                    .get(&class_lower)
+                    .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                    .unwrap_or(false);
+                if !has_to_string {
+                    let type_name = Vm::value_type_name(&from_val);
+                    let msg = format!("strtr(): Argument #2 ($from) must be of type string, {} given", type_name);
+                    let exc = vm.throw_type_error(msg.clone());
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
+                }
+            }
+            _ => {}
+        }
         let from = args[1].to_php_string();
         let to = args[2].to_php_string();
         let from_bytes = from.as_bytes();
         let to_bytes = to.as_bytes();
-        let mut result: Vec<u8> = subject.as_bytes().to_vec();
         let min_len = from_bytes.len().min(to_bytes.len());
+        // PHP keeps the LAST mapping when a byte appears twice in $from, so
+        // iterate forward and overwrite rather than break on first match.
+        let mut map: [Option<u8>; 256] = [None; 256];
+        for i in 0..min_len {
+            map[from_bytes[i] as usize] = Some(to_bytes[i]);
+        }
+        let mut result: Vec<u8> = subject.as_bytes().to_vec();
         for byte in &mut result {
-            for i in 0..min_len {
-                if *byte == from_bytes[i] {
-                    *byte = to_bytes[i];
-                    break;
-                }
+            if let Some(r) = map[*byte as usize] {
+                *byte = r;
             }
         }
         Ok(Value::String(PhpString::from_vec(result)))
     } else if let Some(Value::Array(replacements)) = args.get(1) {
         let replacements = replacements.borrow();
-        // Sort by key length descending for correct replacement order
-        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = replacements
-            .iter()
-            .filter_map(|(k, v)| {
-                let key = match k {
-                    goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
-                    goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
-                };
-                if key.is_empty() {
-                    None
-                } else {
-                    Some((key, v.to_php_string().as_bytes().to_vec()))
-                }
-            })
-            .collect();
+        // Sort by key length descending for correct replacement order; PHP
+        // also warns when a replacement key is the empty string and ignores
+        // that pair entirely.
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(replacements.len());
+        for (k, v) in replacements.iter() {
+            let key = match k {
+                goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+            };
+            if key.is_empty() {
+                vm.emit_warning_at(
+                    "strtr(): Ignoring replacement of empty string",
+                    vm.current_line,
+                );
+                continue;
+            }
+            pairs.push((key, v.to_php_string().as_bytes().to_vec()));
+        }
         pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
         let src = subject.as_bytes();
@@ -2327,9 +2382,9 @@ fn strtr(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let val = &args[1];
         let type_name = goro_core::vm::Vm::value_type_name(val);
         let msg = format!("strtr(): Argument #2 ($from) must be of type array, {} given", type_name);
-        let exc = _vm.throw_type_error(msg.clone());
-        _vm.current_exception = Some(exc);
-        Err(goro_core::vm::VmError { message: msg, line: _vm.current_line })
+        let exc = vm.throw_type_error(msg.clone());
+        vm.current_exception = Some(exc);
+        Err(VmError { message: msg, line: vm.current_line })
     } else {
         Ok(Value::String(subject))
     }
