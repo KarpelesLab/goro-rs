@@ -17351,8 +17351,14 @@ impl Vm {
                         if let Some(Value::Reference(r)) = cvs.get(i) {
                             Value::Reference(r.clone())
                         } else {
-                            // Create a new reference for the variable
-                            let current = cvs.get(i).cloned().unwrap_or(Value::Null);
+                            // Create a new reference for the variable. PHP's
+                            // auto-vivification for by-ref params produces a
+                            // NULL slot (not Undef) so subsequent reads of
+                            // the var don't emit "Undefined variable".
+                            let current = match cvs.get(i) {
+                                Some(Value::Undef) | None => Value::Null,
+                                Some(v) => v.clone(),
+                            };
                             let r = Rc::new(RefCell::new(current));
                             cvs[i] = Value::Reference(r.clone());
                             Value::Reference(r)

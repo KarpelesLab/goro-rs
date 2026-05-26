@@ -5916,11 +5916,11 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             sscanf_put(&mut results, cur_slot, Value::Long(val));
                         }
                     } else {
-                        // Roll back if we consumed just a sign.
+                        // Conversion failed: roll back the input cursor and stop
+                        // parsing entirely. PHP leaves any remaining ref args at
+                        // their previous values (does NOT assign NULL).
                         input_pos = start;
-                        if !suppress {
-                            sscanf_put(&mut results, cur_slot, Value::Null);
-                        }
+                        break;
                     }
                 }
                 b'x' | b'X' => {
@@ -6033,12 +6033,10 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     }
                     if !saw_digit {
-                        // No digits matched — roll back and push NULL.
+                        // No digits matched — roll back and stop parsing.
                         input_pos = start;
                         let _ = int_start;
-                        if !suppress {
-                            sscanf_put(&mut results, cur_slot, Value::Null);
-                        }
+                        break;
                     } else if !suppress {
                         let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
                         let val = s.parse::<f64>().unwrap_or(0.0);
@@ -6047,7 +6045,7 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 b's' => {
                     // Read non-whitespace string. If no characters consumed,
-                    // result is NULL (PHP behavior).
+                    // stop parsing — PHP leaves remaining ref args untouched.
                     let start = input_pos;
                     let max = width.unwrap_or(usize::MAX);
                     let mut count = 0;
@@ -6055,12 +6053,11 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         input_pos += 1;
                         count += 1;
                     }
+                    if input_pos == start {
+                        break;
+                    }
                     if !suppress {
-                        if input_pos > start {
-                            sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
-                        } else {
-                            sscanf_put(&mut results, cur_slot, Value::Null);
-                        }
+                        sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
                     }
                 }
                 b'c' => {
@@ -6074,12 +6071,11 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         input_pos += 1;
                         count += 1;
                     }
+                    if input_pos == start {
+                        break;
+                    }
                     if !suppress {
-                        if input_pos > start {
-                            sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
-                        } else {
-                            sscanf_put(&mut results, cur_slot, Value::Null);
-                        }
+                        sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
                     }
                 }
                 b'n' => {
@@ -6136,12 +6132,11 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         input_pos += 1;
                         count += 1;
                     }
+                    if input_pos == start {
+                        break;
+                    }
                     if !suppress {
-                        if input_pos > start {
-                            sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
-                        } else {
-                            sscanf_put(&mut results, cur_slot, Value::Null);
-                        }
+                        sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
                     }
                 }
                 _ => {
@@ -6172,10 +6167,13 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 input_pos += 1;
             }
         } else {
-            // Literal match
-            if input_pos < input_bytes.len() && input_bytes[input_pos] == format_bytes[fmt_pos] {
-                input_pos += 1;
+            // Literal match: a mismatch stops parsing entirely (matches
+            // PHP/C scanf — refusing to skip the literal keeps the rest
+            // of the format unattempted).
+            if input_pos >= input_bytes.len() || input_bytes[input_pos] != format_bytes[fmt_pos] {
+                break;
             }
+            input_pos += 1;
             fmt_pos += 1;
         }
     }
@@ -6189,22 +6187,18 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    // PHP pads result slots up to the total number of conversion specifiers
-    // declared in the format (slots a conversion couldn't fill become NULL).
-    let total_slots = count_sscanf_total_slots(format_bytes);
-    while results.len() < total_slots {
-        results.push(Value::Null);
-    }
-
     if has_refs {
-        // Write results to reference arguments. PHP's return value is the
-        // count of successful conversions (not the slot count), and slots
-        // that never received a value are written as NULL.
-        let successful = results
-            .iter()
-            .filter(|v| !matches!(v, Value::Null))
-            .count();
+        // With reference args, PHP only assigns the ref args that
+        // successfully matched; refs corresponding to slots that were
+        // never filled (or filled with NULL by an explicit empty %s/%c/%[
+        // match) keep their previous value. Return value is the number
+        // of successful conversions.
+        let mut successful = 0usize;
         for (i, val) in results.iter().enumerate() {
+            if matches!(val, Value::Null) {
+                continue;
+            }
+            successful += 1;
             if let Some(arg) = args.get(i + 2) {
                 if let Value::Reference(r) = arg {
                     *r.borrow_mut() = val.clone();
@@ -6213,6 +6207,12 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Ok(Value::Long(successful as i64))
     } else {
+        // Array-return form: pad to the total slot count so unfilled
+        // slots are explicit NULLs in the returned array.
+        let total_slots = count_sscanf_total_slots(format_bytes);
+        while results.len() < total_slots {
+            results.push(Value::Null);
+        }
         let mut arr = PhpArray::new();
         for val in results {
             arr.push(val);
