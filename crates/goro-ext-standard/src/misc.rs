@@ -5603,6 +5603,177 @@ fn sscanf_put(results: &mut Vec<Value>, slot: usize, v: Value) {
     results[slot] = v;
 }
 
+/// Return the total number of result slots `format` defines, i.e. the size of
+/// the array sscanf() returns when no ref arguments are given. PHP pads with
+/// NULL for slots no conversion could fill.
+fn count_sscanf_total_slots(format: &[u8]) -> usize {
+    let mut next_slot: usize = 0;
+    let mut max_slot_seen: Option<usize> = None;
+    let mut i = 0;
+    while i < format.len() {
+        if format[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i >= format.len() {
+            break;
+        }
+        if format[i] == b'%' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < format.len() && format[i].is_ascii_digit() {
+            i += 1;
+        }
+        let mut cur_slot: Option<usize> = None;
+        if i > start && i < format.len() && format[i] == b'$' {
+            let n: usize = std::str::from_utf8(&format[start..i])
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            i += 1;
+            if n > 0 {
+                cur_slot = Some(n - 1);
+            }
+        } else {
+            i = start;
+        }
+        let mut suppress = false;
+        if i < format.len() && format[i] == b'*' {
+            suppress = true;
+            i += 1;
+        }
+        while i < format.len() && format[i].is_ascii_digit() {
+            i += 1;
+        }
+        while i < format.len() && matches!(format[i], b'h' | b'l' | b'L' | b'j' | b'z' | b't' | b'q') {
+            i += 1;
+        }
+        if i >= format.len() {
+            break;
+        }
+        let spec = format[i];
+        i += 1;
+        if spec == b'[' {
+            if i < format.len() && format[i] == b'^' {
+                i += 1;
+            }
+            if i < format.len() && format[i] == b']' {
+                i += 1;
+            }
+            while i < format.len() && format[i] != b']' {
+                i += 1;
+            }
+            if i < format.len() {
+                i += 1;
+            }
+        }
+        if suppress {
+            continue;
+        }
+        let slot = cur_slot.unwrap_or(next_slot);
+        max_slot_seen = Some(max_slot_seen.map_or(slot, |m| m.max(slot)));
+        next_slot = slot + 1;
+    }
+    max_slot_seen.map_or(0, |m| m + 1)
+}
+
+/// Count how many output slots each variable receives via scanf conversion
+/// specifiers in `format`. Used by sscanf_fn to detect var/specifier mismatch
+/// before performing the scan, mirroring PHP's ValidateFormat phase.
+fn validate_sscanf_format(format: &[u8], num_vars: usize) -> Result<(), String> {
+    let mut nassign: Vec<usize> = vec![0; num_vars];
+    let mut next_slot: usize = 0;
+    let mut got_xpg = false;
+    let mut i = 0;
+    while i < format.len() {
+        if format[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i >= format.len() {
+            break;
+        }
+        if format[i] == b'%' {
+            i += 1;
+            continue;
+        }
+        // Positional spec: %N$
+        let start = i;
+        while i < format.len() && format[i].is_ascii_digit() {
+            i += 1;
+        }
+        let mut cur_slot: Option<usize> = None;
+        if i > start && i < format.len() && format[i] == b'$' {
+            let n: usize = std::str::from_utf8(&format[start..i])
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            i += 1;
+            if n > 0 {
+                cur_slot = Some(n - 1);
+                got_xpg = true;
+            }
+        } else {
+            i = start;
+        }
+        // Suppression %*
+        let mut suppress = false;
+        if i < format.len() && format[i] == b'*' {
+            suppress = true;
+            i += 1;
+        }
+        // Width digits
+        while i < format.len() && format[i].is_ascii_digit() {
+            i += 1;
+        }
+        // Length modifiers
+        while i < format.len() && matches!(format[i], b'h' | b'l' | b'L' | b'j' | b'z' | b't' | b'q') {
+            i += 1;
+        }
+        if i >= format.len() {
+            break;
+        }
+        let spec = format[i];
+        i += 1;
+        // Skip past `[...]` set body for %[ scanset.
+        if spec == b'[' {
+            if i < format.len() && format[i] == b'^' {
+                i += 1;
+            }
+            if i < format.len() && format[i] == b']' {
+                i += 1;
+            }
+            while i < format.len() && format[i] != b']' {
+                i += 1;
+            }
+            if i < format.len() {
+                i += 1;
+            }
+        }
+        if suppress {
+            continue;
+        }
+        let slot = cur_slot.unwrap_or(next_slot);
+        if slot < num_vars {
+            nassign[slot] += 1;
+        }
+        next_slot = slot + 1;
+    }
+    for &count in &nassign {
+        if count > 1 {
+            return Err("Variable is assigned by multiple \"%n$\" conversion specifiers".to_string());
+        }
+        if !got_xpg && count == 0 {
+            return Err("Variable is not assigned by any conversion specifiers".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null).to_php_string();
     let format = args.get(1).unwrap_or(&Value::Null).to_php_string();
@@ -5610,6 +5781,16 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let format_bytes = format.as_bytes();
 
     let has_refs = args.len() > 2;
+    // PHP validates that every supplied ref var is assigned by some specifier
+    // and that no slot is assigned twice. This runs before any scanning so the
+    // ValueError fires even when the input would have produced fewer results.
+    if has_refs {
+        if let Err(msg) = validate_sscanf_format(format_bytes, args.len() - 2) {
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+    }
     let mut results: Vec<Value> = Vec::new();
     let mut input_pos = 0usize;
     let mut fmt_pos = 0usize;
@@ -5743,35 +5924,77 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 b'x' | b'X' => {
-                    // Read hex integer
-                    if input_pos + 1 < input_bytes.len() && input_bytes[input_pos] == b'0'
-                        && (input_bytes[input_pos + 1] == b'x' || input_bytes[input_pos + 1] == b'X') {
-                        input_pos += 2;
-                    }
-                    let start = input_pos;
+                    // Read hex integer with optional leading sign and `0x` prefix.
+                    // If no digits match, roll back and stop parsing (PHP returns
+                    // the partial result up to this point).
+                    let entry_pos = input_pos;
                     let max = width.unwrap_or(usize::MAX);
                     let mut count = 0;
+                    let mut negative = false;
+                    if input_pos < input_bytes.len()
+                        && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+')
+                        && count < max
+                    {
+                        negative = input_bytes[input_pos] == b'-';
+                        input_pos += 1;
+                        count += 1;
+                    }
+                    if input_pos + 1 < input_bytes.len()
+                        && input_bytes[input_pos] == b'0'
+                        && (input_bytes[input_pos + 1] == b'x' || input_bytes[input_pos + 1] == b'X')
+                        && count + 2 <= max
+                    {
+                        input_pos += 2;
+                        count += 2;
+                    }
+                    let digit_start = input_pos;
                     while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_hexdigit() && count < max {
                         input_pos += 1;
                         count += 1;
                     }
+                    if input_pos == digit_start {
+                        input_pos = entry_pos;
+                        break;
+                    }
                     if !suppress {
-                        let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
-                        let val = i64::from_str_radix(s, 16).unwrap_or(0);
+                        let s = std::str::from_utf8(&input_bytes[digit_start..input_pos]).unwrap_or("0");
+                        let mut val = i64::from_str_radix(s, 16).unwrap_or(0);
+                        if negative {
+                            val = -val;
+                        }
                         sscanf_put(&mut results, cur_slot, Value::Long(val));
                     }
                 }
                 b'o' => {
-                    let start = input_pos;
+                    // Read octal integer with optional leading sign. As with %x,
+                    // if no digits match, roll back and stop parsing.
+                    let entry_pos = input_pos;
                     let max = width.unwrap_or(usize::MAX);
                     let mut count = 0;
+                    let mut negative = false;
+                    if input_pos < input_bytes.len()
+                        && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+')
+                        && count < max
+                    {
+                        negative = input_bytes[input_pos] == b'-';
+                        input_pos += 1;
+                        count += 1;
+                    }
+                    let digit_start = input_pos;
                     while input_pos < input_bytes.len() && input_bytes[input_pos] >= b'0' && input_bytes[input_pos] <= b'7' && count < max {
                         input_pos += 1;
                         count += 1;
                     }
+                    if input_pos == digit_start {
+                        input_pos = entry_pos;
+                        break;
+                    }
                     if !suppress {
-                        let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
-                        let val = i64::from_str_radix(s, 8).unwrap_or(0);
+                        let s = std::str::from_utf8(&input_bytes[digit_start..input_pos]).unwrap_or("0");
+                        let mut val = i64::from_str_radix(s, 8).unwrap_or(0);
+                        if negative {
+                            val = -val;
+                        }
                         sscanf_put(&mut results, cur_slot, Value::Long(val));
                     }
                 }
@@ -5966,8 +6189,21 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // PHP pads result slots up to the total number of conversion specifiers
+    // declared in the format (slots a conversion couldn't fill become NULL).
+    let total_slots = count_sscanf_total_slots(format_bytes);
+    while results.len() < total_slots {
+        results.push(Value::Null);
+    }
+
     if has_refs {
-        // Write results to reference arguments
+        // Write results to reference arguments. PHP's return value is the
+        // count of successful conversions (not the slot count), and slots
+        // that never received a value are written as NULL.
+        let successful = results
+            .iter()
+            .filter(|v| !matches!(v, Value::Null))
+            .count();
         for (i, val) in results.iter().enumerate() {
             if let Some(arg) = args.get(i + 2) {
                 if let Value::Reference(r) = arg {
@@ -5975,9 +6211,8 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
         }
-        Ok(Value::Long(results.len() as i64))
+        Ok(Value::Long(successful as i64))
     } else {
-        // Return array of results
         let mut arr = PhpArray::new();
         for val in results {
             arr.push(val);
