@@ -7453,6 +7453,11 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::from_string(String::new())));
     }
     for _ in 0..levels {
+        // Once result is a terminal value ("/" or "."), further iterations
+        // can't change it — short-circuit so we don't loop PHP_INT_MAX times.
+        if result == "/" || result == "." {
+            break;
+        }
         // Strip trailing slashes (but not the root /)
         while result.len() > 1 && result.ends_with('/') {
             result.pop();
