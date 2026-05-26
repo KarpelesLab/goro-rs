@@ -22598,6 +22598,39 @@ impl Vm {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                    // Array/object keys on a real array throw TypeError (matches
+                    // zend_illegal_container_offset). value_to_array_key_checked
+                    // silently maps both to Int(0), so check explicitly first.
+                    if matches!(&arr_val, Value::Array(_)) {
+                        let key_inner = match &key_val {
+                            Value::Reference(r) => r.borrow().clone(),
+                            other => other.clone(),
+                        };
+                        let illegal: Option<String> = match &key_inner {
+                            Value::Array(_) => Some("array".to_string()),
+                            Value::Object(o) => Some(
+                                crate::value::display_class_name(&o.borrow().class_name)
+                            ),
+                            _ => None,
+                        };
+                        if let Some(t) = illegal {
+                            let msg = format!("Cannot access offset of type {} on array", t);
+                            let exc = self.create_exception(b"TypeError", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                let ct = *catch_target;
+                                ip = ct as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
                         arr.borrow_mut().set(key, val);
@@ -22660,6 +22693,24 @@ impl Vm {
                             self.current_exception = Some(exc_val);
                             return Err(VmError { message: msg, line: op.line });
                         }
+                    } else if matches!(&arr_val, Value::True | Value::Long(_) | Value::Double(_)) {
+                        // Cannot use a scalar value as an array: $true[k]=v,
+                        // $42[k]=v, etc. PHP throws Error (not TypeError).
+                        let msg = "Cannot use a scalar value as an array".to_string();
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            let ct = *catch_target;
+                            ip = ct as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
                     } else if matches!(arr_val, Value::String(_)) {
                         // String offset write: $str[n] = 'x'.
                         // Validate the offset type the same way zend_check_string_offset
