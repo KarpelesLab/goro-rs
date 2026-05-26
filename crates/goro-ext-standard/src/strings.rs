@@ -3053,20 +3053,13 @@ fn strrchr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let haystack = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let needle = args.get(1).unwrap_or(&Value::Null);
     let before_needle = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
-    // strrchr uses only the first byte of the needle
-    // Empty needle => byte 0 (null byte) - legacy behavior preserved in PHP 8
-    let needle_byte = match needle {
-        Value::String(s) if !s.is_empty() => s.as_bytes()[0],
-        Value::String(_) => 0u8,  // empty string => null byte
-        Value::Long(n) => *n as u8,
-        Value::Null => 0u8,
-        Value::True => b'1',
-        Value::False => 0u8,
-        Value::Double(d) => *d as i64 as u8,
-        _ => {
-            let s = needle.to_php_string();
-            if s.is_empty() { 0u8 } else { s.as_bytes()[0] }
-        },
+    // PHP 8: needle is coerced to string (Z_PARAM_STR), then strrchr uses first byte.
+    // This means int 42 -> "42" -> first byte '4' (not ASCII char '*').
+    let needle_str = vm.value_to_string(needle);
+    let needle_byte = if needle_str.is_empty() {
+        0u8
+    } else {
+        needle_str.as_bytes()[0]
     };
     if let Some(pos) = haystack.as_bytes().iter().rposition(|&b| b == needle_byte) {
         if before_needle {
