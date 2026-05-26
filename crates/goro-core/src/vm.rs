@@ -19202,6 +19202,20 @@ impl Vm {
                                 }
                             }
                         }
+                        // Non-strict mode: emit "Implicit conversion from float X to int loses precision"
+                        // when a float argument with non-integer fractional part is passed to an int parameter.
+                        if !op_array.strict_types {
+                            if let Some(param_types) = self.builtin_param_types.get(&func_name_lower).cloned() {
+                                for (i, arg) in call.args.iter().enumerate() {
+                                    if i >= param_types.len() {
+                                        break;
+                                    }
+                                    if let Some(ref pt) = param_types[i] {
+                                        self.emit_implicit_float_to_int_if_needed(arg, pt, op.line);
+                                    }
+                                }
+                            }
+                        }
                         // Strict type checking for builtin function parameters
                         if op_array.strict_types {
                             if let Some(param_types) = self.builtin_param_types.get(&func_name_lower).cloned() {
