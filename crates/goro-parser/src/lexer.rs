@@ -662,6 +662,10 @@ impl<'a> Lexer<'a> {
                         .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
                 {
                     // ${variable} interpolation (deprecated syntax, equivalent to {$variable})
+                    crate::push_lexer_deprecated(
+                        "Using ${var} in strings is deprecated, use {$var} instead".to_string(),
+                        self.line,
+                    );
                     self.pending.push(Token::new(
                         TokenKind::InterpolatedStringPart(result.clone()),
                         Span::new(self.pos as u32, self.pos as u32, self.line),
@@ -1925,6 +1929,10 @@ impl<'a> Lexer<'a> {
                     && (content[i + 2].is_ascii_alphabetic() || content[i + 2] == b'_' || content[i + 2] >= 0x80) =>
                 {
                     // ${variable} interpolation (deprecated syntax)
+                    crate::push_lexer_deprecated(
+                        "Using ${var} in strings is deprecated, use {$var} instead".to_string(),
+                        self.line,
+                    );
                     self.pending.push(Token::new(
                         TokenKind::InterpolatedStringPart(result.clone()),
                         Span::new(self.pos as u32, self.pos as u32, self.line),

@@ -5558,8 +5558,8 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // vfprintf($handle, $format, $args_array)
-    if args.len() < 2 {
-        let msg = format!("vfprintf() expects at least 2 arguments, {} given", args.len());
+    if args.len() != 3 {
+        let msg = format!("vfprintf() expects exactly 3 arguments, {} given", args.len());
         let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });

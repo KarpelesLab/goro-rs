@@ -73,6 +73,7 @@ fn main() {
     let mut i = 1;
     let mut script: Option<String> = None;
     let mut inline_code: Option<String> = None;
+    let mut ini_overrides: Vec<(String, String)> = Vec::new();
     while i < args.len() {
         let a = args[i].as_str();
         match a {
@@ -92,8 +93,23 @@ fn main() {
                 script = Some(args[i + 1].clone());
                 break;
             }
-            // INI / behavior flags that take a following argument.
-            "-d" => { i += 2; continue; }
+            // INI overrides: -d key=value
+            "-d" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: -d requires a directive argument");
+                    process::exit(1);
+                }
+                let directive = &args[i + 1];
+                if let Some(eq) = directive.find('=') {
+                    let key = directive[..eq].trim().to_string();
+                    let val = directive[eq+1..].trim().to_string();
+                    ini_overrides.push((key, val));
+                } else {
+                    ini_overrides.push((directive.trim().to_string(), "1".to_string()));
+                }
+                i += 2;
+                continue;
+            }
             // Switches with no argument; ignore.
             "-n" | "-C" | "-q" | "-z" => { i += 1; continue; }
             "--" => { i += 1; break; }
@@ -110,6 +126,8 @@ fn main() {
             }
         }
     }
+
+    apply_ini_overrides(&ini_overrides);
 
     if let Some(code) = inline_code {
         let code = format!("<?php {}", code);
@@ -176,6 +194,9 @@ fn run_code(source: &[u8], filename: &str) {
         }
     };
 
+    // Drain any deprecations recorded by the lexer (e.g. `${var}` syntax).
+    let lexer_deprecations = goro_parser::take_lexer_deprecations();
+
     // Compile
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
@@ -189,6 +210,11 @@ fn run_code(source: &[u8], filename: &str) {
             // Emit any compile-time diagnostics collected before the fatal, in order
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
+            for (msg, line) in &lexer_deprecations {
+                let _ = handle.write_all(
+                    format!("\nDeprecated: {} in {} on line {}\n", msg, filename, line).as_bytes()
+                );
+            }
             for (kind, msg, line) in goro_core::compiler::take_pending_compile_warnings() {
                 let _ = handle.write_all(
                     format!("\n{}: {} in {} on line {}\n", kind, msg, filename, line).as_bytes()
@@ -205,7 +231,10 @@ fn run_code(source: &[u8], filename: &str) {
     // Execute
     let mut vm = Vm::new();
     vm.current_file = filename.to_string();
-    // Emit compile warnings before execution
+    // Emit lexer deprecations first (e.g. `${var}` syntax), then compile warnings
+    for (msg, wline) in &lexer_deprecations {
+        vm.emit_deprecated_at(msg, *wline);
+    }
     for (msg, wline) in &compile_warnings {
         vm.emit_warning_at(msg, *wline);
     }
@@ -417,6 +446,44 @@ fn is_fatal_parse_error(err_msg: &str) -> bool {
         || err_msg.starts_with("Property in interface cannot be final")
         || err_msg.starts_with("Property in interface cannot be protected or private")
         || err_msg.starts_with("Final promoted property")
+}
+
+fn apply_ini_overrides(overrides: &[(String, String)]) {
+    use goro_core::value::{set_php_precision, set_php_serialize_precision, set_memory_limit};
+    for (key, val) in overrides {
+        match key.as_str() {
+            "precision" => {
+                if let Ok(p) = val.parse::<i32>() {
+                    set_php_precision(p);
+                }
+            }
+            "serialize_precision" => {
+                if let Ok(p) = val.parse::<i32>() {
+                    set_php_serialize_precision(p);
+                }
+            }
+            "memory_limit" => {
+                // Parse like ini_set memory_limit: support k/m/g suffix
+                let s = val.trim();
+                let (num_part, mul): (&str, i64) = if let Some(last) = s.chars().last() {
+                    match last {
+                        'k' | 'K' => (&s[..s.len()-1], 1024),
+                        'm' | 'M' => (&s[..s.len()-1], 1024 * 1024),
+                        'g' | 'G' => (&s[..s.len()-1], 1024 * 1024 * 1024),
+                        _ => (s, 1),
+                    }
+                } else {
+                    (s, 1)
+                };
+                if let Ok(n) = num_part.parse::<i64>() {
+                    set_memory_limit(n * mul);
+                }
+            }
+            _ => {
+                // Unhandled INI directive — silently ignored for now.
+            }
+        }
+    }
 }
 
 fn print_usage(program: &str) {
