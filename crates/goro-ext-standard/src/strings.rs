@@ -595,6 +595,41 @@ fn str_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let subject_val = args.get(2).unwrap_or(&Value::Null);
     let count_ref = args.get(3);
 
+    // Type validation: search/replace/subject must be string|array
+    for (i, val, name) in [
+        (1, search_val, "search"),
+        (2, replace_val, "replace"),
+        (3, subject_val, "subject"),
+    ] {
+        let d = val.deref();
+        match &d {
+            Value::String(_) | Value::Array(_) | Value::Null | Value::Long(_) | Value::Double(_) | Value::True | Value::False => {}
+            Value::Object(_) => {
+                // Objects without __toString are an error
+                let class_lower: Vec<u8> = if let Value::Object(o) = &d {
+                    o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect()
+                } else { Vec::new() };
+                let has_tostring = vm.classes.get(&class_lower)
+                    .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                    .unwrap_or(false);
+                if !has_tostring {
+                    let type_name = Vm::value_type_name(&d);
+                    let msg = format!("str_replace(): Argument #{} (${}) must be of type array|string, {} given", i, name, type_name);
+                    let exc = vm.create_exception(b"TypeError", &msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: vm.current_line });
+                }
+            }
+            _ => {
+                let type_name = Vm::value_type_name(&d);
+                let msg = format!("str_replace(): Argument #{} (${}) must be of type array|string, {} given", i, name, type_name);
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+    }
+
     let mut total_count = 0i64;
 
     // Build search/replace pairs
@@ -4778,7 +4813,10 @@ fn get_html_translation_table_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, 
 fn html_entity_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(3); // ENT_QUOTES | ENT_SUBSTITUTE
-    let _encoding = args.get(2); // Ignored for now, assume UTF-8
+    let encoding = args.get(2)
+        .map(|v| v.to_php_string().to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| "utf-8".to_string());
+    let is_iso88591 = matches!(encoding.as_str(), "iso-8859-1" | "iso8859-1" | "latin1");
     let bytes = s.as_bytes();
     let mut result = Vec::new();
     let mut i = 0;
@@ -4788,7 +4826,7 @@ fn html_entity_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             // Try to find closing ;
             if let Some(semi_offset) = bytes[i..].iter().position(|&b| b == b';') {
                 let entity = &bytes[i+1..i+semi_offset];
-                let decoded = decode_html_entity(entity, flags);
+                let decoded = decode_html_entity(entity, flags, is_iso88591);
                 if let Some(decoded_bytes) = decoded {
                     result.extend_from_slice(&decoded_bytes);
                     i += semi_offset + 1;
@@ -4803,7 +4841,10 @@ fn html_entity_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn decode_html_entity(entity: &[u8], flags: i64) -> Option<Vec<u8>> {
+fn decode_html_entity(entity: &[u8], flags: i64, is_iso88591: bool) -> Option<Vec<u8>> {
+    // ENT_HTML_QUOTE_SINGLE = 1, ENT_HTML_QUOTE_DOUBLE = 2 (lower bits of flags)
+    let allow_double_quote = (flags & 2) != 0;
+    let allow_single_quote = (flags & 1) != 0;
     // Numeric entities
     if entity.first() == Some(&b'#') {
         let num_str = &entity[1..];
@@ -4816,6 +4857,16 @@ fn decode_html_entity(entity: &[u8], flags: i64) -> Option<Vec<u8>> {
             let dec = std::str::from_utf8(num_str).ok()?;
             dec.parse::<u32>().ok()?
         };
+        // Respect quote-handling flags: skip decoding " (34) / ' (39) when not allowed
+        if codepoint == 34 && !allow_double_quote {
+            return None;
+        }
+        if codepoint == 39 && !allow_single_quote {
+            return None;
+        }
+        if is_iso88591 && codepoint <= 0xFF {
+            return Some(vec![codepoint as u8]);
+        }
         let ch = char::from_u32(codepoint)?;
         let mut buf = [0u8; 4];
         let encoded = ch.encode_utf8(&mut buf);

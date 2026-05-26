@@ -22934,7 +22934,21 @@ impl Vm {
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
                         match arr.borrow().get(&key).cloned() {
-                            Some(v) => v,
+                            Some(v) => {
+                                // Plain read deref: PHP's R-fetch returns the
+                                // inner value of a referenced slot, not the
+                                // Reference wrapper itself. RW preserves the
+                                // wrapper so the in-place op can write back.
+                                if !is_rw {
+                                    if let Value::Reference(r) = v {
+                                        r.borrow().clone()
+                                    } else {
+                                        v
+                                    }
+                                } else {
+                                    v
+                                }
+                            }
                             None => {
                                 // Emit "Undefined array key" warning — but not
                                 // for FETCH_DIM_RW: the write side will create
