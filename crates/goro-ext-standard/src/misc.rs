@@ -7792,6 +7792,14 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 obj = obj_rc.borrow();
                 continue;
             }
+            // Skip if the backing slot is absent: an uninitialized typed
+            // property, an unset property, or a redeclared private stored under
+            // a mangled key (the last is emitted by the dynamic-props pass below
+            // under its bare name). get_property() returns Null for a missing
+            // key, so gate on presence to avoid reporting it as a null value.
+            if !obj.has_property(name) {
+                continue;
+            }
             // Read value from instance
             let val = obj.get_property(name);
             // Skip uninitialized
@@ -7815,6 +7823,34 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 continue;
             }
             if matches!(val, Value::Undef) { continue; }
+            // Mangled private/protected storage keys (\0Class\0name) hold
+            // redeclared private slots that the declared-property loop above
+            // could not read by bare name. Demangle and apply scope visibility,
+            // exposing them under the bare name when accessible.
+            if name.first() == Some(&0) {
+                if let Some(sep) = name[1..].iter().position(|&b| b == 0) {
+                    let decl = &name[1..1 + sep];
+                    let bare = &name[1 + sep + 1..];
+                    let accessible = if decl == b"*" {
+                        if let Some(ref cc) = calling_class_lower {
+                            cc == &class_name_lower
+                                || vm.is_subclass_of(cc, &class_name_lower)
+                                || vm.is_subclass_of(&class_name_lower, cc)
+                        } else { false }
+                    } else {
+                        let decl_lower: Vec<u8> =
+                            decl.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        calling_class_lower.as_deref() == Some(decl_lower.as_slice())
+                    };
+                    if accessible {
+                        let key = goro_core::array::ArrayKey::String(PhpString::from_vec(bare.to_vec()));
+                        if !arr.contains_key(&key) {
+                            arr.set(key, val.clone());
+                        }
+                    }
+                    continue;
+                }
+            }
             if class_props_order.iter().any(|(n, _, _, _, _)| n == name) { continue; }
             let key = goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone()));
             if !arr.contains_key(&key) {
