@@ -5129,9 +5129,45 @@ fn rawurldecode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn htmlspecialchars(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// PHP's html.c determine_charset accepts these encoding names (case-insensitive).
+fn is_supported_html_charset(name: &str) -> bool {
+    const SUPPORTED: &[&str] = &[
+        "ISO-8859-1", "ISO8859-1", "ISO-8859-15", "ISO8859-15",
+        "utf-8", "UTF-8",
+        "cp1252", "Windows-1252", "1252",
+        "BIG5", "950",
+        "GB2312", "936",
+        "BIG5-HKSCS",
+        "Shift_JIS", "SJIS", "932", "SJIS-win", "CP932",
+        "EUCJP", "EUC-JP", "eucJP-win",
+        "KOI8-R", "koi8-ru", "koi8r",
+        "cp1251", "Windows-1251", "win-1251",
+        "iso8859-5", "iso-8859-5",
+        "cp866", "866", "ibm866",
+        "MacRoman",
+        "", // empty falls back to default
+    ];
+    SUPPORTED.iter().any(|c| c.eq_ignore_ascii_case(name))
+}
+
+fn htmlspecialchars(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(11); // ENT_QUOTES | ENT_SUBSTITUTE (default)
+    // 3rd arg is charset hint - validate it like PHP does
+    if let Some(charset_val) = args.get(2) {
+        match charset_val {
+            Value::Null => {} // default UTF-8, no warning
+            _ => {
+                let charset = charset_val.to_php_string();
+                let cs_str = charset.to_string_lossy();
+                if !cs_str.is_empty() && !is_supported_html_charset(&cs_str) {
+                    vm.emit_warning(
+                        &format!("htmlspecialchars(): Charset \"{}\" is not supported, assuming UTF-8", cs_str),
+                    );
+                }
+            }
+        }
+    }
     let double_encode = match args.get(3) {
         Some(Value::Null) | None => true,
         Some(v) => v.is_truthy(),
