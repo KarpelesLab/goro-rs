@@ -11884,6 +11884,18 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
+    // PHP throws an Error when the class is not declared; the message
+    // uses the original-case spelling supplied by the caller.
+    if !vm.classes.contains_key(&name_lower) {
+        let class_str = class_name.to_string_lossy().to_string();
+        let msg = format!(
+            "get_class_vars(): Argument #1 ($class) must be a valid class name, {} given",
+            class_str
+        );
+        let exc = vm.create_exception(b"Error", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Ok(Value::Null);
+    }
     // Caller-scope visibility filter: only return properties the calling
     // class would be allowed to see. Mirrors what PHP's get_class_vars
     // does at the engine level. Compare scopes in lowercase form because
@@ -11891,40 +11903,63 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // lowercase.
     let caller_scope: Option<Vec<u8>> = vm.current_class_scope()
         .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect());
-    let target_inherits_caller = if let Some(scope) = &caller_scope {
-        vm.class_extends(&name_lower, scope) || name_lower == *scope
-    } else { false };
-    let caller_inherits_target = if let Some(scope) = &caller_scope {
-        vm.class_extends(scope, &name_lower) || name_lower == *scope
-    } else { false };
     let can_see = |prop: &goro_core::object::PropertyDef| -> bool {
         match prop.visibility {
             goro_core::object::Visibility::Public => true,
             goro_core::object::Visibility::Protected => {
-                // Visible from the declaring class or any class in the
-                // hierarchy that joins it.
-                target_inherits_caller || caller_inherits_target
+                // Visible when the caller's scope and the property's
+                // declaring class share an inheritance chain — i.e. the
+                // caller IS the declaring class, or descends from it, or
+                // the declaring class descends from the caller. This
+                // matches the check Zend performs at object access.
+                if let Some(scope) = &caller_scope {
+                    let decl_lower: Vec<u8> = prop.declaring_class
+                        .iter().map(|b| b.to_ascii_lowercase()).collect();
+                    *scope == decl_lower
+                        || vm.class_extends(scope, &decl_lower)
+                        || vm.class_extends(&decl_lower, scope)
+                } else {
+                    false
+                }
             }
             goro_core::object::Visibility::Private => {
-                // Visible only when the caller is exactly the declaring
-                // class of this property.
+                // Visible only when the caller IS the declaring class.
                 caller_scope.as_deref() == Some(prop.declaring_class.as_slice())
             }
         }
     };
     let mut result = PhpArray::new();
-    if let Some(class) = vm.classes.get(&name_lower) {
-        // Non-static properties first, then static
-        for prop in &class.properties {
-            if !prop.is_static {
-                // Skip virtual properties (no backing storage)
-                if prop.is_virtual {
+    if vm.classes.contains_key(&name_lower) {
+        // Build the inheritance chain from most-derived to base; PHP's
+        // get_class_vars emits each level's declared properties in that
+        // order (non-static across all classes first, then static).
+        let mut chain: Vec<Vec<u8>> = Vec::new();
+        let mut cur = name_lower.clone();
+        for _ in 0..50 {
+            chain.push(cur.clone());
+            let parent = vm.classes.get(&cur).and_then(|c| c.parent.clone());
+            match parent {
+                Some(p) => {
+                    cur = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                }
+                None => break,
+            }
+        }
+        let class = vm.classes.get(&name_lower).unwrap();
+        // Non-static, walking child → parent
+        for cls_lower in &chain {
+            for prop in &class.properties {
+                if prop.is_static || prop.is_virtual {
+                    continue;
+                }
+                let decl_lower: Vec<u8> =
+                    prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if decl_lower != *cls_lower {
                     continue;
                 }
                 if !can_see(prop) {
                     continue;
                 }
-                // Uninitialized typed properties (Undef) are returned as null
                 let val = match &prop.default {
                     Value::Undef => Value::Null,
                     other => other.clone(),
@@ -11935,14 +11970,23 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 );
             }
         }
-        // Static properties
-        for prop in &class.properties {
-            if prop.is_static {
+        // Static, walking child → parent
+        for cls_lower in &chain {
+            for prop in &class.properties {
+                if !prop.is_static {
+                    continue;
+                }
+                let decl_lower: Vec<u8> =
+                    prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if decl_lower != *cls_lower {
+                    continue;
+                }
                 if !can_see(prop) {
                     continue;
                 }
-                // Get current value from static_properties (may have been modified at runtime)
-                let val = class.static_properties.get(&prop.name)
+                let val = class
+                    .static_properties
+                    .get(&prop.name)
                     .cloned()
                     .unwrap_or_else(|| prop.default.clone());
                 let val = match val {

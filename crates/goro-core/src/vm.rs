@@ -31352,13 +31352,22 @@ impl Vm {
 
                         // Check visibility before accessing the property
                         let mut visibility_error: Option<String> = None;
+                        // PHP: a private property whose declaring class is
+                        // not the runtime instance class is treated as
+                        // "not found" rather than "access denied" when the
+                        // caller can't see it (Zend's `goto dynamic` in
+                        // zend_get_property_offset). This makes
+                        // `$this->parentPrivate` from a subclass yield an
+                        // Undefined-property warning + NULL instead of an
+                        // Error.
+                        let mut hidden_private_prop = false;
                         let caller_scope_for_get = self.current_class_scope()
                             .map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
                         if let Some((vis, declaring_class, _is_readonly, _prop_type, _set_vis)) = self.find_property_def_for_scope(&class_lower, prop_name.as_bytes(), caller_scope_for_get.as_deref()) {
                             if vis != Visibility::Public {
                                 let caller_scope = self.current_class_scope();
                                 let prop_name_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
-                                visibility_error = self.check_visibility(
+                                let raw_err = self.check_visibility(
                                     vis,
                                     &declaring_class,
                                     &class_name_orig,
@@ -31366,6 +31375,16 @@ impl Vm {
                                     true,
                                     caller_scope.as_deref(),
                                 );
+                                if raw_err.is_some() && vis == Visibility::Private {
+                                    let decl_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    if decl_lower != class_lower {
+                                        hidden_private_prop = true;
+                                    } else {
+                                        visibility_error = raw_err;
+                                    }
+                                } else {
+                                    visibility_error = raw_err;
+                                }
                             }
                         }
 
@@ -31448,7 +31467,16 @@ impl Vm {
                             // Resolve the storage key (mangled for private props that
                             // collide with a subclass redeclaration).
                             let storage_key = self.property_storage_key(&class_lower, prop_name.as_bytes(), caller_scope_for_get.as_deref());
-                            let mut prop = obj.borrow().get_property(&storage_key);
+                            // When the property is a parent-class private (hidden
+                            // from subclass scope), force the "not found" path:
+                            // storage may still hold the inherited slot under the
+                            // bare name, but the engine treats it as if it doesn't
+                            // exist for this scope.
+                            let mut prop = if hidden_private_prop {
+                                Value::Null
+                            } else {
+                                obj.borrow().get_property(&storage_key)
+                            };
                             // SimpleXMLElement: when accessing `$x->name`, the resulting SXE is
                             // "name-bound" — iteration/count operates over the named sibling
                             // list. For multi-sibling (Array property), wrap the first with
@@ -31475,7 +31503,7 @@ impl Vm {
                             }
                             // Check for typed property accessed before initialization
                             // Skip this check when error reporting is suppressed (empty(), @)
-                            if matches!(prop, Value::Undef) && obj.borrow().has_property(&storage_key) && self.error_reporting != 0 {
+                            if matches!(prop, Value::Undef) && !hidden_private_prop && obj.borrow().has_property(&storage_key) && self.error_reporting != 0 {
                                 // Try __get magic method first before throwing error
                                 let has_get = self.magic_depth < 5 && self
                                     .classes
@@ -31541,7 +31569,7 @@ impl Vm {
                                 }
                             } else
                             if matches!(prop, Value::Null)
-                                && !obj.borrow().has_property(&storage_key)
+                                && (hidden_private_prop || !obj.borrow().has_property(&storage_key))
                                 && self.magic_depth < 5
                             {
                                 // Try __get magic method (with recursion guard)
