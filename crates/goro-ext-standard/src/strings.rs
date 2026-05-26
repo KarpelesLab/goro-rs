@@ -3307,19 +3307,38 @@ fn strtok_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     STRTOK_STATE.with(|state| {
         let mut st = state.borrow_mut();
-        let mut pos = st.1;
+        let initial_pos = st.1;
         let s_len = st.0.len();
 
+        // PHP source (ext/standard/string.c, PHP_FUNCTION(strtok)):
+        //   p = BG(strtok_last);
+        //   pe = strtok_string + strtok_len;
+        //   if (p >= pe) RETURN_FALSE;  // path A: silent end, keeps state initialized
+        //   ... scan ...
+        //   while leading delims: if (++p >= pe) goto return_false;
+        //   return_false: release strtok_string; BG(strtok_string) = NULL;  // path B: clears state
+        //
+        // Path A (already at end) keeps state alive so subsequent continuations
+        // return false silently. Path B (scan-consumed-all-as-delims) clears
+        // state so the *next* continuation emits the "Both arguments must be
+        // provided when starting tokenization" warning.
+
+        // Path A: starting at end -> silent false.
+        if initial_pos >= s_len {
+            return Ok(Value::False);
+        }
+
         // Skip leading delimiter characters
+        let mut pos = initial_pos;
         while pos < s_len && delim_bytes.contains(&st.0[pos]) {
             pos += 1;
         }
 
         if pos >= s_len {
-            st.1 = pos;
-            // No more tokens. Remain "initialized" so subsequent single-arg
-            // calls continue returning false without re-emitting the
-            // "Both arguments" warning.
+            // Path B: scan consumed everything as delimiters -> clear state.
+            st.0.clear();
+            st.1 = 0;
+            st.2 = false;
             return Ok(Value::False);
         }
 
