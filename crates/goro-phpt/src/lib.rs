@@ -1002,6 +1002,9 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
 
+    // Drain any deprecations recorded by the lexer (e.g. `${var}` syntax).
+    let lexer_deprecations = goro_parser::take_lexer_deprecations();
+
     // Parse
     let mut parser = Parser::new(tokens);
     let program = match parser.parse() {
@@ -1116,11 +1119,14 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
 
     // Execute
     let mut vm = Vm::new();
-    // Emit compile warnings before execution
+    vm.current_file = filename.to_string();
+    // Emit lexer deprecations first (e.g. `${var}` syntax), then compile warnings.
+    for (msg, wline) in &lexer_deprecations {
+        vm.emit_deprecated_at(msg, *wline);
+    }
     for (msg, wline) in &compile_warnings {
         vm.emit_warning_at(msg, *wline);
     }
-    vm.current_file = filename.to_string();
     goro_ext_standard::register_standard_functions(&mut vm);
     goro_ext_date::register(&mut vm);
     goro_ext_json::register(&mut vm);

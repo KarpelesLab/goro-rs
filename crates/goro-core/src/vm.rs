@@ -3412,6 +3412,19 @@ impl Vm {
     /// Used to determine if the implicit float-to-int deprecation should fire.
     /// The check is: type is int (possibly nullable, or as part of a union where int wins).
     /// In a union containing `float`, the float stays as float (no conversion at all).
+    /// Whether a declared parameter type implicitly accepts null (i.e. it has a
+    /// `?Type` wrapper, or it's a union/intersection containing `null`/`mixed`).
+    /// Pure `mixed` is treated as nullable. Used to decide whether to emit the
+    /// "Passing null to parameter ... is deprecated" notice for builtins.
+    pub(crate) fn param_type_is_nullable(param_type: &ParamType) -> bool {
+        match param_type {
+            ParamType::Simple(name) => matches!(name.as_slice(), b"null" | b"mixed"),
+            ParamType::Nullable(_) => true,
+            ParamType::Union(types) => types.iter().any(Self::param_type_is_nullable),
+            ParamType::Intersection(_) => false,
+        }
+    }
+
     fn param_type_coerces_float_to_int(param_type: &ParamType) -> bool {
         match param_type {
             ParamType::Simple(name) => {
@@ -19214,6 +19227,7 @@ impl Vm {
                         }
                         // Non-strict mode: emit "Implicit conversion from float X to int loses precision".
                         // Also throws TypeError for NaN/Inf passed to int params (PHP 8.1+).
+                        // Also emit "Passing null to parameter #N is deprecated" for null -> non-nullable scalar.
                         if !op_array.strict_types {
                             if let Some(param_types) = self.builtin_param_types.get(&func_name_lower).cloned() {
                                 let mut nan_inf_err: Option<(usize, ParamType)> = None;
@@ -19223,8 +19237,24 @@ impl Vm {
                                     }
                                     if let Some(ref pt) = param_types[i] {
                                         self.emit_implicit_float_to_int_if_needed(arg, pt, op.line);
-                                        // NaN/Inf -> int is rejected with TypeError in PHP 8.1+
                                         let val = arg.deref();
+                                        // Null to non-nullable scalar param: emit deprecation (PHP 8.1+).
+                                        if matches!(&val, Value::Null | Value::Undef)
+                                            && !Self::param_type_is_nullable(pt)
+                                        {
+                                            let display_name = call.name.to_string_lossy();
+                                            let param_name = self.builtin_param_names.get(&func_name_lower)
+                                                .and_then(|names| names.get(i))
+                                                .map(|n| String::from_utf8_lossy(n).to_string())
+                                                .unwrap_or_else(|| format!("arg{}", i + 1));
+                                            let expected = self.param_type_display(pt);
+                                            let msg = format!(
+                                                "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
+                                                display_name, i + 1, param_name, expected
+                                            );
+                                            self.emit_deprecated_at(&msg, op.line);
+                                        }
+                                        // NaN/Inf -> int is rejected with TypeError in PHP 8.1+
                                         if let Value::Double(f) = &val {
                                             if !f.is_finite() && Self::param_type_coerces_float_to_int(pt) {
                                                 nan_inf_err = Some((i, pt.clone()));

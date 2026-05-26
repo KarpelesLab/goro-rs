@@ -127,11 +127,11 @@ fn main() {
         }
     }
 
-    apply_ini_overrides(&ini_overrides);
+    let cli_error_reporting = apply_ini_overrides(&ini_overrides);
 
     if let Some(code) = inline_code {
         let code = format!("<?php {}", code);
-        run_code(code.as_bytes(), "Command line code");
+        run_code(code.as_bytes(), "Command line code", cli_error_reporting);
         return;
     }
 
@@ -155,7 +155,7 @@ fn main() {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| file_path.clone());
     match std::fs::read(path) {
-        Ok(source) => run_code(&source, &abs_path),
+        Ok(source) => run_code(&source, &abs_path, cli_error_reporting),
         Err(e) => {
             eprintln!("Error reading file: {}", e);
             process::exit(1);
@@ -163,7 +163,7 @@ fn main() {
     }
 }
 
-fn run_code(source: &[u8], filename: &str) {
+fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
     use goro_core::compiler::Compiler;
     use goro_core::vm::Vm;
     use goro_parser::{Lexer, Parser};
@@ -231,6 +231,7 @@ fn run_code(source: &[u8], filename: &str) {
     // Execute
     let mut vm = Vm::new();
     vm.current_file = filename.to_string();
+    vm.error_reporting = initial_error_reporting;
     // Emit lexer deprecations first (e.g. `${var}` syntax), then compile warnings
     for (msg, wline) in &lexer_deprecations {
         vm.emit_deprecated_at(msg, *wline);
@@ -448,8 +449,10 @@ fn is_fatal_parse_error(err_msg: &str) -> bool {
         || err_msg.starts_with("Final promoted property")
 }
 
-fn apply_ini_overrides(overrides: &[(String, String)]) {
+fn apply_ini_overrides(overrides: &[(String, String)]) -> i64 {
     use goro_core::value::{set_php_precision, set_php_serialize_precision, set_memory_limit};
+    // Default PHP error_reporting (E_ALL); overridden by -d error_reporting=...
+    let mut error_reporting: i64 = 32767;
     for (key, val) in overrides {
         match key.as_str() {
             "precision" => {
@@ -479,11 +482,17 @@ fn apply_ini_overrides(overrides: &[(String, String)]) {
                     set_memory_limit(n * mul);
                 }
             }
+            "error_reporting" => {
+                if let Ok(n) = val.parse::<i64>() {
+                    error_reporting = n;
+                }
+            }
             _ => {
                 // Unhandled INI directive — silently ignored for now.
             }
         }
     }
+    error_reporting
 }
 
 fn print_usage(program: &str) {

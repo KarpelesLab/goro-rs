@@ -113,6 +113,8 @@ pub fn register(vm: &mut Vm) {
     // Register parameter types for strict_types enforcement on builtins
     let s = || Some(ParamType::Simple(b"string".to_vec()));
     let i = || Some(ParamType::Simple(b"int".to_vec()));
+    let ns = || Some(ParamType::Nullable(Box::new(ParamType::Simple(b"string".to_vec()))));
+    let ni = || Some(ParamType::Nullable(Box::new(ParamType::Simple(b"int".to_vec()))));
     vm.register_builtin_param_types(b"strlen", vec![s()]);
     vm.register_builtin_param_types(b"ord", vec![s()]);
     vm.register_builtin_param_types(b"chr", vec![i()]);
@@ -122,7 +124,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"ltrim", vec![s(), s()]);
     vm.register_builtin_param_types(b"rtrim", vec![s(), s()]);
     vm.register_builtin_param_types(b"chop", vec![s(), s()]);
-    vm.register_builtin_param_types(b"substr", vec![s(), i(), i()]);
+    vm.register_builtin_param_types(b"substr", vec![s(), i(), ni()]);
     vm.register_builtin_param_types(b"strpos", vec![s(), s(), i()]);
     vm.register_builtin_param_types(b"str_contains", vec![s(), s()]);
     vm.register_builtin_param_types(b"str_starts_with", vec![s(), s()]);
@@ -142,13 +144,13 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"addcslashes", vec![s(), s()]);
     vm.register_builtin_param_types(b"stripcslashes", vec![s()]);
     vm.register_builtin_param_types(b"str_rot13", vec![s()]);
-    vm.register_builtin_param_types(b"str_word_count", vec![s(), i(), s()]);
+    vm.register_builtin_param_types(b"str_word_count", vec![s(), i(), ns()]);
     vm.register_builtin_param_types(b"strcmp", vec![s(), s()]);
     vm.register_builtin_param_types(b"strncmp", vec![s(), s(), i()]);
     vm.register_builtin_param_types(b"strcasecmp", vec![s(), s()]);
     vm.register_builtin_param_types(b"strncasecmp", vec![s(), s(), i()]);
-    vm.register_builtin_param_types(b"substr_count", vec![s(), s(), i(), i()]);
-    vm.register_builtin_param_types(b"substr_compare", vec![s(), s(), i(), i(), None]);
+    vm.register_builtin_param_types(b"substr_count", vec![s(), s(), i(), ni()]);
+    vm.register_builtin_param_types(b"substr_compare", vec![s(), s(), i(), ni(), None]);
     vm.register_builtin_param_types(b"strstr", vec![s(), s(), None]);
     vm.register_builtin_param_types(b"stristr", vec![s(), s(), None]);
     vm.register_builtin_param_types(b"strrchr", vec![s(), s()]);
@@ -165,9 +167,9 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"str_increment", vec![s()]);
     vm.register_builtin_param_types(b"str_decrement", vec![s()]);
     vm.register_builtin_param_types(b"get_html_translation_table", vec![i(), i(), s()]);
-    vm.register_builtin_param_types(b"htmlspecialchars", vec![s(), i(), s(), None]);
+    vm.register_builtin_param_types(b"htmlspecialchars", vec![s(), i(), ns(), None]);
     vm.register_builtin_param_types(b"htmlspecialchars_decode", vec![s(), i()]);
-    vm.register_builtin_param_types(b"htmlentities", vec![s(), i(), s(), None]);
+    vm.register_builtin_param_types(b"htmlentities", vec![s(), i(), ns(), None]);
     vm.register_builtin_param_types(b"html_entity_decode", vec![s(), i(), s()]);
 }
 
