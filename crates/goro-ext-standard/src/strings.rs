@@ -1913,19 +1913,18 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             continue;
         }
         if bytes[i] == b'<' {
-            // Check if this could be a tag: must be followed by ?, !, /, %, alpha,
-            // or NUL (PHP treats `<\0` as the start of a tag, mirroring the C
-            // tokenizer where NUL is skipped before the tag-name read).
+            // PHP only rejects `<` followed by whitespace (`< ` is kept as a
+            // literal `<`); every other follower starts a tag — including `<<`,
+            // `<>`, `</`, `<?`, `<!`, or any non-whitespace char.
             if i + 1 < bytes.len() {
                 let next = bytes[i + 1];
-                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && next != 0 && !next.is_ascii_alphabetic() {
-                    // Not a tag, output as literal
+                if matches!(next, b' ' | b'\t' | b'\n' | b'\r') {
                     result.push(bytes[i]);
                     i += 1;
                     continue;
                 }
             } else {
-                // < at end of string - output literally
+                // `<` at end of string — output literally.
                 result.push(bytes[i]);
                 i += 1;
                 continue;
@@ -5268,45 +5267,69 @@ fn decode_html_entity(entity: &[u8], flags: i64, is_iso88591: bool) -> Option<Ve
 }
 
 fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // PHP 8 declares the second arg as `array|string|null` but standard
+    // scalar→string coercion still applies in non-strict mode: bool/int/float
+    // are accepted, while resource and object-without-__toString are not.
+    if let Some(v) = args.get(1) {
+        let d = v.deref();
+        let allowed = match &d {
+            Value::String(_)
+            | Value::Array(_)
+            | Value::Null
+            | Value::Long(_)
+            | Value::Double(_)
+            | Value::True
+            | Value::False => true,
+            Value::Object(o) => {
+                let class_lower: Vec<u8> = o
+                    .borrow()
+                    .class_name
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                _vm.classes
+                    .get(&class_lower)
+                    .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                    .unwrap_or(false)
+            }
+            _ => false,
+        };
+        if !allowed {
+            let type_name = Vm::value_type_name(&d);
+            let msg = format!(
+                "strip_tags(): Argument #2 ($allowed_tags) must be of type array|string|null, {} given",
+                type_name
+            );
+            let exc = _vm.create_exception(b"TypeError", &msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: _vm.current_line });
+        }
+    }
+
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let allowed = args.get(1);
 
-    // Build set of allowed tag names (lowercase)
-    let mut allowed_tags: Vec<Vec<u8>> = Vec::new();
-    if let Some(allowed_val) = allowed {
-        match allowed_val {
-            Value::String(allowed_str) => {
-                let ab = allowed_str.as_bytes();
-                let mut j = 0;
-                while j < ab.len() {
-                    if ab[j] == b'<' {
-                        j += 1;
-                        let start = j;
-                        while j < ab.len() && ab[j] != b'>' && ab[j] != b' ' {
-                            j += 1;
-                        }
-                        if start < j {
-                            allowed_tags.push(ab[start..j].to_ascii_lowercase());
-                        }
-                        while j < ab.len() && ab[j] != b'>' {
-                            j += 1;
-                        }
-                        if j < ab.len() { j += 1; }
-                    } else {
-                        j += 1;
-                    }
-                }
+    // Build the lowercased allow string. PHP doesn't pre-parse tag names —
+    // it just lowercases the supplied allow string (or builds one from the
+    // array form by concatenating `<tagname>` per element) and does substring
+    // search against the normalized current tag. This makes weird inputs like
+    // `<?php<html>` correctly enable the `html` tag (the substring `<html>`
+    // is present at index 11).
+    let allow_lower: Vec<u8> = match allowed.map(|v| v.deref()) {
+        Some(Value::Array(arr)) => {
+            let arr = arr.borrow();
+            let mut buf = Vec::new();
+            for (_, v) in arr.iter() {
+                let tag = v.to_php_string().to_string_lossy().to_ascii_lowercase();
+                buf.push(b'<');
+                buf.extend_from_slice(tag.as_bytes());
+                buf.push(b'>');
             }
-            Value::Array(arr) => {
-                let arr = arr.borrow();
-                for (_, v) in arr.iter() {
-                    let tag = v.to_php_string().to_string_lossy().to_ascii_lowercase();
-                    allowed_tags.push(tag.into_bytes());
-                }
-            }
-            _ => {}
+            buf
         }
-    }
+        Some(Value::Null) | None => Vec::new(),
+        Some(other) => other.to_php_string().as_bytes().to_ascii_lowercase(),
+    };
 
     let bytes = s.as_bytes();
     let mut result = Vec::new();
@@ -5319,19 +5342,18 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             continue;
         }
         if bytes[i] == b'<' {
-            // Check if this could be a tag: must be followed by ?, !, /, %, alpha,
-            // or NUL (PHP treats `<\0` as the start of a tag, mirroring the C
-            // tokenizer where NUL is skipped before the tag-name read).
+            // PHP only rejects `<` followed by whitespace (`< ` is kept as a
+            // literal `<`); every other follower starts a tag — including `<<`,
+            // `<>`, `</`, `<?`, `<!`, or any non-whitespace char.
             if i + 1 < bytes.len() {
                 let next = bytes[i + 1];
-                if next != b'?' && next != b'!' && next != b'/' && next != b'%' && next != 0 && !next.is_ascii_alphabetic() {
-                    // Not a tag, output as literal
+                if matches!(next, b' ' | b'\t' | b'\n' | b'\r') {
                     result.push(bytes[i]);
                     i += 1;
                     continue;
                 }
             } else {
-                // < at end of string - output literally
+                // `<` at end of string — output literally.
                 result.push(bytes[i]);
                 i += 1;
                 continue;
@@ -5412,56 +5434,85 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 continue;
             }
 
-            let tag_start = i;
-            i += 1;
-            let is_closing = i < bytes.len() && bytes[i] == b'/';
-            if is_closing { i += 1; }
-
-            // Extract tag name following PHP's php_tag_find normalization:
-            // read chars until whitespace or '>' or '<'. '/' is part of the
-            // tag name UNLESS it's right before '>' (self-closing like <br/>).
-            // The leading '/' of </closing> was already consumed via is_closing.
-            // So `<s/trong>` normalizes to "s/trong" (not "strong"), correctly
-            // failing to match an allowed "strong" tag. `<br/>` normalizes to
-            // "br" (slash before > is skipped), matching allowed "br".
+            // Mirror PHP's state_1: build a "tbuf" containing only the tag's
+            // canonical bytes — the leading `<`, the tag body, and the final
+            // `>`. Extra `<` inside the tag bump `depth` (state machine bracket
+            // counter); extra `>` at depth>0 decrement it. Neither is copied
+            // into tbuf. When `>` closes at depth=0 the tag ends and tbuf is
+            // normalized into `<tagname>` and checked via substring search
+            // against the lowercased allow string, emitting tbuf verbatim if
+            // present. This makes `<<htmL>>` resolve to `<htmL>` and weird
+            // allow strings like `<?php<html>` correctly enable the `html` tag.
+            let mut tbuf: Vec<u8> = Vec::with_capacity(16);
             let mut tag_name_lower: Vec<u8> = Vec::new();
-            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' && bytes[i] != b'<' {
-                if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                    // self-closing slash — skip it
-                } else {
-                    tag_name_lower.push(bytes[i].to_ascii_lowercase());
-                }
+            // Track whether we're still reading the tag name (first whitespace
+            // / quote / etc. ends it). Slash handling matches PHP's
+            // php_tag_find normalization: a `/` immediately after `<` (a
+            // closing tag) or immediately before `>` (a self-closing slash)
+            // is dropped from the normalized tag name.
+            let mut name_done = false;
+            tbuf.push(b'<');
+            i += 1;
+            // Consume any inner `<` runs (state_1 case '<' = depth++) before
+            // looking for the closing-tag `/`. So `<</htmL>>` correctly sees
+            // the `/` and treats `htmL` as a closing tag.
+            let mut depth: u32 = 0;
+            while i < bytes.len() && bytes[i] == b'<' {
+                depth += 1;
                 i += 1;
             }
-
-            // Skip attributes/rest of tag, handling quoted strings
-            // PHP strip_tags tracks nested <> with a depth counter:
-            // each '<' inside a tag increments depth, each '>' decrements it,
-            // and the tag only ends when '>' is seen at depth 0.
+            let _is_closing = i < bytes.len() && bytes[i] == b'/';
+            if _is_closing {
+                tbuf.push(b'/');
+                i += 1;
+            }
             let mut in_quote: u8 = 0;
-            let mut depth: u32 = 0;
             while i < bytes.len() {
+                let c = bytes[i];
                 if in_quote != 0 {
-                    if bytes[i] == in_quote {
-                        in_quote = 0;
-                    }
-                } else if bytes[i] == b'"' || bytes[i] == b'\'' {
-                    in_quote = bytes[i];
-                } else if bytes[i] == b'<' {
+                    if c == in_quote { in_quote = 0; }
+                    tbuf.push(c);
+                } else if c == b'"' || c == b'\'' {
+                    in_quote = c;
+                    tbuf.push(c);
+                    name_done = true;
+                } else if c == b'<' {
                     depth += 1;
-                } else if bytes[i] == b'>' {
+                    // not appended to tbuf — matches PHP state_1 case '<'
+                } else if c == b'>' {
                     if depth > 0 {
                         depth -= 1;
+                        // not appended — matches PHP state_1 case '>' depth>0
                     } else {
+                        tbuf.push(b'>');
+                        i += 1;
                         break;
                     }
+                } else {
+                    if !name_done {
+                        if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+                            name_done = true;
+                        } else if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                            // self-closing `/` dropped from the name.
+                        } else {
+                            tag_name_lower.push(c.to_ascii_lowercase());
+                        }
+                    }
+                    tbuf.push(c);
                 }
                 i += 1;
             }
-            if i < bytes.len() { i += 1; }
 
-            if !allowed_tags.is_empty() && !tag_name_lower.is_empty() && allowed_tags.iter().any(|t| t == &tag_name_lower) {
-                result.extend_from_slice(&bytes[tag_start..i]);
+            // Allowed iff `<tagname>` appears as a substring of the allow
+            // string (php_tag_find's strstr check, after lowercase normalize).
+            if !tag_name_lower.is_empty() && !allow_lower.is_empty() {
+                let mut needle: Vec<u8> = Vec::with_capacity(tag_name_lower.len() + 2);
+                needle.push(b'<');
+                needle.extend_from_slice(&tag_name_lower);
+                needle.push(b'>');
+                if allow_lower.windows(needle.len()).any(|w| w == needle.as_slice()) {
+                    result.extend_from_slice(&tbuf);
+                }
             }
         } else {
             result.push(bytes[i]);
