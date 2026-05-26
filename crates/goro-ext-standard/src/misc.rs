@@ -436,8 +436,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"str_split", str_split);
     vm.register_function(b"number_format", number_format);
     vm.register_function(b"money_format", money_format);
-    vm.register_function(b"hex2bin", hex2bin);
-    vm.register_function(b"bin2hex", bin2hex);
+    // hex2bin and bin2hex are registered in strings.rs
     vm.register_function(b"base64_encode", base64_encode);
     vm.register_function(b"base64_decode", base64_decode);
     vm.register_function(b"urlencode", urlencode);
@@ -4900,29 +4899,7 @@ fn money_format(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::empty()))
 }
 
-fn hex2bin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let hex = s.as_bytes();
-    if hex.len() % 2 != 0 {
-        _vm.emit_warning("hex2bin(): Hexadecimal input string must have an even length");
-        return Ok(Value::False);
-    }
-    let mut result = Vec::with_capacity(hex.len() / 2);
-    for i in (0..hex.len()).step_by(2) {
-        let byte = u8::from_str_radix(&String::from_utf8_lossy(&hex[i..i + 2]), 16);
-        match byte {
-            Ok(b) => result.push(b),
-            Err(_) => return Ok(Value::False),
-        }
-    }
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-
-fn bin2hex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let hex: String = s.as_bytes().iter().map(|b| format!("{:02x}", b)).collect();
-    Ok(Value::String(PhpString::from_string(hex)))
-}
+// hex2bin and bin2hex moved to strings.rs
 
 fn base64_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();

@@ -302,10 +302,39 @@ fn floatval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     ))
 }
 
-fn strval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
-    if matches!(val, Value::Array(_)) || matches!(val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_))) {
-        _vm.emit_warning("Array to string conversion");
+    let derefed = val.deref();
+    if matches!(&derefed, Value::Array(_)) {
+        vm.emit_warning("Array to string conversion");
+    }
+    // Object without a __toString hook is not convertible — PHP throws Error.
+    if let Value::Object(obj) = &derefed {
+        let class_name_bytes = obj.borrow().class_name.clone();
+        let class_lower: Vec<u8> = class_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let has_to_string = {
+            let mut found = false;
+            let mut cur = Some(class_lower);
+            while let Some(cname) = cur {
+                if let Some(cls) = vm.classes.get(&cname) {
+                    if cls.methods.contains_key(b"__tostring".as_slice()) {
+                        found = true;
+                        break;
+                    }
+                    cur = cls.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                } else {
+                    break;
+                }
+            }
+            found
+        };
+        if !has_to_string {
+            let class_name = goro_core::value::display_class_name(&class_name_bytes);
+            let msg = format!("Object of class {} could not be converted to string", class_name);
+            let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
     }
     Ok(Value::String(val.to_php_string()))
 }

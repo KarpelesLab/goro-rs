@@ -958,9 +958,21 @@ fn chr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_bytes(&[code])))
 }
 
-fn ord(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn ord(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let code = s.as_bytes().first().copied().unwrap_or(0);
+    let bytes = s.as_bytes();
+    // PHP 8.5: deprecation warnings for non-single-byte input.
+    if bytes.is_empty() {
+        let line = vm.current_line;
+        vm.emit_deprecated_at("ord(): Providing an empty string is deprecated", line);
+    } else if bytes.len() > 1 {
+        let line = vm.current_line;
+        vm.emit_deprecated_at(
+            "ord(): Providing a string that is not one byte long is deprecated. Use ord($str[0]) instead",
+            line,
+        );
+    }
+    let code = bytes.first().copied().unwrap_or(0);
     Ok(Value::Long(code as i64))
 }
 
@@ -4105,26 +4117,32 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 
-fn hex2bin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn hex2bin(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let hex = s.as_bytes();
     if hex.len() % 2 != 0 {
-        _vm.emit_warning("hex2bin(): Hexadecimal input string must have an even length");
+        vm.emit_warning("hex2bin(): Hexadecimal input string must have an even length");
         return Ok(Value::False);
     }
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(hex.len() / 2);
     for chunk in hex.chunks(2) {
         let hi = match chunk[0] {
             b'0'..=b'9' => chunk[0] - b'0',
             b'a'..=b'f' => chunk[0] - b'a' + 10,
             b'A'..=b'F' => chunk[0] - b'A' + 10,
-            _ => return Ok(Value::False),
+            _ => {
+                vm.emit_warning("hex2bin(): Input string must be hexadecimal string");
+                return Ok(Value::False);
+            }
         };
         let lo = match chunk[1] {
             b'0'..=b'9' => chunk[1] - b'0',
             b'a'..=b'f' => chunk[1] - b'a' + 10,
             b'A'..=b'F' => chunk[1] - b'A' + 10,
-            _ => return Ok(Value::False),
+            _ => {
+                vm.emit_warning("hex2bin(): Input string must be hexadecimal string");
+                return Ok(Value::False);
+            }
         };
         result.push(hi * 16 + lo);
     }
