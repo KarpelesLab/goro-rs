@@ -9747,6 +9747,83 @@ impl Compiler {
                         }
                         Ok(arr)
                     }
+                    (ExprKind::StaticPropertyAccess { class, property }, _) => {
+                        // ClassName::$prop =& value
+                        // The undeclared-static-property check lives in
+                        // StaticPropSet; mirror the regular static-prop assign
+                        // path so that the runtime error fires consistently.
+                        let class_name = match &class.kind {
+                            ExprKind::Identifier(name) => {
+                                let resolved = self.resolve_class_name(name);
+                                if resolved.eq_ignore_ascii_case(b"self") {
+                                    self.current_class.clone().unwrap_or(resolved)
+                                } else if resolved.eq_ignore_ascii_case(b"static") {
+                                    b"static".to_vec()
+                                } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                    self.current_parent_class.clone().unwrap_or(resolved)
+                                } else {
+                                    resolved
+                                }
+                            }
+                            _ => {
+                                return Err(CompileError {
+                                    message: "Cannot use dynamic class in static property reference assignment".into(),
+                                    line: expr.span.line,
+                                });
+                            }
+                        };
+                        let val = self.compile_expr(value)?;
+                        let class_idx = self.op_array.add_literal(
+                            Value::String(PhpString::from_vec(class_name))
+                        );
+                        let prop_idx = self.op_array.add_literal(
+                            Value::String(PhpString::from_vec(property.clone()))
+                        );
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropSet,
+                            op1: OperandType::Const(class_idx),
+                            op2: val,
+                            result: OperandType::Const(prop_idx),
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Const(class_idx))
+                    }
+                    (ExprKind::DynamicStaticPropertyAccess { class, property }, _) => {
+                        // ClassName::$$prop =& value
+                        let class_name = match &class.kind {
+                            ExprKind::Identifier(name) => {
+                                let resolved = self.resolve_class_name(name);
+                                if resolved.eq_ignore_ascii_case(b"self") {
+                                    self.current_class.clone().unwrap_or(resolved)
+                                } else if resolved.eq_ignore_ascii_case(b"static") {
+                                    b"static".to_vec()
+                                } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                    self.current_parent_class.clone().unwrap_or(resolved)
+                                } else {
+                                    resolved
+                                }
+                            }
+                            _ => {
+                                return Err(CompileError {
+                                    message: "Cannot use dynamic class in static property reference assignment".into(),
+                                    line: expr.span.line,
+                                });
+                            }
+                        };
+                        let val = self.compile_expr(value)?;
+                        let prop_op = self.compile_expr(property)?;
+                        let class_idx = self.op_array.add_literal(
+                            Value::String(PhpString::from_vec(class_name))
+                        );
+                        self.op_array.emit(Op {
+                            opcode: OpCode::StaticPropSet,
+                            op1: OperandType::Const(class_idx),
+                            op2: val,
+                            result: prop_op,
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Const(class_idx))
+                    }
                     _ => {
                         let idx = self.op_array.add_literal(Value::Null);
                         Ok(OperandType::Const(idx))
