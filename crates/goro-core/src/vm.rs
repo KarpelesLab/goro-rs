@@ -22861,7 +22861,8 @@ impl Vm {
                     self.exit_requested = true;
                     return Ok(Value::Null);
                 }
-                OpCode::ArrayGet => {
+                OpCode::ArrayGet | OpCode::ArrayGetRW => {
+                    let is_rw = matches!(op.opcode, OpCode::ArrayGetRW);
                     let mut arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // If the source is an uninitialized superglobal CV, fall back to the global.
                     if matches!(arr_val, Value::Null | Value::Undef) {
@@ -22879,18 +22880,75 @@ impl Vm {
                         }
                     }
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // RW precondition: $arr[$k] op= ... must throw the same
+                    // error the matching ArraySet would, before the binary op
+                    // can read or warn. Mirrors FETCH_DIM_RW.
+                    if is_rw {
+                        // Scalar container (true/int/float) -> Error.
+                        if matches!(&arr_val, Value::True | Value::Long(_) | Value::Double(_)) {
+                            let msg = "Cannot use a scalar value as an array".to_string();
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                let ct = *catch_target;
+                                ip = ct as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                        // Real array with array/object key -> TypeError, before
+                        // value_to_array_key_checked silently coerces to Int(0).
+                        if matches!(&arr_val, Value::Array(_)) {
+                            let key_inner = match &key_val {
+                                Value::Reference(r) => r.borrow().clone(),
+                                other => other.clone(),
+                            };
+                            let illegal: Option<String> = match &key_inner {
+                                Value::Array(_) => Some("array".to_string()),
+                                Value::Object(o) => Some(
+                                    crate::value::display_class_name(&o.borrow().class_name)
+                                ),
+                                _ => None,
+                            };
+                            if let Some(t) = illegal {
+                                let msg = format!("Cannot access offset of type {} on array", t);
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    let ct = *catch_target;
+                                    ip = ct as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught TypeError: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                    }
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
                         match arr.borrow().get(&key).cloned() {
                             Some(v) => v,
                             None => {
-                                // Emit "Undefined array key" warning
-                                match &key {
-                                    crate::array::ArrayKey::Int(i) => {
-                                        self.emit_warning_at(&format!("Undefined array key {}", i), op.line);
-                                    }
-                                    crate::array::ArrayKey::String(s) => {
-                                        self.emit_warning_at(&format!("Undefined array key \"{}\"", s.to_string_lossy()), op.line);
+                                // Emit "Undefined array key" warning — but not
+                                // for FETCH_DIM_RW: the write side will create
+                                // the missing entry, so a warning would be a
+                                // spurious "undefined" diagnostic for what is
+                                // really a brand-new initializer.
+                                if !is_rw {
+                                    match &key {
+                                        crate::array::ArrayKey::Int(i) => {
+                                            self.emit_warning_at(&format!("Undefined array key {}", i), op.line);
+                                        }
+                                        crate::array::ArrayKey::String(s) => {
+                                            self.emit_warning_at(&format!("Undefined array key \"{}\"", s.to_string_lossy()), op.line);
+                                        }
                                     }
                                 }
                                 Value::Null
@@ -30966,11 +31024,46 @@ impl Vm {
                     self.write_operand(&op.result, obj_value, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
-                OpCode::PropertyGet => {
+                OpCode::PropertyGet | OpCode::PropertyGetRW => {
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // PropertyGetRW is the read side of $obj->prop op= $val.
+                    // For non-object scalar LHS, PHP throws the same Error
+                    // the matching PropertySet would (FETCH_OBJ_RW), so we
+                    // short-circuit here before any warning would be emitted.
+                    if matches!(op.opcode, OpCode::PropertyGetRW)
+                        && matches!(
+                            &obj_val_raw,
+                            Value::Null
+                                | Value::Undef
+                                | Value::False
+                                | Value::True
+                                | Value::Long(_)
+                                | Value::Double(_)
+                                | Value::String(_)
+                                | Value::Resource(_)
+                        )
+                    {
+                        let type_name = Self::value_type_name(&obj_val_raw);
+                        let prop_str = prop_name.to_string_lossy();
+                        let msg = format!(
+                            "Attempt to assign property \"{}\" on {}",
+                            prop_str, type_name
+                        );
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
+                    }
                     // PHP refuses property names starting with NUL. When __get exists, dispatch
                     // first; the inner access will trigger this check again under magic_depth > 0.
                     if prop_name.as_bytes().first() == Some(&0u8) {
@@ -32339,8 +32432,21 @@ impl Vm {
                             continue;
                         }
                         return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
-                    } else if matches!(&obj_val, Value::Null | Value::Undef | Value::False) {
-                        // Attempt to assign property on null/false
+                    } else if matches!(
+                        &obj_val,
+                        Value::Null
+                            | Value::Undef
+                            | Value::False
+                            | Value::True
+                            | Value::Long(_)
+                            | Value::Double(_)
+                            | Value::String(_)
+                            | Value::Resource(_)
+                    ) {
+                        // Attempt to assign property on a non-object scalar.
+                        // PHP 8 throws Error for all scalar types (including
+                        // true/int/float/string/resource), with type-name
+                        // matching zend_zval_type_name (true/false/int/float/...).
                         let type_name = Self::value_type_name(&obj_val);
                         let prop_str = prop_name.to_string_lossy();
                         let msg = format!("Attempt to assign property \"{}\" on {}", prop_str, type_name);

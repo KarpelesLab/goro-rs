@@ -182,6 +182,13 @@ pub enum OpCode {
     ArraySet,
     /// Read array element: result = op1[op2]
     ArrayGet,
+    /// Read array element for read-write context (compound assignment):
+    /// like ArrayGet but throws PHP errors instead of warnings when the
+    /// container or key is invalid for writing (matches FETCH_DIM_RW).
+    /// - array key of type array/object -> TypeError
+    /// - scalar container (true/int/float) -> Error "Cannot use a scalar value as an array"
+    /// - undefined keys are not warned (the write side will create them)
+    ArrayGetRW,
     /// List destructure array element: result = op1[op2] (emits "Cannot use X as array" instead of "Trying to access array offset")
     ListGet,
 
@@ -202,6 +209,10 @@ pub enum OpCode {
     NewObject,
     /// Get property: op1 = object, op2 = property name (const), result = value (tmp)
     PropertyGet,
+    /// Get property for read-write context (compound assignment): like
+    /// PropertyGet but throws PHP Error instead of warning when the LHS
+    /// is a scalar (matches FETCH_OBJ_RW).
+    PropertyGetRW,
     /// Set property: op1 = object, op2 = value, result = property name (const)
     PropertySet,
     /// Call method: op1 = object, op2 = method name (const)

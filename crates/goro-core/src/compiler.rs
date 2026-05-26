@@ -6053,7 +6053,7 @@ impl Compiler {
 
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::ArrayGet,
+                            opcode: OpCode::ArrayGetRW,
                             op1: arr,
                             op2: idx,
                             result: OperandType::Tmp(read_tmp),
@@ -6108,7 +6108,7 @@ impl Compiler {
 
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::PropertyGet,
+                            opcode: OpCode::PropertyGetRW,
                             op1: obj,
                             op2: OperandType::Const(name_idx),
                             result: OperandType::Tmp(read_tmp),
