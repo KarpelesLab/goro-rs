@@ -2348,22 +2348,34 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Long(0));
     }
 
-    let sub = &main_bytes[start..];
+    let sub = &main_bytes[start..]; // s1 + offset
+    let s2_bytes = str2.as_bytes();
+    let len1 = sub.len();
+    let len2 = s2_bytes.len();
+    // PHP: cmp_len = len ? len : MAX(len2, len1)
     let cmp_len = match length {
         Some(l) if l > 0 => l as usize,
-        _ => sub.len().max(str2.len()),
+        _ => len1.max(len2),
     };
 
-    let a = &sub[..cmp_len.min(sub.len())];
-    let b = &str2.as_bytes()[..cmp_len.min(str2.len())];
-
-    if case_insensitive {
-        let a_lower: Vec<u8> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
-        let b_lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
-        Ok(Value::Long(crate::misc::php_strcmp(&a_lower, &b_lower)))
+    // PHP's zend_binary_strncmp: memcmp prefix of MIN(cmp_len, len1, len2),
+    // then if equal, three-way-compare MIN(cmp_len, len1) vs MIN(cmp_len, len2).
+    let prefix_len = cmp_len.min(len1).min(len2);
+    let (a_prefix, b_prefix) = if case_insensitive {
+        let a: Vec<u8> = sub[..prefix_len].iter().map(|c| c.to_ascii_lowercase()).collect();
+        let b: Vec<u8> = s2_bytes[..prefix_len].iter().map(|c| c.to_ascii_lowercase()).collect();
+        (a, b)
     } else {
-        Ok(Value::Long(crate::misc::php_strcmp(a, b)))
+        (sub[..prefix_len].to_vec(), s2_bytes[..prefix_len].to_vec())
+    };
+    let cmp = crate::misc::php_strcmp(&a_prefix, &b_prefix);
+    if cmp != 0 {
+        // PHP returns -1, 0, 1 (normalized)
+        return Ok(Value::Long(cmp.signum()));
     }
+    let l1 = cmp_len.min(len1) as i64;
+    let l2 = cmp_len.min(len2) as i64;
+    Ok(Value::Long((l1 - l2).signum()))
 }
 
 fn similar_text(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
