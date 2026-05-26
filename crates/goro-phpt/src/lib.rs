@@ -300,6 +300,19 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         if matches_expectf(pattern_trimmed, actual_trimmed) {
             TestResult::Pass
         } else {
+            if std::env::var("GORO_DEBUG_EXPECTF").is_ok() {
+                eprintln!("EXPECTF FAIL — pattern bytes: {}, actual bytes: {}", pattern_trimmed.len(), actual_trimmed.len());
+                let p_lines: Vec<&str> = pattern_trimmed.lines().collect();
+                let a_lines: Vec<&str> = actual_trimmed.lines().collect();
+                eprintln!("pattern lines: {}, actual lines: {}", p_lines.len(), a_lines.len());
+                for (i, (p, a)) in p_lines.iter().zip(a_lines.iter()).enumerate() {
+                    if !match_expectf_line(p, a) {
+                        eprintln!("LINE {} MISMATCH:", i + 1);
+                        eprintln!("  P: {:?}", p);
+                        eprintln!("  A: {:?}", a);
+                    }
+                }
+            }
             TestResult::Fail {
                 expected: pattern_trimmed.to_string(),
                 actual: actual_trimmed.to_string(),
@@ -1602,14 +1615,14 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                         return false;
                     }
                 }
-                b'%' => {
-                    pi += 2;
-                    if ai < ab.len() && ab[ai] == b'%' {
-                        ai += 1;
-                    } else {
-                        return false;
-                    }
-                }
+                // Note: do NOT special-case `%%` as an escape for a single `%`.
+                // PHP's run-tests.php expectf_to_regex() does NOT collapse `%%`
+                // — preg_quote('%','/') is just `%`, and the strtr table has
+                // no `%%` entry, so the regex still contains `%%` and matches
+                // two literal `%` chars in the actual output. The default `_`
+                // arm below already gives the same behaviour: it matches a
+                // single literal `%`, then the next iteration matches the
+                // next char (which may itself be `%` or a format code).
                 b'r' => {
                     // %r...%r delimits an embedded regex pattern. Find the closing %r.
                     pi += 2;
