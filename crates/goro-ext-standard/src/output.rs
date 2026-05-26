@@ -780,24 +780,52 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 if is_internal_property(name) {
                     continue;
                 }
-                let name_str = String::from_utf8_lossy(name);
-                // Determine visibility
-                let vis = class_info.as_ref().and_then(|c| {
+                // Demangle private/protected storage keys of the form
+                // \0Class\0name (used when a redeclared private property
+                // would otherwise collide with the parent's slot).
+                let (bare_name, mangled_decl): (Vec<u8>, Option<Vec<u8>>) =
+                    if name.first() == Some(&0) {
+                        if let Some(sep) = name[1..].iter().position(|&b| b == 0) {
+                            (name[1 + sep + 1..].to_vec(), Some(name[1..1 + sep].to_vec()))
+                        } else {
+                            (name.clone(), None)
+                        }
+                    } else {
+                        (name.clone(), None)
+                    };
+                let name_str = String::from_utf8_lossy(&bare_name);
+                // Resolve the property definition. Instance properties are
+                // non-static, so prefer a non-static def when a static one
+                // shadows the same name (bug79862). For mangled keys, match
+                // the declaring class encoded in the key.
+                let prop_def = class_info.as_ref().and_then(|c| {
+                    let decl_lower = mangled_decl.as_ref().map(|d| {
+                        d.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>()
+                    });
                     c.properties
                         .iter()
-                        .find(|p| p.name == *name)
-                        .map(|p| p.visibility)
+                        .filter(|p| p.name == bare_name && !p.is_static)
+                        .find(|p| match &decl_lower {
+                            Some(dl) => {
+                                let pdl: Vec<u8> =
+                                    p.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                pdl == *dl
+                            }
+                            None => true,
+                        })
+                        .or_else(|| c.properties.iter().find(|p| p.name == bare_name && !p.is_static))
                 });
+                let vis = prop_def.map(|p| p.visibility);
                 // Detect integer-like property names (e.g. set via {1} = ...) and
                 // render them as bare integers, matching PHP's var_dump output.
-                let is_int_key = !name.is_empty()
-                    && (name[0] == b'-' || name[0].is_ascii_digit())
-                    && name.iter().enumerate().all(|(i, &b)| (i == 0 && b == b'-') || b.is_ascii_digit())
-                    && name.iter().any(|&b| b.is_ascii_digit())
+                let is_int_key = !bare_name.is_empty()
+                    && (bare_name[0] == b'-' || bare_name[0].is_ascii_digit())
+                    && bare_name.iter().enumerate().all(|(i, &b)| (i == 0 && b == b'-') || b.is_ascii_digit())
+                    && bare_name.iter().any(|&b| b.is_ascii_digit())
                     && {
                         // Avoid "01" matches: PHP only treats canonical integer strings
                         // as int keys. Parse and reformat to verify canonical.
-                        let s = std::str::from_utf8(name).unwrap_or("");
+                        let s = std::str::from_utf8(&bare_name).unwrap_or("");
                         if let Ok(n) = s.parse::<i64>() {
                             n.to_string() == s
                         } else {
@@ -812,7 +840,16 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                             format!("\"{}\":protected", name_str)
                         }
                         Some(goro_core::object::Visibility::Private) => {
-                            let class_name = goro_core::value::display_class_name(&obj_class_name);
+                            // PHP shows the declaring class, not the object class.
+                            let decl_raw = mangled_decl.clone()
+                                .or_else(|| prop_def.map(|p| p.declaring_class.clone()))
+                                .unwrap_or_else(|| obj_class_name.clone());
+                            let decl_lower: Vec<u8> =
+                                decl_raw.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let canonical = vm.classes.get(&decl_lower)
+                                .map(|c| c.name.clone())
+                                .unwrap_or(decl_raw);
+                            let class_name = goro_core::value::display_class_name(&canonical);
                             format!("\"{}\":\"{}\":private", name_str, class_name)
                         }
                         _ => format!("\"{}\"", name_str),
@@ -820,9 +857,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 };
                 // Handle uninitialized typed properties
                 if matches!(value, Value::Undef) {
-                    let prop_type = class_info.as_ref().and_then(|c| {
-                        c.properties.iter().find(|p| p.name == *name).and_then(|p| p.property_type.as_ref())
-                    });
+                    let prop_type = prop_def.and_then(|p| p.property_type.as_ref());
                     if let Some(ptype) = prop_type {
                         let type_name = vm.param_type_name(ptype);
                         vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
@@ -839,15 +874,30 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     if prop_def.property_type.is_none() || prop_def.is_static {
                         continue;
                     }
-                    // Skip if already shown (exists on instance)
-                    if props.iter().any(|(n, _)| *n == prop_def.name) {
+                    // Skip if already shown (exists on instance). Stored keys
+                    // may be mangled (\0Class\0name), so compare bare names.
+                    if props.iter().any(|(n, _)| {
+                        let bare: &[u8] = if n.first() == Some(&0) {
+                            n[1..].iter().position(|&b| b == 0)
+                                .map(|sep| &n[1 + sep + 1..])
+                                .unwrap_or(n.as_slice())
+                        } else {
+                            n.as_slice()
+                        };
+                        bare == prop_def.name.as_slice()
+                    }) {
                         continue;
                     }
                     let name_str = String::from_utf8_lossy(&prop_def.name);
                     let display_name = match prop_def.visibility {
                         goro_core::object::Visibility::Protected => format!("\"{}\":protected", name_str),
                         goro_core::object::Visibility::Private => {
-                            let class_name = goro_core::value::display_class_name(&obj_class_name);
+                            let decl_lower: Vec<u8> =
+                                prop_def.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let canonical = vm.classes.get(&decl_lower)
+                                .map(|c| c.name.clone())
+                                .unwrap_or_else(|| prop_def.declaring_class.clone());
+                            let class_name = goro_core::value::display_class_name(&canonical);
                             format!("\"{}\":\"{}\":private", name_str, class_name)
                         }
                         _ => format!("\"{}\"", name_str),
@@ -1331,14 +1381,38 @@ fn print_r_value(
                 if is_internal_property(name) || matches!(value, Value::Undef) {
                     continue;
                 }
-                let name_str = String::from_utf8_lossy(name);
+                // Demangle private/protected storage keys (\0Class\0name).
+                let (bare_name, mangled_decl): (Vec<u8>, Option<Vec<u8>>) =
+                    if name.first() == Some(&0) {
+                        if let Some(sep) = name[1..].iter().position(|&b| b == 0) {
+                            (name[1 + sep + 1..].to_vec(), Some(name[1..1 + sep].to_vec()))
+                        } else {
+                            (name.clone(), None)
+                        }
+                    } else {
+                        (name.clone(), None)
+                    };
+                let name_str = String::from_utf8_lossy(&bare_name);
                 // Determine visibility and declaring class from class definition.
                 // Private properties always print with their declaring class —
                 // PHP shows `[name:Declaring:private]`, NOT the current class.
+                // Instance properties are non-static, so prefer a non-static def.
                 let prop_info = class_info.and_then(|c| {
+                    let decl_lower = mangled_decl.as_ref().map(|d| {
+                        d.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>()
+                    });
                     c.properties
                         .iter()
-                        .find(|p| p.name == *name)
+                        .filter(|p| p.name == bare_name && !p.is_static)
+                        .find(|p| match &decl_lower {
+                            Some(dl) => {
+                                let pdl: Vec<u8> =
+                                    p.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                pdl == *dl
+                            }
+                            None => true,
+                        })
+                        .or_else(|| c.properties.iter().find(|p| p.name == bare_name && !p.is_static))
                         .map(|p| (p.visibility, p.declaring_class.clone()))
                 });
                 let display_name = match prop_info {
@@ -1346,11 +1420,15 @@ fn print_r_value(
                         format!("{}:protected", name_str)
                     }
                     Some((goro_core::object::Visibility::Private, decl)) => {
-                        let decl_disp = if decl.is_empty() {
-                            class_name.clone()
-                        } else {
-                            goro_core::value::display_class_name(&decl)
-                        };
+                        let decl_raw = mangled_decl.clone()
+                            .or(if decl.is_empty() { None } else { Some(decl) })
+                            .unwrap_or_else(|| class_name.clone().into_bytes());
+                        let decl_lower: Vec<u8> =
+                            decl_raw.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let canonical = classes.get(&decl_lower)
+                            .map(|c| c.name.clone())
+                            .unwrap_or(decl_raw);
+                        let decl_disp = goro_core::value::display_class_name(&canonical);
                         format!("{}:{}:private", name_str, decl_disp)
                     }
                     _ => format!("{}", name_str),
@@ -1509,7 +1587,16 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                 for (name, value) in &obj_borrow.properties {
                     if is_internal_property(name) { continue; }
                     if matches!(value, Value::Undef) { continue; }
-                    let name_str = String::from_utf8_lossy(name);
+                    // Demangle private/protected storage keys (\0Class\0name);
+                    // var_export emits the bare property name.
+                    let bare_name: &[u8] = if name.first() == Some(&0) {
+                        name[1..].iter().position(|&b| b == 0)
+                            .map(|sep| &name[1 + sep + 1..])
+                            .unwrap_or(name.as_slice())
+                    } else {
+                        name.as_slice()
+                    };
+                    let name_str = String::from_utf8_lossy(bare_name);
                     buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
                     var_export_value(value, buf, indent + 2);
                     buf.extend_from_slice(b",\n");
@@ -1522,7 +1609,16 @@ fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
                 for (name, value) in &obj_borrow.properties {
                     if is_internal_property(name) { continue; }
                     if matches!(value, Value::Undef) { continue; }
-                    let name_str = String::from_utf8_lossy(name);
+                    // Demangle private/protected storage keys (\0Class\0name);
+                    // var_export emits the bare property name.
+                    let bare_name: &[u8] = if name.first() == Some(&0) {
+                        name[1..].iter().position(|&b| b == 0)
+                            .map(|sep| &name[1 + sep + 1..])
+                            .unwrap_or(name.as_slice())
+                    } else {
+                        name.as_slice()
+                    };
+                    let name_str = String::from_utf8_lossy(bare_name);
                     buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
                     // For complex values (arrays, objects), put value on next line
                     let needs_newline = match &value {

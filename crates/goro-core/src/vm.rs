@@ -1505,42 +1505,92 @@ impl Vm {
     /// Find a property definition, optionally considering the caller scope for private property resolution.
     /// When caller_scope is provided, private properties from other classes are skipped
     /// so that a parent can access its own private property on a child object.
+    ///
+    /// Resolution order (within each class on the parent walk):
+    ///  1. If caller_scope is set: a private prop declared by the scope class.
+    ///  2. The first non-private prop with this name.
+    ///  3. The most-derived (last in declaration order) private prop, for error reporting.
     fn find_property_def_for_scope(&self, class_name_lower: &[u8], prop_name: &[u8], caller_scope: Option<&[u8]>) -> Option<(Visibility, Vec<u8>, bool, Option<crate::opcode::ParamType>, Option<Visibility>)> {
         let mut current = class_name_lower.to_vec();
-        let mut first_match = None;
+        let mut last_private: Option<(Visibility, Vec<u8>, bool, Option<crate::opcode::ParamType>, Option<Visibility>)> = None;
         for _ in 0..50 {
             if let Some(class) = self.classes.get(&current) {
-                for prop in &class.properties {
-                    if prop.name == prop_name {
-                        if prop.visibility == Visibility::Private {
-                            if let Some(scope) = caller_scope {
-                                let declaring_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                if declaring_lower == scope {
-                                    // Exact match for private property in caller's scope
-                                    return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
-                                }
-                                // Save first match but keep looking for a scope match
-                                if first_match.is_none() {
-                                    first_match = Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
-                                }
-                            } else {
+                // Pass 1: scope-private match
+                if let Some(scope) = caller_scope {
+                    for prop in &class.properties {
+                        if prop.name == prop_name && prop.visibility == Visibility::Private {
+                            let declaring_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if declaring_lower == scope {
                                 return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
                             }
-                        } else {
-                            return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
                         }
+                    }
+                }
+                // Pass 2: any non-private match
+                for prop in &class.properties {
+                    if prop.name == prop_name && prop.visibility != Visibility::Private {
+                        return Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
+                    }
+                }
+                // Pass 3: record most-derived private (for error reporting)
+                for prop in &class.properties {
+                    if prop.name == prop_name && prop.visibility == Visibility::Private {
+                        last_private = Some((prop.visibility, prop.declaring_class.clone(), prop.is_readonly, prop.property_type.clone(), prop.set_visibility));
                     }
                 }
                 if let Some(parent) = &class.parent {
                     current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
                 } else {
-                    return first_match;
+                    return last_private;
                 }
             } else {
-                return first_match;
+                return last_private;
             }
         }
-        first_match
+        last_private
+    }
+
+    /// Compute the object-storage key for a property access.
+    ///
+    /// Private properties are stored under a mangled key `\0DeclaringClass\0name`
+    /// so that a parent's private property and a child's redeclaration coexist as
+    /// separate slots (matching PHP/Zend). Public/protected use the bare name.
+    ///
+    /// `class_name_lower` is the object's class. `caller_scope` is the lowercase
+    /// name of the currently-executing method's class (if any). The result is the
+    /// key to use when reading/writing the property on the instance.
+    fn property_storage_key(&self, class_name_lower: &[u8], prop_name: &[u8], caller_scope: Option<&[u8]>) -> Vec<u8> {
+        if let Some((vis, declaring_class, _, _, _)) =
+            self.find_property_def_for_scope(class_name_lower, prop_name, caller_scope)
+        {
+            if vis == Visibility::Private {
+                let decl_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                // Mangle only when there is also a same-named NON-STATIC property declared
+                // by a DIFFERENT class in this hierarchy (i.e. a redeclaration conflict for
+                // instance storage). Static properties live in a separate table, so they
+                // never collide with instance slots. When the private property is unique,
+                // the bare name is used — keeping the common case (and all existing
+                // display/serialize paths) intact.
+                let conflicting = self.classes.get(class_name_lower).map(|c| {
+                    c.properties.iter().filter(|p| p.name == prop_name && !p.is_static).any(|p| {
+                        let pl: Vec<u8> = p.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        pl != decl_lower
+                    })
+                }).unwrap_or(false);
+                if conflicting {
+                    let decl_display = self.classes.get(decl_lower.as_slice())
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| declaring_class.clone());
+                    let mut k = Vec::with_capacity(2 + decl_display.len() + prop_name.len());
+                    k.push(0);
+                    k.extend_from_slice(&decl_display);
+                    k.push(0);
+                    k.extend_from_slice(prop_name);
+                    return k;
+                }
+            }
+        }
+        prop_name.to_vec()
     }
 
     /// Emit a PHP warning message to output
@@ -23112,6 +23162,10 @@ impl Vm {
                             }
                             // Redirect to real for initialized proxy.
                             let target = self.proxy_redirect(obj);
+                            // Current class scope determines which mangled
+                            // private slots are visible during iteration.
+                            let scope_lower: Option<Vec<u8>> = self.current_class_scope()
+                                .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect());
                             let obj_borrow = target.borrow();
                             let mut arr = PhpArray::new();
                             for (name, value) in &obj_borrow.properties {
@@ -23132,8 +23186,36 @@ impl Vm {
                                 if matches!(value, Value::Undef) {
                                     continue;
                                 }
+                                // Demangle private/protected storage keys of the
+                                // form \0Class\0name. Private slots are only
+                                // visible from their declaring class's scope;
+                                // other classes' private slots are skipped.
+                                let display_name: Vec<u8> = if name.first() == Some(&0) {
+                                    if let Some(sep) = name[1..].iter().position(|&b| b == 0) {
+                                        let decl = &name[1..1 + sep];
+                                        let bare = &name[1 + sep + 1..];
+                                        if decl == b"*" {
+                                            // protected: visible from any class scope
+                                            if scope_lower.is_none() {
+                                                continue;
+                                            }
+                                            bare.to_vec()
+                                        } else {
+                                            let decl_lower: Vec<u8> =
+                                                decl.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            if scope_lower.as_deref() != Some(decl_lower.as_slice()) {
+                                                continue;
+                                            }
+                                            bare.to_vec()
+                                        }
+                                    } else {
+                                        name.clone()
+                                    }
+                                } else {
+                                    name.clone()
+                                };
                                 arr.set(
-                                    ArrayKey::String(PhpString::from_vec(name.clone())),
+                                    ArrayKey::String(PhpString::from_vec(display_name)),
                                     value.clone(),
                                 );
                             }
@@ -28130,24 +28212,31 @@ impl Vm {
                                 // declaration order, substituting the child's version when
                                 // the child overrides one. Properties declared only on the
                                 // child come last, in child's declaration order.
+                                // EXCEPTION: parent's private properties are NOT overridden —
+                                // they remain as separate slots (PHP semantics: private props
+                                // belong to their declaring class). When the child redeclares
+                                // a same-named property, both coexist.
                                 let child_props_orig = std::mem::take(&mut class.properties);
-                                let parent_prop_names: std::collections::HashSet<Vec<u8>> =
-                                    parent.properties.iter().map(|p| p.name.clone()).collect();
+                                let mut used_child: std::collections::HashSet<usize> = std::collections::HashSet::new();
                                 let mut new_props: Vec<_> = Vec::with_capacity(
                                     parent.properties.len() + child_props_orig.len(),
                                 );
                                 for prop in &parent.properties {
-                                    if let Some(child_prop) = child_props_orig
+                                    if prop.visibility == Visibility::Private {
+                                        // Always keep parent's private as a separate entry.
+                                        new_props.push(prop.clone());
+                                    } else if let Some(idx) = child_props_orig
                                         .iter()
-                                        .find(|cp| cp.name == prop.name)
+                                        .position(|cp| cp.name == prop.name)
                                     {
-                                        new_props.push(child_prop.clone());
+                                        new_props.push(child_props_orig[idx].clone());
+                                        used_child.insert(idx);
                                     } else {
                                         new_props.push(prop.clone());
                                     }
                                 }
-                                for child_prop in &child_props_orig {
-                                    if !parent_prop_names.contains(&child_prop.name) {
+                                for (idx, child_prop) in child_props_orig.iter().enumerate() {
+                                    if !used_child.contains(&idx) {
                                         new_props.push(child_prop.clone());
                                     }
                                 }
@@ -30408,9 +30497,34 @@ impl Vm {
 
                     // Initialize properties from class definition
                     if let Some(class) = self.classes.get(&name_lower) {
+                        // Detect names declared more than once across the hierarchy
+                        // (a private property redeclared by a subclass). Such private
+                        // slots must be stored under a mangled key so parent and child
+                        // versions coexist.
+                        let mut name_counts: std::collections::HashMap<&[u8], usize> = std::collections::HashMap::new();
+                        for p in class.properties.iter().filter(|p| !p.is_static) {
+                            *name_counts.entry(p.name.as_slice()).or_insert(0) += 1;
+                        }
                         let props: Vec<_> = class.properties.iter()
                             .filter(|p| !p.is_static)
-                            .map(|p| (p.name.clone(), p.default.clone(), p.is_readonly, p.is_virtual))
+                            .map(|p| {
+                                let conflicted = name_counts.get(p.name.as_slice()).copied().unwrap_or(0) > 1;
+                                let key = if conflicted && p.visibility == Visibility::Private {
+                                    let decl_lower: Vec<u8> = p.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let decl_display = self.classes.get(decl_lower.as_slice())
+                                        .map(|c| c.name.clone())
+                                        .unwrap_or_else(|| p.declaring_class.clone());
+                                    let mut k = Vec::with_capacity(2 + decl_display.len() + p.name.len());
+                                    k.push(0);
+                                    k.extend_from_slice(&decl_display);
+                                    k.push(0);
+                                    k.extend_from_slice(&p.name);
+                                    k
+                                } else {
+                                    p.name.clone()
+                                };
+                                (key, p.default.clone(), p.is_readonly, p.is_virtual)
+                            })
                             .collect();
                         for (name, default, is_readonly, is_virtual) in props {
                             // Virtual properties have no backing store and should not be initialized
@@ -30935,7 +31049,10 @@ impl Vm {
                                 }
                             }
                         } else {
-                            let mut prop = obj.borrow().get_property(prop_name.as_bytes());
+                            // Resolve the storage key (mangled for private props that
+                            // collide with a subclass redeclaration).
+                            let storage_key = self.property_storage_key(&class_lower, prop_name.as_bytes(), caller_scope_for_get.as_deref());
+                            let mut prop = obj.borrow().get_property(&storage_key);
                             // SimpleXMLElement: when accessing `$x->name`, the resulting SXE is
                             // "name-bound" — iteration/count operates over the named sibling
                             // list. For multi-sibling (Array property), wrap the first with
@@ -30962,7 +31079,7 @@ impl Vm {
                             }
                             // Check for typed property accessed before initialization
                             // Skip this check when error reporting is suppressed (empty(), @)
-                            if matches!(prop, Value::Undef) && obj.borrow().has_property(prop_name.as_bytes()) && self.error_reporting != 0 {
+                            if matches!(prop, Value::Undef) && obj.borrow().has_property(&storage_key) && self.error_reporting != 0 {
                                 // Try __get magic method first before throwing error
                                 let has_get = self.magic_depth < 5 && self
                                     .classes
@@ -31028,7 +31145,7 @@ impl Vm {
                                 }
                             } else
                             if matches!(prop, Value::Null)
-                                && !obj.borrow().has_property(prop_name.as_bytes())
+                                && !obj.borrow().has_property(&storage_key)
                                 && self.magic_depth < 5
                             {
                                 // Try __get magic method (with recursion guard)
